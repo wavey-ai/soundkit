@@ -1,7 +1,11 @@
 [package]
 name = "soundkit"
-version = "1.0.0"
+version = "0.9.0"
 edition = "2021"
+license = "MIT"
+description = "Audio format optimised low-latency audio."
+repository = "https://github.com/wavey-ai/soundkit"
+readme = "README.md"
 
 [lib]
 crate-type = ["lib", "staticlib"]
