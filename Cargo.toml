@@ -3,7 +3,7 @@ name = "soundkit"
 version = "0.9.0"
 edition = "2021"
 license = "MIT"
-description = "Audio format optimised low-latency audio."
+description = "Audio format optimised for low-latency audio."
 repository = "https://github.com/wavey-ai/soundkit"
 readme = "README.md"
 
@@ -11,10 +11,6 @@ readme = "README.md"
 crate-type = ["lib", "staticlib"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies.uuid]
-version = "1.3.0"
-features = ["v4", "fast-rng", "macro-diagnostics"]
 
 [dependencies]
 opus = "0.3.0"
