@@ -155,9 +155,14 @@ fn opus_stream_from_raw(
     }
 
     // Prepend offset_count to encoded_data
-    let mut final_encoded_data = vec![0; 4];
+    let mut final_encoded_data = vec![0; 6];
     for i in 0..4 {
         final_encoded_data[i] = ((offset_count >> (i * 8)) & 0xFF) as u8;
+    }
+    // Prepend frame duration to encoded_data
+    let frame_duration: u16 = 10;
+    for i in 0..2 {
+        final_encoded_data[4+i] = ((frame_duration >> (i * 8)) & 0xFF) as u8;
     }
     final_encoded_data.extend(encoded_data);
 
