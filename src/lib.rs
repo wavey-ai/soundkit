@@ -112,17 +112,18 @@ fn opus_stream_from_raw(
     bits_per_sample: u8,
     channel_count: usize,
     frame_size: u16,
-)  -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, String> {
     let bytes_per_sample = bits_per_sample / 8;
-    let chunk_size = (frame_size as usize) * (channel_count as usize) * (bytes_per_sample as usize);
+    let chunk_size = frame_size as usize * channel_count * bytes_per_sample as usize;
 
     let mut encoder = Encoder::new(48000, Channels::Mono, Application::Audio).unwrap();
     encoder.set_bitrate(opus::Bitrate::Bits(96000));
 
     let mut encoded_data = Vec::new();
+    let mut offset: u32 = 0;
+    let mut offset_count: u32 = 0;
 
     for chunk in data.chunks(chunk_size) {
-
         let flag = if chunk.len() < 480 {
             EncodingFlag::PCM
         } else {
@@ -140,11 +141,27 @@ fn opus_stream_from_raw(
         )?;
 
         for packet_chunk in packet {
+            let header = decode_audio_packet_header(&packet_chunk);
+            // Convert the offset to bytes and append to the encoded data
+            for i in 0..4 {
+                encoded_data.push(((offset >> (i * 8)) & 0xFF) as u8);
+            }
+            for len in header.frame_sizes {
+                offset += len as u32;
+            }
+            offset_count += 1;
             encoded_data.extend(packet_chunk);
         }
     }
 
-    Ok(encoded_data)
+    // Prepend offset_count to encoded_data
+    let mut final_encoded_data = vec![0; 4];
+    for i in 0..4 {
+        final_encoded_data[i] = ((offset_count >> (i * 8)) & 0xFF) as u8;
+    }
+    final_encoded_data.extend(encoded_data);
+
+    Ok(final_encoded_data)
 }
 
 fn encode_audio_packet(
