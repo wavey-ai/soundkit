@@ -7,10 +7,10 @@ description = "Audio format optimised for low-latency audio."
 repository = "https://github.com/wavey-ai/soundkit"
 readme = "README.md"
 
-[lib]
-crate-type = ["lib", "staticlib"]
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 opus = "0.3.0"
+structopt = "0.3"
+
+[[bin]]
+name = "soundkit"
+path = "src/main.rs"
