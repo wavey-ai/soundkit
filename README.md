@@ -37,20 +37,7 @@ The `AudioConfig` is a enumeration that represents the sample rate and bit depth
 - `Hz48000Bit16`
 - `Hz48000Bit24`
 - `Hz48000Bit32`
-- `Hz88200Bit16`
-- `Hz88200Bit24`
-- `Hz88200Bit32`
-- `Hz96000Bit16`
-- `Hz96000Bit24`
-- `Hz96000Bit32`
-- `Hz176400Bit16`
-- `Hz176400Bit24`
-- `Hz176400Bit32`
-- `Hz192000Bit16`
-- `Hz192000Bit24`
-- `Hz192000Bit32`
-- `Hz352800Bit16`
-- `Hz352800Bit24`
+- `...`
 - `Hz352800Bit32`
 
 Each configuration indicates a combination of the sample rate (in Hz) and the bit depth (in Bits). For instance, `Hz44100Bit16` represents a sample rate of 44100 Hz and a bit depth of 16 bits.
