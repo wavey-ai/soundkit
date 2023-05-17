@@ -4,6 +4,8 @@ use std::fs::File;
 use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
+use std::io::{BufRead, BufReader};
+use std::process;
 
 use crate::types::{
     get_audio_config, get_config, get_sampling_rate_and_bits_per_sample, AudioConfig, EncodingFlag,
@@ -24,43 +26,6 @@ pub struct AudioPacketHeader {
     bits_per_sample: u8,
     channel_count: u8,
     frame_sizes: Vec<u16>,
-}
-
-pub fn opus_stream_headers<R: Read + Seek>(mut reader: R) -> Result<(), String> {
-    loop {
-        let mut header_buffer = vec![0; 2]; // first 2 bytes for initial decoding
-        match reader.read_exact(&mut header_buffer) {
-            Ok(_) => {
-                let channel_count = header_buffer[1]; // get the channel count
-                let header_size = 2 + channel_count as usize * 2; // calculate total header size
-                header_buffer.resize(header_size, 0); // resize the header_buffer
-                reader
-                    .read_exact(&mut header_buffer[2..])
-                    .map_err(|err| err.to_string())?; // read the rest of the header
-
-                let header = decode_audio_packet_header(&header_buffer);
-                eprintln!("{:?}", header);
-                let skip_size = header.frame_sizes.iter().sum::<u16>() as u64;
-
-                // Skip the data of this frame
-                match reader.seek(SeekFrom::Current(skip_size as i64)) {
-                    Ok(_) => (),
-                    Err(err) => return Err(err.to_string()),
-                };
-            }
-            Err(err) => {
-                if err.kind() == std::io::ErrorKind::UnexpectedEof {
-                    // End of file, break the loop
-                    break;
-                } else {
-                    // Another error occurred, return it
-                    return Err(err.to_string());
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
 
 pub fn wav_to_opus_stream<R: Read>(mut reader: R) -> Result<Vec<u8>, String> {
@@ -98,6 +63,7 @@ pub fn wav_to_opus_stream<R: Read>(mut reader: R) -> Result<Vec<u8>, String> {
     }
 
     let data_chunk = &buffer[position + 8..]; // Skip "data" and size
+
     let frame_size: u16 = 480;
     let encoded_data = opus_stream_from_raw(
         &data_chunk,
@@ -552,6 +518,24 @@ fn deinterleave_vecs_i16(input: &[u8], channel_count: usize) -> Vec<Vec<i16>> {
     result
 }
 
+fn interleave_vecs_i16(channels: &[Vec<i16>]) -> Vec<u8> {
+    let channel_count = channels.len();
+    let sample_size = channels[0].len();
+    let mut result = vec![0; channel_count * sample_size * 2];
+
+    for i in 0..sample_size {
+        for channel in 0..channel_count {
+            let value = channels[channel][i];
+            let bytes = value.to_le_bytes();
+            let start = (i * channel_count + channel) * 2;
+            result[start] = bytes[0];
+            result[start + 1] = bytes[1];
+        }
+    }
+
+    result
+}
+
 fn deinterleave_vecs_24bit(input: &[u8], channel_count: usize) -> Vec<Vec<i32>> {
     let sample_size = input.len() / (channel_count * 3);
     let mut result = vec![vec![0; sample_size]; channel_count];
@@ -587,6 +571,7 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Read;
+
     fn read_test_file(filename: &str) -> Vec<u8> {
         let mut file = File::open(filename).unwrap();
         let mut buffer = Vec::new();
@@ -603,6 +588,13 @@ mod tests {
         let input = vec![1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0]; // Little Endian u16 values [1, 2, 3, 4, 5, 6]
         let result = deinterleave_vecs_i16(&input, 2);
         assert_eq!(result, vec![vec![1, 3, 5], vec![2, 4, 6]]);
+    }
+
+    #[test]
+    fn test_interleave_vecs_i16() {
+        let input = vec![vec![1, 3, 5], vec![2, 4, 6]];
+        let result = interleave_vecs_i16(&input);
+        assert_eq!(result, vec![1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0]);
     }
 
     #[test]
@@ -844,16 +836,16 @@ mod tests {
 
     #[test]
     fn test_encode_decode_pcm32() {
-        //      test_encode_decode_common(32);
+        test_encode_decode_common(32);
     }
 
     #[test]
     fn test_encode_decode_pcm16() {
-        //        test_encode_decode_common(16);
+        test_encode_decode_common(16);
     }
 
     #[test]
-    fn test_wav_to_opus_stream() {
+    fn test_wav_to_pcm_stream() {
         let file_path = "test/i16.wav";
         let file = File::open(&file_path).expect("unable to open file");
         let data = wav_to_opus_stream(file).unwrap();
@@ -875,24 +867,90 @@ mod tests {
         }
         assert_eq!(pkt_offsets.len(), n_packets);
 
+        let n_channels = 2;
+        let mut all_frames: Vec<Vec<Vec<i16>>> =
+            vec![vec![vec![0; n_samples as usize]; n_channels]; n_packets];
+
+        let mut all_frames: Vec<Vec<Vec<i16>>> = Vec::new();
         let cues_end: usize = (n_packets * 4) + 6;
         let pkt_header_size: usize = 6;
+
+        // sanity check the first i16 in the payload
+        let bytes: [u8; 2] = data[cues_end + 6..cues_end + 8]
+            .try_into()
+            .expect("Insufficient bytes to read");
+        let value = i16::from_le_bytes(bytes);
+        assert_eq!(value, 569);
+
         for i in pkt_offsets {
             let start = cues_end + i as usize;
-            dbg!(start);
             let b = Vec::from(&data[start..start + pkt_header_size]);
             let header = decode_audio_packet_header(&b);
             assert_eq!(header.bits_per_sample, 16);
             assert_eq!(header.frame_sizes[0], 960);
             assert_eq!(header.frame_sizes[1], 960);
 
-            let frame_size = header.frame_sizes[0] as usize;
-            let chan = Vec::from(&data[start..start + pkt_header_size + frame_size]);
-            let mut dst = vec![0i16; 480];
-        }
-    }
+            let mut offset = 0;
+            let mut decoded_frames: Vec<Vec<i16>> = Vec::new();
+            for size in header.frame_sizes {
+                let fstart = start + pkt_header_size + offset;
+                let frame = Vec::from(&data[fstart..fstart + size as usize]);
+                assert_eq!(frame.len(), 960);
+                let decoded_frame: Vec<i16> = frame
+                    .chunks_exact(2)
+                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                    .collect();
 
-    fn align_offset(offset: usize, alignment: usize) -> usize {
-        (offset + alignment - 1) / alignment * alignment
+                decoded_frames.push(decoded_frame);
+                offset += size as usize;
+            }
+            all_frames.push(decoded_frames);
+        }
+
+        // sanity check
+        assert_eq!(all_frames[0][0][0], 569);
+
+        let total_samples = n_samples as usize * n_packets as usize;
+        let mut reduced_frames: Vec<Vec<i16>> = vec![vec![0; total_samples]; n_channels];
+        for (i, packets) in all_frames.iter().enumerate() {
+            for (j, frames) in packets.iter().enumerate() {
+                for (k, &sample) in frames.iter().enumerate() {
+                    reduced_frames[j][i * n_samples as usize + k] = sample;
+                }
+            }
+        }
+
+        // sanity check
+        assert_eq!(reduced_frames[0][0], 569);
+        assert_eq!(reduced_frames[1][0], 7028);
+
+        // `sox test/i16.wav -t raw -e signed-integer -b 16 --channels 2 - | od -An -t d2 > test/i16.raw`
+        let file = File::open("./test/i16.raw").expect("Failed to open file");
+        let reader = BufReader::new(file);
+
+        let mut samples: Vec<i16> = Vec::new();
+        let mut samples: Vec<i16> = Vec::new();
+
+        for line in reader
+            .lines()
+            .filter(|line| !line.as_ref().unwrap().contains('*'))
+        {
+            if let Ok(line) = line {
+                let values: Vec<i16> = line
+                    .split_whitespace()
+                    .map(|value| value.parse::<i16>().expect("Failed to parse value"))
+                    .collect();
+
+                samples.extend(values);
+            }
+        }
+
+        let interleaved_frames: Vec<i16> = (0..total_samples)
+            .flat_map(|i| reduced_frames.iter().map(move |channel| channel[i]))
+            .collect();
+
+
+        // TODO: Debug zero padding at end
+        assert_eq!(&interleaved_frames[0..10000], &samples[0..10000]);
     }
 }

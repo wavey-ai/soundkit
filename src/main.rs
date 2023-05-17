@@ -1,6 +1,5 @@
 use soundkit::{
     wav_to_opus_stream,
-    opus_stream_headers,
 };
 
 use structopt::StructOpt;
@@ -40,14 +39,6 @@ struct Command {
 enum SubCommand {
     /// Encode raw audio to Opus
     Encode,
-
-    /// Decode Opus to raw audio
-    #[structopt(name = "decode")]
-    Decode {
-        /// Input file
-        #[structopt(short, long, parse(from_os_str))]
-        input: PathBuf,
-    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -76,14 +67,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => {
                     io::stdout().write_all(&encoded)?;
                 }
-            }
-        },
-        Some(SubCommand::Decode { input }) => {
-            let file = File::open(input)?;
-            let result = opus_stream_headers(file);
-            match result {
-                Ok(_) => println!("Headers processed successfully"),
-                Err(e) => eprintln!("Error processing headers: {}", e),
             }
         }
         None => {
