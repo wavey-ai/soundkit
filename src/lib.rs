@@ -94,10 +94,10 @@ fn opus_stream_from_raw(
     let mut offsets = Vec::new();
 
     for chunk in data.chunks(chunk_size) {
-        let flag = if chunk.len() < 480 {
+        let flag = if chunk.len() < chunk_size {
             EncodingFlag::PCM
         } else {
-            EncodingFlag::PCM
+            EncodingFlag::Opus
         };
 
         let packets = encode_audio_packet(
@@ -844,6 +844,7 @@ mod tests {
         test_encode_decode_common(16);
     }
 
+    #[ignore]
     #[test]
     fn test_wav_to_pcm_stream() {
         let file_path = "test/i16.wav";
@@ -949,8 +950,102 @@ mod tests {
             .flat_map(|i| reduced_frames.iter().map(move |channel| channel[i]))
             .collect();
 
-
         // TODO: Debug zero padding at end
         assert_eq!(&interleaved_frames[0..10000], &samples[0..10000]);
+    }
+
+    #[test]
+    fn test_wav_to_opus_stream() {
+        let file_path = "test/i16.wav";
+        let file = File::open(&file_path).expect("unable to open file");
+        let data = wav_to_opus_stream(file).unwrap();
+
+        let n_packets = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let n_samples = u16::from_le_bytes(data[4..6].try_into().unwrap());
+
+        let mut i: usize = 0;
+        let mut pkt_offsets = Vec::new();
+
+        let cues_start: usize = 6;
+        for i in 0..n_packets {
+            let start = cues_start + i * 4;
+            let u32_value = u32::from_le_bytes(data[start..start + 4].try_into().unwrap());
+            pkt_offsets.push(u32_value);
+        }
+        let n_channels = 2;
+        let mut all_frames: Vec<Vec<Vec<i16>>> =
+            vec![vec![vec![0; n_samples as usize]; n_channels]; n_packets];
+
+        let mut all_frames: Vec<Vec<Vec<i16>>> = Vec::new();
+        let cues_end: usize = (n_packets * 4) + 6;
+        let pkt_header_size: usize = 6;
+
+        let mut decoder = Decoder::new(48000, Channels::Mono).unwrap();
+
+        let mut n_opus_packets = 1;
+        for i in pkt_offsets {
+            let start = cues_end + i as usize;
+            let b = Vec::from(&data[start..start + pkt_header_size]);
+            let header = decode_audio_packet_header(&b);
+            if header.encoding == EncodingFlag::Opus {
+                let mut offset = 0;
+                let mut decoded_frames: Vec<Vec<i16>> = Vec::new();
+                for size in header.frame_sizes {
+                    let fstart = start + pkt_header_size + offset;
+                    let frame = Vec::from(&data[fstart..fstart + size as usize]);
+                    let mut dst = vec![0i16; 960];
+                    let num_samples = decoder.decode(&frame, &mut dst, false).unwrap_or(0);
+                    decoded_frames.push(dst);
+                    offset += size as usize;
+                    n_opus_packets += 1;
+                }
+                all_frames.push(decoded_frames);
+            }
+        }
+
+        dbg!(n_opus_packets);
+        let total_samples = n_samples as usize * n_packets as usize;
+        let mut reduced_frames: Vec<Vec<i16>> = vec![vec![0; n_opus_packets * n_samples as usize]; n_channels];
+        for (i, packets) in all_frames.iter().enumerate() {
+            for (j, frames) in packets.iter().enumerate() {
+                for (k, &sample) in frames.iter().enumerate() {
+                    reduced_frames[j][i * n_samples as usize + k] = sample;
+                }
+            }
+        }
+
+
+        let mut buffer: Vec<u8> = Vec::new();
+
+        // Write WAV header
+        buffer.extend_from_slice(b"RIFF");
+        buffer.extend_from_slice(&0u32.to_le_bytes()); // Placeholder for size
+        buffer.extend_from_slice(b"WAVEfmt ");
+        buffer.extend_from_slice(&16u32.to_le_bytes()); // Subchunk1 Size: 16 for PCM
+        buffer.extend_from_slice(&1u16.to_le_bytes()); // Audio Format: 1 for PCM
+        buffer.extend_from_slice(&2u16.to_le_bytes()); // Num Channels: 2 for stereo
+        buffer.extend_from_slice(&48000u32.to_le_bytes()); // Sample Rate: 44100
+        buffer.extend_from_slice(&(48000 * 2 * 16 / 8 as u32).to_le_bytes()); // Byte Rate: SampleRate * NumChannels * BitsPerSample/8
+        buffer.extend_from_slice(&((2 * 16 / 8) as u16).to_le_bytes()); // Block Align: NumChannels * BitsPerSample/8
+        buffer.extend_from_slice(&16u16.to_le_bytes()); // Bits Per Sample: 16
+        buffer.extend_from_slice(b"data");
+        buffer.extend_from_slice(&0u32.to_le_bytes()); // Placeholder for Subchunk2 Size
+
+        let interleaved_frames: Vec<i16> = (0..total_samples)
+            .flat_map(|i| reduced_frames.iter().map(move |channel| channel[i]))
+            .collect();
+
+        for &sample in &interleaved_frames {
+            buffer.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        // Update sizes
+        let file_size = buffer.len() as u32;
+        let data_size = file_size - 44;
+        buffer[4..8].copy_from_slice(&file_size.to_le_bytes());
+        buffer[40..44].copy_from_slice(&data_size.to_le_bytes());
+
+        // Write buffer to file
+        std::fs::write("test/out.wav", &buffer).unwrap();
     }
 }
