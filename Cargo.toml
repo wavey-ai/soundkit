@@ -8,7 +8,9 @@ repository = "https://github.com/wavey-ai/soundkit"
 readme = "README.md"
 
 [dependencies]
-opus = "0.3.0"
+bindgen = "0.65.1"
+cc = "1.0.79"
+libopus = { path = "../opus-rs" }
 structopt = "0.3"
 
 [[bin]]
