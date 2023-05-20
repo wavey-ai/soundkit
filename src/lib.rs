@@ -84,7 +84,7 @@ pub fn parse_wav<R: Read>(mut reader: R) -> Result<AudioFileData, String> {
 
 pub fn wav_to_opus_stream<R: Read>(mut reader: R) -> Result<Vec<u8>, String> {
     let result = parse_wav(reader)?;
-    let frame_size: u16 = 480;
+    let frame_size: u16 = 240;
     let encoded_data = opus_stream_from_raw(
         &result.data,
         result.sampling_rate,
@@ -142,11 +142,6 @@ fn opus_stream_from_raw(
     let mut final_encoded_data = Vec::new();
     for i in 0..4 {
         final_encoded_data.push(((offsets.len() >> (i * 8)) & 0xFF) as u8);
-    }
-
-    // Prepend frame size to encoded_data
-    for i in 0..2 {
-        final_encoded_data.push(((frame_size >> (i * 8)) & 0xFF) as u8);
     }
 
     for offset in offsets {
