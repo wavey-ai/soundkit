@@ -115,10 +115,10 @@ fn opus_stream_from_raw(
     const HOP: usize = 256;
     const NORM: f32 = 0.0;
 
-    let chunk_size = WIN * bytes_per_sample as usize * channel_count;
+    let size = WIN * bytes_per_sample as usize * channel_count;
     let mut channel_frames: Vec<Vec<Vec<f32>>> = vec![Vec::new(); channel_count];
 
-    for chunk in data.chunks(chunk_size) {
+    for chunk in data.chunks(size) {
         let data: Vec<PcmData> = match bits_per_sample {
             16 => deinterleave_vecs_i16(chunk, channel_count)
                 .into_iter()
