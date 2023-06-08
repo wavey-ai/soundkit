@@ -24,7 +24,7 @@ pub fn save_spectrogram(frames: Vec<Vec<Vec<f32>>>, eq: bool) {
             }
         }
 
-        let name: String = format!("spectrogram{}.png", i);
+        let name: String = format!("out/spectrogram{}.png", i);
         if eq {
             let equalized_image = equalize_histogram(&imgbuf);
             let dynamic_image = DynamicImage::ImageLuma8(equalized_image);
