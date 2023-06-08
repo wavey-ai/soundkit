@@ -6,11 +6,46 @@ use std::sync::Arc;
 extern crate image;
 extern crate imageproc;
 use image::codecs::png::PngEncoder;
-use image::{DynamicImage, GrayImage};
+use image::ImageBuffer;
+use image::{DynamicImage, GrayImage, Luma};
+use image::{Rgba, RgbaImage};
 use imageproc::contrast::equalize_histogram;
+use std::cmp;
 use std::io::Cursor;
 
-pub fn save_spectrogram(frames: Vec<Vec<Vec<f32>>>, eq: bool) {
+pub fn save_waveform(data: &Vec<Vec<i16>>, width: u32, height: u32, filename: &str) {
+    let mut imgbuf: RgbaImage = ImageBuffer::new(width, height);
+    for (channel_index, channel_data) in data.iter().enumerate() {
+        // the number of audio samples that will be represented by each column of pixels
+        let samples_per_pixel = channel_data.len() / width as usize;
+
+        for (x, chunk) in channel_data.chunks(samples_per_pixel).enumerate() {
+            let x = x as u32;
+            if x >= width {
+                break;
+            }
+
+            let color = match channel_index {
+                0 => Rgba([200u8, 200u8, 200u8, 255u8]),
+                _ => Rgba([180u8, 180u8, 180u8, 255u8]),
+            };
+
+            let min_val = *chunk.iter().min().unwrap_or(&0) as f32;
+            let max_val = *chunk.iter().max().unwrap_or(&0) as f32;
+
+            let min_y = ((min_val + 32768.0) / 65536.0 * (height as f32)) as u32;
+            let max_y = ((max_val + 32768.0) / 65536.0 * (height as f32)) as u32;
+
+            for y in min_y..=max_y {
+                imgbuf.put_pixel(x, y, color);
+            }
+        }
+    }
+
+    imgbuf.save(filename).unwrap();
+}
+
+pub fn save_spectrogram(frames: Vec<Vec<Vec<f32>>>, eq: bool, fileprefix: &str) {
     for i in 0..frames.len() {
         let width = frames[i].len();
         let height = frames[i][0].len();
@@ -24,7 +59,7 @@ pub fn save_spectrogram(frames: Vec<Vec<Vec<f32>>>, eq: bool) {
             }
         }
 
-        let name: String = format!("out/spectrogram{}.png", i);
+        let name: String = format!("{}{}.png", fileprefix, i);
         if eq {
             let equalized_image = equalize_histogram(&imgbuf);
             let dynamic_image = DynamicImage::ImageLuma8(equalized_image);

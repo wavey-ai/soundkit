@@ -1,4 +1,4 @@
-mod spectrogram;
+mod graph;
 mod types;
 
 use libopus::decoder::*;
@@ -12,7 +12,7 @@ use crate::types::{
     get_audio_config, get_config, get_sampling_rate_and_bits_per_sample, AudioConfig, EncodingFlag,
 };
 
-use spectrogram::*;
+use graph::*;
 
 const HEADER_SIZE: usize = 4;
 
@@ -108,6 +108,9 @@ fn opus_stream_from_raw(
     let bytes_per_sample = bits_per_sample / 8;
     let chunk_size = frame_size as usize * channel_count * bytes_per_sample as usize;
 
+    let d = deinterleave_vecs_i16(data, channel_count);
+    save_waveform(&d, 1600, 48, "out/wave.png");
+
     const WIN: usize = 768;
     const HOP: usize = 256;
     const NORM: f32 = 0.0;
@@ -144,7 +147,7 @@ fn opus_stream_from_raw(
         }
     }
 
-    save_spectrogram(channel_frames, true);
+    save_spectrogram(channel_frames, true, "out/sono");
 
     let mut encoder = Encoder::create(48000, 2, 1, 1, &[0u8, 1u8], Application::Audio).unwrap();
     encoder
