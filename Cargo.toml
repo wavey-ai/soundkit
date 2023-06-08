@@ -1,6 +1,6 @@
 [package]
 name = "soundkit"
-version = "0.9.3"
+version = "0.9.4"
 edition = "2021"
 license = "MIT"
 description = "Audio format optimised for low-latency audio."
@@ -10,7 +10,10 @@ readme = "README.md"
 [dependencies]
 bindgen = "0.65.1"
 cc = "1.0.79"
+image = "0.24.6"
+imageproc = "0.23.0"
 libopus = { path = "../opus-rs" }
+rustfft = "6.1.0"
 structopt = "0.3"
 
 [[bin]]

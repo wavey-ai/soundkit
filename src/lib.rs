@@ -1,8 +1,8 @@
+mod spectrogram;
 mod types;
 
 use libopus::decoder::*;
 use libopus::encoder::*;
-
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -11,6 +11,8 @@ use std::process;
 use crate::types::{
     get_audio_config, get_config, get_sampling_rate_and_bits_per_sample, AudioConfig, EncodingFlag,
 };
+
+use spectrogram::*;
 
 const HEADER_SIZE: usize = 4;
 
@@ -106,20 +108,60 @@ fn opus_stream_from_raw(
     let bytes_per_sample = bits_per_sample / 8;
     let chunk_size = frame_size as usize * channel_count * bytes_per_sample as usize;
 
+    const WIN: usize = 768;
+    const HOP: usize = 256;
+    const NORM: f32 = 0.0;
+
+    let chunk_size = WIN * bytes_per_sample as usize * channel_count;
+    let mut channel_frames: Vec<Vec<Vec<f32>>> = vec![Vec::new(); channel_count];
+
+    for chunk in data.chunks(chunk_size) {
+        let data: Vec<PcmData> = match bits_per_sample {
+            16 => deinterleave_vecs_i16(chunk, channel_count)
+                .into_iter()
+                .map(|mut d| {
+                    if d.len() % WIN != 0 {
+                        d.extend(vec![0; WIN - d.len()]);
+                    }
+                    PcmData::I16(d)
+                })
+                .collect(),
+            32 => deinterleave_vecs_f32(chunk, channel_count)
+                .into_iter()
+                .map(|mut d| {
+                    if d.len() % WIN != 0 {
+                        d.extend(vec![0.0; WIN - d.len()]);
+                    }
+                    PcmData::F32(d)
+                })
+                .collect(),
+            _ => continue,
+        };
+
+        for (i, pcm_data) in data.into_iter().enumerate() {
+            let frame_data = frame_spectrogram(pcm_data, WIN, HOP, NORM);
+            channel_frames[i].extend(frame_data);
+        }
+    }
+
+    save_spectrogram(channel_frames, true);
+
     let mut encoder = Encoder::create(48000, 2, 1, 1, &[0u8, 1u8], Application::Audio).unwrap();
-    encoder.set_option(OPUS_SET_BITRATE_REQUEST, 64000).unwrap();
+    encoder
+        .set_option(OPUS_SET_BITRATE_REQUEST, 128000)
+        .unwrap();
 
     let mut encoded_data = Vec::new();
     let mut offset: u32 = 0;
     let mut offsets = Vec::new();
 
+    let mut i = 0;
     for chunk in data.chunks(chunk_size) {
         let flag = if chunk.len() < chunk_size {
             EncodingFlag::PCM
         } else {
             EncodingFlag::Opus
         };
-
         let packets = encode_audio_packet(
             AudioConfig::Hz44100Bit16,
             chunk.to_vec(),
@@ -173,7 +215,7 @@ fn encode_audio_packet(
 
     let bytes_per_sample = bits_per_sample / 8;
     let frame_size = buf.len() as u32 / bytes_per_sample as u32;
-    let len = frame_size as usize *  bytes_per_sample as usize;
+    let len = frame_size as usize * bytes_per_sample as usize;
 
     let mut data = vec![0u8; len as usize];
 
@@ -201,6 +243,7 @@ fn encode_audio_packet(
                     ))
                 }
             }
+
             let mut dst = vec![0u8; frame_size as usize * 2];
             let mut num_bytes = encoder.encode(&src[..], &mut data[..]).unwrap_or(0);
             if num_bytes == 0 {
@@ -208,44 +251,39 @@ fn encode_audio_packet(
             }
             data.truncate(num_bytes);
         }
-        EncodingFlag::PCM => {
-            match bits_per_sample {
+        EncodingFlag::PCM => match bits_per_sample {
+            16 => match src_bits_per_sample {
                 16 => {
-                    match src_bits_per_sample {
-                        16 => {
-                            data.clone_from_slice(&buf[..]);
-                        }
-                        32 => {
-                            for bytes in buf.chunks_exact(4) {
-                                let sample =
-                                    f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                                let scaled_sample = (sample * 32767.0) as i16;
-                                let bytes = scaled_sample.to_le_bytes();
-                                data.extend_from_slice(&bytes);
-                            }
-                        }
-                        _ => {
-                            return Err(format!(
-                                "Unsupported src bits per_sample: {}",
-                                src_bits_per_sample
-                            ))
-                        }
+                    data.clone_from_slice(&buf[..]);
+                }
+                32 => {
+                    for bytes in buf.chunks_exact(4) {
+                        let sample = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                        let scaled_sample = (sample * 32767.0) as i16;
+                        let bytes = scaled_sample.to_le_bytes();
+                        data.extend_from_slice(&bytes);
                     }
                 }
-                32 => match src_bits_per_sample {
-                    32 => {
-                        data.clone_from_slice(&buf[..]);
-                    }
-                    _ => {
-                        return Err(format!(
-                            "Unsupported source bits per_sample: {}",
-                            src_bits_per_sample
-                        ))
-                    }
-                },
-                _ => return Err(format!("Unsupported bits per_sample: {}", bits_per_sample)),
-            }
-        }
+                _ => {
+                    return Err(format!(
+                        "Unsupported src bits per_sample: {}",
+                        src_bits_per_sample
+                    ))
+                }
+            },
+            32 => match src_bits_per_sample {
+                32 => {
+                    data.clone_from_slice(&buf[..]);
+                }
+                _ => {
+                    return Err(format!(
+                        "Unsupported source bits per_sample: {}",
+                        src_bits_per_sample
+                    ))
+                }
+            },
+            _ => return Err(format!("Unsupported bits per_sample: {}", bits_per_sample)),
+        },
     };
 
     let mut result_chunks = Vec::new();
@@ -375,7 +413,7 @@ fn encode_audio_packet_header(
     data
 }
 
-fn decode_audio_packet_header(data: &Vec<u8>) -> AudioPacketHeader {
+pub fn decode_audio_packet_header(data: &Vec<u8>) -> AudioPacketHeader {
     let flag = if (data[0] & 0x20) == 0 {
         EncodingFlag::PCM
     } else {
@@ -592,7 +630,6 @@ mod tests {
             let decoded_samples = decode_audio_packet(encoded_buffer, &mut decoder).unwrap();
             decoded_samples_total.push(decoded_samples);
         }
-
     }
 
     #[test]
