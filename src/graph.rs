@@ -45,7 +45,7 @@ pub fn save_waveform(data: &Vec<Vec<i16>>, width: u32, height: u32, filename: &s
     imgbuf.save(filename).unwrap();
 }
 
-pub fn save_spectrogram(frames: Vec<Vec<Vec<f32>>>, eq: bool, fileprefix: &str) {
+pub fn save_spectrogram(frames: &Vec<Vec<Vec<f32>>>, eq: bool, fileprefix: &str) {
     for i in 0..frames.len() {
         let width = frames[i].len();
         let height = frames[i][0].len();

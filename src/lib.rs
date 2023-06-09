@@ -147,8 +147,8 @@ fn opus_stream_from_raw(
         }
     }
 
-    save_spectrogram(channel_frames, true, "out/sono-eq");
-    save_spectrogram(channel_frames, false, "out/sono-ue");
+    save_spectrogram(&channel_frames, true, "out/sono-eq");
+    save_spectrogram(&channel_frames, false, "out/sono-ue");
 
     let mut encoder = Encoder::create(48000, 2, 1, 1, &[0u8, 1u8], Application::Audio).unwrap();
     encoder
