@@ -86,7 +86,7 @@ pub fn parse_wav<R: Read>(mut reader: R) -> Result<AudioFileData, String> {
 
 pub fn wav_to_opus_stream<R: Read>(mut reader: R) -> Result<Vec<u8>, String> {
     let result = parse_wav(reader)?;
-    let frame_size: u16 = 240;
+    let frame_size: u16 = 120;
     let encoded_data = opus_stream_from_raw(
         &result.data,
         result.sampling_rate,
@@ -152,7 +152,7 @@ fn opus_stream_from_raw(
 
     let mut encoder = Encoder::create(48000, 2, 1, 1, &[0u8, 1u8], Application::Audio).unwrap();
     encoder
-        .set_option(OPUS_SET_BITRATE_REQUEST, 128000)
+        .set_option(OPUS_SET_BITRATE_REQUEST, 96000)
         .unwrap();
 
     let mut encoded_data = Vec::new();
@@ -167,7 +167,7 @@ fn opus_stream_from_raw(
             EncodingFlag::Opus
         };
         let packets = encode_audio_packet(
-            AudioConfig::Hz44100Bit16,
+            AudioConfig::Hz48000Bit16,
             chunk.to_vec(),
             channel_count,
             bits_per_sample,
@@ -652,7 +652,7 @@ mod tests {
         let file = File::open(&file_path).expect("unable to open file");
         let data = parse_wav(file).unwrap();
 
-        let frame_size = 240;
+        let frame_size = 120;
         let chunk_size = frame_size as usize * data.channel_count as usize * 2 as usize;
 
         let mut enc = Encoder::create(48000, 2, 1, 1, &[0u8, 1u8], Application::Audio).unwrap();
