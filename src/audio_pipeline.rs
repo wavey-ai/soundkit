@@ -2,16 +2,17 @@ use crate::audio_packet::*;
 use crate::audio_types::*;
 use crate::wav::*;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct AudioEncoder {
     opus_encoder: libopus::encoder::Encoder,
     wav_reader: WavStreamProcessor,
-    audio_packets: Vec<u8>,
     frame_size: usize,
     packets: Vec<Vec<u8>>,
     bitrate: usize,
     widow: Vec<AudioFileData>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl AudioEncoder {
     pub fn new(bitrate: usize, frame_size: usize) -> Self {
         let mut opus_encoder = libopus::encoder::Encoder::create(
@@ -33,7 +34,6 @@ impl AudioEncoder {
         Self {
             opus_encoder,
             wav_reader,
-            audio_packets: Vec::new(),
             frame_size,
             packets: Vec::new(),
             bitrate,
@@ -51,7 +51,7 @@ impl AudioEncoder {
 
     pub fn flush(&mut self) -> Vec<u8> {
         if let Some(widow) = self.widow.pop() {
-            self.encode(widow, true);
+            let _ = self.encode(widow, true);
         }
 
         let mut offset = 0;

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::audio_types::AudioFileData;
+use crate::audio_types::{get_audio_config, AudioFileData};
 
 enum StreamWavState {
     Initial,
@@ -34,6 +34,18 @@ impl WavStreamProcessor {
             data_chunk_size: 0,
             data_chunk_collected: 0,
         }
+    }
+
+    pub fn bits_per_sample(&self) -> usize {
+        self.bits_per_sample
+    }
+
+    pub fn channel_count(&self) -> usize {
+        self.channel_count
+    }
+
+    pub fn sampling_rate(&self) -> usize {
+        self.sampling_rate
     }
 
     pub fn add(&mut self, chunk: &[u8]) -> Result<Option<AudioFileData>, String> {

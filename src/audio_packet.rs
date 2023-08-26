@@ -20,6 +20,7 @@ pub struct AudioPacketHeader {
     frame_size: u16,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn encode_audio_packet(
     config: AudioConfig,
     buf: &Vec<u8>,
@@ -86,6 +87,7 @@ pub fn encode_audio_packet(
     Ok(chunk)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn decode_audio_packet(
     buffer: Vec<u8>,
     decoder: &mut libopus::decoder::Decoder,
