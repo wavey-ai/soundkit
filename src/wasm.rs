@@ -8,7 +8,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::Worker;
 
 #[wasm_bindgen]
-struct WavToPacket {
+struct WavToPkt {
     wav_reader: WavStreamProcessor,
     audio_packets: Vec<u8>,
     frame_size: usize,
@@ -18,7 +18,7 @@ struct WavToPacket {
 }
 
 #[wasm_bindgen]
-impl WavToPacket {
+impl WavToPkt {
     #[wasm_bindgen]
     pub fn new(bitrate: usize, frame_size: usize) -> Self {
         let wav_reader = WavStreamProcessor::new();
