@@ -1,0 +1,14 @@
+{
+  "name": "browser",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "test": "tap --bail test test/ringbuffer_test.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "tap": "^16.3.8"
+  }
+}

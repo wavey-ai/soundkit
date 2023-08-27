@@ -1,3 +1,18 @@
+
+
+function sharedbuffer_growable(frame_size, max_frames, dataType) {
+  const data_offset = 6 * 4; // Assuming 4 bytes per Uint32Array element
+  const el_bytes = dataType.BYTES_PER_ELEMENT;
+  const initialLength = (frame_size * el_bytes) + data_offset;
+  const maxByteLength = (frame_size * el_bytes * max_frames) + data_offset;
+  const sab = new SharedArrayBuffer(
+    initialLength,
+    { maxByteLength },
+  );
+
+  return sab;
+}
+
 function sharedbuffer(frame_size, max_frames, dataType) {
   const data_offset = 6 * 4; // Assuming 4 bytes per Uint32Array element
   const el_bytes = dataType.BYTES_PER_ELEMENT;
@@ -15,8 +30,10 @@ function ringbuffer(sab, frame_size, max_frames, dataType) {
   const w_ptr_b = new Uint32Array(sab, 12, 1);
   const r_ptr_b = new Uint32Array(sab, 16, 1);
   const wrap_flag_b = new Uint32Array(sab, 20, 1);
-  const data_b = new dataType(sab, data_offset, max_frames * frame_size);
-
+  const el_bytes = dataType.BYTES_PER_ELEMENT;
+  let data_b = new dataType(sab, data_offset, ((sab.byteLength - data_offset) / el_bytes));
+  const frame_len = frame_size * el_bytes;
+  const max_len = (frame_len * max_frames) + data_offset;
   const in_count = () => Atomics.load(in_b, 0);
   const out_count = () => Atomics.load(out_b, 0);
   const dropped_count = () => Atomics.load(dropped_b, 0);
@@ -29,7 +46,7 @@ function ringbuffer(sab, frame_size, max_frames, dataType) {
   };
 
   const wrapping_add = (count_func) => {
-    let i = count_func();
+    const i = count_func();
     return i == max_frames - 1 ? 0 : i + 1;
   };
 
@@ -38,6 +55,15 @@ function ringbuffer(sab, frame_size, max_frames, dataType) {
   }
 
   const push = (frame) => {
+    if (sab.growable) {
+      if (sab.byteLength - data_offset == current_offset(w_ptr) * el_bytes) {
+        if (sab.byteLength - data_offset == max_len) {
+        } else {
+          sab.grow(sab.byteLength + frame_len);
+          data_b = new dataType(sab, data_offset, ((sab.byteLength - data_offset) / el_bytes));
+        }
+      }
+    }
     const offset = current_offset(w_ptr);
     for (let i = 0; i < frame_size; i++) {
       data_b[offset + i] = frame[i];
@@ -67,7 +93,7 @@ function ringbuffer(sab, frame_size, max_frames, dataType) {
     const res = [];
     let offset = current_offset(r_ptr);
     for (let i = 0; i < frame_size; i++) {
-      res.push(data_b[offset+i]);
+      res.push(data_b[offset + i]);
     }
     Atomics.add(out_b, 0, 1);
     Atomics.store(r_ptr_b, 0, wrapping_add(r_ptr));
@@ -88,5 +114,6 @@ if (typeof module !== 'undefined') {
   module.exports = {
     ringbuffer,
     sharedbuffer,
+    sharedbuffer_growable,
   }
 }
