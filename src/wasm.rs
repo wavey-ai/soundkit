@@ -1,4 +1,8 @@
-use crate::audio_packets::encode_audio_packet_header;
+use crate::audio_bytes::s24le_to_i32;
+use crate::audio_packet::encode_audio_packet_header;
+use crate::audio_types::get_audio_config;
+use crate::audio_types::EncodingFlag;
+use crate::wav::WavStreamProcessor;
 use js_sys::{Array, Int16Array, Object, Reflect};
 use wasm_bindgen::prelude::*;
 use web_sys::Worker;
@@ -31,10 +35,15 @@ impl WavToOpus {
 
     #[wasm_bindgen]
     pub fn into_frames(&mut self, data: &[u8]) -> JsValue {
+        let result = Object::new();
+        Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
         match self.wav_reader.add(data) {
-            Ok(Some(audio_data)) => self.frames(audio_data, false),
-            Ok(None) => Ok(()),
-            Err(err) => Err(err),
+            Ok(Some(audio_data)) => self._into_frames(audio_data.data(), false),
+            Ok(None) => result.into(),
+            Err(err) => {
+                Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
+                return result.into();
+            }
         }
     }
 
@@ -44,23 +53,23 @@ impl WavToOpus {
             self.wav_reader.sampling_rate() as u32,
             self.wav_reader.bits_per_sample() as u8,
         ) {
-            let packet_data = encode_audio_packet_header(
-                EncodingFlag::Opus,
+            let mut packet_data = encode_audio_packet_header(
+                &EncodingFlag::Opus,
                 config,
-                wav_reader.channel_count() as u8,
+                self.wav_reader.channel_count() as u8,
                 data.len() as u16,
             );
 
             packet_data.extend_from_slice(&data);
 
-            self.packets.push(&packet_data);
+            self.packets.push(packet_data);
         }
     }
 
     #[wasm_bindgen]
     pub fn flush(&mut self) -> Vec<u8> {
         if let Some(widow) = self.widow.pop() {
-            let _ = self.encode(widow, true);
+            let _ = self._into_frames(&widow, true);
         }
 
         let mut offset = 0;
@@ -100,56 +109,58 @@ impl WavToOpus {
 
         let mut owned_data = data.to_owned();
         if let Some(widow) = self.widow.pop() {
-            owned_data.extend_from_slice(&widow.data());
+            owned_data.extend_from_slice(&widow);
         }
 
         Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
 
-        let data = Vec::new();
+        let mut data = Vec::new();
 
         for chunk in owned_data.chunks(chunk_size) {
-            let Some(config) = get_audio_config(self.wav_reader.sampling_rate(), bits_per_sample)
-            else {
-                return result;
+            let Some(config) = get_audio_config(
+                self.wav_reader.sampling_rate() as u32,
+                bits_per_sample as u8,
+            ) else {
+                return result.into();
             };
 
             let chunk_size = self.frame_size as usize * channel_count * bits_per_sample;
 
             if chunk.len() < chunk_size {
                 self.widow.push(chunk.to_vec());
-                return result;
+                return result.into();
             };
 
             let mut src: Vec<i16> = Vec::new();
             match bits_per_sample {
                 16 => {
-                    for bytes in buf.chunks_exact(2) {
+                    for bytes in chunk.chunks_exact(2) {
                         let sample = i16::from_le_bytes([bytes[0], bytes[1]]);
                         src.push(sample);
                     }
                 }
                 24 => {
-                    for bytes in buf.chunks_exact(3) {
+                    for bytes in chunk.chunks_exact(3) {
                         let sample = s24le_to_i32([bytes[0], bytes[1], bytes[2]]) as i16;
                         src.push(sample);
                     }
                 }
                 32 => {
-                    for bytes in buf.chunks_exact(4) {
+                    for bytes in chunk.chunks_exact(4) {
                         let sample = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                         let scaled_sample = (sample * 32767.0) as i16;
                         src.push(scaled_sample);
                     }
                 }
                 _ => {
-                    return result;
+                    return result.into();
                 }
             }
 
-            result.push(src);
+            data.push(src);
         }
         let mut nested_array = Array::new();
-        for src in results {
+        for src in data {
             let frame_array = Int16Array::from(&src[..]);
             nested_array.push(&frame_array.into());
         }
@@ -163,7 +174,7 @@ impl WavToOpus {
         )
         .unwrap();
 
-        result
+        result.into()
     }
 
     fn reset(&mut self) {

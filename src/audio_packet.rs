@@ -153,7 +153,7 @@ pub fn decode_audio_packet(
     })
 }
 
-fn encode_audio_packet_header(
+pub fn encode_audio_packet_header(
     encoding: &EncodingFlag,
     config: AudioConfig,
     channel_count: u8,
