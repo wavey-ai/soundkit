@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "",
   "scripts": {
-    "test": "tap --bail test test/ringbuffer_test.js"
+    "test": "tap test test/ringbuffer_test.js"
   },
   "keywords": [],
   "author": "",

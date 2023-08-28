@@ -1,4 +1,17 @@
 
+function ringbuffer_from_data(data, dataType, frame_size) {
+  const data_offset = 6 * 4;
+  const el_bytes = dataType.BYTES_PER_ELEMENT;
+  const sab = new SharedArrayBuffer(data.byteLength + data_offset);
+  const sabView = new Uint8Array(sab);
+  sabView.set(data, data_offset);
+  const n = (data.byteLength / el_bytes) / frame_size;
+  const w_ptr_b = new Uint32Array(sab, 12, 1);
+  const in_b = new Uint32Array(sab, 0, 1);
+  Atomics.store(w_ptr_b, 0, n);
+  Atomics.store(in_b, 0, n);
+  return ringbuffer(sab, frame_size, n, dataType)
+}
 
 function sharedbuffer_growable(frame_size, max_frames, dataType) {
   const data_offset = 6 * 4; // Assuming 4 bytes per Uint32Array element
@@ -115,6 +128,7 @@ function ringbuffer(sab, frame_size, max_frames, dataType) {
 if (typeof module !== 'undefined') {
   module.exports = {
     ringbuffer,
+    ringbuffer_from_data,
     sharedbuffer,
     sharedbuffer_growable,
   }

@@ -1,6 +1,24 @@
 const test = require("tap").test;
 
-const { sharedbuffer_growable, sharedbuffer, ringbuffer } = require("./../ringbuffer");
+const { ringbuffer_from_data, sharedbuffer_growable, sharedbuffer, ringbuffer } = require("./../ringbuffer");
+
+test("from data", (t) => {
+  const testData = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+  const frame_size = 2;
+  const rb = ringbuffer_from_data(testData, Uint8Array, frame_size);
+
+  t.equal(rb.count(), 4);
+
+  t.same(rb.pop(), [1, 2]);
+  t.same(rb.pop(), [3, 4]);
+  t.same(rb.pop(), [5, 6]);
+  t.same(rb.pop(), [7, 8]);
+  t.equal(rb.pop(), undefined);
+
+
+  t.end();
+
+});
 
 const tests = (shared_buffer) => {
   test("pop should return undefined when buffer is empty", (t) => {
