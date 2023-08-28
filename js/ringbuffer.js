@@ -90,6 +90,8 @@ function ringbuffer(sab, frame_size, max_frames, dataType) {
     if (in_count() - out_count() === 0) {
       return;
     }
+
+    data_b = new dataType(sab, data_offset, ((sab.byteLength - data_offset) / el_bytes));
     const res = [];
     let offset = current_offset(r_ptr);
     for (let i = 0; i < frame_size; i++) {
