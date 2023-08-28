@@ -114,7 +114,7 @@ impl WavToPkt {
         let result = Object::new();
         Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
 
-        let chunk_size = self.frame_size * channel_count * bits_per_sample;
+        let chunk_size = self.frame_size as usize * channel_count * bytes_per_sample;
 
         let mut owned_data = data.to_owned();
         if let Some(widow) = self.widow.pop() {
@@ -123,8 +123,6 @@ impl WavToPkt {
 
         let mut data = Vec::new();
         for chunk in owned_data.chunks(chunk_size) {
-            let chunk_size = self.frame_size as usize * channel_count * bytes_per_sample;
-
             if chunk.len() < chunk_size {
                 self.widow.push(chunk.to_vec());
                 return result.into();
