@@ -117,12 +117,7 @@ impl WavToPkt {
 
         let result = Object::new();
         Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
-        Reflect::set(
-            &result,
-            &JsValue::from_str("reqid"),
-            &JsValue::from(self.idx),
-        )
-        .unwrap();
+        Reflect::set(&result, &JsValue::from_str("seq"), &JsValue::from(self.idx)).unwrap();
 
         let chunk_size = self.frame_size as usize * channel_count * bytes_per_sample;
 
