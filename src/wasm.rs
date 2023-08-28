@@ -108,6 +108,8 @@ impl WavToPkt {
     fn _into_frames(&mut self, data: &[u8], is_last: bool) -> JsValue {
         let bits_per_sample = self.wav_reader.bits_per_sample() as usize;
         let channel_count = self.wav_reader.channel_count() as usize;
+        let sampling_rate = self.wav_reader.sampling_rate() as usize;
+
         let result = Object::new();
         Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
 
@@ -119,21 +121,6 @@ impl WavToPkt {
         }
         let mut data = Vec::new();
         for chunk in owned_data.chunks(chunk_size) {
-            let Some(config) = get_audio_config(
-                self.wav_reader.sampling_rate() as u32,
-                bits_per_sample as u8,
-            ) else {
-                Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
-                Reflect::set(
-                    &result,
-                    &JsValue::from_str("msg"),
-                    &JsValue::from("unsupported audio config".to_string()),
-                )
-                .unwrap();
-
-                return result.into();
-            };
-
             let chunk_size = self.frame_size as usize * channel_count * bits_per_sample;
 
             if chunk.len() < chunk_size {
@@ -191,6 +178,12 @@ impl WavToPkt {
             &result,
             &JsValue::from_str("bits_per_sample"),
             &JsValue::from(bits_per_sample),
+        )
+        .unwrap();
+        Reflect::set(
+            &result,
+            &JsValue::from_str("sampling_rate"),
+            &JsValue::from(sampling_rate),
         )
         .unwrap();
 
