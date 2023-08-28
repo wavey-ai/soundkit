@@ -134,20 +134,6 @@ impl WavToPkt {
         for chunk in owned_data.chunks(chunk_size) {
             if chunk.len() < chunk_size {
                 self.widow.extend_from_slice(&owned_data);
-                Reflect::set(
-                    &result,
-                    &JsValue::from_str("msg"),
-                    &JsValue::from("need more data"),
-                )
-                .unwrap();
-                Reflect::set(
-                    &result,
-                    &JsValue::from_str("val"),
-                    &JsValue::from(chunk_size - chunk.len()),
-                )
-                .unwrap();
-
-                return result.into();
             };
 
             let mut src: Vec<i16> = Vec::new();
@@ -172,7 +158,6 @@ impl WavToPkt {
                     }
                 }
                 _ => {
-                    Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
                     Reflect::set(
                         &result,
                         &JsValue::from_str("msg"),
@@ -189,19 +174,21 @@ impl WavToPkt {
                     return result.into();
                 }
             }
-
             data.push(src);
         }
+        Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
+
+        if data.is_empty() {
+            return result.into();
+        }
+
         let mut nested_array = Array::new();
         for src in data {
             let frame_array = Int16Array::from(&src[..]);
             nested_array.push(&frame_array.into());
         }
 
-        Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
-
         Reflect::set(&result, &JsValue::from_str("frames"), &nested_array).unwrap();
-
         Reflect::set(
             &result,
             &JsValue::from_str("channel_count"),
