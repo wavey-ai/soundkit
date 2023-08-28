@@ -202,7 +202,8 @@ mod tests {
         //            "processed more bytes than indicated in data header"
         //        );
         assert!(audio_packets.len() > 0, "No audio packets processed");
-        dbg!(audio_packets[0].sampling_rate());
-        dbg!(audio_packets[0].bits_per_sample());
+        dbg!(processor.sampling_rate());
+        dbg!(processor.bits_per_sample());
+        dbg!(processor.channel_count());
     }
 }

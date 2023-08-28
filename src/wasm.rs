@@ -43,7 +43,7 @@ impl WavToPkt {
                 Reflect::set(
                     &result,
                     &JsValue::from_str("msg"),
-                    &JsValue::from("no wav data".to_string()),
+                    &JsValue::from("no wav data"),
                 )
                 .unwrap();
 
@@ -109,6 +109,7 @@ impl WavToPkt {
         let bits_per_sample = self.wav_reader.bits_per_sample() as usize;
         let channel_count = self.wav_reader.channel_count() as usize;
         let sampling_rate = self.wav_reader.sampling_rate() as usize;
+        let bytes_per_sample = bits_per_sample / 8;
 
         let result = Object::new();
         Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
@@ -122,7 +123,7 @@ impl WavToPkt {
 
         let mut data = Vec::new();
         for chunk in owned_data.chunks(chunk_size) {
-            let chunk_size = self.frame_size as usize * channel_count * bits_per_sample;
+            let chunk_size = self.frame_size as usize * channel_count * bytes_per_sample;
 
             if chunk.len() < chunk_size {
                 self.widow.push(chunk.to_vec());
