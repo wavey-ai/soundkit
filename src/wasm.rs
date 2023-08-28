@@ -119,6 +119,7 @@ impl WavToPkt {
         if let Some(widow) = self.widow.pop() {
             owned_data.extend_from_slice(&widow);
         }
+
         let mut data = Vec::new();
         for chunk in owned_data.chunks(chunk_size) {
             let chunk_size = self.frame_size as usize * channel_count * bits_per_sample;
@@ -151,6 +152,18 @@ impl WavToPkt {
                 }
                 _ => {
                     Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
+                    Reflect::set(
+                        &result,
+                        &JsValue::from_str("msg"),
+                        &JsValue::from("unsupported bits_per_sample"),
+                    )
+                    .unwrap();
+                    Reflect::set(
+                        &result,
+                        &JsValue::from_str("val"),
+                        &JsValue::from(bits_per_sample),
+                    )
+                    .unwrap();
 
                     return result.into();
                 }
