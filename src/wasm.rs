@@ -129,6 +129,19 @@ impl WavToPkt {
         for chunk in owned_data.chunks(chunk_size) {
             if chunk.len() < chunk_size {
                 self.widow.extend_from_slice(&owned_data);
+                Reflect::set(
+                    &result,
+                    &JsValue::from_str("msg"),
+                    &JsValue::from("need more data"),
+                )
+                .unwrap();
+                Reflect::set(
+                    &result,
+                    &JsValue::from_str("val"),
+                    &JsValue::from(chunk_size - chunk.len()),
+                )
+                .unwrap();
+
                 return result.into();
             };
 
