@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn test_wav_stream() {
-        let file_path = "testdata/i16.wav";
+        let file_path = "testdata/f32le.wav";
         let mut file = File::open(&file_path).unwrap();
 
         let mut processor = WavStreamProcessor::new();
@@ -202,5 +202,6 @@ mod tests {
         //            "processed more bytes than indicated in data header"
         //        );
         assert!(audio_packets.len() > 0, "No audio packets processed");
+        dbg!(audio_packets.len());
     }
 }

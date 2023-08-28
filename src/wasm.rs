@@ -123,7 +123,14 @@ impl WavToPkt {
                 self.wav_reader.sampling_rate() as u32,
                 bits_per_sample as u8,
             ) else {
-                Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
+                Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
+                Reflect::set(
+                    &result,
+                    &JsValue::from_str("msg"),
+                    &JsValue::from("unsupported audio config".to_string()),
+                )
+                .unwrap();
+
                 return result.into();
             };
 
@@ -178,6 +185,12 @@ impl WavToPkt {
             &result,
             &JsValue::from_str("channel_count"),
             &JsValue::from(channel_count),
+        )
+        .unwrap();
+        Reflect::set(
+            &result,
+            &JsValue::from_str("bits_per_sample"),
+            &JsValue::from(bits_per_sample),
         )
         .unwrap();
 
