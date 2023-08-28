@@ -36,14 +36,20 @@ impl WavToPkt {
     #[wasm_bindgen]
     pub fn into_frames(&mut self, data: &[u8]) -> JsValue {
         let result = Object::new();
-        Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
         match self.wav_reader.add(data) {
             Ok(Some(audio_data)) => self._into_frames(audio_data.data(), false),
-            Ok(None) => result.into(),
-            Err(err) => {
-                Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
+            Ok(None) => {
+                Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
+                Reflect::set(
+                    &result,
+                    &JsValue::from_str("msg"),
+                    &JsValue::from("no wav data".to_string()),
+                )
+                .unwrap();
+
                 return result.into();
             }
+            Err(err) => result.into(),
         }
     }
 
@@ -111,16 +117,13 @@ impl WavToPkt {
         if let Some(widow) = self.widow.pop() {
             owned_data.extend_from_slice(&widow);
         }
-
-        Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
-
         let mut data = Vec::new();
-
         for chunk in owned_data.chunks(chunk_size) {
             let Some(config) = get_audio_config(
                 self.wav_reader.sampling_rate() as u32,
                 bits_per_sample as u8,
             ) else {
+                Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
                 return result.into();
             };
 
@@ -153,6 +156,8 @@ impl WavToPkt {
                     }
                 }
                 _ => {
+                    Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
+
                     return result.into();
                 }
             }
@@ -164,6 +169,8 @@ impl WavToPkt {
             let frame_array = Int16Array::from(&src[..]);
             nested_array.push(&frame_array.into());
         }
+
+        Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
 
         Reflect::set(&result, &JsValue::from_str("frames"), &nested_array).unwrap();
 
