@@ -216,7 +216,7 @@ impl WavToPkt {
         )
         .unwrap();
 
-        result.into()
+        return result.into();
     }
 
     fn reset(&mut self) {
