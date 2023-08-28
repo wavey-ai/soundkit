@@ -100,7 +100,7 @@ function ringbuffer(sab, frame_size, max_frames, dataType) {
     Atomics.add(out_b, 0, 1);
     Atomics.store(r_ptr_b, 0, wrapping_add(r_ptr));
 
-    return res;
+    return new dataType(res);
   };
 
   return {
