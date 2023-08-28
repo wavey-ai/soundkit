@@ -14,7 +14,7 @@ struct WavToPkt {
     frame_size: usize,
     packets: Vec<Vec<u8>>,
     bitrate: usize,
-    widow: Vec<Vec<u8>>,
+    widow: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -74,8 +74,8 @@ impl WavToPkt {
 
     #[wasm_bindgen]
     pub fn flush(&mut self) -> Vec<u8> {
-        if let Some(widow) = self.widow.pop() {
-            let _ = self._into_frames(&widow, true);
+        if self.widow.len() > 0 {
+            let _ = self._into_frames(&self.widow, true);
         }
 
         let mut offset = 0;
@@ -117,14 +117,15 @@ impl WavToPkt {
         let chunk_size = self.frame_size as usize * channel_count * bytes_per_sample;
 
         let mut owned_data = data.to_owned();
-        if let Some(widow) = self.widow.pop() {
-            owned_data.extend_from_slice(&widow);
+        if self.widow.len() > 0 {
+            owned_data.extend_from_slice(&self.widow);
+            self.widow.drain(..);
         }
 
         let mut data = Vec::new();
         for chunk in owned_data.chunks(chunk_size) {
             if chunk.len() < chunk_size {
-                self.widow.push(chunk.to_vec());
+                self.widow.extend_from_slice(&owned_data);
                 return result.into();
             };
 
