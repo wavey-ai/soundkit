@@ -116,10 +116,13 @@ impl WavToPkt {
 
         let chunk_size = self.frame_size as usize * channel_count * bytes_per_sample;
 
-        let mut owned_data = data.to_owned();
+        let mut owned_data;
         if self.widow.len() > 0 {
-            owned_data.extend_from_slice(&self.widow);
+            owned_data = self.widow.clone();
+            owned_data.extend_from_slice(&data);
             self.widow.drain(..);
+        } else {
+            owned_data = data.to_owned();
         }
 
         let mut data = Vec::new();
