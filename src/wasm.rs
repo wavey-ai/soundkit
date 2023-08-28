@@ -75,7 +75,7 @@ impl WavToPkt {
     #[wasm_bindgen]
     pub fn flush(&mut self) -> Vec<u8> {
         if self.widow.len() > 0 {
-            let _ = self._into_frames(&self.widow, true);
+            let _ = self._into_frames(&self.widow.clone(), true);
         }
 
         let mut offset = 0;
