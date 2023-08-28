@@ -40,6 +40,9 @@ impl WavToPkt {
         self.idx = self.idx.wrapping_add(1);
 
         let result = Object::new();
+
+        Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
+
         match self.wav_reader.add(data) {
             Ok(Some(audio_data)) => self._into_frames(audio_data.data(), false),
             Ok(None) => {
@@ -53,7 +56,16 @@ impl WavToPkt {
 
                 return result.into();
             }
-            Err(err) => result.into(),
+            Err(err) => {
+                Reflect::set(
+                    &result,
+                    &JsValue::from_str("err"),
+                    &JsValue::from(err.to_string()),
+                )
+                .unwrap();
+
+                return result.into();
+            }
         }
     }
 
