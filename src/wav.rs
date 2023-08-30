@@ -179,7 +179,7 @@ mod tests {
 
         let mut processor = WavStreamProcessor::new();
         let mut audio_packets = Vec::new();
-        let mut buffer = [0u8; 1024];
+        let mut buffer = [0u8; 128];
 
         loop {
             let bytes_read = file.read(&mut buffer).unwrap();

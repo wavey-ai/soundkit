@@ -158,6 +158,10 @@ impl WavToPkt {
         for chunk in owned_data.chunks(chunk_size) {
             if chunk.len() < chunk_size {
                 self.widow.extend_from_slice(&owned_data);
+
+                Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
+
+                return result.into();
             };
 
             let mut src: Vec<i16> = Vec::new();
