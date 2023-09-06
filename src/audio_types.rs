@@ -1,16 +1,22 @@
 #![allow(dead_code)]
 
+pub enum PcmData {
+    I16(Vec<Vec<i16>>),
+    I32(Vec<Vec<i32>>),
+    F32(Vec<Vec<f32>>),
+}
+
 #[derive(Debug)]
-pub struct AudioFileData {
+pub struct AudioData {
     bits_per_sample: u8,
     channel_count: u8,
     data: Vec<u8>,
     sampling_rate: u32,
 }
 
-impl AudioFileData {
+impl AudioData {
     pub fn new(bits_per_sample: u8, channel_count: u8, sampling_rate: u32, data: Vec<u8>) -> Self {
-        AudioFileData {
+        AudioData {
             bits_per_sample,
             channel_count,
             sampling_rate,
