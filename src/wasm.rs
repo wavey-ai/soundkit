@@ -8,18 +8,6 @@ use wasm_bindgen::prelude::*;
 use web_sys::Worker;
 
 #[wasm_bindgen]
-pub fn f32_to_i16(input: Vec<f32>) -> Int16Array {
-    let output = crate::resample::f32_to_i16(input);
-    Int16Array::from(&output[..])
-}
-
-#[wasm_bindgen]
-pub fn i16_to_f32(input: Vec<i16>) -> Float32Array {
-    let output = crate::resample::i16_to_f32(input);
-    Float32Array::from(&output[..])
-}
-
-#[wasm_bindgen]
 struct WavToPkt {
     wav_reader: WavStreamProcessor,
     audio_packets: Vec<u8>,
