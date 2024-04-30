@@ -5,6 +5,7 @@ use crate::audio_bytes::{
 use crate::audio_packet::encode_audio_packet_header;
 use crate::audio_types::get_audio_config;
 use crate::audio_types::EncodingFlag;
+use crate::audio_types::Endianness;
 use crate::wav::WavStreamProcessor;
 use js_sys::{Array, Float32Array, Int16Array, Object, Reflect};
 use wasm_bindgen::prelude::*;
@@ -48,8 +49,14 @@ impl WavToPkt {
         self.wav_reader.channel_count()
     }
 
+    #[wasm_bindgen]
     pub fn sampling_rate(&self) -> usize {
         self.wav_reader.sampling_rate()
+    }
+
+    #[wasm_bindgen]
+    pub fn audio_format(&self) -> u16 {
+        self.wav_reader.audio_format()
     }
 
     #[wasm_bindgen]
@@ -88,11 +95,16 @@ impl WavToPkt {
 
     #[wasm_bindgen]
     pub fn set_frame(&mut self, data: &[u8]) {
+        let fmt = if self.wav_reader.audio_format() == 3 {
+            Some(3)
+        } else {
+            None
+        };
         if let Some(config) = get_audio_config(
             self.wav_reader.sampling_rate() as u32,
             self.wav_reader.bits_per_sample() as u8,
-            Some(self.wav_reader.endianness()),
-            self.wav_reader.audio_format(),
+            fmt,
+            self.wav_reader.endianness(),
         ) {
             let mut packet_data = encode_audio_packet_header(
                 &EncodingFlag::Opus,
@@ -144,9 +156,9 @@ impl WavToPkt {
         let bits_per_sample = self.wav_reader.bits_per_sample() as usize;
         let channel_count = self.wav_reader.channel_count() as usize;
         let sampling_rate = self.wav_reader.sampling_rate() as usize;
-
-        let header = self.wav_reader.header().unwrap(); // Ensure header access
-        let bytes_per_sample = header.bytes_per_sample(); // Helper function usage
+        let endianness = self.wav_reader.endianness();
+        let bytes_per_sample = bits_per_sample / 8;
+        let audio_format = self.wav_reader.audio_format();
 
         let result = Object::new();
         Reflect::set(
@@ -180,28 +192,28 @@ impl WavToPkt {
 
             let src = match bits_per_sample {
                 16 => {
-                    if header.endianness() == Endianness::LE {
+                    if endianness == Endianness::LE {
                         s16le_to_i16(chunk)
                     } else {
                         s16be_to_i16(chunk)
                     }
                 }
                 24 => {
-                    if header.endianness() == Endianness::LE {
+                    if endianness == Endianness::LE {
                         s24le_to_i16(chunk)
                     } else {
                         s24be_to_i16(chunk)
                     }
                 }
                 32 => {
-                    if header.audio_format() == 3 {
-                        if header.endianness() == Endianness::LE {
+                    if audio_format == 3 {
+                        if endianness == Endianness::LE {
                             f32le_to_i16(chunk)
                         } else {
                             f32be_to_i16(chunk)
                         }
                     } else {
-                        if header.endianness() == Endianness::LE {
+                        if endianness == Endianness::LE {
                             i32le_to_i16(chunk)
                         } else {
                             i32be_to_i16(chunk)

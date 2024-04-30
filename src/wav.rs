@@ -108,13 +108,15 @@ impl WavStreamProcessor {
                         u16::from_le_bytes(fmt_chunk[22..24].try_into().unwrap()) as usize;
                     self.channel_count =
                         u16::from_le_bytes(fmt_chunk[10..12].try_into().unwrap()) as usize;
-
-                    self.audio_format = u16::from_le_bytes(fmt_chunk[20..22].try_into().unwrap());
-
+                    self.audio_format = u16::from_le_bytes(fmt_chunk[8..10].try_into().unwrap());
+                    if (self.audio_format > 3) {
+                        self.audio_format = 3;
+                    }
                     self.endianness = if self.audio_format == 1 || self.audio_format == 3 {
                         Endianness::LE
                     } else {
-                        Endianness::BE
+                        Endianness::LE
+                        // Endianness::BE
                     };
 
                     self.state = StreamWavState::ReadToData;
