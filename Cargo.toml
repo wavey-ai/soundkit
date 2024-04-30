@@ -13,6 +13,7 @@ libopus = { path = "../opus-rs", optional = true }
 web-sys = { version = "0.3.64", optional = true, features = ["Worker"] }
 wasm-bindgen = { version = "0.2.87", optional = true }
 rubato = "0.14.1"
+byteorder = "1.5.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

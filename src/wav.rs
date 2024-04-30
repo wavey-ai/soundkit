@@ -1,8 +1,5 @@
-#![allow(dead_code)]
-
+use crate::audio_types::{get_audio_config, AudioData, Endianness, PcmData};
 use std::io::Write;
-
-use crate::audio_types::{get_audio_config, AudioData, PcmData};
 
 enum StreamWavState {
     Initial,
@@ -20,6 +17,8 @@ pub struct WavStreamProcessor {
     bits_per_sample: usize,
     channel_count: usize,
     sampling_rate: usize,
+    audio_format: u16,
+    endianness: Endianness, // New field to track endianness
     data_chunk_size: usize,
     data_chunk_collected: usize,
 }
@@ -33,6 +32,8 @@ impl WavStreamProcessor {
             bits_per_sample: 0,
             channel_count: 0,
             sampling_rate: 0,
+            audio_format: 0,
+            endianness: Endianness::LE, // Default to little-endian
             data_chunk_size: 0,
             data_chunk_collected: 0,
         }
@@ -50,6 +51,14 @@ impl WavStreamProcessor {
         self.sampling_rate
     }
 
+    pub fn audio_format(&self) -> u16 {
+        self.audio_format
+    }
+
+    pub fn endianness(&self) -> Endianness {
+        self.endianness
+    }
+
     pub fn add(&mut self, chunk: &[u8]) -> Result<Option<AudioData>, String> {
         self.buffer.extend(chunk);
 
@@ -57,7 +66,7 @@ impl WavStreamProcessor {
             match &self.state {
                 StreamWavState::Initial => {
                     if self.buffer.len() < 12 {
-                        return Ok(None); // Wait for more data
+                        return Ok(None);
                     }
 
                     if &self.buffer[..4] != b"RIFF" || &self.buffer[8..12] != b"WAVE" {
@@ -77,17 +86,19 @@ impl WavStreamProcessor {
                         let chunk_size = u32::from_le_bytes(
                             self.buffer[self.idx + 4..self.idx + 8].try_into().unwrap(),
                         ) as usize;
-                        self.idx += chunk_size + 8; // Advance to next chunk
+                        self.idx += chunk_size + 8;
+
                         if self.buffer.len() < self.idx + 8 {
                             return Ok(None);
                         }
                     }
+
                     self.state = StreamWavState::ReadingFmt;
                 }
 
                 StreamWavState::ReadingFmt => {
                     if self.buffer.len() < self.idx + 24 {
-                        return Ok(None); // Wait for more data
+                        return Ok(None);
                     }
 
                     let fmt_chunk = &self.buffer[self.idx..self.idx + 24];
@@ -97,6 +108,14 @@ impl WavStreamProcessor {
                         u16::from_le_bytes(fmt_chunk[22..24].try_into().unwrap()) as usize;
                     self.channel_count =
                         u16::from_le_bytes(fmt_chunk[10..12].try_into().unwrap()) as usize;
+
+                    self.audio_format = u16::from_le_bytes(fmt_chunk[20..22].try_into().unwrap());
+
+                    self.endianness = if self.audio_format == 1 || self.audio_format == 3 {
+                        Endianness::LE
+                    } else {
+                        Endianness::BE
+                    };
 
                     self.state = StreamWavState::ReadToData;
 
@@ -115,7 +134,8 @@ impl WavStreamProcessor {
                         let chunk_size = u32::from_le_bytes(
                             self.buffer[self.idx + 4..self.idx + 8].try_into().unwrap(),
                         ) as usize;
-                        self.idx += chunk_size + 8; // Advance to next chunk
+                        self.idx += chunk_size + 8;
+
                         if self.buffer.len() < self.idx + 8 {
                             return Ok(None);
                         }
@@ -128,7 +148,7 @@ impl WavStreamProcessor {
                     self.data_chunk_size = chunk_size;
 
                     self.state = StreamWavState::ReadingData;
-                    // Skip "data" and size
+
                     self.buffer = self.buffer.split_off(self.idx + 8);
                 }
 
@@ -136,8 +156,8 @@ impl WavStreamProcessor {
                     let bytes_per_sample = (self.bits_per_sample / 8) as usize;
                     let bytes_per_frame = bytes_per_sample * self.channel_count as usize;
 
-                    if self.buffer.len() < bytes_per_frame as usize {
-                        return Ok(None); // Wait for more data
+                    if self.buffer.len() < bytes_per_frame {
+                        return Ok(None); // Wait for more data.
                     }
 
                     let frames_in_buffer = self.buffer.len() / bytes_per_frame;
@@ -155,13 +175,15 @@ impl WavStreamProcessor {
                         self.channel_count as u8,
                         self.sampling_rate as u32,
                         data_chunk,
+                        self.audio_format,
+                        self.endianness,
                     );
 
                     return Ok(Some(result));
                 }
 
                 StreamWavState::Finished => {
-                    return Err("Already finished processing WAV file".to_string());
+                    return Err("Already finished processing WAV file.".to_string());
                 }
             }
         }
@@ -170,6 +192,7 @@ impl WavStreamProcessor {
 
 pub fn generate_wav_buffer(pcm_data: &PcmData, sampling_rate: u32) -> Result<Vec<u8>, String> {
     let mut cursor = Vec::new();
+
     let bits_per_sample = match pcm_data {
         PcmData::I16(_) => 16,
         PcmData::I32(_) => 32,
@@ -199,21 +222,19 @@ pub fn generate_wav_buffer(pcm_data: &PcmData, sampling_rate: u32) -> Result<Vec
     let block_align = bytes_per_sample * channel_count;
     let sub_chunk_2_size = sample_count * bytes_per_sample * channel_count;
 
-    // RIFF Header
     cursor.write_all(b"RIFF").unwrap();
     cursor
         .write_all(&(36 + sub_chunk_2_size as u32).to_le_bytes())
         .unwrap();
     cursor.write_all(b"WAVE").unwrap();
 
-    // FMT Header
     cursor.write_all(b"fmt ").unwrap();
     cursor.write_all(&16u32.to_le_bytes()).unwrap(); // fmt chunk size
-    cursor.write_all(&audio_format.to_le_bytes()).unwrap();
+    cursor.write_all(&audio_format.to_le_bytes()).unwrap(); // PCM or IEEE float
     cursor
         .write_all(&(channel_count as u16).to_le_bytes())
-        .unwrap(); // Num channels
-    cursor.write_all(&sampling_rate.to_le_bytes()).unwrap(); // Sampling rate
+        .unwrap(); // Number of channels
+    cursor.write_all(&sampling_rate.to_le_bytes()).unwrap(); // Sample rate
     cursor.write_all(&(byte_rate as u32).to_le_bytes()).unwrap(); // Byte rate
     cursor
         .write_all(&(block_align as u16).to_le_bytes())
@@ -222,25 +243,17 @@ pub fn generate_wav_buffer(pcm_data: &PcmData, sampling_rate: u32) -> Result<Vec
         .write_all(&(bits_per_sample as u16).to_le_bytes())
         .unwrap(); // Bits per sample
 
-    // Data header
     cursor.write_all(b"data").unwrap();
     cursor
         .write_all(&(sub_chunk_2_size as u32).to_le_bytes())
         .unwrap();
 
-    // Actual data
     for i in 0..sample_count {
         for ch in 0..channel_count {
             match pcm_data {
-                PcmData::I16(data) => {
-                    cursor.write_all(&data[ch][i].to_le_bytes()).unwrap();
-                }
-                PcmData::I32(data) => {
-                    cursor.write_all(&data[ch][i].to_le_bytes()).unwrap();
-                }
-                PcmData::F32(data) => {
-                    cursor.write_all(&data[ch][i].to_le_bytes()).unwrap();
-                }
+                PcmData::I16(data) => cursor.write_all(&data[ch][i].to_le_bytes()).unwrap(),
+                PcmData::I32(data) => cursor.write_all(&data[ch][i].to_le_bytes()).unwrap(),
+                PcmData::F32(data) => cursor.write_all(&f32::to_le_bytes(data[ch][i])).unwrap(),
             }
         }
     }
@@ -271,18 +284,12 @@ mod tests {
 
             let chunk = &buffer[..bytes_read];
             match processor.add(chunk) {
-                Ok(Some(audio_data)) => {
-                    audio_packets.push(audio_data);
-                }
+                Ok(Some(audio_data)) => audio_packets.push(audio_data),
                 Ok(None) => continue,
                 Err(err) => panic!("Error: {}", err),
             }
         }
 
-        //        assert_eq!(
-        //            &processor.data_chunk_size, &processor.data_chunk_collected,
-        //            "processed more bytes than indicated in data header"
-        //        );
         assert!(audio_packets.len() > 0, "No audio packets processed");
     }
 }

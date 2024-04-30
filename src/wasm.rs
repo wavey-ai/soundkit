@@ -1,4 +1,7 @@
-use crate::audio_bytes::s24le_to_i32;
+use crate::audio_bytes::{
+    f32be_to_i16, f32le_to_i16, i32be_to_i16, i32le_to_i16, s16be_to_i16, s16le_to_i16,
+    s24be_to_i16, s24le_to_i16,
+};
 use crate::audio_packet::encode_audio_packet_header;
 use crate::audio_types::get_audio_config;
 use crate::audio_types::EncodingFlag;
@@ -33,6 +36,20 @@ impl WavToPkt {
             widow: Vec::new(),
             idx: 0,
         }
+    }
+
+    #[wasm_bindgen]
+    pub fn bits_per_sample(&self) -> usize {
+        self.wav_reader.bits_per_sample()
+    }
+
+    #[wasm_bindgen]
+    pub fn channel_count(&self) -> usize {
+        self.wav_reader.channel_count()
+    }
+
+    pub fn sampling_rate(&self) -> usize {
+        self.wav_reader.sampling_rate()
     }
 
     #[wasm_bindgen]
@@ -74,6 +91,8 @@ impl WavToPkt {
         if let Some(config) = get_audio_config(
             self.wav_reader.sampling_rate() as u32,
             self.wav_reader.bits_per_sample() as u8,
+            Some(self.wav_reader.endianness()),
+            self.wav_reader.audio_format(),
         ) {
             let mut packet_data = encode_audio_packet_header(
                 &EncodingFlag::Opus,
@@ -125,13 +144,22 @@ impl WavToPkt {
         let bits_per_sample = self.wav_reader.bits_per_sample() as usize;
         let channel_count = self.wav_reader.channel_count() as usize;
         let sampling_rate = self.wav_reader.sampling_rate() as usize;
-        let bytes_per_sample = bits_per_sample / 8;
+
+        let header = self.wav_reader.header().unwrap(); // Ensure header access
+        let bytes_per_sample = header.bytes_per_sample(); // Helper function usage
 
         let result = Object::new();
+        Reflect::set(
+            &result,
+            &JsValue::from_str("len"),
+            &JsValue::from(data.len()),
+        )
+        .unwrap();
+
         Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
         Reflect::set(&result, &JsValue::from_str("seq"), &JsValue::from(self.idx)).unwrap();
 
-        let chunk_size = self.frame_size as usize * channel_count * bytes_per_sample;
+        let chunk_size = self.frame_size * channel_count * bytes_per_sample as usize;
 
         let mut owned_data;
         if self.widow.len() > 0 {
@@ -142,35 +170,42 @@ impl WavToPkt {
             owned_data = data.to_owned();
         }
 
-        let mut data = Vec::new();
+        let mut converted_data: Vec<Vec<i16>> = Vec::new();
+
         for chunk in owned_data.chunks(chunk_size) {
             if chunk.len() < chunk_size {
-                self.widow.extend_from_slice(&owned_data);
+                self.widow.extend_from_slice(&chunk);
+                break;
+            }
 
-                Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
-
-                return result.into();
-            };
-
-            let mut src: Vec<i16> = Vec::new();
-            match bits_per_sample {
+            let src = match bits_per_sample {
                 16 => {
-                    for bytes in chunk.chunks_exact(2) {
-                        let sample = i16::from_le_bytes([bytes[0], bytes[1]]);
-                        src.push(sample);
+                    if header.endianness() == Endianness::LE {
+                        s16le_to_i16(chunk)
+                    } else {
+                        s16be_to_i16(chunk)
                     }
                 }
                 24 => {
-                    for bytes in chunk.chunks_exact(3) {
-                        let sample = s24le_to_i32([bytes[0], bytes[1], bytes[2]]) as i16;
-                        src.push(sample);
+                    if header.endianness() == Endianness::LE {
+                        s24le_to_i16(chunk)
+                    } else {
+                        s24be_to_i16(chunk)
                     }
                 }
                 32 => {
-                    for bytes in chunk.chunks_exact(4) {
-                        let sample = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                        let scaled_sample = (sample * 32767.0) as i16;
-                        src.push(scaled_sample);
+                    if header.audio_format() == 3 {
+                        if header.endianness() == Endianness::LE {
+                            f32le_to_i16(chunk)
+                        } else {
+                            f32be_to_i16(chunk)
+                        }
+                    } else {
+                        if header.endianness() == Endianness::LE {
+                            i32le_to_i16(chunk)
+                        } else {
+                            i32be_to_i16(chunk)
+                        }
                     }
                 }
                 _ => {
@@ -180,6 +215,7 @@ impl WavToPkt {
                         &JsValue::from("unsupported bits_per_sample"),
                     )
                     .unwrap();
+
                     Reflect::set(
                         &result,
                         &JsValue::from_str("val"),
@@ -189,17 +225,18 @@ impl WavToPkt {
 
                     return result.into();
                 }
-            }
-            data.push(src);
+            };
+            converted_data.push(src);
         }
+
         Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
 
-        if data.is_empty() {
+        if converted_data.is_empty() {
             return result.into();
         }
 
         let mut nested_array = Array::new();
-        for src in data {
+        for src in converted_data {
             let frame_array = Int16Array::from(&src[..]);
             nested_array.push(&frame_array.into());
         }

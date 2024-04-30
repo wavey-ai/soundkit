@@ -1,3 +1,127 @@
+use byteorder::{BigEndian, ByteOrder, LittleEndian};
+
+pub fn s24le_to_i16(data: &[u8]) -> Vec<i16> {
+    // Converts a signed 24-bit little-endian PCM audio stream to a vector of i16 samples.
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < data.len() {
+        let sample = LittleEndian::read_i24(&data[i..i + 3]);
+        let i16_sample = (sample >> 8) as i16; // Convert to 16-bit
+        result.push(i16_sample);
+        i += 3;
+    }
+
+    result
+}
+
+pub fn s24be_to_i16(data: &[u8]) -> Vec<i16> {
+    // Converts a signed 24-bit big-endian PCM audio stream to a vector of i16 samples.
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < data.len() {
+        let sample = BigEndian::read_i24(&data[i..i + 3]);
+        let i16_sample = (sample >> 8) as i16; // Convert to 16-bit
+        result.push(i16_sample);
+        i += 3;
+    }
+
+    result
+}
+
+pub fn i32le_to_i16(data: &[u8]) -> Vec<i16> {
+    // Converts a 32-bit little-endian integer PCM audio stream to a vector of i16 samples.
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < data.len() {
+        let sample = LittleEndian::read_i32(&data[i..i + 4]);
+        let i16_sample = (sample >> 16) as i16; // Convert to 16-bit
+        result.push(i16_sample);
+        i += 4;
+    }
+
+    result
+}
+
+pub fn i32be_to_i16(data: &[u8]) -> Vec<i16> {
+    // Converts a 32-bit big-endian integer PCM audio stream to a vector of i16 samples.
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < data.len() {
+        let sample = BigEndian::read_i32(&data[i..i + 4]);
+        let i16_sample = (sample >> 16) as i16; // Convert to 16-bit
+        result.push(i16_sample);
+        i += 4;
+    }
+
+    result
+}
+
+pub fn f32le_to_i16(data: &[u8]) -> Vec<i16> {
+    // Converts a 32-bit little-endian float PCM audio stream to a vector of i16 samples.
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < data.len() {
+        let f32_sample = LittleEndian::read_f32(&data[i..i + 4]);
+        let i16_sample = (f32_sample * 32767.0) as i16; // Convert to 16-bit integer range
+        result.push(i16_sample);
+        i += 4;
+    }
+
+    result
+}
+
+pub fn f32be_to_i16(data: &[u8]) -> Vec<i16> {
+    // Converts a 32-bit big-endian float PCM audio stream to a vector of i16 samples.
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < data.len() {
+        let f32_sample = BigEndian::read_f32(&data[i..i + 4]);
+        let i16_sample = (f32_sample * 32767.0) as i16; // Convert to 16-bit integer range
+        result.push(i16_sample);
+        i += 4;
+    }
+
+    result
+}
+
+pub fn s16be_to_i16(data: &[u8]) -> Vec<i16> {
+    // Converts a 16-bit big-endian PCM audio stream to a vector of i16 samples.
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < data.len() {
+        // Read the sample from two bytes in big-endian order.
+        let sample = BigEndian::read_i16(&data[i..i + 2]);
+
+        result.push(sample);
+        i += 2;
+    }
+
+    result
+}
+
+pub fn s16le_to_i16(data: &[u8]) -> Vec<i16> {
+    // Converts a 16-bit little-endian PCM audio stream to a vector of i16 samples.
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i < data.len() {
+        // Read the sample from two bytes in little-endian order.
+        let sample = LittleEndian::read_i16(&data[i..i + 2]);
+
+        result.push(sample);
+        i += 2;
+    }
+
+    result
+}
+
 pub fn interleave_vecs_i16(channels: &[Vec<i16>]) -> Vec<u8> {
     let channel_count = channels.len();
     let sample_size = channels[0].len();

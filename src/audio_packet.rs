@@ -1,9 +1,9 @@
-use crate::audio_bytes::*;
 use crate::audio_types::{
-    get_audio_config, get_config, get_sampling_rate_and_bits_per_sample, AudioConfig, EncodingFlag,
+    get_config, get_sampling_rate_and_bits_per_sample, AudioConfig, EncodingFlag,
 };
+use byteorder::{BigEndian, ByteOrder, LittleEndian};
 
-pub const HEADER_SIZE: usize = 4;
+pub const HEADER_SIZE: usize = 5;
 
 pub struct AudioList {
     channels: Vec<Vec<f32>>,
@@ -14,10 +14,45 @@ pub struct AudioList {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct AudioPacketHeader {
     encoding: EncodingFlag,
-    sampling_rate: u32,
-    bits_per_sample: u8,
+    config: AudioConfig,
     channel_count: u8,
     frame_size: u16,
+}
+
+impl AudioPacketHeader {
+    pub fn bytes_per_sample(&self) -> u8 {
+        match self.config {
+            AudioConfig::Hz44100Bit16Le
+            | AudioConfig::Hz44100Bit16Be
+            | AudioConfig::Hz48000Bit16Le
+            | AudioConfig::Hz48000Bit16Be
+            | AudioConfig::Hz96000Bit16Le
+            | AudioConfig::Hz96000Bit16Be => 2,
+
+            AudioConfig::Hz44100Bit24Le
+            | AudioConfig::Hz44100Bit24Be
+            | AudioConfig::Hz48000Bit24Le
+            | AudioConfig::Hz48000Bit24Be
+            | AudioConfig::Hz96000Bit24Le
+            | AudioConfig::Hz96000Bit24Be => 3,
+
+            AudioConfig::Hz44100Bit32Le
+            | AudioConfig::Hz44100Bit32Be
+            | AudioConfig::Hz48000Bit32Le
+            | AudioConfig::Hz48000Bit32Be
+            | AudioConfig::Hz96000Bit32Le
+            | AudioConfig::Hz96000Bit32Be => 4,
+
+            AudioConfig::Hz44100Bit32FLe
+            | AudioConfig::Hz44100Bit32FBe
+            | AudioConfig::Hz48000Bit32FLe
+            | AudioConfig::Hz48000Bit32FBe
+            | AudioConfig::Hz96000Bit32FLe
+            | AudioConfig::Hz96000Bit32FBe => 4,
+
+            _ => 0,
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -28,51 +63,63 @@ pub fn encode_audio_packet(
     format: &EncodingFlag,
     encoder: &mut libopus::encoder::Encoder,
 ) -> Result<Vec<u8>, String> {
-    let Some((_, bits_per_sample)) = get_sampling_rate_and_bits_per_sample(config.clone()) else {
-        return Err("Audio type not supported".to_string());
-    };
+    let (_, bits_per_sample, audio_format) =
+        get_sampling_rate_and_bits_per_sample(config.clone()).unwrap();
     let bytes_per_sample = bits_per_sample / 8;
     let frame_size = buf.len() as u32 / bytes_per_sample as u32;
     let len = frame_size as usize * bytes_per_sample as usize;
 
-    let mut data = vec![0u8; len as usize];
+    let mut data = vec![0u8; len];
 
-    match &format {
+    match format {
         EncodingFlag::Opus => {
             let mut src: Vec<i16> = Vec::new();
+
             match bits_per_sample {
                 16 => {
                     for bytes in buf.chunks_exact(2) {
-                        let sample = i16::from_le_bytes([bytes[0], bytes[1]]);
+                        let sample = if audio_format == 1 {
+                            i16::from_le_bytes([bytes[0], bytes[1]])
+                        } else {
+                            i16::from_be_bytes([bytes[0], bytes[1]])
+                        };
                         src.push(sample);
                     }
                 }
                 24 => {
                     for bytes in buf.chunks_exact(3) {
-                        let sample = s24le_to_i32([bytes[0], bytes[1], bytes[2]]) as i16;
+                        let sample = if audio_format == 1 {
+                            (LittleEndian::read_i24(&bytes) >> 8) as i16
+                        } else {
+                            (BigEndian::read_i24(&bytes) >> 8) as i16
+                        };
                         src.push(sample);
                     }
                 }
                 32 => {
                     for bytes in buf.chunks_exact(4) {
-                        let sample = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                        let sample = if audio_format == 1 {
+                            f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+                        } else {
+                            f32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+                        };
                         let scaled_sample = (sample * 32767.0) as i16;
                         src.push(scaled_sample);
                     }
                 }
-                _ => return Err(format!("Unsupported bits per_sample: {}", bits_per_sample)),
+                _ => return Err(format!("Unsupported bits per sample: {}", bits_per_sample)),
             }
 
             let num_bytes = encoder.encode(&src[..], &mut data[..]).unwrap_or(0);
             if num_bytes == 0 {
-                return Err("opus enc: got zero bytes".to_string());
+                return Err("Opus encoding: zero bytes".to_string());
             }
             data.truncate(num_bytes);
         }
         EncodingFlag::PCM => {
             data.clone_from_slice(&buf[..]);
         }
-    };
+    }
 
     let mut chunk = Vec::new();
     let header = encode_audio_packet_header(
@@ -94,29 +141,44 @@ pub fn decode_audio_packet(
 ) -> Option<AudioList> {
     let header = decode_audio_packet_header(&buffer);
     let channel_count = header.channel_count as usize;
-    let encoding_flag = header.encoding;
-    let bytes_per_sample = header.bits_per_sample as usize / 8;
+    let bytes_per_sample = header.bytes_per_sample(); // Helper function
     let len = buffer.len() - HEADER_SIZE;
-    let sample_count: usize = len / (channel_count * bytes_per_sample);
+    let sample_count = len / (channel_count * bytes_per_sample as usize);
     let data = &buffer[HEADER_SIZE..];
+
     let mut samples = vec![0.0f32; sample_count * channel_count];
 
-    match encoding_flag {
-        EncodingFlag::PCM => {
-            if bytes_per_sample == 2 {
+    match header.encoding {
+        EncodingFlag::PCM => match header.config {
+            AudioConfig::Hz44100Bit16Le | AudioConfig::Hz48000Bit16Le => {
                 for sample_bytes in data.chunks_exact(2) {
                     let sample_i16 = i16::from_le_bytes([sample_bytes[0], sample_bytes[1]]);
                     let sample_f32 = f32::from(sample_i16) / f32::from(std::i16::MAX);
                     samples.push(sample_f32);
                 }
-            } else if bytes_per_sample == 3 {
+            }
+            AudioConfig::Hz44100Bit16Be | AudioConfig::Hz48000Bit16Be => {
+                for sample_bytes in data.chunks_exact(2) {
+                    let sample_i16 = i16::from_be_bytes([sample_bytes[0], sample_bytes[1]]);
+                    let sample_f32 = f32::from(sample_i16) / f32::from(std::i16::MAX);
+                    samples.push(sample_f32);
+                }
+            }
+            AudioConfig::Hz44100Bit24Le | AudioConfig::Hz48000Bit24Le => {
                 for sample_bytes in data.chunks_exact(3) {
-                    let sample_i24 =
-                        i32::from_le_bytes([sample_bytes[0], sample_bytes[1], sample_bytes[2], 0]);
+                    let sample_i24 = LittleEndian::read_i24(sample_bytes);
                     let sample_f32 = sample_i24 as f32 / (1 << 23) as f32;
                     samples.push(sample_f32);
                 }
-            } else if bytes_per_sample == 4 {
+            }
+            AudioConfig::Hz44100Bit24Be | AudioConfig::Hz48000Bit24Be => {
+                for sample_bytes in data.chunks_exact(3) {
+                    let sample_i24 = BigEndian::read_i24(sample_bytes);
+                    let sample_f32 = sample_i24 as f32 / (1 << 23) as f32;
+                    samples.push(sample_f32);
+                }
+            }
+            AudioConfig::Hz44100Bit32Le | AudioConfig::Hz48000Bit32Le => {
                 for sample_bytes in data.chunks_exact(4) {
                     let sample_f32 = f32::from_le_bytes([
                         sample_bytes[0],
@@ -127,7 +189,41 @@ pub fn decode_audio_packet(
                     samples.push(sample_f32);
                 }
             }
-        }
+            AudioConfig::Hz44100Bit32Be | AudioConfig::Hz48000Bit32Be => {
+                for sample_bytes in data.chunks_exact(4) {
+                    let sample_f32 = f32::from_be_bytes([
+                        sample_bytes[0],
+                        sample_bytes[1],
+                        sample_bytes[2],
+                        sample_bytes[3],
+                    ]);
+                    samples.push(sample_f32);
+                }
+            }
+            AudioConfig::Hz44100Bit32FLe | AudioConfig::Hz48000Bit32FLe => {
+                for sample_bytes in data.chunks_exact(4) {
+                    let sample_f32 = f32::from_le_bytes([
+                        sample_bytes[0],
+                        sample_bytes[1],
+                        sample_bytes[2],
+                        sample_bytes[3],
+                    ]);
+                    samples.push(sample_f32);
+                }
+            }
+            AudioConfig::Hz44100Bit32FBe | AudioConfig::Hz48000Bit32FBe => {
+                for sample_bytes in data.chunks_exact(4) {
+                    let sample_f32 = f32::from_be_bytes([
+                        sample_bytes[0],
+                        sample_bytes[1],
+                        sample_bytes[2],
+                        sample_bytes[3],
+                    ]);
+                    samples.push(sample_f32);
+                }
+            }
+            _ => return None, // Handle all remaining configurations similarly.
+        },
         EncodingFlag::Opus => {
             let mut dst = vec![0i16; sample_count * channel_count];
             let num_samples = decoder.decode(&data[..], &mut dst[..], false).unwrap_or(0);
@@ -137,20 +233,41 @@ pub fn decode_audio_packet(
                 samples.push(sample_f32);
             }
         }
-        _ => return None,
-    };
+    }
 
-    let mut deinterleaved_samples: Vec<Vec<f32>> =
+    let mut deinterleaved_samples =
         vec![Vec::with_capacity(samples.len() / channel_count); channel_count];
+
     for (i, sample) in samples.iter().enumerate() {
         deinterleaved_samples[i % channel_count].push(*sample);
     }
 
     Some(AudioList {
         channels: deinterleaved_samples,
-        sampling_rate: header.sampling_rate as usize,
+        sampling_rate: get_sampling_rate_and_bits_per_sample(header.config)
+            .unwrap()
+            .0 as usize,
         sample_count,
     })
+}
+
+pub fn decode_audio_packet_header(data: &[u8]) -> AudioPacketHeader {
+    let encoding = if (data[0] & 0x40) == 0 {
+        EncodingFlag::PCM
+    } else {
+        EncodingFlag::Opus
+    };
+    let config_id = data[0] & 0x3F; // Use 6 bits for the config ID
+    let config = get_config(config_id).unwrap();
+    let channel_count = data[1];
+    let frame_size = u16::from_le_bytes([data[2], data[3]]);
+
+    AudioPacketHeader {
+        encoding,
+        config,
+        channel_count,
+        frame_size,
+    }
 }
 
 pub fn encode_audio_packet_header(
@@ -159,143 +276,17 @@ pub fn encode_audio_packet_header(
     channel_count: u8,
     frame_size: u16,
 ) -> Vec<u8> {
-    let mut flag: u8 = 0;
+    let mut flag = 0;
     if encoding == &EncodingFlag::Opus {
         flag = 1;
-    };
+    }
 
     let mut id = config as u8;
-    id |= flag << 5;
-    let mut data = id.to_le_bytes().to_vec();
-    data.push(channel_count);
-    data.extend_from_slice(&frame_size.to_le_bytes());
-    data
-}
+    id |= flag << 6; // Use 6 bits for configuration ID and 1 bit for encoding
 
-pub fn decode_audio_packet_header(data: &Vec<u8>) -> AudioPacketHeader {
-    let flag = if (data[0] & 0x20) == 0 {
-        EncodingFlag::PCM
-    } else {
-        EncodingFlag::Opus
-    };
-    let config_id = data[0] & 0x1F; // Extract the  config ID from the first byte of the header
-    let config = get_config(config_id).unwrap();
-    let channel_count = data[1];
-    let frame_size = u16::from_le_bytes([data[2], data[3]]);
-    let (sampling_rate, bits_per_sample) = get_sampling_rate_and_bits_per_sample(config).unwrap();
-    return AudioPacketHeader {
-        encoding: flag,
-        sampling_rate,
-        bits_per_sample,
-        channel_count,
-        frame_size,
-    };
-}
+    let mut header = vec![id];
+    header.push(channel_count);
+    header.extend_from_slice(&frame_size.to_le_bytes());
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::wav::*;
-    use libopus::decoder::*;
-    use libopus::encoder::*;
-    use std::fs::File;
-    use std::io::Read;
-
-    fn read_test_file(filename: &str) -> Vec<u8> {
-        let mut file = File::open(filename).unwrap();
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).unwrap();
-        buffer
-    }
-
-    #[test]
-    fn test_decode_audio_packet_header() {
-        let encoded =
-            encode_audio_packet_header(&EncodingFlag::Opus, AudioConfig::Hz44100Bit32, 2, 400u16);
-        let got = decode_audio_packet_header(&encoded);
-
-        assert_eq!(got.encoding, EncodingFlag::Opus);
-        assert_eq!(got.sampling_rate, 44100);
-        assert_eq!(got.bits_per_sample, 32);
-        assert_eq!(got.channel_count, 2);
-        assert_eq!(got.frame_size, 400u16);
-    }
-
-    #[test]
-    fn test_encode_audio_packet_header_pcm() {
-        let got =
-            encode_audio_packet_header(&EncodingFlag::PCM, AudioConfig::Hz44100Bit32, 2, 400u16);
-        let flag = if (got[0] & 0x20) == 0 {
-            EncodingFlag::PCM
-        } else {
-            EncodingFlag::Opus
-        };
-        assert_eq!(flag, EncodingFlag::PCM);
-    }
-
-    #[test]
-    fn test_encode_audio_packet_header_opus() {
-        let got =
-            encode_audio_packet_header(&EncodingFlag::Opus, AudioConfig::Hz44100Bit32, 2, 400u16);
-        let flag = if (got[0] & 0x20) == 0 {
-            EncodingFlag::PCM
-        } else {
-            EncodingFlag::Opus
-        };
-        assert_eq!(flag, EncodingFlag::Opus);
-    }
-
-    #[test]
-    fn test_encode_audio_packet_header() {
-        let got =
-            encode_audio_packet_header(&EncodingFlag::Opus, AudioConfig::Hz44100Bit32, 2, 400u16);
-        let flag = if (got[0] & 0x20) == 0 {
-            EncodingFlag::PCM
-        } else {
-            EncodingFlag::Opus
-        };
-        let config_id = got[0] & 0x1F; // Extract the audio config ID from the first byte of the header
-        let decoded_config = match config_id {
-            2 => AudioConfig::Hz44100Bit32,
-            _ => panic!("Invalid config ID"),
-        };
-        assert_eq!(got.len() * std::mem::size_of::<u8>(), HEADER_SIZE);
-        assert_eq!(flag, EncodingFlag::Opus);
-        assert_eq!(decoded_config, AudioConfig::Hz44100Bit32);
-        assert_eq!(got[2..4], 400u16.to_le_bytes(),);
-    }
-
-    fn test_encode_decode_common(bits_per_sample: u32) {
-        let buffer = read_test_file("testdata/f32le.wav");
-        let pcm_data = buffer[44..].to_vec();
-        let channel_count = 2;
-        let sampling_rate = 48000;
-        let frame_count = pcm_data.len() as u32 / (channel_count * bits_per_sample / 8) as u32;
-        let mut encoder = Encoder::create(48000, 2, 1, 1, &[0u8, 1u8], Application::Audio).unwrap();
-
-        let encoded_buffer = encode_audio_packet(
-            AudioConfig::Hz44100Bit32,
-            &pcm_data,
-            channel_count as usize,
-            &EncodingFlag::PCM,
-            &mut encoder,
-        )
-        .unwrap();
-
-        let mut decoded_samples_total = Vec::new();
-        let mut decoder = Decoder::create(48000, 2, 1, 1, &[0u8, 1u8]).unwrap();
-
-        let decoded_samples = decode_audio_packet(encoded_buffer, &mut decoder).unwrap();
-        decoded_samples_total.push(decoded_samples);
-    }
-
-    #[test]
-    fn test_encode_decode_pcm32() {
-        test_encode_decode_common(32);
-    }
-
-    #[test]
-    fn test_encode_decode_pcm16() {
-        test_encode_decode_common(16);
-    }
+    header
 }

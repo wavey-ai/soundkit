@@ -175,7 +175,7 @@ impl AudioEncoder {
         final_encoded_data
     }
 
-    fn encode(&mut self, audio_data: AudioData, is_last: bool) -> Result<(), String> {
+    pub fn encode(&mut self, audio_data: AudioData, is_last: bool) -> Result<(), String> {
         let chunk_size = self.frame_size
             * audio_data.channel_count() as usize
             * audio_data.bits_per_sample() as usize;
@@ -185,16 +185,15 @@ impl AudioEncoder {
             data.extend_from_slice(&widow.data());
         }
 
-        for chunk in audio_data.data().chunks(chunk_size) {
-            let Some(config) =
-                get_audio_config(audio_data.sampling_rate(), audio_data.bits_per_sample())
-            else {
+        for chunk in data.chunks(chunk_size) {
+            let Some(config) = get_audio_config(
+                audio_data.sampling_rate(),
+                audio_data.bits_per_sample(),
+                Some(audio_data.audio_format()),
+                audio_data.endianness(), // Added endianness argument
+            ) else {
                 return Err("Audio type not supported".to_string());
             };
-
-            let chunk_size = self.frame_size as usize
-                * audio_data.channel_count() as usize
-                * audio_data.bits_per_sample() as usize;
 
             let flag = if chunk.len() < chunk_size {
                 EncodingFlag::PCM
@@ -208,10 +207,12 @@ impl AudioEncoder {
                     audio_data.channel_count(),
                     audio_data.sampling_rate(),
                     chunk.to_vec(),
+                    audio_data.audio_format(),
+                    audio_data.endianness(),
                 );
                 self.widow.push(widow);
                 return Ok(());
-            };
+            }
 
             let packet = encode_audio_packet(
                 config,
