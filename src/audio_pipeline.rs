@@ -97,6 +97,7 @@ pub fn downsample_audio(audio: &AudioData, sampling_rate: usize) -> Result<Vec<V
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "opus")]
 pub struct AudioEncoder {
     opus_encoder: libopus::encoder::Encoder,
     wav_reader: WavStreamProcessor,
@@ -107,6 +108,7 @@ pub struct AudioEncoder {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "opus")]
 impl AudioEncoder {
     pub fn new(bitrate: usize, frame_size: usize) -> Self {
         let mut opus_encoder = libopus::encoder::Encoder::create(

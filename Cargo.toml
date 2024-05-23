@@ -19,5 +19,5 @@ byteorder = "1.5.0"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["libopus"]
+opus = ["libopus"]
 wasm = ["js-sys", "web-sys", "wasm-bindgen"]
