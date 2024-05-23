@@ -9,7 +9,7 @@ readme = "README.md"
 
 [dependencies]
 js-sys = { version = "0.3.64", optional = true }
-libopus = { git = "https://github.com/rust-av/opus-rs", rev = "e38e510", optional = true }
+libopus = { git = "https://github.com/rust-av/opus-rs", rev = "e38e510", version = "0.1.0", optional = true }
 web-sys = { version = "0.3.64", optional = true, features = ["Worker"] }
 wasm-bindgen = { version = "0.2.87", optional = true }
 rubato = "0.14.1"
