@@ -1,4 +1,4 @@
-use crate::audio_types::{get_audio_config, AudioData, Endianness, PcmData};
+use crate::audio_types::{AudioData, Endianness, PcmData};
 use std::io::Write;
 
 enum StreamWavState {
@@ -109,7 +109,7 @@ impl WavStreamProcessor {
                     self.channel_count =
                         u16::from_le_bytes(fmt_chunk[10..12].try_into().unwrap()) as usize;
                     self.audio_format = u16::from_le_bytes(fmt_chunk[8..10].try_into().unwrap());
-                    if (self.audio_format > 3) {
+                    if self.audio_format > 3 {
                         self.audio_format = 3;
                     }
                     self.endianness = if self.audio_format == 1 || self.audio_format == 3 {
