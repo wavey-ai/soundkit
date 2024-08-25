@@ -202,15 +202,6 @@ pub fn s24le_to_i32(sample_bytes: [u8; 3]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::File;
-    use std::io::Read;
-
-    fn read_test_file(filename: &str) -> Vec<u8> {
-        let mut file = File::open(filename).unwrap();
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).unwrap();
-        buffer
-    }
 
     #[test]
     fn test_deinterleave_vecs_i16() {

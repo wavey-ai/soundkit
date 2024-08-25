@@ -1,7 +1,7 @@
 use crate::audio_bytes::*;
-use crate::audio_packet::*;
+use crate::audio_packet::{encode_audio_packet, Encoder};
 use crate::audio_types::*;
-use crate::wav::*;
+use crate::wav::WavStreamProcessor;
 
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
@@ -96,35 +96,16 @@ pub fn downsample_audio(audio: &AudioData, sampling_rate: usize) -> Result<Vec<V
     Ok(out)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg(feature = "opus")]
-pub struct AudioEncoder {
-    opus_encoder: libopus::encoder::Encoder,
+pub struct AudioEncoder<E: Encoder> {
+    opus_encoder: E,
     wav_reader: WavStreamProcessor,
     frame_size: usize,
     packets: Vec<Vec<u8>>,
-    bitrate: usize,
     widow: Vec<AudioData>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg(feature = "opus")]
-impl AudioEncoder {
-    pub fn new(bitrate: usize, frame_size: usize) -> Self {
-        let mut opus_encoder = libopus::encoder::Encoder::create(
-            48000,
-            2,
-            1,
-            1,
-            &[0u8, 1u8],
-            libopus::encoder::Application::Audio,
-        )
-        .unwrap();
-
-        opus_encoder
-            .set_option(libopus::encoder::OPUS_SET_BITRATE_REQUEST, bitrate as u32)
-            .unwrap();
-
+impl<E: Encoder> AudioEncoder<E> {
+    pub fn new(frame_size: usize, opus_encoder: E) -> Self {
         let wav_reader = WavStreamProcessor::new();
 
         Self {
@@ -132,7 +113,6 @@ impl AudioEncoder {
             wav_reader,
             frame_size,
             packets: Vec::new(),
-            bitrate,
             widow: Vec::new(),
         }
     }
@@ -236,12 +216,7 @@ impl AudioEncoder {
     }
 
     fn reset(&mut self) {
-        self.opus_encoder
-            .set_option(
-                libopus::encoder::OPUS_SET_BITRATE_REQUEST,
-                self.bitrate as u32,
-            )
-            .unwrap();
+        self.opus_encoder.reset();
 
         self.wav_reader = WavStreamProcessor::new();
     }
@@ -250,31 +225,10 @@ impl AudioEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wav::generate_wav_buffer;
     use std::fs::File;
     use std::io::Read;
     use std::io::Write;
-
-    #[test]
-    fn test_opus_encoding() {
-        let file_path = "testdata/f32le.wav";
-        let mut file = File::open(&file_path).unwrap();
-
-        let frame_size = 120;
-        let bitrate = 96_000;
-        let mut processor = AudioEncoder::new(bitrate, frame_size);
-
-        let mut buffer = [0u8; 1024 * 100];
-        loop {
-            let bytes_read = file.read(&mut buffer).unwrap();
-            if bytes_read == 0 {
-                break;
-            }
-
-            let chunk = &buffer[..bytes_read];
-            let _ = processor.add(chunk).unwrap();
-        }
-        let _encoded_data = processor.flush();
-    }
 
     #[test]
     fn test_downsample_audio() {

@@ -1,6 +1,6 @@
 [package]
 name = "soundkit"
-version = "0.9.5"
+version = "0.10.0"
 edition = "2021"
 license = "MIT"
 description = "Audio format optimised for low-latency audio."
@@ -9,7 +9,6 @@ readme = "README.md"
 
 [dependencies]
 js-sys = { version = "0.3.64", optional = true }
-libopus = { git = "https://github.com/rust-av/opus-rs", rev = "e38e510", version = "0.1.0", optional = true }
 web-sys = { version = "0.3.64", optional = true, features = ["Worker"] }
 wasm-bindgen = { version = "0.2.87", optional = true }
 rubato = "0.14.1"
@@ -19,6 +18,4 @@ byteorder = "1.5.0"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["opus"]
-opus = ["libopus"]
 wasm = ["js-sys", "web-sys", "wasm-bindgen"]

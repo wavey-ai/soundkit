@@ -3,6 +3,15 @@ use crate::audio_types::{
 };
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 
+pub trait Encoder {
+    fn encode(&mut self, input: &[i16], output: &mut [u8]) -> Result<usize, String>;
+    fn reset(&mut self);
+}
+
+pub trait Decoder {
+    fn decode(&mut self, input: &[u8], output: &mut [i16], fec: bool) -> Result<usize, String>;
+}
+
 pub const HEADER_SIZE: usize = 5;
 
 pub struct AudioList {
@@ -55,14 +64,12 @@ impl AudioPacketHeader {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg(feature = "opus")]
-pub fn encode_audio_packet(
+pub fn encode_audio_packet<E: Encoder>(
     config: AudioConfig,
     buf: &Vec<u8>,
     channel_count: usize,
     format: &EncodingFlag,
-    encoder: &mut libopus::encoder::Encoder,
+    encoder: &mut E,
 ) -> Result<Vec<u8>, String> {
     let (_, bits_per_sample, audio_format) =
         get_sampling_rate_and_bits_per_sample(config.clone()).unwrap();
@@ -135,7 +142,7 @@ pub fn encode_audio_packet(
     Ok(chunk)
 }
 
-pub fn decode_audio_packet(buffer: Vec<u8>) -> Option<AudioList> {
+pub fn decode_audio_packet<D: Decoder>(buffer: Vec<u8>, decoder: &mut D) -> Option<AudioList> {
     let header = decode_audio_packet_header(&buffer);
     let channel_count = header.channel_count as usize;
     let bytes_per_sample = header.bytes_per_sample(); // Helper function
@@ -222,7 +229,8 @@ pub fn decode_audio_packet(buffer: Vec<u8>) -> Option<AudioList> {
             _ => return None, // Handle all remaining configurations similarly.
         },
         EncodingFlag::Opus => {
-            let dst = vec![0i16; sample_count * channel_count];
+            let mut dst = vec![0i16; sample_count * channel_count];
+            let _num_samples_decoded = decoder.decode(&data[..], &mut dst[..], false).unwrap_or(0);
 
             for sample_i16 in dst {
                 let sample_f32 = f32::from(sample_i16) / f32::from(std::i16::MAX);
