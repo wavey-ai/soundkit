@@ -157,7 +157,6 @@ pub fn get_sampling_rate_and_bits_per_sample(config: AudioConfig) -> Option<(u32
         AudioConfig::Hz352800Bit24Le | AudioConfig::Hz352800Bit24Be => Some((352800, 24, 1)),
         AudioConfig::Hz352800Bit32Le | AudioConfig::Hz352800Bit32Be => Some((352800, 32, 1)),
         AudioConfig::Hz352800Bit32FLe | AudioConfig::Hz352800Bit32FBe => Some((352800, 32, 3)),
-        _ => None,
     }
 }
 
@@ -227,6 +226,11 @@ pub fn get_audio_config(
     format_flag: Option<u16>,
     endian_flag: Endianness,
 ) -> Option<AudioConfig> {
+    let format_flag = match format_flag {
+        Some(flag) if flag < 3 => None,
+        _ => format_flag,
+    };
+
     match (sampling_rate, bits_per_sample, format_flag, endian_flag) {
         (44100, 16, None, Endianness::LE) => Some(AudioConfig::Hz44100Bit16Le),
         (44100, 16, None, Endianness::BE) => Some(AudioConfig::Hz44100Bit16Be),

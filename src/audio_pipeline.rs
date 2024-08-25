@@ -187,14 +187,19 @@ impl AudioEncoder {
             data.extend_from_slice(&widow.data());
         }
 
+        let sampling_rate = audio_data.sampling_rate();
+        let bits_per_sample = audio_data.bits_per_sample();
+        let audio_format = Some(audio_data.audio_format());
+        let endianness = audio_data.endianness();
+
         for chunk in data.chunks(chunk_size) {
-            let Some(config) = get_audio_config(
-                audio_data.sampling_rate(),
-                audio_data.bits_per_sample(),
-                Some(audio_data.audio_format()),
-                audio_data.endianness(), // Added endianness argument
-            ) else {
-                return Err("Audio type not supported".to_string());
+            let Some(config) =
+                get_audio_config(sampling_rate, bits_per_sample, audio_format, endianness)
+            else {
+                return Err(format!(
+                            "Audio type not supported: sampling_rate={}, bits_per_sample={}, audio_format={:?}, endianness={:?}",
+                            sampling_rate, bits_per_sample, audio_format, endianness
+                        ));
             };
 
             let flag = if chunk.len() < chunk_size {
@@ -255,7 +260,7 @@ mod tests {
         let mut file = File::open(&file_path).unwrap();
 
         let frame_size = 120;
-        let bitrate = 128_000;
+        let bitrate = 96_000;
         let mut processor = AudioEncoder::new(bitrate, frame_size);
 
         let mut buffer = [0u8; 1024 * 100];

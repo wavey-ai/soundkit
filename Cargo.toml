@@ -1,6 +1,6 @@
 [package]
 name = "soundkit"
-version = "0.9.4"
+version = "0.9.5"
 edition = "2021"
 license = "MIT"
 description = "Audio format optimised for low-latency audio."
@@ -19,5 +19,6 @@ byteorder = "1.5.0"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+default = ["opus"]
 opus = ["libopus"]
 wasm = ["js-sys", "web-sys", "wasm-bindgen"]

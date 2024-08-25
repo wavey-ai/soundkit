@@ -6,9 +6,9 @@ use byteorder::{BigEndian, ByteOrder, LittleEndian};
 pub const HEADER_SIZE: usize = 5;
 
 pub struct AudioList {
-    channels: Vec<Vec<f32>>,
-    sample_count: usize,
-    sampling_rate: usize,
+    pub channels: Vec<Vec<f32>>,
+    pub sample_count: usize,
+    pub sampling_rate: usize,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -135,12 +135,7 @@ pub fn encode_audio_packet(
     Ok(chunk)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg(feature = "opus")]
-pub fn decode_audio_packet(
-    buffer: Vec<u8>,
-    decoder: &mut libopus::decoder::Decoder,
-) -> Option<AudioList> {
+pub fn decode_audio_packet(buffer: Vec<u8>) -> Option<AudioList> {
     let header = decode_audio_packet_header(&buffer);
     let channel_count = header.channel_count as usize;
     let bytes_per_sample = header.bytes_per_sample(); // Helper function
@@ -227,8 +222,7 @@ pub fn decode_audio_packet(
             _ => return None, // Handle all remaining configurations similarly.
         },
         EncodingFlag::Opus => {
-            let mut dst = vec![0i16; sample_count * channel_count];
-            let num_samples = decoder.decode(&data[..], &mut dst[..], false).unwrap_or(0);
+            let dst = vec![0i16; sample_count * channel_count];
 
             for sample_i16 in dst {
                 let sample_f32 = f32::from(sample_i16) / f32::from(std::i16::MAX);
