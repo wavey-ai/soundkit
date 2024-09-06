@@ -97,7 +97,8 @@ pub fn downsample_audio(audio: &AudioData, sampling_rate: usize) -> Result<Vec<V
 }
 
 pub struct AudioEncoder<E: Encoder> {
-    opus_encoder: E,
+    encoder: E,
+    encoding_flag: EncodingFlag,
     wav_reader: WavStreamProcessor,
     frame_size: usize,
     packets: Vec<Vec<u8>>,
@@ -105,11 +106,12 @@ pub struct AudioEncoder<E: Encoder> {
 }
 
 impl<E: Encoder> AudioEncoder<E> {
-    pub fn new(frame_size: usize, opus_encoder: E) -> Self {
+    pub fn new(encoding_flag: EncodingFlag, frame_size: usize, encoder: E) -> Self {
         let wav_reader = WavStreamProcessor::new();
 
         Self {
-            opus_encoder,
+            encoder,
+            encoding_flag,
             wav_reader,
             frame_size,
             packets: Vec::new(),
@@ -173,8 +175,7 @@ impl<E: Encoder> AudioEncoder<E> {
         let endianness = audio_data.endianness();
 
         for chunk in data.chunks(chunk_size) {
-            let Some(config) =
-                get_audio_config(sampling_rate, bits_per_sample, audio_format, endianness)
+            let Some(config) = get_audio_config(sampling_rate, bits_per_sample, audio_format)
             else {
                 return Err(format!(
                             "Audio type not supported: sampling_rate={}, bits_per_sample={}, audio_format={:?}, endianness={:?}",
@@ -185,7 +186,7 @@ impl<E: Encoder> AudioEncoder<E> {
             let flag = if chunk.len() < chunk_size {
                 EncodingFlag::PCM
             } else {
-                EncodingFlag::Opus
+                self.encoding_flag
             };
 
             if flag == EncodingFlag::PCM && !is_last {
@@ -206,7 +207,7 @@ impl<E: Encoder> AudioEncoder<E> {
                 &chunk.to_vec(),
                 audio_data.channel_count() as usize,
                 &flag,
-                &mut self.opus_encoder,
+                &mut self.encoder,
             )?;
 
             self.packets.push(packet);
@@ -216,7 +217,7 @@ impl<E: Encoder> AudioEncoder<E> {
     }
 
     fn reset(&mut self) {
-        self.opus_encoder.reset();
+        self.encoder.reset();
 
         self.wav_reader = WavStreamProcessor::new();
     }
