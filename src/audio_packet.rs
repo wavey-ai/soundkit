@@ -4,7 +4,13 @@ use crate::audio_types::{
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 
 pub trait Encoder {
-    fn new(sample_rate: u32, bits_per_sample: u32, channels: u32, frame_size: u32) -> Self;
+    fn new(
+        sample_rate: u32,
+        bits_per_sample: u32,
+        channels: u32,
+        frame_size: u32,
+        bitrate: u32,
+    ) -> Self;
     fn init(&mut self) -> Result<(), String>;
     // used for libOpus
     fn encode_i16(&mut self, input: &[i16], output: &mut [u8]) -> Result<usize, String>;
