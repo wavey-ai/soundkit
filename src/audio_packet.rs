@@ -1,5 +1,5 @@
 use crate::audio_types::{
-    get_config, get_sampling_rate_and_bits_per_sample, AudioConfig, EncodingFlag,
+    get_config, get_sampling_rate_and_bits_per_sample, AudioConfig, EncodingFlag, Endianness,
 };
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 
@@ -66,38 +66,60 @@ pub fn encode_audio_packet<E: Encoder>(
     let mut data = vec![0u8; len];
 
     match format {
+        EncodingFlag::FLAC => {
+            let mut src: Vec<i32> = Vec::new();
+            match bits_per_sample {
+                16 => {
+                    for bytes in buf.chunks_exact(2) {
+                        src.push(i16::from_le_bytes([bytes[0], bytes[1]]) as i32);
+                    }
+                }
+                24 => {
+                    for bytes in buf.chunks_exact(3) {
+                        src.push(LittleEndian::read_i24(&bytes));
+                    }
+                }
+                32 => {
+                    for bytes in buf.chunks_exact(4) {
+                        if audio_format == 3 {
+                            src.push(
+                                f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i32
+                            );
+                        } else {
+                            src.push(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+                        };
+                    }
+                }
+                _ => return Err(format!("Unsupported bits per sample: {}", bits_per_sample)),
+            }
+            let num_bytes = encoder.encode_i32(&src[..], &mut data[..]).unwrap_or(0);
+            if num_bytes == 0 {
+                return Err("Flac encoding: zero bytes".to_string());
+            }
+            data.truncate(num_bytes);
+        }
         EncodingFlag::Opus => {
             let mut src: Vec<i16> = Vec::new();
 
             match bits_per_sample {
                 16 => {
                     for bytes in buf.chunks_exact(2) {
-                        let sample = if audio_format == 1 {
-                            i16::from_le_bytes([bytes[0], bytes[1]])
-                        } else {
-                            i16::from_be_bytes([bytes[0], bytes[1]])
-                        };
-                        src.push(sample);
+                        src.push(i16::from_le_bytes([bytes[0], bytes[1]]));
                     }
                 }
                 24 => {
                     for bytes in buf.chunks_exact(3) {
-                        let sample = if audio_format == 1 {
-                            (LittleEndian::read_i24(&bytes) >> 8) as i16
-                        } else {
-                            (BigEndian::read_i24(&bytes) >> 8) as i16
-                        };
-                        src.push(sample);
+                        src.push((LittleEndian::read_i24(&bytes) >> 8) as i16);
                     }
                 }
                 32 => {
                     for bytes in buf.chunks_exact(4) {
                         let sample = if audio_format == 1 {
-                            f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+                            i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
                         } else {
-                            f32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+                            f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i32
                         };
-                        let scaled_sample = (sample * 32767.0) as i16;
+                        let scaled_sample = (sample * 32767) as i16;
                         src.push(scaled_sample);
                     }
                 }

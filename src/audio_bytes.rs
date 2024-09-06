@@ -1,139 +1,109 @@
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 
 pub fn s24le_to_i16(data: &[u8]) -> Vec<i16> {
-    // Converts a signed 24-bit little-endian PCM audio stream to a vector of i16 samples.
-    let mut result = Vec::new();
-    let mut i = 0;
-
-    while i < data.len() {
-        let sample = LittleEndian::read_i24(&data[i..i + 3]);
-        let i16_sample = (sample >> 8) as i16; // Convert to 16-bit
-        result.push(i16_sample);
-        i += 3;
-    }
-
+    let sample_count = data.len() / 3;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(3).for_each(|chunk| {
+        let sample = LittleEndian::read_i24(chunk);
+        result.push((sample >> 8) as i16);
+    });
     result
 }
 
 pub fn s24be_to_i16(data: &[u8]) -> Vec<i16> {
-    // Converts a signed 24-bit big-endian PCM audio stream to a vector of i16 samples.
-    let mut result = Vec::new();
-    let mut i = 0;
-
-    while i < data.len() {
-        let sample = BigEndian::read_i24(&data[i..i + 3]);
-        let i16_sample = (sample >> 8) as i16; // Convert to 16-bit
-        result.push(i16_sample);
-        i += 3;
-    }
-
+    let sample_count = data.len() / 3;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(3).for_each(|chunk| {
+        let sample = BigEndian::read_i24(chunk);
+        result.push((sample >> 8) as i16);
+    });
     result
 }
 
 pub fn i32le_to_i16(data: &[u8]) -> Vec<i16> {
-    // Converts a 32-bit little-endian integer PCM audio stream to a vector of i16 samples.
-    let mut result = Vec::new();
-    let mut i = 0;
-
-    while i < data.len() {
-        let sample = LittleEndian::read_i32(&data[i..i + 4]);
-        let i16_sample = (sample >> 16) as i16; // Convert to 16-bit
-        result.push(i16_sample);
-        i += 4;
-    }
-
+    let sample_count = data.len() / 4;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(4).for_each(|chunk| {
+        let sample = LittleEndian::read_i32(chunk);
+        result.push((sample >> 16) as i16);
+    });
     result
 }
 
 pub fn i32be_to_i16(data: &[u8]) -> Vec<i16> {
-    // Converts a 32-bit big-endian integer PCM audio stream to a vector of i16 samples.
-    let mut result = Vec::new();
-    let mut i = 0;
-
-    while i < data.len() {
-        let sample = BigEndian::read_i32(&data[i..i + 4]);
-        let i16_sample = (sample >> 16) as i16; // Convert to 16-bit
-        result.push(i16_sample);
-        i += 4;
-    }
-
+    let sample_count = data.len() / 4;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(4).for_each(|chunk| {
+        let sample = BigEndian::read_i32(chunk);
+        result.push((sample >> 16) as i16);
+    });
     result
 }
 
 pub fn f32le_to_i16(data: &[u8]) -> Vec<i16> {
-    // Converts a 32-bit little-endian float PCM audio stream to a vector of i16 samples.
-    let mut result = Vec::new();
-    let mut i = 0;
-
-    while i < data.len() {
-        let f32_sample = LittleEndian::read_f32(&data[i..i + 4]);
-        let i16_sample = (f32_sample * 32767.0) as i16; // Convert to 16-bit integer range
+    let sample_count = data.len() / 4;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(4).for_each(|chunk| {
+        let f32_sample = LittleEndian::read_f32(chunk);
+        let i16_sample = (f32_sample.max(-1.0).min(1.0) * 32767.0) as i16;
         result.push(i16_sample);
-        i += 4;
-    }
-
+    });
     result
 }
 
 pub fn f32be_to_i16(data: &[u8]) -> Vec<i16> {
-    // Converts a 32-bit big-endian float PCM audio stream to a vector of i16 samples.
-    let mut result = Vec::new();
-    let mut i = 0;
-
-    while i < data.len() {
-        let f32_sample = BigEndian::read_f32(&data[i..i + 4]);
-        let i16_sample = (f32_sample * 32767.0) as i16; // Convert to 16-bit integer range
+    let sample_count = data.len() / 4;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(4).for_each(|chunk| {
+        let f32_sample = BigEndian::read_f32(chunk);
+        let i16_sample = (f32_sample.max(-1.0).min(1.0) * 32767.0) as i16;
         result.push(i16_sample);
-        i += 4;
-    }
+    });
+    result
+}
 
+pub fn f32le_to_i32(data: &[u8]) -> Vec<i32> {
+    let sample_count = data.len() / 4;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(4).for_each(|chunk| {
+        let f32_sample = LittleEndian::read_f32(chunk);
+        let clamped = f32_sample.max(-1.0).min(1.0);
+        let sample = if clamped >= 0.0 {
+            (clamped * i32::MAX as f32) as i32
+        } else {
+            (clamped * -(i32::MIN as f32)) as i32
+        };
+        result.push(sample);
+    });
     result
 }
 
 pub fn s16be_to_i16(data: &[u8]) -> Vec<i16> {
-    // Converts a 16-bit big-endian PCM audio stream to a vector of i16 samples.
-    let mut result = Vec::new();
-    let mut i = 0;
-
-    while i < data.len() {
-        // Read the sample from two bytes in big-endian order.
-        let sample = BigEndian::read_i16(&data[i..i + 2]);
-
-        result.push(sample);
-        i += 2;
-    }
-
+    let sample_count = data.len() / 2;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(2).for_each(|chunk| {
+        result.push(BigEndian::read_i16(chunk));
+    });
     result
 }
 
 pub fn s16le_to_i16(data: &[u8]) -> Vec<i16> {
-    // Converts a 16-bit little-endian PCM audio stream to a vector of i16 samples.
-    let mut result = Vec::new();
-    let mut i = 0;
-
-    while i < data.len() {
-        // Read the sample from two bytes in little-endian order.
-        let sample = LittleEndian::read_i16(&data[i..i + 2]);
-
-        result.push(sample);
-        i += 2;
-    }
-
+    let sample_count = data.len() / 2;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(2).for_each(|chunk| {
+        result.push(LittleEndian::read_i16(chunk));
+    });
     result
 }
 
 pub fn interleave_vecs_i16(channels: &[Vec<i16>]) -> Vec<u8> {
     let channel_count = channels.len();
-    let sample_size = channels[0].len();
-    let mut result = vec![0; channel_count * sample_size * 2];
+    let sample_count = channels[0].len();
+    let mut result = Vec::with_capacity(channel_count * sample_count * 2);
 
-    for i in 0..sample_size {
-        for channel in 0..channel_count {
-            let value = channels[channel][i];
-            let bytes = value.to_le_bytes();
-            let start = (i * channel_count + channel) * 2;
-            result[start] = bytes[0];
-            result[start + 1] = bytes[1];
+    for i in 0..sample_count {
+        for channel in channels {
+            result.extend_from_slice(&channel[i].to_le_bytes());
         }
     }
 
@@ -141,62 +111,56 @@ pub fn interleave_vecs_i16(channels: &[Vec<i16>]) -> Vec<u8> {
 }
 
 pub fn deinterleave_vecs_i16(input: &[u8], channel_count: usize) -> Vec<Vec<i16>> {
-    let sample_size = input.len() / (channel_count * 2);
-    let mut result = vec![vec![0; sample_size]; channel_count];
+    let sample_count = input.len() / (channel_count * 2);
+    let mut result = vec![Vec::with_capacity(sample_count); channel_count];
 
-    for i in 0..sample_size {
-        for channel in 0..channel_count {
-            let start = (i * channel_count + channel) * 2;
-            let value = i16::from_le_bytes([input[start], input[start + 1]]);
-            result[channel][i] = value;
-        }
-    }
+    input.chunks_exact(channel_count * 2).for_each(|chunk| {
+        chunk
+            .chunks_exact(2)
+            .enumerate()
+            .for_each(|(channel, bytes)| {
+                result[channel].push(i16::from_le_bytes([bytes[0], bytes[1]]));
+            });
+    });
 
     result
 }
 
 pub fn deinterleave_vecs_24bit(input: &[u8], channel_count: usize) -> Vec<Vec<i32>> {
-    let sample_size = input.len() / (channel_count * 3);
-    let mut result = vec![vec![0; sample_size]; channel_count];
+    let sample_count = input.len() / (channel_count * 3);
+    let mut result = vec![Vec::with_capacity(sample_count); channel_count];
 
-    for i in 0..sample_size {
-        for channel in 0..channel_count {
-            let start = (i * channel_count + channel) * 3;
-            let value = i32::from_le_bytes([input[start], input[start + 1], input[start + 2], 0]);
-            result[channel][i] = value;
-        }
-    }
+    input.chunks_exact(channel_count * 3).for_each(|chunk| {
+        chunk
+            .chunks_exact(3)
+            .enumerate()
+            .for_each(|(channel, bytes)| {
+                result[channel].push(s24le_to_i32([bytes[0], bytes[1], bytes[2]]));
+            });
+    });
 
     result
 }
 
 pub fn deinterleave_vecs_f32(input: &[u8], channel_count: usize) -> Vec<Vec<f32>> {
-    let sample_size = input.len() / (channel_count * 4);
-    let mut result = vec![vec![0.0; sample_size]; channel_count];
+    let sample_count = input.len() / (channel_count * 4);
+    let mut result = vec![Vec::with_capacity(sample_count); channel_count];
 
-    for i in 0..sample_size {
-        for channel in 0..channel_count {
-            let start = (i * channel_count + channel) * 4;
-            let value = f32::from_le_bytes(input[start..start + 4].try_into().unwrap());
-            result[channel][i] = value;
-        }
-    }
+    input.chunks_exact(channel_count * 4).for_each(|chunk| {
+        chunk
+            .chunks_exact(4)
+            .enumerate()
+            .for_each(|(channel, bytes)| {
+                result[channel].push(f32::from_le_bytes(bytes.try_into().unwrap()));
+            });
+    });
 
     result
 }
 
 pub fn s24le_to_i32(sample_bytes: [u8; 3]) -> i32 {
-    let sample = i32::from(sample_bytes[0])
-        | (i32::from(sample_bytes[1]) << 8)
-        | (i32::from(sample_bytes[2]) << 16);
-
-    // If the most significant bit of the 24-bit sample is set (negative value),
-    // sign-extend it to 32 bits
-    if sample & 0x800000 != 0 {
-        sample | (0xFF000000u32 as i32)
-    } else {
-        sample
-    }
+    let sample = i32::from_le_bytes([sample_bytes[0], sample_bytes[1], sample_bytes[2], 0]);
+    (sample << 8) >> 8 // Sign extend
 }
 
 #[cfg(test)]
