@@ -4,8 +4,7 @@ pub fn s24le_to_i32(data: &[u8]) -> Vec<i32> {
     let sample_count = data.len() / 3;
     let mut result = Vec::with_capacity(sample_count);
     data.chunks_exact(3).for_each(|sample_bytes| {
-        let sample = i32::from_le_bytes([sample_bytes[0], sample_bytes[1], sample_bytes[2], 0]);
-        result.push((sample << 8) >> 8);
+        result.push(LittleEndian::read_i24(sample_bytes));
     });
     result
 }
@@ -30,7 +29,7 @@ pub fn s24be_to_i16(data: &[u8]) -> Vec<i16> {
     result
 }
 
-pub fn i32le_to_i16(data: &[u8]) -> Vec<i16> {
+pub fn s32le_to_i16(data: &[u8]) -> Vec<i16> {
     let sample_count = data.len() / 4;
     let mut result = Vec::with_capacity(sample_count);
     data.chunks_exact(4).for_each(|chunk| {
@@ -40,7 +39,17 @@ pub fn i32le_to_i16(data: &[u8]) -> Vec<i16> {
     result
 }
 
-pub fn i32be_to_i16(data: &[u8]) -> Vec<i16> {
+pub fn s32le_to_i32(data: &[u8]) -> Vec<i32> {
+    let sample_count = data.len() / 4;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(4).for_each(|chunk| {
+        let sample = LittleEndian::read_i32(chunk);
+        result.push(sample);
+    });
+    result
+}
+
+pub fn s32be_to_i16(data: &[u8]) -> Vec<i16> {
     let sample_count = data.len() / 4;
     let mut result = Vec::with_capacity(sample_count);
     data.chunks_exact(4).for_each(|chunk| {
@@ -84,6 +93,34 @@ pub fn f32le_to_i32(data: &[u8]) -> Vec<i32> {
             (clamped * -(i32::MIN as f32)) as i32
         };
         result.push(sample);
+    });
+    result
+}
+
+pub fn f32le_to_s24(data: &[u8]) -> Vec<i32> {
+    let sample_count = data.len() / 4;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(4).for_each(|chunk| {
+        let f32_sample = f32::from_le_bytes(chunk.try_into().unwrap());
+        let clamped = f32_sample.max(-1.0).min(1.0);
+        let s24_max = 8388607; // 2^23 - 1
+        let sample = if clamped >= 0.0 {
+            (clamped * s24_max as f32) as i32
+        } else {
+            (clamped * (s24_max + 1) as f32) as i32
+        };
+        result.push(sample);
+    });
+    result
+}
+
+pub fn s32le_to_s24(data: &[u8]) -> Vec<i32> {
+    let sample_count = data.len() / 4;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(4).for_each(|chunk| {
+        let s32_sample = i32::from_le_bytes(chunk.try_into().unwrap());
+        let s24_sample = s32_sample >> 8; // Shift right by 8 bits
+        result.push(s24_sample);
     });
     result
 }
