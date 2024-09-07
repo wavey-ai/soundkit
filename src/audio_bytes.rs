@@ -96,6 +96,18 @@ pub fn s16le_to_i16(data: &[u8]) -> Vec<i16> {
     result
 }
 
+pub fn s16le_to_i32(data: &[u8]) -> Vec<i32> {
+    let sample_count = data.len() / 2;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(2).for_each(|chunk| {
+        let sample = LittleEndian::read_i16(chunk);
+        // Scale from 16-bit to 32-bit range
+        let scaled_sample = (sample as i32) << 16;
+        result.push(scaled_sample);
+    });
+    result
+}
+
 pub fn interleave_vecs_i16(channels: &[Vec<i16>]) -> Vec<u8> {
     let channel_count = channels.len();
     let sample_count = channels[0].len();
@@ -166,6 +178,82 @@ pub fn s24le_to_i32(sample_bytes: [u8; 3]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_s16le_to_i32_edge_cases() {
+        let input = vec![
+            0, 0, // 0: Neutral
+            255, 127, // 32767: Max positive
+            0, 128, // -32768: Max negative
+            1, 0, // 1: Small positive
+            255, 255, // -1: Small negative
+        ];
+        let expected = vec![0, 2_147_418_112, -2_147_483_648, 65536, -65536];
+        let result = s16le_to_i32(&input);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_s16le_to_i32_typical_values() {
+        let input = vec![
+            0, 64, // 16384: Quarter max positive
+            0, 192, // -16384: Quarter max negative
+            0, 32, // 8192: Low positive
+            0, 224, // -8192: Low negative
+        ];
+        let expected = vec![1_073_741_824, -1_073_741_824, 536_870_912, -536_870_912];
+        let result = s16le_to_i32(&input);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_s16le_to_i32_silent_audio() {
+        let input = vec![0, 0, 0, 0, 0, 0, 0, 0]; // Four silent samples
+        let expected = vec![0, 0, 0, 0];
+        let result = s16le_to_i32(&input);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_s16le_to_i32_alternating_samples() {
+        let input = vec![
+            0, 64, // 16384
+            0, 192, // -16384
+            0, 64, // 16384
+            0, 192, // -16384
+        ];
+        let expected = vec![1_073_741_824, -1_073_741_824, 1_073_741_824, -1_073_741_824];
+        let result = s16le_to_i32(&input);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_s16le_to_i32_rounding() {
+        let input = vec![
+            128, 0, // 128: Should round to 8_388_608
+            128, 255, // -128: Should round to -8_388_608
+        ];
+        let expected = vec![8_388_608, -8_388_608];
+        let result = s16le_to_i32(&input);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_s16le_to_i32_empty_input() {
+        let input: Vec<u8> = vec![];
+        let expected: Vec<i32> = vec![];
+        let result = s16le_to_i32(&input);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_s16le_to_i32() {
+        // Test values: 0 (neutral), 32767 (max positive), -32768 (max negative)
+        let input = vec![0, 0, 255, 127, 0, 128];
+        let expected = vec![0, 2_147_418_112, -2_147_483_648];
+        let result = s16le_to_i32(&input);
+        assert_eq!(result, expected);
+    }
 
     #[test]
     fn test_deinterleave_vecs_i16() {
