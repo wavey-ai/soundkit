@@ -3,8 +3,14 @@ use byteorder::{BigEndian, ByteOrder, LittleEndian};
 pub fn s24le_to_i32(data: &[u8]) -> Vec<i32> {
     let sample_count = data.len() / 3;
     let mut result = Vec::with_capacity(sample_count);
-    data.chunks_exact(3).for_each(|sample_bytes| {
-        result.push(LittleEndian::read_i24(sample_bytes));
+    data.chunks_exact(3).for_each(|chunk| {
+        let unsigned_sample = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], 0]);
+        let signed_sample = if unsigned_sample & 0x800000 != 0 {
+            (unsigned_sample | 0xFF000000) as i32
+        } else {
+            unsigned_sample as i32
+        };
+        result.push(signed_sample);
     });
     result
 }
@@ -13,8 +19,13 @@ pub fn s24le_to_i16(data: &[u8]) -> Vec<i16> {
     let sample_count = data.len() / 3;
     let mut result = Vec::with_capacity(sample_count);
     data.chunks_exact(3).for_each(|chunk| {
-        let sample = LittleEndian::read_i24(chunk);
-        result.push((sample >> 8) as i16);
+        let unsigned_sample = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], 0]);
+        let signed_sample = if unsigned_sample & 0x800000 != 0 {
+            (unsigned_sample | 0xFF000000) as i32
+        } else {
+            unsigned_sample as i32
+        };
+        result.push((signed_sample >> 8) as i16);
     });
     result
 }
@@ -23,38 +34,24 @@ pub fn s24be_to_i16(data: &[u8]) -> Vec<i16> {
     let sample_count = data.len() / 3;
     let mut result = Vec::with_capacity(sample_count);
     data.chunks_exact(3).for_each(|chunk| {
-        let sample = BigEndian::read_i24(chunk);
-        result.push((sample >> 8) as i16);
+        let unsigned_sample = u32::from_be_bytes([0, chunk[0], chunk[1], chunk[2]]);
+        let signed_sample = if unsigned_sample & 0x800000 != 0 {
+            (unsigned_sample | 0xFF000000) as i32
+        } else {
+            unsigned_sample as i32
+        };
+        result.push((signed_sample >> 8) as i16);
     });
     result
 }
 
-pub fn s32le_to_i16(data: &[u8]) -> Vec<i16> {
+pub fn s32le_to_s24(data: &[u8]) -> Vec<i32> {
     let sample_count = data.len() / 4;
     let mut result = Vec::with_capacity(sample_count);
     data.chunks_exact(4).for_each(|chunk| {
-        let sample = LittleEndian::read_i32(chunk);
-        result.push((sample >> 16) as i16);
-    });
-    result
-}
-
-pub fn s32le_to_i32(data: &[u8]) -> Vec<i32> {
-    let sample_count = data.len() / 4;
-    let mut result = Vec::with_capacity(sample_count);
-    data.chunks_exact(4).for_each(|chunk| {
-        let sample = LittleEndian::read_i32(chunk);
-        result.push(sample);
-    });
-    result
-}
-
-pub fn s32be_to_i16(data: &[u8]) -> Vec<i16> {
-    let sample_count = data.len() / 4;
-    let mut result = Vec::with_capacity(sample_count);
-    data.chunks_exact(4).for_each(|chunk| {
-        let sample = BigEndian::read_i32(chunk);
-        result.push((sample >> 16) as i16);
+        let s32_sample = i32::from_le_bytes(chunk.try_into().unwrap());
+        let s24_sample = s32_sample & 0x00FFFFFF;
+        result.push(s24_sample);
     });
     result
 }
@@ -110,17 +107,6 @@ pub fn f32le_to_s24(data: &[u8]) -> Vec<i32> {
             (clamped * (s24_max + 1) as f32) as i32
         };
         result.push(sample);
-    });
-    result
-}
-
-pub fn s32le_to_s24(data: &[u8]) -> Vec<i32> {
-    let sample_count = data.len() / 4;
-    let mut result = Vec::with_capacity(sample_count);
-    data.chunks_exact(4).for_each(|chunk| {
-        let s32_sample = i32::from_le_bytes(chunk.try_into().unwrap());
-        let s24_sample = s32_sample >> 8; // Shift right by 8 bits
-        result.push(s24_sample);
     });
     result
 }

@@ -11,6 +11,7 @@ pub trait Encoder {
         frame_size: u32,
         bitrate: u32,
     ) -> Self;
+    fn stream_info(&self) -> Vec<u8>;
     fn init(&mut self) -> Result<(), String>;
     // used for libOpus
     fn encode_i16(&mut self, input: &[i16], output: &mut [u8]) -> Result<usize, String>;
