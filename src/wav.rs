@@ -1,4 +1,4 @@
-use crate::audio_types::{AudioData, Endianness, PcmData};
+use crate::audio_types::{AudioData, EncodingFlag, Endianness, PcmData};
 use std::io::Write;
 
 enum StreamWavState {
@@ -17,7 +17,7 @@ pub struct WavStreamProcessor {
     bits_per_sample: usize,
     channel_count: usize,
     sampling_rate: usize,
-    audio_format: u16,
+    audio_format: EncodingFlag,
     endianness: Endianness, // New field to track endianness
     data_chunk_size: usize,
     data_chunk_collected: usize,
@@ -32,8 +32,8 @@ impl WavStreamProcessor {
             bits_per_sample: 0,
             channel_count: 0,
             sampling_rate: 0,
-            audio_format: 0,
-            endianness: Endianness::LE, // Default to little-endian
+            audio_format: EncodingFlag::PCMSigned,
+            endianness: Endianness::LittleEndian, // Default to little-endian
             data_chunk_size: 0,
             data_chunk_collected: 0,
         }
@@ -51,7 +51,7 @@ impl WavStreamProcessor {
         self.sampling_rate
     }
 
-    pub fn audio_format(&self) -> u16 {
+    pub fn audio_format(&self) -> EncodingFlag {
         self.audio_format
     }
 
@@ -108,17 +108,15 @@ impl WavStreamProcessor {
                         u16::from_le_bytes(fmt_chunk[22..24].try_into().unwrap()) as usize;
                     self.channel_count =
                         u16::from_le_bytes(fmt_chunk[10..12].try_into().unwrap()) as usize;
-                    self.audio_format = u16::from_le_bytes(fmt_chunk[8..10].try_into().unwrap());
-                    if self.audio_format > 3 {
-                        self.audio_format = 3;
-                    }
-                    self.endianness = if self.audio_format == 1 || self.audio_format == 3 {
-                        Endianness::LE
-                    } else {
-                        Endianness::LE
-                        // Endianness::BE
-                    };
 
+                    self.audio_format =
+                        match u16::from_le_bytes(fmt_chunk[8..10].try_into().unwrap()) {
+                            1 => EncodingFlag::PCMSigned,
+                            3 => EncodingFlag::PCMFloat,
+                            _ => EncodingFlag::PCMFloat,
+                        };
+
+                    self.endianness = Endianness::LittleEndian;
                     self.state = StreamWavState::ReadToData;
 
                     let chunk_size = u32::from_le_bytes(

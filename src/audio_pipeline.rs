@@ -52,7 +52,7 @@ pub fn deserialize_audio(
             data,
             channel_count as usize,
         ))),
-        24 => Ok(PcmData::I32(deinterleave_vecs_24bit(
+        24 => Ok(PcmData::I32(deinterleave_vecs_s24(
             data,
             channel_count as usize,
         ))),
@@ -175,21 +175,13 @@ impl<E: Encoder> AudioEncoder<E> {
         let endianness = audio_data.endianness();
 
         for chunk in data.chunks(chunk_size) {
-            let Some(config) = get_audio_config(sampling_rate, bits_per_sample, audio_format)
-            else {
-                return Err(format!(
-                            "Audio type not supported: sampling_rate={}, bits_per_sample={}, audio_format={:?}, endianness={:?}",
-                            sampling_rate, bits_per_sample, audio_format, endianness
-                        ));
-            };
-
             let flag = if chunk.len() < chunk_size {
-                EncodingFlag::PCM
+                EncodingFlag::PCMFloat
             } else {
                 self.encoding_flag
             };
 
-            if flag == EncodingFlag::PCM && !is_last {
+            if flag == EncodingFlag::PCMFloat || !is_last {
                 let widow = AudioData::new(
                     audio_data.bits_per_sample(),
                     audio_data.channel_count(),
@@ -203,10 +195,13 @@ impl<E: Encoder> AudioEncoder<E> {
             }
 
             let packet = encode_audio_packet(
-                config,
                 &chunk.to_vec(),
                 audio_data.channel_count() as usize,
-                &flag,
+                audio_data.channel_count() as usize,
+                audio_data.sampling_rate() as usize,
+                self.frame_size,
+                audio_data.audio_format(),
+                self.encoding_flag,
                 &mut self.encoder,
             )?;
 

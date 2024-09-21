@@ -1,11 +1,11 @@
 use crate::audio_bytes::{
-    f32be_to_i16, f32le_to_i16, i32be_to_i16, i32le_to_i16, s16be_to_i16, s16le_to_i16,
-    s24be_to_i16, s24le_to_i16,
+    deinterleave_vecs_f32, deinterleave_vecs_i16, deinterleave_vecs_s24, f32be_to_i16,
+    f32le_to_i16, s16be_to_i16, s16le_to_i16, s24be_to_i16, s24le_to_i16, s32be_to_i16,
+    s32le_to_i16,
 };
-use crate::audio_packet::encode_audio_packet_header;
-use crate::audio_types::get_audio_config;
-use crate::audio_types::EncodingFlag;
-use crate::audio_types::Endianness;
+use crate::audio_packet::FrameHeader;
+use crate::audio_pipeline::{vec_i16_to_f32, vec_i32_to_f32};
+use crate::audio_types::{EncodingFlag, Endianness};
 use crate::wav::WavStreamProcessor;
 use js_sys::{Array, Float32Array, Int16Array, Object, Reflect};
 use wasm_bindgen::prelude::*;
@@ -55,11 +55,6 @@ impl WavToPkt {
     }
 
     #[wasm_bindgen]
-    pub fn audio_format(&self) -> u16 {
-        self.wav_reader.audio_format()
-    }
-
-    #[wasm_bindgen]
     pub fn into_frames(&mut self, data: &[u8]) -> JsValue {
         self.idx = self.idx.wrapping_add(1);
 
@@ -95,28 +90,18 @@ impl WavToPkt {
 
     #[wasm_bindgen]
     pub fn set_frame(&mut self, data: &[u8]) {
-        let fmt = if self.wav_reader.audio_format() == 3 {
-            Some(3)
-        } else {
-            None
-        };
-        if let Some(config) = get_audio_config(
-            self.wav_reader.sampling_rate() as u32,
-            self.wav_reader.bits_per_sample() as u8,
-            fmt,
-            self.wav_reader.endianness(),
-        ) {
-            let mut packet_data = encode_audio_packet_header(
-                &EncodingFlag::Opus,
-                config,
-                self.wav_reader.channel_count() as u8,
-                data.len() as u16,
-            );
-
-            packet_data.extend_from_slice(&data);
-
-            self.packets.push(packet_data);
-        }
+        let mut packet_data: Vec<u8> = Vec::new();
+        let header = FrameHeader::new(
+            EncodingFlag::Opus,
+            self.frame_size.try_into().unwrap(),
+            self.wav_reader.sampling_rate().try_into().unwrap(),
+            self.wav_reader.channel_count().try_into().unwrap(),
+            self.wav_reader.bits_per_sample().try_into().unwrap(),
+            Endianness::LittleEndian,
+        );
+        header.encode(&mut packet_data).unwrap();
+        packet_data.extend_from_slice(&data);
+        self.packets.push(packet_data);
     }
 
     #[wasm_bindgen]
@@ -156,7 +141,6 @@ impl WavToPkt {
         let bits_per_sample = self.wav_reader.bits_per_sample() as usize;
         let channel_count = self.wav_reader.channel_count() as usize;
         let sampling_rate = self.wav_reader.sampling_rate() as usize;
-        let endianness = self.wav_reader.endianness();
         let bytes_per_sample = bits_per_sample / 8;
         let audio_format = self.wav_reader.audio_format();
 
@@ -191,33 +175,13 @@ impl WavToPkt {
             }
 
             let src = match bits_per_sample {
-                16 => {
-                    if endianness == Endianness::LE {
-                        s16le_to_i16(chunk)
-                    } else {
-                        s16be_to_i16(chunk)
-                    }
-                }
-                24 => {
-                    if endianness == Endianness::LE {
-                        s24le_to_i16(chunk)
-                    } else {
-                        s24be_to_i16(chunk)
-                    }
-                }
+                16 => s16le_to_i16(chunk),
+                24 => s24le_to_i16(chunk),
                 32 => {
-                    if audio_format == 3 {
-                        if endianness == Endianness::LE {
-                            f32le_to_i16(chunk)
-                        } else {
-                            f32be_to_i16(chunk)
-                        }
+                    if audio_format == EncodingFlag::PCMFloat {
+                        f32le_to_i16(chunk)
                     } else {
-                        if endianness == Endianness::LE {
-                            i32le_to_i16(chunk)
-                        } else {
-                            i32be_to_i16(chunk)
-                        }
+                        s32le_to_i16(chunk)
                     }
                 }
                 _ => {
@@ -278,6 +242,82 @@ impl WavToPkt {
 
     fn reset(&mut self) {
         self.wav_reader = WavStreamProcessor::new();
+    }
+}
+
+#[wasm_bindgen]
+pub struct WavToPcm {
+    wav: WavStreamProcessor,
+}
+
+#[wasm_bindgen]
+impl WavToPcm {
+    #[wasm_bindgen]
+    pub fn new() -> Self {
+        let wav = WavStreamProcessor::new();
+        Self { wav }
+    }
+
+    #[wasm_bindgen]
+    pub fn add(&mut self, data: &[u8]) -> JsValue {
+        let result = Object::new();
+        Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
+        match self.wav.add(data) {
+            Ok(Some(audio)) => {
+                Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(true)).unwrap();
+                Reflect::set(
+                    &result,
+                    &JsValue::from_str("bits_per_sample"),
+                    &JsValue::from(audio.bits_per_sample()),
+                )
+                .unwrap();
+                Reflect::set(
+                    &result,
+                    &JsValue::from_str("sampling_rate"),
+                    &JsValue::from(audio.sampling_rate()),
+                )
+                .unwrap();
+                Reflect::set(
+                    &result,
+                    &JsValue::from_str("channel_count"),
+                    &JsValue::from(audio.channel_count()),
+                )
+                .unwrap();
+
+                let channels = match audio.bits_per_sample() {
+                    16 => deinterleave_vecs_i16(&data, audio.channel_count() as usize)
+                        .iter()
+                        .map(|a| vec_i16_to_f32(a.clone()))
+                        .collect(),
+                    24 => deinterleave_vecs_s24(&data, audio.channel_count() as usize)
+                        .iter()
+                        .map(|a| vec_i32_to_f32(a.clone()))
+                        .collect(),
+                    32 => deinterleave_vecs_f32(&data, audio.channel_count() as usize),
+                    _ => todo!(),
+                };
+
+                let js_array = channels
+                    .iter()
+                    .map(|channel| {
+                        channel
+                            .iter()
+                            .map(|&value| JsValue::from_f64(f64::from(value)))
+                            .collect::<Array>()
+                    })
+                    .collect::<Array>();
+                Reflect::set(&result, &JsValue::from_str("channels"), &js_array).unwrap();
+            }
+            Ok(None) => {
+                return JsValue::from(result);
+            }
+            Err(error) => {
+                // Handle the error
+                println!("Error: {}", error);
+            }
+        }
+
+        return JsValue::from(result);
     }
 }
 

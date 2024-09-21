@@ -56,6 +56,39 @@ pub fn s32le_to_s24(data: &[u8]) -> Vec<i32> {
     result
 }
 
+pub fn s32be_to_s24(data: &[u8]) -> Vec<i32> {
+    let sample_count: usize = data.len() / 4;
+    let mut result: Vec<i32> = Vec::with_capacity(sample_count);
+    data.chunks_exact(4).for_each(|chunk| {
+        let s32_sample: i32 = i32::from_be_bytes(chunk.try_into().unwrap());
+        let s24_sample: i32 = s32_sample & 0x00FFFFFF;
+        result.push(s24_sample);
+    });
+    result
+}
+
+pub fn s32le_to_i16(data: &[u8]) -> Vec<i16> {
+    let sample_count: usize = data.len() / 4;
+    let mut result: Vec<i16> = Vec::with_capacity(sample_count);
+    data.chunks_exact(4).for_each(|chunk| {
+        let s32_sample: i32 = i32::from_le_bytes(chunk.try_into().unwrap());
+        let i16_sample: i16 = (s32_sample >> 16) as i16;
+        result.push(i16_sample);
+    });
+    result
+}
+
+pub fn s32be_to_i16(data: &[u8]) -> Vec<i16> {
+    let sample_count: usize = data.len() / 4;
+    let mut result: Vec<i16> = Vec::with_capacity(sample_count);
+    data.chunks_exact(4).for_each(|chunk| {
+        let s32_sample: i32 = i32::from_be_bytes(chunk.try_into().unwrap());
+        let i16_sample: i16 = (s32_sample >> 16) as i16;
+        result.push(i16_sample);
+    });
+    result
+}
+
 pub fn f32le_to_i16(data: &[u8]) -> Vec<i16> {
     let sample_count = data.len() / 4;
     let mut result = Vec::with_capacity(sample_count);
@@ -169,7 +202,7 @@ pub fn deinterleave_vecs_i16(input: &[u8], channel_count: usize) -> Vec<Vec<i16>
     result
 }
 
-pub fn deinterleave_vecs_24bit(input: &[u8], channel_count: usize) -> Vec<Vec<i32>> {
+pub fn deinterleave_vecs_s24(input: &[u8], channel_count: usize) -> Vec<Vec<i32>> {
     let sample_count = input.len() / (channel_count * 3);
     let mut result = vec![Vec::with_capacity(sample_count); channel_count];
 
