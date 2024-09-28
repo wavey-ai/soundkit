@@ -10,7 +10,6 @@ pub trait Encoder {
         frame_size: u32,
         bitrate: u32,
     ) -> Self;
-    fn stream_info(&self) -> Vec<u8>;
     fn init(&mut self) -> Result<(), String>;
     // used for libOpus
     fn encode_i16(&mut self, input: &[i16], output: &mut [u8]) -> Result<usize, String>;
@@ -32,21 +31,19 @@ pub struct AudioList {
 }
 
 pub fn encode_audio_packet<E: Encoder>(
-    buf: &Vec<u8>,
-    channel_count: usize,
-    bits_per_sample: usize,
-    sample_rate: usize,
-    sample_size: usize,
-    input_format: EncodingFlag,
     encoding_format: EncodingFlag,
     encoder: &mut E,
+    fullbuf: &[u8],
 ) -> Result<Vec<u8>, String> {
-    let mut data = vec![0u8; buf.len()];
+    let header = FrameHeader::decode(&mut &fullbuf[..4]).unwrap();
+
+    let buf = &fullbuf[4..];
+    let mut data = vec![0u8; buf.len() - 4];
 
     match encoding_format {
         EncodingFlag::FLAC => {
             let mut src: Vec<i32> = Vec::new();
-            match bits_per_sample {
+            match header.bits_per_sample() {
                 16 => {
                     for bytes in buf.chunks_exact(2) {
                         src.push(i16::from_le_bytes([bytes[0], bytes[1]]) as i32);
@@ -59,7 +56,7 @@ pub fn encode_audio_packet<E: Encoder>(
                 }
                 32 => {
                     for bytes in buf.chunks_exact(4) {
-                        if input_format == EncodingFlag::PCMSigned {
+                        if header.encoding() == &EncodingFlag::PCMSigned {
                             src.push(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
                         } else {
                             src.push(
@@ -68,7 +65,12 @@ pub fn encode_audio_packet<E: Encoder>(
                         };
                     }
                 }
-                _ => return Err(format!("Unsupported bits per sample: {}", bits_per_sample)),
+                _ => {
+                    return Err(format!(
+                        "Unsupported bits per sample: {}",
+                        header.bits_per_sample()
+                    ))
+                }
             }
             let num_bytes = encoder.encode_i32(&src[..], &mut data[..]).unwrap_or(0);
             if num_bytes == 0 {
@@ -79,7 +81,7 @@ pub fn encode_audio_packet<E: Encoder>(
         EncodingFlag::Opus => {
             let mut src: Vec<i16> = Vec::new();
 
-            match bits_per_sample {
+            match header.bits_per_sample() {
                 16 => {
                     for bytes in buf.chunks_exact(2) {
                         src.push(i16::from_le_bytes([bytes[0], bytes[1]]));
@@ -92,7 +94,7 @@ pub fn encode_audio_packet<E: Encoder>(
                 }
                 32 => {
                     for bytes in buf.chunks_exact(4) {
-                        let sample = if input_format == EncodingFlag::PCMSigned {
+                        let sample = if header.encoding() == &EncodingFlag::PCMSigned {
                             i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
                         } else {
                             f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i32
@@ -101,7 +103,12 @@ pub fn encode_audio_packet<E: Encoder>(
                         src.push(scaled_sample);
                     }
                 }
-                _ => return Err(format!("Unsupported bits per sample: {}", bits_per_sample)),
+                _ => {
+                    return Err(format!(
+                        "Unsupported bits per sample: {}",
+                        header.bits_per_sample()
+                    ))
+                }
             }
 
             let num_bytes = encoder.encode_i16(&src[..], &mut data[..]).unwrap_or(0);
@@ -119,10 +126,10 @@ pub fn encode_audio_packet<E: Encoder>(
     let mut chunk = Vec::new();
     let header = FrameHeader::new(
         encoding_format,
-        sample_size as u16,
-        sample_rate as u32,
-        channel_count as u8,
-        bits_per_sample as u8,
+        data.len() as u16,
+        header.sample_rate() as u32,
+        header.channels() as u8,
+        header.bits_per_sample() as u8,
         Endianness::LittleEndian,
     );
     let mut buffer = Vec::new();
