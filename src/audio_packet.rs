@@ -73,12 +73,12 @@ pub fn encode_audio_packet<E: Encoder>(
                 }
             }
 
-            let mut num_bytes = 0;
+            let num_bytes;
 
             match encoder.encode_i32(&src[..], &mut data[..]) {
                 Ok(n) => num_bytes = n,
                 Err(e) => {
-                    panic!("Failed to encode chunk {:?}", e);
+                    return Err(format!("Failed to encode chunk {:?}", e));
                 }
             }
 
@@ -243,7 +243,6 @@ impl FrameHeader {
         bits_per_sample: u8,
         endianness: Endianness,
     ) -> Self {
-        assert!(sample_size <= 2048, "Data length must not exceed 2048");
         assert!(channels <= 16, "Channel count must not exceed 16");
         assert!(bits_per_sample <= 32, "Bits per sample must not exceed 32");
         FrameHeader {
