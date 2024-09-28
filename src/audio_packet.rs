@@ -208,6 +208,7 @@ pub fn decode_audio_packet<D: Decoder>(buffer: Vec<u8>, decoder: &mut D) -> Opti
     })
 }
 
+#[derive(Debug)]
 pub struct FrameHeader {
     encoding: EncodingFlag,
     sample_size: u16,
@@ -237,6 +238,30 @@ impl FrameHeader {
             bits_per_sample,
             endianness,
         }
+    }
+
+    pub fn encoding(&self) -> &EncodingFlag {
+        &self.encoding
+    }
+
+    pub fn sample_size(&self) -> u16 {
+        self.sample_size
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub fn channels(&self) -> u8 {
+        self.channels
+    }
+
+    pub fn bits_per_sample(&self) -> u8 {
+        self.bits_per_sample
+    }
+
+    pub fn endianness(&self) -> &Endianness {
+        &self.endianness
     }
 
     pub fn encode<W: Write>(&self, writer: &mut W) -> io::Result<()> {
