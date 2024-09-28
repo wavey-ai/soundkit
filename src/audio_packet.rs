@@ -72,7 +72,16 @@ pub fn encode_audio_packet<E: Encoder>(
                     ))
                 }
             }
-            let num_bytes = encoder.encode_i32(&src[..], &mut data[..]).unwrap_or(0);
+
+            let mut num_bytes = 0;
+
+            match encoder.encode_i32(&src[..], &mut data[..]) {
+                Ok(n) => num_bytes = n,
+                Err(e) => {
+                    panic!("Failed to encode chunk {:?}", e);
+                }
+            }
+
             if num_bytes == 0 {
                 return Err("Flac encoding: zero bytes".to_string());
             }
