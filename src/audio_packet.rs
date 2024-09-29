@@ -289,7 +289,7 @@ impl FrameHeader {
 
     pub fn size(&self) -> usize {
         if self.id.is_some() {
-            8
+            12
         } else {
             4
         }
