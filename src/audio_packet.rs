@@ -1,6 +1,6 @@
 use crate::audio_types::{EncodingFlag, Endianness};
 use byteorder::{ByteOrder, LE};
-use bytes::Bytes;
+use bytes::BytesMut;
 use std::io::{self, Read, Write};
 
 pub trait Encoder {
@@ -35,11 +35,11 @@ pub fn encode_audio_packet<E: Encoder>(
     encoding_format: EncodingFlag,
     encoder: &mut E,
     fullbuf: &[u8],
-) -> Result<Bytes, String> {
+) -> Result<BytesMut, String> {
     let header = FrameHeader::decode(&mut &fullbuf[..4]).unwrap();
 
     let buf = &fullbuf[4..];
-    let mut data = vec![0u8; buf.len() - 4];
+    let mut data = vec![0u8; buf.len()];
 
     match encoding_format {
         EncodingFlag::FLAC => {
@@ -147,12 +147,11 @@ pub fn encode_audio_packet<E: Encoder>(
     chunk.extend_from_slice(&buffer);
     chunk.extend_from_slice(&data);
 
-    Ok(Bytes::from(chunk))
+    Ok(BytesMut::from(&chunk[..]))
 }
 
 pub fn decode_audio_packet<D: Decoder>(buffer: Vec<u8>, decoder: &mut D) -> Option<AudioList> {
     let header = FrameHeader::decode(&mut buffer.as_slice()).unwrap();
-    let len = buffer.len() - 4;
     let channel_count = header.channels as usize;
     let data = &buffer[4..];
 
