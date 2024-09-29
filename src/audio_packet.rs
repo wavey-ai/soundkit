@@ -141,6 +141,7 @@ pub fn encode_audio_packet<E: Encoder>(
         header.channels() as u8,
         header.bits_per_sample() as u8,
         Endianness::LittleEndian,
+        header.id,
     );
     let mut buffer = Vec::new();
     header.encode(&mut buffer).unwrap();
@@ -232,6 +233,8 @@ pub struct FrameHeader {
     channels: u8,
     bits_per_sample: u8,
     endianness: Endianness,
+    has_id: bool,
+    id: Option<u64>,
 }
 
 impl FrameHeader {
@@ -242,6 +245,7 @@ impl FrameHeader {
         channels: u8,
         bits_per_sample: u8,
         endianness: Endianness,
+        id: Option<u64>,
     ) -> Self {
         assert!(channels <= 16, "Channel count must not exceed 16");
         assert!(bits_per_sample <= 32, "Bits per sample must not exceed 32");
@@ -252,6 +256,8 @@ impl FrameHeader {
             channels,
             bits_per_sample,
             endianness,
+            has_id: id.is_some(),
+            id,
         }
     }
 
@@ -277,6 +283,14 @@ impl FrameHeader {
 
     pub fn endianness(&self) -> &Endianness {
         &self.endianness
+    }
+
+    pub fn has_id(&self) -> bool {
+        self.has_id
+    }
+
+    pub fn id(&self) -> Option<u64> {
+        self.id
     }
 
     pub fn encode<W: Write>(&self, writer: &mut W) -> io::Result<()> {
@@ -309,8 +323,10 @@ impl FrameHeader {
         // Endianness (1 bit)
         header |= (self.endianness as u32) << 5;
 
-        // Reserved bits (5 bits) - explicitly set to zero
-        // No action needed as these bits are already zero
+        // Reserved bits (5 bits)
+        // Use the first reserved bit to indicate presence of ID
+        header |= (self.has_id as u32) << 4;
+        // The remaining 4 bits are still set to zero
 
         // Write the header
         writer.write_all(&header.to_be_bytes())?;
@@ -318,6 +334,11 @@ impl FrameHeader {
         // Write custom sample rate if needed
         if sample_rate_code == 7 {
             writer.write_all(&self.sample_rate.to_be_bytes())?;
+        }
+
+        // Write ID if present
+        if self.has_id {
+            writer.write_all(&self.id.unwrap().to_be_bytes())?;
         }
 
         Ok(())
@@ -370,8 +391,15 @@ impl FrameHeader {
             Endianness::BigEndian
         };
 
-        // Reserved bits (5 bits) - explicitly ignored
-        // No action needed as we're not using these bits
+        let has_id = (header >> 4) & 0x1 == 1;
+
+        let id = if has_id {
+            let mut id_bytes = [0u8; 8];
+            reader.read_exact(&mut id_bytes)?;
+            Some(u64::from_be_bytes(id_bytes))
+        } else {
+            None
+        };
 
         Ok(FrameHeader {
             encoding,
@@ -380,6 +408,8 @@ impl FrameHeader {
             channels,
             bits_per_sample,
             endianness,
+            has_id,
+            id,
         })
     }
 }
