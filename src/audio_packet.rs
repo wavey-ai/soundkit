@@ -36,9 +36,9 @@ pub fn encode_audio_packet<E: Encoder>(
     encoder: &mut E,
     fullbuf: &[u8],
 ) -> Result<BytesMut, String> {
-    let header = FrameHeader::decode(&mut &fullbuf[..4]).unwrap();
+    let header = FrameHeader::decode(&mut &fullbuf[..]).unwrap();
 
-    let buf = &fullbuf[4..];
+    let buf = &fullbuf[header.size()..];
     let mut data = vec![0u8; buf.len()];
 
     match encoding_format {
@@ -154,7 +154,7 @@ pub fn encode_audio_packet<E: Encoder>(
 pub fn decode_audio_packet<D: Decoder>(buffer: Vec<u8>, decoder: &mut D) -> Option<AudioList> {
     let header = FrameHeader::decode(&mut buffer.as_slice()).unwrap();
     let channel_count = header.channels as usize;
-    let data = &buffer[4..];
+    let data = &buffer[header.size()..];
 
     let mut samples = vec![0.0f32; header.sample_size as usize * channel_count];
 
@@ -291,6 +291,14 @@ impl FrameHeader {
 
     pub fn id(&self) -> Option<u64> {
         self.id
+    }
+
+    pub fn size(&self) -> usize {
+        if self.has_id {
+            8
+        } else {
+            4
+        }
     }
 
     pub fn encode<W: Write>(&self, writer: &mut W) -> io::Result<()> {
