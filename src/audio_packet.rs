@@ -233,7 +233,6 @@ pub struct FrameHeader {
     channels: u8,
     bits_per_sample: u8,
     endianness: Endianness,
-    has_id: bool,
     id: Option<u64>,
 }
 
@@ -256,7 +255,6 @@ impl FrameHeader {
             channels,
             bits_per_sample,
             endianness,
-            has_id: id.is_some(),
             id,
         }
     }
@@ -285,16 +283,12 @@ impl FrameHeader {
         &self.endianness
     }
 
-    pub fn has_id(&self) -> bool {
-        self.has_id
-    }
-
     pub fn id(&self) -> Option<u64> {
         self.id
     }
 
     pub fn size(&self) -> usize {
-        if self.has_id {
+        if self.id.is_some() {
             8
         } else {
             4
@@ -333,7 +327,7 @@ impl FrameHeader {
 
         // Reserved bits (5 bits)
         // Use the first reserved bit to indicate presence of ID
-        header |= (self.has_id as u32) << 4;
+        header |= (self.id.is_some() as u32) << 4;
         // The remaining 4 bits are still set to zero
 
         // Write the header
@@ -345,7 +339,7 @@ impl FrameHeader {
         }
 
         // Write ID if present
-        if self.has_id {
+        if self.id.is_some() {
             writer.write_all(&self.id.unwrap().to_be_bytes())?;
         }
 
@@ -416,7 +410,6 @@ impl FrameHeader {
             channels,
             bits_per_sample,
             endianness,
-            has_id,
             id,
         })
     }
@@ -435,6 +428,7 @@ mod tests {
             2,
             32,
             Endianness::LittleEndian,
+            None,
         );
         let mut buffer = Vec::new();
         original.encode(&mut buffer).unwrap();
@@ -457,6 +451,7 @@ mod tests {
                 2,
                 bits,
                 Endianness::BigEndian,
+                None,
             );
             let mut buffer = Vec::new();
             original.encode(&mut buffer).unwrap();
@@ -475,6 +470,7 @@ mod tests {
             2,
             33,
             Endianness::LittleEndian,
+            None,
         );
     }
 
@@ -487,6 +483,7 @@ mod tests {
             2,
             16,
             Endianness::LittleEndian,
+            None,
         );
         let mut buffer = Vec::new();
         header.encode(&mut buffer).unwrap();
