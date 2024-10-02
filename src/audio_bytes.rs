@@ -258,9 +258,9 @@ mod tests {
     }
 
     #[test]
-    fn test_deinterleave_vecs_24bit() {
+    fn test_deinterleave_vecs_s24() {
         let input = vec![1, 0, 0, 2, 0, 0, 3, 0, 0, 4, 0, 0, 5, 0, 0, 6, 0, 0]; // Little Endian u24 values [1, 2, 3, 4, 5, 6]
-        let result = deinterleave_vecs_24bit(&input, 2);
+        let result = deinterleave_vecs_s24(&input, 2);
         assert_eq!(result, vec![vec![1, 3, 5], vec![2, 4, 6]]);
     }
 

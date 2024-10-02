@@ -20,3 +20,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 wasm = ["js-sys", "web-sys", "wasm-bindgen"]
+
+[dev-dependencies]
+soundkit-flac = { git = "https://github.com/wavey-ai/soundkit-flac.git" }
+#soundkit-flac = { path = "../soundkit-flac/" }
