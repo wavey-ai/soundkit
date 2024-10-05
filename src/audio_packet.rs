@@ -1,3 +1,4 @@
+use crate::audio_bytes::{f32le_to_s24, s16le_to_i32, s24le_to_i32, s32le_to_s24};
 use crate::audio_types::{EncodingFlag, Endianness};
 use byteorder::{ByteOrder, LE};
 use bytes::BytesMut;
@@ -42,36 +43,20 @@ pub fn encode_audio_packet<E: Encoder>(
 
     match encoding_format {
         EncodingFlag::FLAC => {
-            let mut src: Vec<i32> = Vec::new();
-            match header.bits_per_sample() {
-                16 => {
-                    for bytes in buf.chunks_exact(2) {
-                        src.push(i16::from_le_bytes([bytes[0], bytes[1]]) as i32);
-                    }
-                }
-                24 => {
-                    for bytes in buf.chunks_exact(3) {
-                        src.push(LE::read_i24(&bytes));
-                    }
-                }
+            let src = match header.bits_per_sample() {
+                16 => s16le_to_i32(buf),
+                24 => s24le_to_i32(buf),
                 32 => {
-                    for bytes in buf.chunks_exact(4) {
-                        if header.encoding() == &EncodingFlag::PCMSigned {
-                            src.push(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
-                        } else {
-                            src.push(
-                                f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i32
-                            );
-                        };
+                    if header.encoding() == &EncodingFlag::PCMSigned {
+                        s32le_to_s24(buf)
+                    } else {
+                        f32le_to_s24(buf)
                     }
                 }
                 _ => {
-                    return Err(format!(
-                        "Unsupported bits per sample: {}",
-                        header.bits_per_sample()
-                    ))
+                    unreachable!()
                 }
-            }
+            };
 
             let num_bytes;
 
