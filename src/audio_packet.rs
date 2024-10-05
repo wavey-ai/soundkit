@@ -140,6 +140,7 @@ pub fn decode_audio_packet<D: Decoder>(buffer: Vec<u8>, decoder: &mut D) -> Opti
     let channel_count = header.channels as usize;
     let data = &buffer[header.size()..];
 
+    dbg!(&header);
     let mut samples = vec![0.0f32; header.sample_size as usize * channel_count];
 
     match header.encoding {
