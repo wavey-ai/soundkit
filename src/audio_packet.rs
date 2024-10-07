@@ -21,7 +21,8 @@ pub trait Encoder {
 }
 
 pub trait Decoder {
-    fn decode(&mut self, input: &[u8], output: &mut [i16], fec: bool) -> Result<usize, String>;
+    fn decode_i16(&mut self, input: &[u8], output: &mut [i16], fec: bool) -> Result<usize, String>;
+    fn decode_i32(&mut self, input: &[u8], output: &mut [i32], fec: bool) -> Result<usize, String>;
 }
 
 pub const HEADER_SIZE: usize = 5;
@@ -139,8 +140,6 @@ pub fn decode_audio_packet<D: Decoder>(buffer: Vec<u8>, decoder: &mut D) -> Opti
     let header = FrameHeader::decode(&mut buffer.as_slice()).unwrap();
     let channel_count = header.channels as usize;
     let data = &buffer[header.size()..];
-
-    dbg!(&header);
     let mut samples = vec![0.0f32; header.sample_size as usize * channel_count];
 
     match header.encoding {
@@ -186,7 +185,9 @@ pub fn decode_audio_packet<D: Decoder>(buffer: Vec<u8>, decoder: &mut D) -> Opti
         }
         EncodingFlag::Opus => {
             let mut dst = vec![0i16; header.sample_size as usize * channel_count];
-            let _num_samples_decoded = decoder.decode(&data[..], &mut dst[..], false).unwrap_or(0);
+            let _num_samples_decoded = decoder
+                .decode_i16(&data[..], &mut dst[..], false)
+                .unwrap_or(0);
 
             for sample_i16 in dst {
                 let sample_f32 = f32::from(sample_i16) / f32::from(std::i16::MAX);
