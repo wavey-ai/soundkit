@@ -1,4 +1,4 @@
-use crate::audio_bytes::{f32le_to_s24, s16le_to_i32, s24le_to_i32, s32le_to_s24};
+use crate::audio_bytes::{f32le_to_i32, s16le_to_i32, s24le_to_i32, s32le_to_i32, s32le_to_s24};
 use crate::audio_types::{EncodingFlag, Endianness};
 use byteorder::{ByteOrder, LE};
 use bytes::BytesMut;
@@ -49,9 +49,9 @@ pub fn encode_audio_packet<E: Encoder>(
                 24 => s24le_to_i32(buf),
                 32 => {
                     if header.encoding() == &EncodingFlag::PCMSigned {
-                        s32le_to_s24(buf)
+                        s32le_to_i32(buf)
                     } else {
-                        f32le_to_s24(buf)
+                        f32le_to_i32(buf)
                     }
                 }
                 _ => {

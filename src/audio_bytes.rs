@@ -45,6 +45,26 @@ pub fn s24be_to_i16(data: &[u8]) -> Vec<i16> {
     result
 }
 
+pub fn s32le_to_i32(data: &[u8]) -> Vec<i32> {
+    let sample_count = data.len() / 4;
+    let mut result = Vec::with_capacity(sample_count);
+    data.chunks_exact(4).for_each(|chunk| {
+        let s32_sample = i32::from_le_bytes(chunk.try_into().unwrap());
+        result.push(s32_sample);
+    });
+    result
+}
+
+pub fn s32be_to_i32(data: &[u8]) -> Vec<i32> {
+    let sample_count: usize = data.len() / 4;
+    let mut result: Vec<i32> = Vec::with_capacity(sample_count);
+    data.chunks_exact(4).for_each(|chunk| {
+        let s32_sample: i32 = i32::from_be_bytes(chunk.try_into().unwrap());
+        result.push(s32_sample);
+    });
+    result
+}
+
 pub fn s32le_to_s24(data: &[u8]) -> Vec<i32> {
     let sample_count = data.len() / 4;
     let mut result = Vec::with_capacity(sample_count);
