@@ -47,7 +47,7 @@ impl Encoder for FlacEncoder {
             encoder
         };
 
-        FlacEncoder {
+        Self {
             encoder,
             sample_rate,
             channels,

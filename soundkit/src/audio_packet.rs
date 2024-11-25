@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_flac_encoding() {
-        let file_path = "testdata/lori.wav";
+        let file_path = "testdata/f32le.wav";
 
         let frame_len = 480 * 2;
         let mut file = File::open(file_path.clone()).unwrap();
