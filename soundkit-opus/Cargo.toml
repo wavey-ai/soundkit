@@ -1,0 +1,15 @@
+[package]
+name = "soundkit-opus"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+description = "Opus Encoder traits"
+repository = "https://github.com/wavey-ai/soundkit"
+readme = "README.md"
+
+[dependencies]
+libopus = { git = "https://github.com/wavey-ai/opus-rs", rev = "e38e510", version = "0.1.0" }
+soundkit = { path = "../soundkit" }
+
+[lib]
+crate-type = ["cdylib", "rlib"]

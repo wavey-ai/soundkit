@@ -25,8 +25,6 @@ pub trait Decoder {
     fn decode_i32(&mut self, input: &[u8], output: &mut [i32], fec: bool) -> Result<usize, String>;
 }
 
-pub const HEADER_SIZE: usize = 5;
-
 pub struct AudioList {
     pub channels: Vec<Vec<f32>>,
     pub sample_count: usize,
@@ -40,7 +38,7 @@ pub fn encode_audio_packet<E: Encoder>(
 ) -> Result<BytesMut, String> {
     let header = FrameHeader::decode(&mut &fullbuf[..]).unwrap();
     let buf = &fullbuf[header.size()..];
-    let mut data = vec![0u8; buf.len() * 10];
+    let mut data = vec![0u8; buf.len() * 2];
 
     match encoding_format {
         EncodingFlag::FLAC => {

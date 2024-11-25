@@ -4,6 +4,4 @@ Cargo.lock
 test/out.wav
 .idea/
 .vscode/
-testdata/*aac*
-testdata/*opus*
-testdata/*flac*
+testdata/f32le_*
