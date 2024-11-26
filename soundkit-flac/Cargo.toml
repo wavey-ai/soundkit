@@ -8,6 +8,4 @@ access-unit = "0.0.2"
 libc = "0.2.158"
 libflac-sys = { git = "https://github.com/mgeier/libflac-sys.git" }
 soundkit = { path = "../soundkit" }
-
-
 tracing = "0.1.40"

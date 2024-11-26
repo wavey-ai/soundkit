@@ -31,6 +31,25 @@ pub struct AudioList {
     pub sampling_rate: usize,
 }
 
+pub fn patch_sample_size(header_bytes: &mut [u8], new_sample_size: u16) -> Result<(), String> {
+    // Ensure the header is large enough to contain the sample size field
+    if header_bytes.len() < 4 {
+        return Err("Header too small to update sample size".to_string());
+    }
+
+    // Decode the existing header
+    let mut header = u32::from_be_bytes(header_bytes[..4].try_into().unwrap());
+
+    // Update the sample size (11 bits starting at bit 18)
+    header &= !(0x7FF << 18); // Clear the existing sample size bits
+    header |= (new_sample_size as u32 & 0x7FF) << 18; // Set the new sample size
+
+    // Encode the updated header back into bytes
+    header_bytes[..4].copy_from_slice(&header.to_be_bytes());
+
+    Ok(())
+}
+
 pub fn encode_audio_packet<E: Encoder>(
     encoding_format: EncodingFlag,
     encoder: &mut E,
@@ -88,11 +107,19 @@ pub fn encode_audio_packet<E: Encoder>(
                 32 => {
                     for bytes in buf.chunks_exact(4) {
                         let sample = if header.encoding() == &EncodingFlag::PCMSigned {
-                            i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+                            // Read the 32-bit signed integer and scale to i16 range
+                            let s32_sample =
+                                i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                            (s32_sample as i64 * i16::MAX as i64 / i32::MAX as i64) as i32
                         } else {
-                            f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i32
+                            // Read the 32-bit floating-point sample and scale to i16 range
+                            let float_sample =
+                                f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                            (float_sample * 32767.0) as i32
                         };
-                        let scaled_sample = (sample * 32767) as i16;
+
+                        // Clamp the sample to i16 range to avoid overflow
+                        let scaled_sample = sample.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                         src.push(scaled_sample);
                     }
                 }
@@ -119,7 +146,7 @@ pub fn encode_audio_packet<E: Encoder>(
     let mut chunk = Vec::new();
     let header = FrameHeader::new(
         encoding_format,
-        data.len() as u16,
+        header.sample_size() as u16,
         header.sample_rate() as u32,
         header.channels() as u8,
         header.bits_per_sample() as u8,
@@ -404,7 +431,6 @@ mod tests {
     use super::*;
     use crate::audio_bytes::{f32le_to_s24, s16le_to_i32, s24le_to_i32};
     use crate::wav::WavStreamProcessor;
-    use soundkit_flac::FlacEncoder;
     use std::fs::File;
     use std::io::Read;
     use std::io::Write;
@@ -483,76 +509,41 @@ mod tests {
     }
 
     #[test]
-    fn test_flac_encoding() {
-        let file_path = "testdata/lori.wav";
-
-        let frame_len = 480 * 2;
-        let mut file = File::open(file_path.clone()).unwrap();
-        let mut file_buffer = Vec::new();
-        file.read_to_end(&mut file_buffer).unwrap();
-
-        let mut processor = WavStreamProcessor::new();
-        let audio_data = processor.add(&file_buffer).unwrap().unwrap();
-
-        let mut encoder = FlacEncoder::new(
-            audio_data.sampling_rate(),
-            audio_data.bits_per_sample() as u32,
-            audio_data.channel_count() as u32,
-            frame_len as u32,
-            5,
+    fn test_patch_sample_size_preserves_reserved_bits() {
+        // Create an initial header using the constructor
+        let original_header = FrameHeader::new(
+            EncodingFlag::PCMSigned,
+            1024,
+            44100,
+            2,
+            16,
+            Endianness::LittleEndian,
+            None,
         );
 
-        encoder.init().expect("Failed to initialize FLAC encoder");
+        // Serialize the header into bytes
+        let mut header_bytes = Vec::new();
+        original_header.encode(&mut header_bytes).unwrap();
 
-        let i32_samples = match audio_data.bits_per_sample() {
-            16 => {
-                // this doesn't scale the 16 bit samples - important!
-                s16le_to_i32(audio_data.data())
-            }
-            24 => s24le_to_i32(audio_data.data()),
-            32 => f32le_to_s24(audio_data.data()),
-            _ => {
-                vec![0i32]
-            }
-        };
+        // Patch the sample size in the header
+        let new_sample_size = 512;
+        patch_sample_size(&mut header_bytes, new_sample_size).expect("Failed to patch sample size");
 
-        let chunk_size = frame_len * audio_data.channel_count() as usize;
+        // Decode the modified header
+        let patched_header = FrameHeader::decode(&mut header_bytes.as_slice()).unwrap();
 
-        let mut frames = Vec::new();
+        // Verify that the sample size has been updated
+        assert_eq!(patched_header.sample_size(), new_sample_size);
 
-        let sample_rate = audio_data.sampling_rate() as u64;
-        let channels = audio_data.channel_count() as u64;
-        let samples_per_chunk = chunk_size as u64 / channels;
-        let time_base = 1_000;
-
-        let chunk_duration = samples_per_chunk * time_base / sample_rate;
-
-        for (i, chunk) in i32_samples.chunks(chunk_size).enumerate() {
-            let mut output_buffer = vec![0u8; 1024 * 10];
-
-            match encoder.encode_i32(chunk, &mut output_buffer) {
-                Ok(encoded_len) => {
-                    if encoded_len > 0 {
-                        let data = &output_buffer[..encoded_len];
-                        frames.push(data.to_owned());
-                    }
-                }
-                Err(e) => {
-                    panic!("Failed to encode chunk {}: {:?}", i, e);
-                }
-            }
-        }
-
-        let flac_output_file_path = "testdata/test.flac";
-        let mut flac_output_file =
-            File::create(flac_output_file_path).expect("Failed to create output file");
-
-        for frame in frames {
-            flac_output_file
-                .write_all(&frame)
-                .expect("Failed to write data segment");
-        }
-
-        println!("FMP4 file written successfully");
+        // Verify that all other fields remain unchanged
+        assert_eq!(patched_header.encoding(), original_header.encoding());
+        assert_eq!(patched_header.sample_rate(), original_header.sample_rate());
+        assert_eq!(patched_header.channels(), original_header.channels());
+        assert_eq!(
+            patched_header.bits_per_sample(),
+            original_header.bits_per_sample()
+        );
+        assert_eq!(patched_header.endianness(), original_header.endianness());
+        assert_eq!(patched_header.id(), original_header.id());
     }
 }

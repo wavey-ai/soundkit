@@ -341,7 +341,7 @@ mod tests {
         let mut processor = WavStreamProcessor::new();
         let audio_data = processor.add(&file_buffer).unwrap().unwrap();
 
-        dbg!(file_path, audio_data.sampling_rate());
+        dbg!(file_path, audio_data.bits_per_sample());
 
         let mut encoder = FlacEncoder::new(
             audio_data.sampling_rate(),

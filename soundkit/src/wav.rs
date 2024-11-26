@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_wav_stream() {
-        let file_path = "testdata/f32le.wav";
+        let file_path = "../testdata/f32le.wav";
         let mut file = File::open(&file_path).unwrap();
 
         let mut processor = WavStreamProcessor::new();

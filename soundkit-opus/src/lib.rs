@@ -112,6 +112,8 @@ mod tests {
         let mut processor = WavStreamProcessor::new();
         let audio_data = processor.add(&file_buffer).unwrap().unwrap();
 
+        dbg!(audio_data.bits_per_sample());
+
         let mut encoder = OpusEncoder::new(
             audio_data.sampling_rate(),
             audio_data.bits_per_sample() as u32,
