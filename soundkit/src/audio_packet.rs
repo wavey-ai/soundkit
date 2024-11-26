@@ -233,6 +233,27 @@ pub fn decode_audio_packet_scratch<D: Decoder>(
     Ok(header)
 }
 
+pub fn get_encoding_flag(header_bytes: &[u8]) -> Result<EncodingFlag, String> {
+    if header_bytes.len() < 4 {
+        return Err("Header too small to extract encoding flag".to_string());
+    }
+
+    // Extract the first 4 bytes and interpret as a big-endian u32
+    let header = u32::from_be_bytes(header_bytes[..4].try_into().unwrap());
+
+    // Extract the encoding flag (3 bits starting at bit 29)
+    let encoding = match (header >> 29) & 0x7 {
+        0 => EncodingFlag::PCMSigned,
+        1 => EncodingFlag::PCMFloat,
+        2 => EncodingFlag::Opus,
+        3 => EncodingFlag::FLAC,
+        4 => EncodingFlag::AAC,
+        _ => return Err("Unknown encoding flag".to_string()),
+    };
+
+    Ok(encoding)
+}
+
 pub fn decode_audio_packet<D: Decoder>(buffer: Vec<u8>, decoder: &mut D) -> Option<AudioList> {
     let header = FrameHeader::decode(&mut buffer.as_slice()).unwrap();
     let channel_count = header.channels as usize;
