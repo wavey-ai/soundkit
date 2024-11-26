@@ -1,7 +1,7 @@
 use crate::audio_bytes::{f32le_to_i32, s16le_to_i32, s24le_to_i32, s32le_to_i32, s32le_to_s24};
 use crate::audio_types::{EncodingFlag, Endianness};
 use byteorder::{ByteOrder, LE};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use std::io::{self, Read, Write};
 
 pub trait Encoder {
@@ -159,6 +159,78 @@ pub fn encode_audio_packet<E: Encoder>(
     chunk.extend_from_slice(&data);
 
     Ok(BytesMut::from(&chunk[..]))
+}
+
+pub fn decode_audio_packet_scratch<D: Decoder>(
+    buffer: Bytes,
+    decoder: &mut D,
+    scratch: &mut Vec<f32>,
+) -> Result<FrameHeader, String> {
+    let header = FrameHeader::decode(&mut &buffer[..20])
+        .map_err(|e| format!("Failed to decode header: {}", e))?;
+    let channel_count = header.channels as usize;
+    let data = &buffer[header.size()..];
+
+    // Resize scratch buffer to hold all samples
+    scratch.clear();
+    scratch.resize(header.sample_size as usize * channel_count, 0.0);
+
+    match header.encoding {
+        EncodingFlag::PCMSigned => match header.bits_per_sample {
+            16 => {
+                for (i, sample_bytes) in data.chunks_exact(2).enumerate() {
+                    let sample_i16 = i16::from_le_bytes([sample_bytes[0], sample_bytes[1]]);
+                    scratch[i] = f32::from(sample_i16) / f32::from(std::i16::MAX);
+                }
+            }
+            24 => {
+                for (i, sample_bytes) in data.chunks_exact(3).enumerate() {
+                    let sample_i24 = LE::read_i24(sample_bytes);
+                    scratch[i] = sample_i24 as f32 / (1 << 23) as f32;
+                }
+            }
+            32 => {
+                for (i, sample_bytes) in data.chunks_exact(4).enumerate() {
+                    let sample_i32 = i32::from_le_bytes([
+                        sample_bytes[0],
+                        sample_bytes[1],
+                        sample_bytes[2],
+                        sample_bytes[3],
+                    ]);
+                    scratch[i] = sample_i32 as f32 / std::i32::MAX as f32;
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "Unsupported bits per sample: {}",
+                    header.bits_per_sample
+                ))
+            }
+        },
+        EncodingFlag::PCMFloat => {
+            for (i, sample_bytes) in data.chunks_exact(4).enumerate() {
+                scratch[i] = f32::from_le_bytes([
+                    sample_bytes[0],
+                    sample_bytes[1],
+                    sample_bytes[2],
+                    sample_bytes[3],
+                ]);
+            }
+        }
+        EncodingFlag::Opus => {
+            let mut dst = vec![0i16; header.sample_size as usize * channel_count];
+            let num_samples_decoded = decoder
+                .decode_i16(data, &mut dst, false)
+                .map_err(|e| format!("Opus decoding failed: {}", e))?;
+
+            for (i, sample_i16) in dst[..num_samples_decoded].iter().enumerate() {
+                scratch[i] = f32::from(*sample_i16) / f32::from(std::i16::MAX);
+            }
+        }
+        _ => return Err("Unsupported encoding type".to_string()),
+    }
+
+    Ok(header)
 }
 
 pub fn decode_audio_packet<D: Decoder>(buffer: Vec<u8>, decoder: &mut D) -> Option<AudioList> {
