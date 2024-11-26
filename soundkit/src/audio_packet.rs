@@ -509,8 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn test_patch_sample_size_preserves_reserved_bits() {
-        // Create an initial header using the constructor
+    fn test_patch_sample_size() {
         let original_header = FrameHeader::new(
             EncodingFlag::PCMSigned,
             1024,
@@ -521,18 +520,13 @@ mod tests {
             None,
         );
 
-        // Serialize the header into bytes
         let mut header_bytes = Vec::new();
         original_header.encode(&mut header_bytes).unwrap();
 
-        // Patch the sample size in the header
         let new_sample_size = 512;
         patch_sample_size(&mut header_bytes, new_sample_size).expect("Failed to patch sample size");
 
-        // Decode the modified header
         let patched_header = FrameHeader::decode(&mut header_bytes.as_slice()).unwrap();
-
-        // Verify that the sample size has been updated
         assert_eq!(patched_header.sample_size(), new_sample_size);
 
         // Verify that all other fields remain unchanged
