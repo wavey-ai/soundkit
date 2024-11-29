@@ -1,8 +1,8 @@
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 
-pub fn f32_to_i16le(vec: Vec<f32>) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(vec.len() * 2); // Each i16 is 2 bytes
-    for value in vec {
+pub fn f32_to_i16le(data: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(data.len() * 2); // Each i16 is 2 bytes
+    for value in data {
         let scaled = (value * i16::MAX as f32)
             .round()
             .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
