@@ -196,10 +196,6 @@ pub fn decode_audio_packet_scratch<D: Decoder>(
     let channel_count = header.channels as usize;
     let data = &buffer[header.size()..];
 
-    // Resize scratch buffer to hold all samples
-    scratch.clear();
-    scratch.resize(header.sample_size as usize * channel_count, 0.0);
-
     match header.encoding {
         EncodingFlag::PCMSigned => match header.bits_per_sample {
             16 => {

@@ -11,6 +11,14 @@ pub fn f32_to_i16le(data: &[f32]) -> Vec<u8> {
     bytes
 }
 
+pub fn i16_to_i16le(data: &[i16]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(data.len() * 2); // Each i16 is 2 bytes
+    for value in data {
+        bytes.extend(&value.to_le_bytes());
+    }
+    bytes
+}
+
 pub fn i16le_to_i16(bytes: &[u8]) -> Vec<i16> {
     assert!(bytes.len() % 2 == 0, "Bytes length must be a multiple of 2");
     bytes
