@@ -1,5 +1,24 @@
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 
+pub fn f32_to_i16le(vec: Vec<f32>) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(vec.len() * 2); // Each i16 is 2 bytes
+    for value in vec {
+        let scaled = (value * i16::MAX as f32)
+            .round()
+            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        bytes.extend(&scaled.to_le_bytes());
+    }
+    bytes
+}
+
+pub fn i16le_to_i16(bytes: &[u8]) -> Vec<i16> {
+    assert!(bytes.len() % 2 == 0, "Bytes length must be a multiple of 2");
+    bytes
+        .chunks(2)
+        .map(|chunk| i16::from_le_bytes(chunk.try_into().unwrap()))
+        .collect()
+}
+
 pub fn s24le_to_i32(data: &[u8]) -> Vec<i32> {
     let sample_count = data.len() / 3;
     let mut result = Vec::with_capacity(sample_count);

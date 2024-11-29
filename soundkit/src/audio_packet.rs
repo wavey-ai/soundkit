@@ -50,6 +50,27 @@ pub fn patch_sample_size(header_bytes: &mut [u8], new_sample_size: u16) -> Resul
     Ok(())
 }
 
+pub fn get_encoding_flag(header_bytes: &[u8]) -> Result<EncodingFlag, String> {
+    if header_bytes.len() < 4 {
+        return Err("Header too small to extract encoding flag".to_string());
+    }
+
+    // Extract the first 4 bytes and interpret as a big-endian u32
+    let header = u32::from_be_bytes(header_bytes[..4].try_into().unwrap());
+
+    // Extract the encoding flag (3 bits starting at bit 29)
+    let encoding = match (header >> 29) & 0x7 {
+        0 => EncodingFlag::PCMSigned,
+        1 => EncodingFlag::PCMFloat,
+        2 => EncodingFlag::Opus,
+        3 => EncodingFlag::FLAC,
+        4 => EncodingFlag::AAC,
+        _ => return Err("Unknown encoding flag".to_string()),
+    };
+
+    Ok(encoding)
+}
+
 pub fn encode_audio_packet<E: Encoder>(
     encoding_format: EncodingFlag,
     encoder: &mut E,
@@ -90,7 +111,7 @@ pub fn encode_audio_packet<E: Encoder>(
             }
             data.truncate(num_bytes);
         }
-        EncodingFlag::Opus => {
+        EncodingFlag::Opus | EncodingFlag::AAC => {
             let mut src: Vec<i16> = Vec::new();
 
             match header.bits_per_sample() {
@@ -131,9 +152,13 @@ pub fn encode_audio_packet<E: Encoder>(
                 }
             }
 
-            let num_bytes = encoder.encode_i16(&src[..], &mut data[..]).unwrap_or(0);
+            let num_bytes = encoder
+                .encode_i16(&src[..], &mut data[..])
+                .to_owned()
+                .map_err(|e| format!("Opus/AAC encoding failed: {}", e))?;
+
             if num_bytes == 0 {
-                return Err("Opus encoding: zero bytes".to_string());
+                return Err("Opus/AAC encoding: zero bytes".to_string());
             }
             data.truncate(num_bytes);
         }
@@ -231,27 +256,6 @@ pub fn decode_audio_packet_scratch<D: Decoder>(
     }
 
     Ok(header)
-}
-
-pub fn get_encoding_flag(header_bytes: &[u8]) -> Result<EncodingFlag, String> {
-    if header_bytes.len() < 4 {
-        return Err("Header too small to extract encoding flag".to_string());
-    }
-
-    // Extract the first 4 bytes and interpret as a big-endian u32
-    let header = u32::from_be_bytes(header_bytes[..4].try_into().unwrap());
-
-    // Extract the encoding flag (3 bits starting at bit 29)
-    let encoding = match (header >> 29) & 0x7 {
-        0 => EncodingFlag::PCMSigned,
-        1 => EncodingFlag::PCMFloat,
-        2 => EncodingFlag::Opus,
-        3 => EncodingFlag::FLAC,
-        4 => EncodingFlag::AAC,
-        _ => return Err("Unknown encoding flag".to_string()),
-    };
-
-    Ok(encoding)
 }
 
 pub fn decode_audio_packet<D: Decoder>(buffer: Vec<u8>, decoder: &mut D) -> Option<AudioList> {
