@@ -68,8 +68,8 @@ pub struct OpusDecoder {
 }
 
 impl OpusDecoder {
-    pub fn new() -> Self {
-        let decoder = decoder::Decoder::create(48000, 2, 1, 1, &[0u8, 1u8]).unwrap();
+    pub fn new(channels: usize) -> Self {
+        let decoder = decoder::Decoder::create(48000, channels, 1, 1, &[0u8, 1u8]).unwrap();
 
         OpusDecoder { decoder }
     }
