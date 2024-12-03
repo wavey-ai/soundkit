@@ -25,15 +25,15 @@ impl Encoder for AacEncoder {
         _compression_level: u32, // Not used in AAC, we can use bitrate modes instead
     ) -> Self {
         let params = EncoderParams {
-            bit_rate: BitRate::VbrVeryHigh,
+            bit_rate: BitRate::VbrMedium,
             sample_rate,
-            transport: EncoderTransport::Adts, // Transport can be set to Raw or Adts
+            transport: EncoderTransport::Raw,
             channels: if channels == 1 {
                 ChannelMode::Mono
             } else {
                 ChannelMode::Stereo
             },
-            audio_object_type: AudioObjectType::Mpeg4LowComplexity,
+            audio_object_type: AudioObjectType::Mpeg4EnhancedLowDelay,
         };
 
         let encoder = AacLibEncoder::new(params).expect("Failed to initialize AAC encoder");
@@ -164,7 +164,7 @@ impl Drop for AacDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use access_unit::aac::is_aac;
+    use access_unit::aac::create_adts_header;
     use soundkit::audio_bytes::s16le_to_i16;
     use soundkit::wav::WavStreamProcessor;
     use std::fs::File;
@@ -176,7 +176,7 @@ mod tests {
         let mut decoder = AacDecoder::new();
         decoder.init().expect("Decoder initialization failed");
 
-        let frame_size = 1024;
+        let frame_size = 480;
         let mut file = File::open(file_path).unwrap();
         let mut file_buffer = Vec::new();
         file.read_to_end(&mut file_buffer).unwrap();
@@ -208,26 +208,25 @@ mod tests {
 
         for (i, chunk) in i16_samples.chunks(chunk_size).enumerate() {
             let start_time = Instant::now();
-            let mut output_buffer = vec![0u8; chunk.len() * std::mem::size_of::<i32>() * 2];
+            let mut output_buffer = vec![0u8; chunk_size * std::mem::size_of::<i32>()];
             match encoder.encode_i16(chunk, &mut output_buffer) {
                 Ok(encoded_len) => {
-                    if encoded_len > 0 {
-                        let elapsed_time = start_time.elapsed();
-                        println!("Encoding took: {:.2?} seconds", elapsed_time);
-                        assert!(is_aac(&output_buffer[..encoded_len]));
-                        match decoder.decode_i16(
-                            &output_buffer[..encoded_len],
-                            &mut decoded_samples,
-                            false,
-                        ) {
-                            Ok(samples_read) => {
-                                println!(
-                                    "Decoded {} samples of {} data successfully.",
-                                    samples_read, encoded_len
-                                );
-                            }
-                            Err(e) => panic!("Decoding failed: {}", e),
+                    assert!(encoded_len > 0);
+                    dbg!(encoded_len);
+                    let elapsed_time = start_time.elapsed();
+                    println!("Encoding took: {:.2?} seconds", elapsed_time);
+                    //assert!(is_aac(&output_buffer[..encoded_len]));
+                    let mut data = create_adts_header(0x66, 2, 44_100, 480, false);
+                    data.extend(&output_buffer[..encoded_len]);
+                    dbg!(data.len());
+                    match decoder.decode_i16(&data, &mut decoded_samples, false) {
+                        Ok(samples_read) => {
+                            println!(
+                                "Decoded {} samples of {} data successfully.",
+                                samples_read, encoded_len
+                            );
                         }
+                        Err(e) => panic!("Decoding failed: {}", e),
                     }
                     encoded_data.extend_from_slice(&output_buffer[..encoded_len]);
                 }
@@ -238,7 +237,7 @@ mod tests {
         }
 
         let mut file =
-            File::create(file_path.to_owned() + ".acc").expect("Failed to create output file");
+            File::create(file_path.to_owned() + ".aac").expect("Failed to create output file");
         file.write_all(&encoded_data)
             .expect("Failed to write to output file");
 

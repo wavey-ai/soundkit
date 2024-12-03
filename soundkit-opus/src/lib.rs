@@ -101,7 +101,7 @@ mod tests {
     use std::time::Instant;
 
     fn run_acc_encoder_with_wav_file(file_path: &str) {
-        let mut decoder = OpusDecoder::new();
+        let mut decoder = OpusDecoder::new(2);
         decoder.init().expect("Decoder initialization failed");
 
         let frame_size = 960 as usize;
