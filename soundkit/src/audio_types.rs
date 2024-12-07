@@ -71,4 +71,5 @@ pub enum EncodingFlag {
     Opus = 2,
     FLAC = 3,
     AAC = 4,
+    H264 = 5,
 }
