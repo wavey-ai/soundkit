@@ -31,25 +31,6 @@ pub struct AudioList {
     pub sampling_rate: usize,
 }
 
-pub fn patch_sample_size(header_bytes: &mut [u8], new_sample_size: u16) -> Result<(), String> {
-    // Ensure the header is large enough to contain the sample size field
-    if header_bytes.len() < 4 {
-        return Err("Header too small to update sample size".to_string());
-    }
-
-    // Decode the existing header
-    let mut header = u32::from_be_bytes(header_bytes[..4].try_into().unwrap());
-
-    // Update the sample size (11 bits starting at bit 18)
-    header &= !(0x7FF << 18); // Clear the existing sample size bits
-    header |= (new_sample_size as u32 & 0x7FF) << 18; // Set the new sample size
-
-    // Encode the updated header back into bytes
-    header_bytes[..4].copy_from_slice(&header.to_be_bytes());
-
-    Ok(())
-}
-
 pub fn get_encoding_flag(header_bytes: &[u8]) -> Result<EncodingFlag, String> {
     if header_bytes.len() < 4 {
         return Err("Header too small to extract encoding flag".to_string());
@@ -341,6 +322,109 @@ pub struct FrameHeader {
 }
 
 impl FrameHeader {
+    pub fn patch_sample_size(header_bytes: &mut [u8], new_sample_size: u16) -> Result<(), String> {
+        if header_bytes.len() < 4 {
+            return Err("Header too small to update sample size".to_string());
+        }
+        if new_sample_size > 0x3FFF {
+            // 14-bit max
+            return Err("Sample size exceeds maximum value (16383)".to_string());
+        }
+
+        let mut header = u32::from_be_bytes(header_bytes[..4].try_into().unwrap());
+        header &= !(0x3FFF << 8); // Clear sample size bits
+        header |= (new_sample_size as u32) << 8; // Set new sample size
+        header_bytes[..4].copy_from_slice(&header.to_be_bytes());
+        Ok(())
+    }
+
+    pub fn patch_encoding(header_bytes: &mut [u8], encoding: EncodingFlag) -> Result<(), String> {
+        if header_bytes.len() < 4 {
+            return Err("Header too small to update encoding".to_string());
+        }
+
+        let mut header = u32::from_be_bytes(header_bytes[..4].try_into().unwrap());
+        header &= !(0x7 << 29); // Clear encoding bits
+        header |= (encoding as u32) << 29; // Set new encoding
+        header_bytes[..4].copy_from_slice(&header.to_be_bytes());
+        Ok(())
+    }
+
+    pub fn patch_sample_rate(header_bytes: &mut [u8], sample_rate: u32) -> Result<(), String> {
+        if header_bytes.len() < 4 {
+            return Err("Header too small to update sample rate".to_string());
+        }
+
+        let rate_code = match sample_rate {
+            44100 => 0,
+            48000 => 1,
+            88200 => 2,
+            96000 => 3,
+            176400 => 4,
+            192000 => 5,
+            _ => 7,
+        };
+
+        let mut header = u32::from_be_bytes(header_bytes[..4].try_into().unwrap());
+        header &= !(0x7 << 26); // Clear sample rate bits
+        header |= rate_code << 26; // Set new sample rate code
+        header_bytes[..4].copy_from_slice(&header.to_be_bytes());
+
+        Ok(())
+    }
+
+    pub fn patch_channels(header_bytes: &mut [u8], channels: u8) -> Result<(), String> {
+        if header_bytes.len() < 4 {
+            return Err("Header too small to update channels".to_string());
+        }
+        if channels == 0 || channels > 16 {
+            return Err("Channel count must be between 1 and 16".to_string());
+        }
+
+        let mut header = u32::from_be_bytes(header_bytes[..4].try_into().unwrap());
+        header &= !(0xF << 22); // Clear channel bits
+        header |= ((channels - 1) as u32) << 22; // Set new channels
+        header_bytes[..4].copy_from_slice(&header.to_be_bytes());
+        Ok(())
+    }
+
+    pub fn patch_bits_per_sample(header_bytes: &mut [u8], bits: u8) -> Result<(), String> {
+        if header_bytes.len() < 4 {
+            return Err("Header too small to update bits per sample".to_string());
+        }
+        if bits == 0 || bits > 32 {
+            return Err("Bits per sample must be between 1 and 32".to_string());
+        }
+
+        let mut header = u32::from_be_bytes(header_bytes[..4].try_into().unwrap());
+        header &= !(0x1F << 3); // Clear bits per sample
+        header |= ((bits - 1) as u32) << 3; // Set new bits per sample
+        header_bytes[..4].copy_from_slice(&header.to_be_bytes());
+        Ok(())
+    }
+
+    pub fn patch_endianness(header_bytes: &mut [u8], endianness: Endianness) -> Result<(), String> {
+        if header_bytes.len() < 4 {
+            return Err("Header too small to update endianness".to_string());
+        }
+
+        let mut header = u32::from_be_bytes(header_bytes[..4].try_into().unwrap());
+        header &= !(1 << 2); // Clear endianness bit
+        header |= (endianness as u32) << 2; // Set new endianness
+        header_bytes[..4].copy_from_slice(&header.to_be_bytes());
+        Ok(())
+    }
+
+    // Helper method to get current values
+    pub fn get_field_values(header_bytes: &[u8]) -> Result<FrameHeader, String> {
+        if header_bytes.len() < 4 {
+            return Err("Header too small to read fields".to_string());
+        }
+
+        FrameHeader::decode(&mut &header_bytes[..])
+            .map_err(|e| format!("Failed to decode header: {}", e))
+    }
+
     pub fn new(
         encoding: EncodingFlag,
         sample_size: u16,
@@ -402,13 +486,10 @@ impl FrameHeader {
     pub fn encode<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         let mut header: u32 = 0;
 
+        // First byte:
         // Encoding flag (3 bits)
         header |= (self.encoding as u32) << 29;
-
-        // Data length (11 bits)
-        header |= (self.sample_size as u32) << 18;
-
-        // Sample rate (3 bits)
+        // Sample rate code (3 bits)
         let sample_rate_code = match self.sample_rate {
             44100 => 0,
             48000 => 1,
@@ -416,23 +497,24 @@ impl FrameHeader {
             96000 => 3,
             176400 => 4,
             192000 => 5,
-            _ => 7, // Custom rate, will be written separately
+            _ => 7,
         };
-        header |= (sample_rate_code as u32) << 15;
-
+        header |= (sample_rate_code as u32) << 26;
         // Channels (4 bits)
-        header |= ((self.channels - 1) as u32) << 11;
+        header |= ((self.channels - 1) as u32) << 22;
 
+        // Second byte+:
+        // Sample size (14 bits) - Increased from 11
+        header |= (self.sample_size as u32) << 8;
+
+        // Last byte:
         // Bits per sample (5 bits)
-        header |= ((self.bits_per_sample - 1) as u32) << 6;
-
+        header |= ((self.bits_per_sample - 1) as u32) << 3;
         // Endianness (1 bit)
-        header |= (self.endianness as u32) << 5;
-
-        // Reserved bits (5 bits)
-        // Use the first reserved bit to indicate presence of ID
-        header |= (self.id.is_some() as u32) << 4;
-        // The remaining 4 bits are still set to zero
+        header |= (self.endianness as u32) << 2;
+        // ID present flag (1 bit)
+        header |= (self.id.is_some() as u32) << 1;
+        // 1 reserved bit
 
         // Write the header
         writer.write_all(&header.to_be_bytes())?;
@@ -443,8 +525,8 @@ impl FrameHeader {
         }
 
         // Write ID if present
-        if self.id.is_some() {
-            writer.write_all(&self.id.unwrap().to_be_bytes())?;
+        if let Some(id) = self.id {
+            writer.write_all(&id.to_be_bytes())?;
         }
 
         Ok(())
@@ -455,6 +537,7 @@ impl FrameHeader {
         reader.read_exact(&mut header_bytes)?;
         let header = u32::from_be_bytes(header_bytes);
 
+        // First byte
         let encoding = match (header >> 29) & 0x7 {
             0 => EncodingFlag::PCMSigned,
             1 => EncodingFlag::PCMFloat,
@@ -464,9 +547,21 @@ impl FrameHeader {
             _ => unreachable!(),
         };
 
-        let sample_size = ((header >> 18) & 0x7FF) as u16;
+        let sample_rate_code = (header >> 26) & 0x7;
+        let channels = (((header >> 22) & 0xF) + 1) as u8;
 
-        let sample_rate_code = (header >> 15) & 0x7;
+        // Middle bits
+        let sample_size = ((header >> 8) & 0x3FFF) as u16; // 14 bits
+
+        // Last byte
+        let bits_per_sample = (((header >> 3) & 0x1F) + 1) as u8;
+        let endianness = if (header >> 2) & 0x1 == 0 {
+            Endianness::LittleEndian
+        } else {
+            Endianness::BigEndian
+        };
+        let has_id = (header >> 1) & 0x1 == 1;
+
         let sample_rate = match sample_rate_code {
             0 => 44100,
             1 => 48000,
@@ -486,18 +581,6 @@ impl FrameHeader {
                 ))
             }
         };
-
-        let channels = (((header >> 11) & 0xF) + 1) as u8;
-
-        let bits_per_sample = (((header >> 6) & 0x1F) + 1) as u8;
-
-        let endianness = if (header >> 5) & 0x1 == 0 {
-            Endianness::LittleEndian
-        } else {
-            Endianness::BigEndian
-        };
-
-        let has_id = (header >> 4) & 0x1 == 1;
 
         let id = if has_id {
             let mut id_bytes = [0u8; 8];
@@ -525,8 +608,169 @@ mod tests {
     use crate::audio_bytes::{f32le_to_s24, s16le_to_i32, s24le_to_i32};
     use crate::wav::WavStreamProcessor;
     use std::fs::File;
+    use std::io::Cursor;
     use std::io::Read;
     use std::io::Write;
+
+    fn create_test_header() -> Vec<u8> {
+        let header = FrameHeader::new(
+            EncodingFlag::PCMSigned,
+            1024,
+            48000,
+            2,
+            24,
+            Endianness::LittleEndian,
+            None,
+        );
+        let mut buffer = Vec::new();
+        header.encode(&mut buffer).unwrap();
+        buffer
+    }
+
+    #[test]
+    fn test_patch_sample_size() {
+        let mut header_bytes = create_test_header();
+
+        // Test valid sample size
+        assert!(FrameHeader::patch_sample_size(&mut header_bytes, 2048).is_ok());
+        let updated = FrameHeader::get_field_values(&header_bytes).unwrap();
+        assert_eq!(updated.sample_size(), 2048);
+
+        // Test maximum value
+        assert!(FrameHeader::patch_sample_size(&mut header_bytes, 0x3FFF).is_ok());
+        let updated = FrameHeader::get_field_values(&header_bytes).unwrap();
+        assert_eq!(updated.sample_size(), 0x3FFF);
+
+        // Test exceeding maximum value
+        assert!(FrameHeader::patch_sample_size(&mut header_bytes, 0x4000).is_err());
+
+        // Test with invalid header size
+        let mut short_header = vec![0; 2];
+        assert!(FrameHeader::patch_sample_size(&mut short_header, 1024).is_err());
+    }
+
+    #[test]
+    fn test_patch_encoding() {
+        let mut header_bytes = create_test_header();
+
+        // Test each encoding type
+        let encodings = vec![
+            EncodingFlag::PCMSigned,
+            EncodingFlag::PCMFloat,
+            EncodingFlag::Opus,
+            EncodingFlag::FLAC,
+            EncodingFlag::AAC,
+        ];
+
+        for encoding in encodings {
+            assert!(FrameHeader::patch_encoding(&mut header_bytes, encoding).is_ok());
+            let updated = FrameHeader::get_field_values(&header_bytes).unwrap();
+            assert_eq!(*updated.encoding(), encoding);
+        }
+
+        // Test with invalid header size
+        let mut short_header = vec![0; 2];
+        assert!(FrameHeader::patch_encoding(&mut short_header, EncodingFlag::PCMSigned).is_err());
+    }
+
+    #[test]
+    fn test_patch_sample_rate() {
+        let mut header_bytes = create_test_header();
+
+        // Test standard rates
+        let rates = vec![44100, 48000, 88200, 96000, 176400, 192000];
+
+        for rate in rates {
+            assert!(FrameHeader::patch_sample_rate(&mut header_bytes, rate).is_ok());
+            let updated = FrameHeader::get_field_values(&header_bytes).unwrap();
+            assert_eq!(updated.sample_rate(), rate);
+        }
+
+        // Test custom rate (should set code to 7)
+        assert!(FrameHeader::patch_sample_rate(&mut header_bytes, 128000).is_ok());
+
+        // Test with invalid header size
+        let mut short_header = vec![0; 2];
+        assert!(FrameHeader::patch_sample_rate(&mut short_header, 48000).is_err());
+    }
+
+    #[test]
+    fn test_patch_channels() {
+        let mut header_bytes = create_test_header();
+
+        // Test valid channel counts
+        for channels in 1..=16 {
+            assert!(FrameHeader::patch_channels(&mut header_bytes, channels).is_ok());
+            let updated = FrameHeader::get_field_values(&header_bytes).unwrap();
+            assert_eq!(updated.channels(), channels);
+        }
+
+        // Test invalid channel counts
+        assert!(FrameHeader::patch_channels(&mut header_bytes, 0).is_err());
+        assert!(FrameHeader::patch_channels(&mut header_bytes, 17).is_err());
+
+        // Test with invalid header size
+        let mut short_header = vec![0; 2];
+        assert!(FrameHeader::patch_channels(&mut short_header, 2).is_err());
+    }
+
+    #[test]
+    fn test_patch_bits_per_sample() {
+        let mut header_bytes = create_test_header();
+
+        // Test valid bit depths
+        for bits in &[16, 24, 32] {
+            assert!(FrameHeader::patch_bits_per_sample(&mut header_bytes, *bits).is_ok());
+            let updated = FrameHeader::get_field_values(&header_bytes).unwrap();
+            assert_eq!(updated.bits_per_sample(), *bits);
+        }
+
+        // Test invalid bit depths
+        assert!(FrameHeader::patch_bits_per_sample(&mut header_bytes, 0).is_err());
+        assert!(FrameHeader::patch_bits_per_sample(&mut header_bytes, 33).is_err());
+
+        // Test with invalid header size
+        let mut short_header = vec![0; 2];
+        assert!(FrameHeader::patch_bits_per_sample(&mut short_header, 24).is_err());
+    }
+
+    #[test]
+    fn test_patch_endianness() {
+        let mut header_bytes = create_test_header();
+
+        // Test both endianness values
+        assert!(FrameHeader::patch_endianness(&mut header_bytes, Endianness::LittleEndian).is_ok());
+        let updated = FrameHeader::get_field_values(&header_bytes).unwrap();
+        assert_eq!(*updated.endianness(), Endianness::LittleEndian);
+
+        assert!(FrameHeader::patch_endianness(&mut header_bytes, Endianness::BigEndian).is_ok());
+        let updated = FrameHeader::get_field_values(&header_bytes).unwrap();
+        assert_eq!(*updated.endianness(), Endianness::BigEndian);
+
+        // Test with invalid header size
+        let mut short_header = vec![0; 2];
+        assert!(
+            FrameHeader::patch_endianness(&mut short_header, Endianness::LittleEndian).is_err()
+        );
+    }
+
+    #[test]
+    fn test_field_preservation() {
+        let mut header_bytes = create_test_header();
+        let original = FrameHeader::get_field_values(&header_bytes).unwrap();
+
+        // Modify one field and verify others remain unchanged
+        FrameHeader::patch_sample_size(&mut header_bytes, 2048).unwrap();
+        let updated = FrameHeader::get_field_values(&header_bytes).unwrap();
+
+        assert_eq!(updated.sample_size(), 2048); // Changed
+        assert_eq!(updated.encoding(), original.encoding()); // Preserved
+        assert_eq!(updated.sample_rate(), original.sample_rate()); // Preserved
+        assert_eq!(updated.channels(), original.channels()); // Preserved
+        assert_eq!(updated.bits_per_sample(), original.bits_per_sample()); // Preserved
+        assert_eq!(updated.endianness(), original.endianness()); // Preserved
+        assert_eq!(updated.id(), original.id()); // Preserved
+    }
 
     #[test]
     fn test_encode_decode_with_32bit_audio() {
@@ -584,53 +828,21 @@ mod tests {
     }
 
     #[test]
-    fn test_reserved_bits_are_zero() {
-        let header = FrameHeader::new(
-            EncodingFlag::PCMSigned,
-            1024,
-            48000,
-            2,
-            16,
-            Endianness::LittleEndian,
-            None,
-        );
-        let mut buffer = Vec::new();
-        header.encode(&mut buffer).unwrap();
-
-        // The last byte of the header should have its lower 6 bits as zero
-        assert_eq!(buffer[3] & 0b00111111, 0);
-    }
-
-    #[test]
-    fn test_patch_sample_size() {
-        let original_header = FrameHeader::new(
-            EncodingFlag::PCMSigned,
-            1024,
-            44100,
-            2,
-            16,
-            Endianness::LittleEndian,
-            None,
-        );
-
+    fn test_large_sample_size() {
+        let header = FrameHeader {
+            encoding: EncodingFlag::PCMSigned,
+            sample_size: 3000,
+            sample_rate: 48000,
+            channels: 2,
+            bits_per_sample: 24,
+            endianness: Endianness::LittleEndian,
+            id: Some(16752778769957134339),
+        };
         let mut header_bytes = Vec::new();
-        original_header.encode(&mut header_bytes).unwrap();
+        header.encode(&mut header_bytes).unwrap();
 
-        let new_sample_size = 512;
-        patch_sample_size(&mut header_bytes, new_sample_size).expect("Failed to patch sample size");
+        let decoded_header = FrameHeader::decode(&mut header_bytes.as_slice()).unwrap();
 
-        let patched_header = FrameHeader::decode(&mut header_bytes.as_slice()).unwrap();
-        assert_eq!(patched_header.sample_size(), new_sample_size);
-
-        // Verify that all other fields remain unchanged
-        assert_eq!(patched_header.encoding(), original_header.encoding());
-        assert_eq!(patched_header.sample_rate(), original_header.sample_rate());
-        assert_eq!(patched_header.channels(), original_header.channels());
-        assert_eq!(
-            patched_header.bits_per_sample(),
-            original_header.bits_per_sample()
-        );
-        assert_eq!(patched_header.endianness(), original_header.endianness());
-        assert_eq!(patched_header.id(), original_header.id());
+        assert_eq!(header.sample_size(), decoded_header.sample_size());
     }
 }
