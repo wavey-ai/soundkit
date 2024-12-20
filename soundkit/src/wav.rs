@@ -1,4 +1,5 @@
-use crate::audio_types::{AudioData, EncodingFlag, Endianness, PcmData};
+use crate::audio_types::{AudioData, PcmData};
+use frame_header::{EncodingFlag, Endianness};
 use std::io::Write;
 
 enum StreamWavState {

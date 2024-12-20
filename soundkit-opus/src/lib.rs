@@ -22,7 +22,7 @@ impl Encoder for OpusEncoder {
             48000,
             channels as usize,
             1,
-            1,
+            if channels > 1 { 1 } else { 0 },
             &[0u8, 1u8],
             encoder::Application::Audio,
         )

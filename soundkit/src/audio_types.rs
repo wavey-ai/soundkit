@@ -1,3 +1,5 @@
+use frame_header::{EncodingFlag, Endianness};
+
 pub enum PcmData {
     I16(Vec<Vec<i16>>),
     I32(Vec<Vec<i32>>),
@@ -12,12 +14,6 @@ pub struct AudioData {
     sampling_rate: u32,
     audio_format: EncodingFlag,
     endianness: Endianness,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum Endianness {
-    LittleEndian,
-    BigEndian,
 }
 
 impl AudioData {
@@ -62,14 +58,4 @@ impl AudioData {
     pub fn endianness(&self) -> Endianness {
         self.endianness
     }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum EncodingFlag {
-    PCMSigned = 0,
-    PCMFloat = 1,
-    Opus = 2,
-    FLAC = 3,
-    AAC = 4,
-    H264 = 5,
 }
