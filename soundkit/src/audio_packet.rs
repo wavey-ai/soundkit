@@ -157,6 +157,7 @@ pub fn encode_audio_packet<E: Encoder>(
         header.bits_per_sample() as u8,
         Endianness::LittleEndian,
         header.id(),
+        None,
     );
     let mut buffer = Vec::new();
     header?.encode(&mut buffer).unwrap();
