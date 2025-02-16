@@ -19,7 +19,7 @@ impl Encoder for OpusEncoder {
         bitrate: u32,
     ) -> Self {
         let encoder = encoder::Encoder::create(
-            sample_rate,
+            sample_rate as usize,
             channels as usize,
             1,
             if channels > 1 { 1 } else { 0 },
@@ -68,7 +68,7 @@ pub struct OpusDecoder {
 }
 
 impl OpusDecoder {
-    pub fn new(channels: usize) -> Self {
+    pub fn new(sample_rate: usize, channels: usize) -> Self {
         let decoder = decoder::Decoder::create(sample_rate, channels, 1, 1, &[0u8, 1u8]).unwrap();
 
         OpusDecoder { decoder }
@@ -101,7 +101,7 @@ mod tests {
     use std::time::Instant;
 
     fn run_acc_encoder_with_wav_file(file_path: &str) {
-        let mut decoder = OpusDecoder::new(1);
+        let mut decoder = OpusDecoder::new(48_000, 1);
         decoder.init().expect("Decoder initialization failed");
 
         let frame_size = 960 as usize;
@@ -115,7 +115,7 @@ mod tests {
         dbg!(audio_data.bits_per_sample());
 
         let mut encoder = OpusEncoder::new(
-            audio_data.sampling_rate(),
+            48_000,
             audio_data.bits_per_sample() as u32,
             audio_data.channel_count() as u32,
             frame_size as u32,
