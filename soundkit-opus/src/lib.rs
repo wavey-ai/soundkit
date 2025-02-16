@@ -19,7 +19,7 @@ impl Encoder for OpusEncoder {
         bitrate: u32,
     ) -> Self {
         let encoder = encoder::Encoder::create(
-            48000,
+            sample_rate,
             channels as usize,
             1,
             if channels > 1 { 1 } else { 0 },
@@ -69,7 +69,7 @@ pub struct OpusDecoder {
 
 impl OpusDecoder {
     pub fn new(channels: usize) -> Self {
-        let decoder = decoder::Decoder::create(48000, channels, 1, 1, &[0u8, 1u8]).unwrap();
+        let decoder = decoder::Decoder::create(sample_rate, channels, 1, 1, &[0u8, 1u8]).unwrap();
 
         OpusDecoder { decoder }
     }
