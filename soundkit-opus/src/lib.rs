@@ -100,7 +100,7 @@ mod tests {
     use std::io::Write;
     use std::time::Instant;
 
-    fn run_acc_encoder_with_wav_file(file_path: &str) {
+    fn run_opus_encoder_with_wav_file(file_path: &str) {
         let mut decoder = OpusDecoder::new(16_000, 1);
         decoder.init().expect("Decoder initialization failed");
 
@@ -121,7 +121,7 @@ mod tests {
             frame_size as u32,
             128_000,
         );
-        encoder.init().expect("Failed to initialize acc encoder");
+        encoder.init().expect("Failed to initialize opus encoder");
 
         let i16_samples = match audio_data.bits_per_sample() {
             16 => s16le_to_i16(audio_data.data()),
@@ -182,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn test_acc_encoder_with_wave_16bit() {
-        run_acc_encoder_with_wav_file("../testdata/s16le.wav");
+    fn test_opus_encoder_with_wave_16bit() {
+        run_opus_encoder_with_wav_file("../testdata/s16le.wav");
     }
 }
