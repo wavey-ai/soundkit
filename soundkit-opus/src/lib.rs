@@ -101,10 +101,10 @@ mod tests {
     use std::time::Instant;
 
     fn run_acc_encoder_with_wav_file(file_path: &str) {
-        let mut decoder = OpusDecoder::new(48_000, 1);
+        let mut decoder = OpusDecoder::new(16_000, 1);
         decoder.init().expect("Decoder initialization failed");
 
-        let frame_size = 960 as usize;
+        let frame_size = 320 as usize;
         let mut file = File::open(file_path).unwrap();
         let mut file_buffer = Vec::new();
         file.read_to_end(&mut file_buffer).unwrap();
@@ -115,7 +115,7 @@ mod tests {
         dbg!(audio_data.bits_per_sample());
 
         let mut encoder = OpusEncoder::new(
-            48_000,
+            16_000,
             audio_data.bits_per_sample() as u32,
             audio_data.channel_count() as u32,
             frame_size as u32,
