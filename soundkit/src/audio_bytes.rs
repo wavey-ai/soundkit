@@ -1,6 +1,17 @@
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 
-pub fn f32_to_i16le(data: &[f32]) -> Vec<u8> {
+pub fn i16le_to_f32(bytes: &[u8]) -> Vec<f32> {
+    assert!(bytes.len() % 2 == 0, "Bytes length must be a multiple of 2");
+    bytes
+        .chunks(2)
+        .map(|chunk| {
+            let i16_sample = i16::from_le_bytes(chunk.try_into().unwrap());
+            i16_sample as f32 / 32768.0
+        })
+        .collect()
+}
+
+fn f32_to_i16le(data: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(data.len() * 2); // Each i16 is 2 bytes
     for value in data {
         let scaled = (value * i16::MAX as f32)
@@ -348,5 +359,30 @@ mod tests {
                 vec![2.0, 4.0, 6.0], // channel 2
             ]
         );
+    }
+
+    #[test]
+    fn test_i16le_to_f32() {
+        // Little-endian bytes for i16 values: 0, 16384, 32767, -16384, -32768
+        let input = vec![
+            0, 0, // 0
+            0, 64, // 16384
+            255, 127, // 32767
+            0, 192, // -16384
+            0, 128, // -32768
+        ];
+        let expected = vec![0.0, 0.5, 0.9999694, -0.5, -1.0];
+        let result = i16le_to_f32(&input);
+
+        assert_eq!(result.len(), expected.len());
+        for (i, (&expected, &actual)) in expected.iter().zip(result.iter()).enumerate() {
+            assert!(
+                (expected - actual).abs() < 0.0001,
+                "Sample {} mismatch: expected {}, got {}",
+                i,
+                expected,
+                actual
+            );
+        }
     }
 }
