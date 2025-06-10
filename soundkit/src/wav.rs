@@ -293,4 +293,36 @@ mod tests {
 
         assert!(audio_packets.len() > 0, "No audio packets processed");
     }
+
+    #[test]
+    fn test_wav_stream_24bit_pcm() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"RIFF");
+        let data_chunk_size = 3u32;
+        let fmt_chunk_size = 16u32;
+        let file_size = 4 + (8 + fmt_chunk_size) + (8 + data_chunk_size);
+        buf.extend_from_slice(&file_size.to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&fmt_chunk_size.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
+        buf.extend_from_slice(&1u16.to_le_bytes()); // num channels = 1
+        buf.extend_from_slice(&48_000u32.to_le_bytes()); // sample rate = 48000
+        let byte_rate = 48_000 * 1 * 3;
+        buf.extend_from_slice(&(byte_rate as u32).to_le_bytes());
+        let block_align = 1 * 3;
+        buf.extend_from_slice(&(block_align as u16).to_le_bytes());
+        buf.extend_from_slice(&24u16.to_le_bytes()); // bits per sample = 24
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_chunk_size.to_le_bytes());
+        buf.extend_from_slice(&[0x01, 0x02, 0x03]); // one 24-bit sample
+
+        let mut proc = WavStreamProcessor::new();
+        let out = proc.add(&buf).unwrap().unwrap();
+
+        assert_eq!(out.bits_per_sample(), 24);
+        assert_eq!(out.channel_count(), 1);
+        assert_eq!(out.sampling_rate(), 48_000);
+        assert_eq!(out.data(), &vec![1, 2, 3]);
+    }
 }
