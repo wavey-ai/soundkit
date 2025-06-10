@@ -172,7 +172,7 @@ mod tests {
     use std::io::Write;
     use std::time::Instant;
 
-    fn run_acc_encoder_with_wav_file(file_path: &str) {
+    fn run_aac_encoder_with_wav_file(file_path: &str) {
         let mut decoder = AacDecoder::new();
         decoder.init().expect("Decoder initialization failed");
 
@@ -193,7 +193,7 @@ mod tests {
             0 as u32,
             5,
         );
-        encoder.init().expect("Failed to initialize acc encoder");
+        encoder.init().expect("Failed to initialize aac encoder");
 
         let i16_samples = match audio_data.bits_per_sample() {
             16 => s16le_to_i16(audio_data.data()),
@@ -238,7 +238,7 @@ mod tests {
         }
 
         let mut file =
-            File::create(file_path.to_owned() + ".acc").expect("Failed to create output file");
+            File::create(file_path.to_owned() + ".aac").expect("Failed to create output file");
         file.write_all(&encoded_data)
             .expect("Failed to write to output file");
 
@@ -246,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn test_acc_encoder_with_wave_16bit() {
-        run_acc_encoder_with_wav_file("../testdata/s16le.wav");
+    fn test_aac_encoder_with_wave_16bit() {
+        run_aac_encoder_with_wav_file("../testdata/s16le.wav");
     }
 }
