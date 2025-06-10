@@ -10,7 +10,32 @@ pub struct Mp3Encoder {
 }
 
 impl Mp3Encoder {
+    /// Encode i16 samples into a standalone MP3 `Vec<u8>`, automatically sizing the buffer.
+    pub fn encode_to_vec(&mut self, samples: &[i16]) -> Result<Vec<u8>, String> {
+        // reserve worst-case space for encode + flush
+        let mut mp3 = Vec::new();
+        mp3.reserve(max_required_buffer_size(samples.len()) + 7200);
+
+        if self.channels == 1 {
+            self.inner
+                .encode_to_vec(MonoPcm(samples), &mut mp3)
+                .map_err(|e| e.to_string())?;
+        } else {
+            self.inner
+                .encode_to_vec(InterleavedPcm(samples), &mut mp3)
+                .map_err(|e| e.to_string())?;
+        }
+
+        self.inner
+            .flush_to_vec::<FlushNoGap>(&mut mp3)
+            .map_err(|e| e.to_string())?;
+
+        Ok(mp3)
+    }
+
+    /// Low-level flush if you used `encode_i16` directly.
     pub fn flush(&mut self, out: &mut Vec<u8>) -> Result<usize, String> {
+        out.reserve(7200);
         self.inner
             .flush_to_vec::<FlushNoGap>(out)
             .map_err(|e| e.to_string())
@@ -50,24 +75,10 @@ impl Encoder for Mp3Encoder {
     }
 
     fn encode_i16(&mut self, input: &[i16], out_buf: &mut [u8]) -> Result<usize, String> {
-        let mut tmp_out = Vec::with_capacity(max_required_buffer_size(input.len()));
-
-        let written = if self.channels == 1 {
-            self.inner
-                .encode_to_vec(MonoPcm(input), &mut tmp_out)
-                .map_err(|e| e.to_string())?
-        } else {
-            self.inner
-                .encode_to_vec(InterleavedPcm(input), &mut tmp_out)
-                .map_err(|e| e.to_string())?
-        };
-
-        if written > out_buf.len() {
-            return Err("Output buffer is too small".to_string());
-        }
-
-        out_buf[..written].copy_from_slice(&tmp_out[..written]);
-        Ok(written)
+        let mp3 = self.encode_to_vec(input)?;
+        let take = mp3.len().min(out_buf.len());
+        out_buf[..take].copy_from_slice(&mp3[..take]);
+        Ok(take)
     }
 
     fn encode_i32(&mut self, _input: &[i32], _out: &mut [u8]) -> Result<usize, String> {
@@ -80,6 +91,7 @@ impl Encoder for Mp3Encoder {
 }
 
 pub struct Mp3Decoder;
+
 impl Decoder for Mp3Decoder {
     fn decode_i16(&mut self, _input: &[u8], _out: &mut [i16], _fec: bool) -> Result<usize, String> {
         Err("not implemented".into())
@@ -103,26 +115,21 @@ mod tests {
         let mut proc = WavStreamProcessor::new();
         let audio = proc.add(&data).unwrap().unwrap();
         let samples = s16le_to_i16(audio.data());
-        let sample_rate = audio.sampling_rate();
-        let channels = audio.channel_count() as u32;
-        let bits = audio.bits_per_sample() as u32;
-        let bitrate = 128_000;
 
-        let mut enc = Mp3Encoder::new(sample_rate, bits, channels, 0, bitrate);
+        let mut enc = Mp3Encoder::new(
+            audio.sampling_rate(),
+            audio.bits_per_sample() as u32,
+            audio.channel_count() as u32,
+            0,
+            128_000,
+        );
         enc.init().unwrap();
 
-        let mut out = Vec::new();
-        let mut encode_buf = vec![0u8; max_required_buffer_size(samples.len())];
-
-        let written = enc.encode_i16(&samples, &mut encode_buf).unwrap();
-        out.extend_from_slice(&encode_buf[..written]);
-
-        enc.flush(&mut out).unwrap();
-
-        assert!(!out.is_empty(), "Output buffer should not be empty");
-        assert_eq!(out[0], 0xFF, "First byte of an MP3 frame should be 0xFF");
+        let mp3 = enc.encode_to_vec(&samples).unwrap();
+        assert!(!mp3.is_empty());
+        assert_eq!(mp3[0], 0xFF);
 
         let output_path = Path::new("../testdata/s16le.wav.mp3");
-        fs::write(output_path, &out).expect("Failed to write test MP3 file");
+        fs::write(output_path, &mp3).unwrap();
     }
 }
