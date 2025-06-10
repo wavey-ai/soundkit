@@ -1,0 +1,10 @@
+[package]
+name = "soundkit-mp3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mp3lame-encoder = "0.2.1"
+mp3lame-sys = "0.1.9"
+soundkit = { path = "../soundkit" }
+tracing = "0.1.40"

@@ -4,6 +4,7 @@ Cargo.lock
 test/out.wav
 .idea/
 .vscode/
+testdata/*mp3*
 testdata/*aac*
 testdata/*opus*
 testdata/*flac*

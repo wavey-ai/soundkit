@@ -1,3 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["soundkit", "soundkit-aac", "soundkit-flac", "soundkit-opus"]
+members = [
+  "soundkit",
+  "soundkit-aac",
+  "soundkit-flac",
+  "soundkit-opus",
+  "soundkit-mp3",
+]
