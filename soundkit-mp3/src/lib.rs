@@ -104,18 +104,21 @@ impl Decoder for Mp3Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mp3lame_encoder::max_required_buffer_size;
     use soundkit::audio_bytes::s16le_to_i16;
     use soundkit::wav::WavStreamProcessor;
     use std::fs;
     use std::path::Path;
 
     #[test]
-    fn test_mp3_encoder_16bit() {
+    fn test_mp3_encoder_encode_i16() {
+        // load a 16-bit WAV
         let data = fs::read("../testdata/s16le.wav").unwrap();
         let mut proc = WavStreamProcessor::new();
         let audio = proc.add(&data).unwrap().unwrap();
         let samples = s16le_to_i16(audio.data());
 
+        // build the encoder
         let mut enc = Mp3Encoder::new(
             audio.sampling_rate(),
             audio.bits_per_sample() as u32,
@@ -125,11 +128,17 @@ mod tests {
         );
         enc.init().unwrap();
 
-        let mp3 = enc.encode_to_vec(&samples).unwrap();
-        assert!(!mp3.is_empty());
-        assert_eq!(mp3[0], 0xFF);
+        // prepare an output buffer sized for the worst case
+        let buf_size = max_required_buffer_size(samples.len()) + 7200;
+        let mut out_buf = vec![0u8; buf_size];
 
+        // encode into our buffer
+        let written = enc.encode_i16(&samples, &mut out_buf).unwrap();
+        assert!(written > 0, "no bytes were written");
+        assert_eq!(out_buf[0], 0xFF, "MP3 frames should start with 0xFF");
+
+        // write exactly the written bytes to disk for manual inspection
         let output_path = Path::new("../testdata/s16le.wav.mp3");
-        fs::write(output_path, &mp3).unwrap();
+        fs::write(output_path, &out_buf[..written]).unwrap();
     }
 }
