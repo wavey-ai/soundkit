@@ -54,11 +54,22 @@ impl Encoder for Mp3Encoder {
         builder.set_sample_rate(sample_rate).unwrap();
         builder.set_num_channels(channels as u8).unwrap();
         let kbps = match bitrate {
-            b if b >= 320_000 => Bitrate::Kbps320,
-            b if b >= 256_000 => Bitrate::Kbps256,
-            b if b >= 192_000 => Bitrate::Kbps192,
-            b if b >= 128_000 => Bitrate::Kbps128,
-            b if b >= 96_000 => Bitrate::Kbps96,
+            8_000 => Bitrate::Kbps8,
+            16_000 => Bitrate::Kbps16,
+            24_000 => Bitrate::Kbps24,
+            32_000 => Bitrate::Kbps32,
+            40_000 => Bitrate::Kbps40,
+            48_000 => Bitrate::Kbps48,
+            64_000 => Bitrate::Kbps64,
+            80_000 => Bitrate::Kbps80,
+            96_000 => Bitrate::Kbps96,
+            112_000 => Bitrate::Kbps112,
+            128_000 => Bitrate::Kbps128,
+            160_000 => Bitrate::Kbps160,
+            192_000 => Bitrate::Kbps192,
+            224_000 => Bitrate::Kbps224,
+            256_000 => Bitrate::Kbps256,
+            320_000 => Bitrate::Kbps320,
             _ => Bitrate::Kbps128,
         };
         builder.set_brate(kbps).unwrap();
