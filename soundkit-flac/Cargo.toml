@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-access-unit = "0.0.2"
+access-unit = "0.1.1"
 libc = "0.2.158"
 libflac-sys = { git = "https://github.com/mgeier/libflac-sys.git" }
 soundkit = { path = "../soundkit" }

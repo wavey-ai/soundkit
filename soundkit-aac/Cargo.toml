@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-access-unit = { git = "https://github.com/wavey-ai/access-unit.git" }
+access-unit = "0.1.1"
 fdk-aac = { git = "https://github.com/wavey-ai/fdk-aac-rs.git" }
 
 soundkit = { path = "../soundkit" }
