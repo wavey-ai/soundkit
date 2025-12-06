@@ -119,7 +119,7 @@ mod tests {
     use soundkit::audio_bytes::s16le_to_i16;
     use soundkit::wav::WavStreamProcessor;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -128,12 +128,11 @@ mod tests {
             .join(file)
     }
 
-    fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
-        path.with_file_name(format!(
-            "{}{}",
-            path.file_name().unwrap().to_string_lossy(),
-            suffix
-        ))
+    fn golden_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("golden")
+            .join(file)
     }
 
     #[test]
@@ -165,7 +164,9 @@ mod tests {
         assert_eq!(out_buf[0], 0xFF, "MP3 frames should start with 0xFF");
 
         // write exactly the written bytes to disk for manual inspection
-        let output_path = append_suffix(&input_path, ".mp3");
+        let output_path =
+            golden_path("mp3/A_Tusk_is_used_to_make_costly_gifts_encoded.mp3");
+        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
         fs::write(&output_path, &out_buf[..written]).unwrap();
     }
 }

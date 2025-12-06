@@ -167,7 +167,7 @@ mod tests {
     use access_unit::aac::is_aac;
     use soundkit::audio_bytes::s16le_to_i16;
     use soundkit::wav::WavStreamProcessor;
-    use std::fs::File;
+    use std::fs::{self, File};
     use std::io::Read;
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -180,15 +180,14 @@ mod tests {
             .join(file)
     }
 
-    fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
-        path.with_file_name(format!(
-            "{}{}",
-            path.file_name().unwrap().to_string_lossy(),
-            suffix
-        ))
+    fn golden_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("golden")
+            .join(file)
     }
 
-    fn run_aac_encoder_with_wav_file(file_path: &Path) {
+    fn run_aac_encoder_with_wav_file(file_path: &Path, output_path: &Path) {
         let mut decoder = AacDecoder::new();
         decoder.init().expect("Decoder initialization failed");
 
@@ -253,7 +252,8 @@ mod tests {
             }
         }
 
-        let mut file = File::create(append_suffix(file_path, ".aac"))
+        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+        let mut file = File::create(output_path)
             .expect("Failed to create output file");
         file.write_all(&encoded_data)
             .expect("Failed to write to output file");
@@ -263,8 +263,9 @@ mod tests {
 
     #[test]
     fn test_aac_encoder_with_wave_16bit() {
-        run_aac_encoder_with_wav_file(&testdata_path(
-            "wav_stereo/A_Tusk_is_used_to_make_costly_gifts.wav",
-        ));
+        run_aac_encoder_with_wav_file(
+            &testdata_path("wav_stereo/A_Tusk_is_used_to_make_costly_gifts.wav"),
+            &golden_path("aac/A_Tusk_is_used_to_make_costly_gifts_encoded.aac"),
+        );
     }
 }

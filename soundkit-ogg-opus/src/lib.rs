@@ -224,7 +224,7 @@ mod tests {
     use soundkit::audio_types::PcmData;
     use soundkit::wav::generate_wav_buffer;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -233,12 +233,11 @@ mod tests {
             .join(file)
     }
 
-    fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
-        path.with_file_name(format!(
-            "{}{}",
-            path.file_name().unwrap().to_string_lossy(),
-            suffix
-        ))
+    fn golden_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("golden")
+            .join(file)
     }
 
     #[test]
@@ -298,7 +297,9 @@ mod tests {
         assert!(decoded_packets > 0, "no opus packets were decoded");
 
         let wav_bytes = generate_wav_buffer(&PcmData::I16(channels), sample_rate).unwrap();
-        let output_path = append_suffix(&input_path, ".decoded.wav");
+        let output_path =
+            golden_path("ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg.decoded.wav");
+        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
         fs::write(&output_path, &wav_bytes).unwrap();
 
         assert!(

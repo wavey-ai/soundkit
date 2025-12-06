@@ -95,7 +95,7 @@ mod tests {
     use super::*;
     use soundkit::audio_bytes::s16le_to_i16;
     use soundkit::wav::WavStreamProcessor;
-    use std::fs::File;
+    use std::fs::{self, File};
     use std::io::Read;
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -108,15 +108,18 @@ mod tests {
             .join(file)
     }
 
-    fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
-        path.with_file_name(format!(
-            "{}{}",
-            path.file_name().unwrap().to_string_lossy(),
-            suffix
-        ))
+    fn golden_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("golden")
+            .join(file)
     }
 
-    fn run_opus_encoder_with_wav_file(file_path: &Path) {
+    fn run_opus_encoder_with_wav_file(
+        file_path: &Path,
+        encoded_output: &Path,
+        decoded_output: &Path,
+    ) {
         let mut file = File::open(file_path).unwrap();
         let mut file_buffer = Vec::new();
         file.read_to_end(&mut file_buffer).unwrap();
@@ -189,12 +192,11 @@ mod tests {
             }
         }
 
-        let mut file = File::create(append_suffix(file_path, ".opus"))
-            .expect("Failed to create output file");
+        fs::create_dir_all(encoded_output.parent().unwrap()).unwrap();
+        let mut file = File::create(encoded_output).expect("Failed to create output file");
         file.write_all(&encoded_data)
             .expect("Failed to write to output file");
-        let mut file = File::create(append_suffix(file_path, ".opus.wav"))
-            .expect("Failed to create output file");
+        let mut file = File::create(decoded_output).expect("Failed to create output file");
         file.write_all(&output[..])
             .expect("Failed to write to output file");
 
@@ -203,8 +205,10 @@ mod tests {
 
     #[test]
     fn test_opus_encoder_with_wave_16bit() {
-        run_opus_encoder_with_wav_file(&testdata_path(
-            "wav_stereo/A_Tusk_is_used_to_make_costly_gifts.wav",
-        ));
+        run_opus_encoder_with_wav_file(
+            &testdata_path("wav_stereo/A_Tusk_is_used_to_make_costly_gifts.wav"),
+            &golden_path("opus/A_Tusk_is_used_to_make_costly_gifts_encoded.opus"),
+            &golden_path("opus/A_Tusk_is_used_to_make_costly_gifts_decoded_from_opus.wav"),
+        );
     }
 }
