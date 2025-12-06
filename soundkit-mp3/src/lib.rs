@@ -119,12 +119,28 @@ mod tests {
     use soundkit::audio_bytes::s16le_to_i16;
     use soundkit::wav::WavStreamProcessor;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+
+    fn testdata_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("testdata")
+            .join(file)
+    }
+
+    fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+        path.with_file_name(format!(
+            "{}{}",
+            path.file_name().unwrap().to_string_lossy(),
+            suffix
+        ))
+    }
 
     #[test]
     fn test_mp3_encoder_encode_i16() {
         // load a 16-bit WAV
-        let data = fs::read("../testdata/s16le.wav").unwrap();
+        let input_path = testdata_path("wav_stereo/A_Tusk_is_used_to_make_costly_gifts.wav");
+        let data = fs::read(&input_path).unwrap();
         let mut proc = WavStreamProcessor::new();
         let audio = proc.add(&data).unwrap().unwrap();
         let samples = s16le_to_i16(audio.data());
@@ -149,7 +165,7 @@ mod tests {
         assert_eq!(out_buf[0], 0xFF, "MP3 frames should start with 0xFF");
 
         // write exactly the written bytes to disk for manual inspection
-        let output_path = Path::new("../testdata/s16le.wav.mp3");
-        fs::write(output_path, &out_buf[..written]).unwrap();
+        let output_path = append_suffix(&input_path, ".mp3");
+        fs::write(&output_path, &out_buf[..written]).unwrap();
     }
 }

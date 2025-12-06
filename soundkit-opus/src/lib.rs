@@ -3,10 +3,10 @@ use soundkit::audio_packet::{Decoder, Encoder};
 
 pub struct OpusEncoder {
     encoder: encoder::Encoder,
-    sample_rate: u32,
-    channels: u32,
-    bits_per_sample: u32,
-    frame_size: u32,
+    _sample_rate: u32,
+    _channels: u32,
+    _bits_per_sample: u32,
+    _frame_size: u32,
     bitrate: u32,
 }
 
@@ -30,10 +30,10 @@ impl Encoder for OpusEncoder {
 
         Self {
             encoder,
-            sample_rate,
-            channels,
-            bits_per_sample,
-            frame_size,
+            _sample_rate: sample_rate,
+            _channels: channels,
+            _bits_per_sample: bits_per_sample,
+            _frame_size: frame_size,
             bitrate,
         }
     }
@@ -48,7 +48,7 @@ impl Encoder for OpusEncoder {
             .map_err(|e| e.to_string())
     }
 
-    fn encode_i32(&mut self, input: &[i32], output: &mut [u8]) -> Result<usize, String> {
+    fn encode_i32(&mut self, _input: &[i32], _output: &mut [u8]) -> Result<usize, String> {
         Err("Not implemented.".to_string())
     }
 
@@ -85,7 +85,7 @@ impl Decoder for OpusDecoder {
             .decode(input, output, fec)
             .map_err(|e| e.to_string())
     }
-    fn decode_i32(&mut self, input: &[u8], output: &mut [i32], fec: bool) -> Result<usize, String> {
+    fn decode_i32(&mut self, _input: &[u8], _output: &mut [i32], _fec: bool) -> Result<usize, String> {
         return Err("not implemented.".to_string());
     }
 }
@@ -98,13 +98,25 @@ mod tests {
     use std::fs::File;
     use std::io::Read;
     use std::io::Write;
+    use std::path::{Path, PathBuf};
     use std::time::Instant;
 
-    fn run_opus_encoder_with_wav_file(file_path: &str) {
-        let mut decoder = OpusDecoder::new(16_000, 1);
-        decoder.init().expect("Decoder initialization failed");
+    fn testdata_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("testdata")
+            .join(file)
+    }
 
-        let frame_size = 320 as usize;
+    fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+        path.with_file_name(format!(
+            "{}{}",
+            path.file_name().unwrap().to_string_lossy(),
+            suffix
+        ))
+    }
+
+    fn run_opus_encoder_with_wav_file(file_path: &Path) {
         let mut file = File::open(file_path).unwrap();
         let mut file_buffer = Vec::new();
         file.read_to_end(&mut file_buffer).unwrap();
@@ -114,8 +126,16 @@ mod tests {
 
         dbg!(audio_data.bits_per_sample());
 
+        let mut decoder = OpusDecoder::new(
+            audio_data.sampling_rate() as usize,
+            audio_data.channel_count() as usize,
+        );
+        decoder.init().expect("Decoder initialization failed");
+
+        let frame_size = std::cmp::max(1, (audio_data.sampling_rate() / 50) as usize);
+
         let mut encoder = OpusEncoder::new(
-            16_000,
+            audio_data.sampling_rate(),
             audio_data.bits_per_sample() as u32,
             audio_data.channel_count() as u32,
             frame_size as u32,
@@ -169,12 +189,12 @@ mod tests {
             }
         }
 
-        let mut file =
-            File::create(file_path.to_owned() + ".opus").expect("Failed to create output file");
+        let mut file = File::create(append_suffix(file_path, ".opus"))
+            .expect("Failed to create output file");
         file.write_all(&encoded_data)
             .expect("Failed to write to output file");
-        let mut file =
-            File::create(file_path.to_owned() + ".opus.wav").expect("Failed to create output file");
+        let mut file = File::create(append_suffix(file_path, ".opus.wav"))
+            .expect("Failed to create output file");
         file.write_all(&output[..])
             .expect("Failed to write to output file");
 
@@ -183,6 +203,8 @@ mod tests {
 
     #[test]
     fn test_opus_encoder_with_wave_16bit() {
-        run_opus_encoder_with_wav_file("../testdata/s16le.wav");
+        run_opus_encoder_with_wav_file(&testdata_path(
+            "wav_stereo/A_Tusk_is_used_to_make_costly_gifts.wav",
+        ));
     }
 }

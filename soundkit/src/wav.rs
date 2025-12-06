@@ -267,10 +267,18 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Read;
+    use std::path::PathBuf;
+
+    fn testdata_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("testdata")
+            .join(file)
+    }
 
     #[test]
     fn test_wav_stream() {
-        let file_path = "../testdata/f32le.wav";
+        let file_path = testdata_path("wav_32f/A_Tusk_is_used_to_make_costly_gifts.wav");
         let mut file = File::open(&file_path).unwrap();
 
         let mut processor = WavStreamProcessor::new();

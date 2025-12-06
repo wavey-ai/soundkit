@@ -225,10 +225,18 @@ mod tests {
     use std::fs::File;
     use std::io::Read;
     use std::io::Write;
+    use std::path::PathBuf;
+
+    fn testdata_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("testdata")
+            .join(file)
+    }
 
     #[test]
     fn test_downsample_audio() {
-        let file_path = "testdata/f32le.wav";
+        let file_path = testdata_path("wav_32f/A_Tusk_is_used_to_make_costly_gifts.wav");
         let mut file = File::open(&file_path).unwrap();
 
         let mut processor = WavStreamProcessor::new();
@@ -259,8 +267,8 @@ mod tests {
 
         match generate_wav_buffer(&PcmData::F32(result), 8_000) {
             Ok(wav_buffer) => {
-                let mut file =
-                    File::create("testdata/f32le_8kz.wav").expect("Could not create file");
+                let output_path = file_path.with_file_name("A_Tusk_is_used_to_make_costly_gifts_8kz.wav");
+                let mut file = File::create(output_path).expect("Could not create file");
                 file.write_all(&wav_buffer)
                     .expect("Could not write to file");
             }

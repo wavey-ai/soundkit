@@ -11,17 +11,6 @@ pub fn i16le_to_f32(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-fn f32_to_i16le(data: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(data.len() * 2); // Each i16 is 2 bytes
-    for value in data {
-        let scaled = (value * i16::MAX as f32)
-            .round()
-            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        bytes.extend(&scaled.to_le_bytes());
-    }
-    bytes
-}
-
 pub fn i16_to_i16le(data: &[i16]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(data.len() * 2); // Each i16 is 2 bytes
     for value in data {

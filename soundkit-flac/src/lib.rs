@@ -328,8 +328,24 @@ mod tests {
     use std::fs::File;
     use std::io::Read;
     use std::io::Write;
+    use std::path::{Path, PathBuf};
 
-    fn run_flac_encoder_with_wav_file(file_path: &str) {
+    fn testdata_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("testdata")
+            .join(file)
+    }
+
+    fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+        path.with_file_name(format!(
+            "{}{}",
+            path.file_name().unwrap().to_string_lossy(),
+            suffix
+        ))
+    }
+
+    fn run_flac_encoder_with_wav_file(file_path: &Path) {
         let mut decoder = FlacDecoder::new();
         decoder.init().expect("Decoder initialization failed");
 
@@ -399,7 +415,7 @@ mod tests {
         dbg!(n);
 
         let mut file =
-            File::create(file_path.to_owned() + ".flac").expect("Failed to create output file");
+            File::create(append_suffix(file_path, ".flac")).expect("Failed to create output file");
         file.write_all(&encoded_data)
             .expect("Failed to write to output file");
 
@@ -408,20 +424,28 @@ mod tests {
 
     #[test]
     fn test_flac_encoder_with_wave_16bit() {
-        run_flac_encoder_with_wav_file("../testdata/s16le.wav");
+        run_flac_encoder_with_wav_file(&testdata_path(
+            "wav_stereo/A_Tusk_is_used_to_make_costly_gifts.wav",
+        ));
     }
 
     #[test]
     fn test_flac_encoder_with_wave_24bit() {
-        run_flac_encoder_with_wav_file("../testdata/s24le.wav");
+        run_flac_encoder_with_wav_file(&testdata_path(
+            "wav_24/A_Tusk_is_used_to_make_costly_gifts.wav",
+        ));
     }
 
     #[test]
     fn test_flac_encoder_with_wave_32bit() {
-        run_flac_encoder_with_wav_file("../testdata/f32le.wav");
+        run_flac_encoder_with_wav_file(&testdata_path(
+            "wav_32f/A_Tusk_is_used_to_make_costly_gifts.wav",
+        ));
     }
 
     fn test_flac_encoder_with_wave_s32bit() {
-        run_flac_encoder_with_wav_file("../testdata/s32le.wav");
+        run_flac_encoder_with_wav_file(&testdata_path(
+            "wav_32f/A_Tusk_is_used_to_make_costly_gifts.wav",
+        ));
     }
 }

@@ -6,4 +6,5 @@ members = [
   "soundkit-flac",
   "soundkit-opus",
   "soundkit-mp3",
+  "soundkit-ogg-opus",
 ]

@@ -1,4 +1,4 @@
-use crate::audio_bytes::{f32le_to_i32, s16le_to_i32, s24le_to_i32, s32le_to_i32, s32le_to_s24};
+use crate::audio_bytes::{f32le_to_i32, s16le_to_i32, s24le_to_i32, s32le_to_i32};
 use byteorder::{ByteOrder, LE};
 use bytes::{Bytes, BytesMut};
 use frame_header::{EncodingFlag, Endianness, FrameHeader};
