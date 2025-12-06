@@ -253,7 +253,11 @@ unsafe extern "C" fn read_callback_decode(
     client_data: *mut std::ffi::c_void,
 ) -> ffi::FLAC__StreamDecoderReadStatus {
     let decoder = &mut *(client_data as *mut FlacDecoder);
-    let remaining = decoder.input_buffer.len() - decoder.input_position;
+    // Avoid underflow if libFLAC asks for more bytes than we buffered.
+    let remaining = decoder
+        .input_buffer
+        .len()
+        .saturating_sub(decoder.input_position);
     let to_read = std::cmp::min(*bytes, remaining);
 
     if to_read == 0 {
