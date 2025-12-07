@@ -9,3 +9,6 @@ fdk-aac = { git = "https://github.com/wavey-ai/fdk-aac-rs.git" }
 
 soundkit = { path = "../soundkit" }
 tracing = "0.1.40"
+
+[dev-dependencies]
+tracing-subscriber = "0.3"

@@ -9,3 +9,7 @@ testdata/*mp3*
 testdata/*aac*
 testdata/*opus*
 testdata/*flac*
+soundkit-aac/outputs/
+soundkit-flac/outputs/
+soundkit-mp3/outputs/
+soundkit-opus/outputs/

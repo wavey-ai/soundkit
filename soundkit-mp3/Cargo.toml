@@ -9,3 +9,6 @@ mp3lame-sys = "0.1.9"
 nanomp3 = "0.1.1"
 soundkit = { path = "../soundkit" }
 tracing = "0.1.40"
+
+[dev-dependencies]
+tracing-subscriber = "0.3"

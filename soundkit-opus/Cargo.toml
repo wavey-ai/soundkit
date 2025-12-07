@@ -10,6 +10,9 @@ readme = "README.md"
 [dependencies]
 libopus = { git = "https://github.com/wavey-ai/opus-rs" }
 soundkit = { version = "0.12.1", path = "../soundkit" }
+tracing = "0.1.40"
 
+[dev-dependencies]
+tracing-subscriber = "0.3"
 [lib]
 crate-type = ["cdylib", "rlib"]

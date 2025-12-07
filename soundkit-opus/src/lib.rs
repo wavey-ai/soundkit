@@ -1,5 +1,6 @@
 use libopus::{decoder, encoder};
 use soundkit::audio_packet::{Decoder, Encoder};
+use tracing::{debug, trace};
 
 pub struct OpusEncoder {
     encoder: encoder::Encoder,
@@ -65,25 +66,63 @@ impl Encoder for OpusEncoder {
 
 pub struct OpusDecoder {
     decoder: decoder::Decoder,
+    sample_rate: u32,
+    channels: u8,
+    first_frame_logged: bool,
 }
 
 impl OpusDecoder {
     pub fn new(sample_rate: usize, channels: usize) -> Self {
         let decoder = decoder::Decoder::create(sample_rate, channels, 1, 1, &[0u8, 1u8]).unwrap();
 
-        OpusDecoder { decoder }
+        OpusDecoder {
+            decoder,
+            sample_rate: sample_rate as u32,
+            channels: channels as u8,
+            first_frame_logged: false,
+        }
     }
 
     pub fn init(&mut self) -> Result<(), String> {
         Ok(())
     }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub fn channels(&self) -> u8 {
+        self.channels
+    }
 }
 
 impl Decoder for OpusDecoder {
     fn decode_i16(&mut self, input: &[u8], output: &mut [i16], fec: bool) -> Result<usize, String> {
-        self.decoder
+        let samples_per_channel = self
+            .decoder
             .decode(input, output, fec)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+
+        if !self.first_frame_logged {
+            debug!(
+                sample_rate_hz = self.sample_rate,
+                channels = self.channels,
+                packet_len = input.len(),
+                pcm_samples_written = samples_per_channel * self.channels as usize,
+                "decoded Opus packet"
+            );
+        } else {
+            trace!(
+                sample_rate_hz = self.sample_rate,
+                channels = self.channels,
+                packet_len = input.len(),
+                pcm_samples_written = samples_per_channel * self.channels as usize,
+                "decoded Opus packet"
+            );
+        }
+        self.first_frame_logged = true;
+
+        Ok(samples_per_channel)
     }
     fn decode_i32(&mut self, _input: &[u8], _output: &mut [i32], _fec: bool) -> Result<usize, String> {
         return Err("not implemented.".to_string());
@@ -100,6 +139,26 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::time::Instant;
+    use std::sync::Once;
+    use tracing::debug;
+    use tracing_subscriber;
+
+    #[derive(Debug)]
+    struct RawOpusHeader {
+        sample_rate: u32,
+        channels: u8,
+        pre_skip: u16,
+    }
+
+    fn init_tracing() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_test_writer()
+                .try_init();
+        });
+    }
 
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -115,6 +174,97 @@ mod tests {
             .join(file)
     }
 
+    fn outputs_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("outputs")
+            .join(file)
+    }
+
+    fn parse_length_prefixed_opus(
+        data: &[u8],
+    ) -> Result<(RawOpusHeader, Vec<&[u8]>), String> {
+        if data.len() < 19 || !data.starts_with(b"OpusHead") {
+            return Err("Missing OpusHead".to_string());
+        }
+
+        let header = RawOpusHeader {
+            sample_rate: u32::from_le_bytes([data[12], data[13], data[14], data[15]]),
+            channels: data[9],
+            pre_skip: u16::from_le_bytes([data[10], data[11]]),
+        };
+
+        let mut packets = Vec::new();
+        let mut cursor = &data[19..];
+        while cursor.len() >= 2 {
+            let len = u16::from_le_bytes([cursor[0], cursor[1]]) as usize;
+            cursor = &cursor[2..];
+            if len == 0 || cursor.len() < len {
+                break;
+            }
+            let (packet, rest) = cursor.split_at(len);
+            packets.push(packet);
+            cursor = rest;
+        }
+
+        Ok((header, packets))
+    }
+
+    #[test]
+    fn test_opus_decoder_streaming_decode() {
+        // decode the real fixture opus stream; it is already length-prefixed
+        let input_path = testdata_path("opus/A_Tusk_is_used_to_make_costly_gifts.opus");
+        let opus_bytes = fs::read(&input_path).unwrap();
+        assert!(!opus_bytes.is_empty(), "fixture opus missing or empty");
+
+        init_tracing();
+
+        let (header, packets) =
+            parse_length_prefixed_opus(&opus_bytes).expect("failed to parse opus fixture");
+
+        const MAX_OPUS_FRAME_SAMPLES: usize = 5760; // 120 ms @ 48kHz
+        let mut decoder =
+            OpusDecoder::new(header.sample_rate as usize, header.channels as usize);
+        decoder.init().expect("Decoder initialization failed");
+
+        let mut decoded = Vec::new();
+        let mut scratch =
+            vec![0i16; MAX_OPUS_FRAME_SAMPLES * header.channels as usize];
+        let mut pre_skip = header.pre_skip as usize * header.channels as usize;
+
+        for packet in packets {
+            let samples_per_channel =
+                decoder.decode_i16(packet, &mut scratch, false).unwrap();
+            if samples_per_channel == 0 {
+                continue;
+            }
+
+            let mut frame_samples =
+                samples_per_channel * header.channels as usize;
+            let mut start = 0;
+            if pre_skip > 0 {
+                let skip = pre_skip.min(frame_samples);
+                pre_skip -= skip;
+                start = skip;
+            }
+
+            frame_samples = frame_samples.saturating_sub(start);
+            if frame_samples == 0 {
+                continue;
+            }
+
+            decoded.extend_from_slice(&scratch[start..start + frame_samples]);
+        }
+
+        assert!(!decoded.is_empty(), "decoder produced no PCM samples");
+        assert_eq!(decoder.sample_rate(), 16_000);
+        assert_eq!(decoder.channels(), 1);
+
+        let output_path = outputs_path("opus_decoder_streaming_decode.pcm");
+        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+        let pcm_bytes: Vec<u8> = decoded.iter().flat_map(|s| s.to_le_bytes()).collect();
+        fs::write(&output_path, pcm_bytes).unwrap();
+    }
+
     fn run_opus_encoder_with_wav_file(
         file_path: &Path,
         encoded_output: &Path,
@@ -127,7 +277,13 @@ mod tests {
         let mut processor = WavStreamProcessor::new();
         let audio_data = processor.add(&file_buffer).unwrap().unwrap();
 
-        dbg!(audio_data.bits_per_sample());
+        init_tracing();
+        debug!(
+            bits_per_sample = audio_data.bits_per_sample(),
+            sample_rate_hz = audio_data.sampling_rate(),
+            channels = audio_data.channel_count(),
+            "loaded WAV fixture"
+        );
 
         let mut decoder = OpusDecoder::new(
             audio_data.sampling_rate() as usize,
@@ -164,16 +320,23 @@ mod tests {
                 Ok(encoded_len) => {
                     if encoded_len > 0 {
                         let elapsed_time = start_time.elapsed();
-                        println!("Encoding took: {:.2?}", elapsed_time);
+                        debug!(
+                            chunk = i,
+                            encoded_len,
+                            elapsed_micros = elapsed_time.as_micros() as u64,
+                            "encoded chunk"
+                        );
                         match decoder.decode_i16(
                             &output_buffer[..encoded_len],
                             &mut decoded_samples,
                             false,
                         ) {
                             Ok(samples_read) => {
-                                println!(
-                                    "Decoded {} samples of {} bytes successfully.",
-                                    samples_read, encoded_len
+                                debug!(
+                                    chunk = i,
+                                    samples_read,
+                                    encoded_len,
+                                    "decoded opus chunk"
                                 );
                                 for sample in &decoded_samples
                                     [..samples_read * audio_data.channel_count() as usize]

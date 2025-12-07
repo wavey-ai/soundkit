@@ -166,6 +166,35 @@ impl Mp3Decoder {
         self.channels = None;
     }
 
+    fn capture_header(&mut self, info: &FrameInfo) {
+        if self.sample_rate.is_none() || self.channels.is_none() {
+            tracing::debug!(
+                sample_rate_hz = info.sample_rate,
+                channel_mode = ?info.channels,
+                channels = info.channels.num(),
+                bitrate_kbps = info.bitrate,
+                samples_produced = info.samples_produced,
+                "parsed MP3 frame header"
+            );
+        }
+
+        self.sample_rate.get_or_insert(info.sample_rate);
+        self.channels.get_or_insert(info.channels.num());
+    }
+
+    fn log_frame_decode(&self, info: &FrameInfo, consumed: usize, frame_samples: usize) {
+        tracing::trace!(
+            sample_rate_hz = info.sample_rate,
+            channel_mode = ?info.channels,
+            channels = info.channels.num(),
+            bitrate_kbps = info.bitrate,
+            samples_produced = info.samples_produced,
+            bytes_consumed = consumed,
+            pcm_samples_written = frame_samples,
+            "decoded MP3 frame"
+        );
+    }
+
     fn write_frame_i16(&self, info: &FrameInfo, output: &mut [i16]) -> Result<usize, String> {
         let channels = info.channels.num() as usize;
         let frame_samples = info.samples_produced * channels;
@@ -237,10 +266,11 @@ impl AudioDecoder for Mp3Decoder {
                 }
             };
 
-            self.sample_rate.get_or_insert(info.sample_rate);
-            self.channels.get_or_insert(info.channels.num());
+            self.capture_header(&info);
 
-            written += self.write_frame_i16(&info, &mut out[written..])?;
+            let frame_written = self.write_frame_i16(&info, &mut out[written..])?;
+            self.log_frame_decode(&info, consumed, frame_written);
+            written += frame_written;
 
             if out.len().saturating_sub(written) < MAX_SAMPLES_PER_FRAME {
                 break;
@@ -269,10 +299,11 @@ impl AudioDecoder for Mp3Decoder {
                 }
             };
 
-            self.sample_rate.get_or_insert(info.sample_rate);
-            self.channels.get_or_insert(info.channels.num());
+            self.capture_header(&info);
 
-            written += self.write_frame_i32(&info, &mut out[written..])?;
+            let frame_written = self.write_frame_i32(&info, &mut out[written..])?;
+            self.log_frame_decode(&info, consumed, frame_written);
+            written += frame_written;
 
             if out.len().saturating_sub(written) < MAX_SAMPLES_PER_FRAME {
                 break;
@@ -328,6 +359,12 @@ mod tests {
             .join(file)
     }
 
+    fn outputs_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("outputs")
+            .join(file)
+    }
+
     #[test]
     fn test_mp3_encoder_encode_i16() {
         // load a 16-bit WAV
@@ -375,25 +412,15 @@ mod tests {
 
     #[test]
     fn test_mp3_decoder_streaming_decode() {
-        // encode a short mp3 first so we have known-good input
-        let input_path = testdata_path("wav_stereo/A_Tusk_is_used_to_make_costly_gifts.wav");
-        let data = fs::read(&input_path).unwrap();
-        let mut proc = WavStreamProcessor::new();
-        let audio = proc.add(&data).unwrap().unwrap();
-        let samples = s16le_to_i16(audio.data());
-
-        let mut enc = Mp3Encoder::new(
-            audio.sampling_rate(),
-            audio.bits_per_sample() as u32,
-            audio.channel_count() as u32,
-            0,
-            128_000,
-        );
-        enc.init().unwrap();
-        let mp3_bytes = enc.encode_to_vec(&samples).expect("mp3 encode failed");
-        assert!(!mp3_bytes.is_empty(), "no mp3 bytes produced");
+        // decode the real fixture MP3, not a freshly encoded one
+        let input_path = testdata_path("mp3/A_Tusk_is_used_to_make_costly_gifts.mp3");
+        let mp3_bytes = fs::read(&input_path).unwrap();
+        assert!(!mp3_bytes.is_empty(), "fixture mp3 missing or empty");
 
         // decode in small chunks to exercise streaming
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
         let mut dec = Mp3Decoder::new();
         let mut decoded = Vec::new();
         let mut scratch = vec![0i16; MAX_SAMPLES_PER_FRAME * 2];
@@ -412,25 +439,17 @@ mod tests {
             decoded.extend_from_slice(&scratch[..written]);
         }
 
-        assert_eq!(
-            dec.sample_rate(),
-            Some(audio.sampling_rate()),
-            "sample rate should be captured from the bitstream"
-        );
-        assert_eq!(
-            dec.channels(),
-            Some(audio.channel_count()),
-            "channel count should be captured from the bitstream"
-        );
         assert!(
             !decoded.is_empty(),
             "decoder produced no PCM samples"
         );
-        assert!(
-            decoded.len() >= samples.len() / 2,
-            "unexpectedly few decoded samples: {} vs source {}",
-            decoded.len(),
-            samples.len()
-        );
+        assert_eq!(dec.sample_rate(), Some(16_000), "fixture sample rate");
+        assert_eq!(dec.channels(), Some(1), "fixture channel count");
+
+        // persist decoded PCM for manual inspection
+        let output_path = outputs_path("mp3_decoder_streaming_decode.pcm");
+        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+        let pcm_bytes: Vec<u8> = decoded.iter().flat_map(|s| s.to_le_bytes()).collect();
+        fs::write(&output_path, pcm_bytes).unwrap();
     }
 }

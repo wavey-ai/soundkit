@@ -4,6 +4,7 @@ use ogg::Packet;
 use soundkit::audio_packet::Decoder;
 use soundkit::audio_types::AudioData;
 use soundkit_opus::OpusDecoder;
+use tracing::{debug, trace};
 
 const MAX_OPUS_FRAME_SAMPLES: usize = 5760; // 120 ms @ 48 kHz
 
@@ -94,6 +95,7 @@ pub struct OggOpusDecoder {
     info: Option<OpusStreamInfo>,
     seen_tags: bool,
     pre_skip_remaining: usize,
+    logged_first_audio: bool,
 }
 
 impl OggOpusDecoder {
@@ -104,6 +106,7 @@ impl OggOpusDecoder {
             info: None,
             seen_tags: false,
             pre_skip_remaining: 0,
+            logged_first_audio: false,
         }
     }
 
@@ -134,6 +137,13 @@ impl OggOpusDecoder {
                 self.pre_skip_remaining = scaled_skip;
                 self.opus = Some(opus);
                 self.info = Some(info);
+            debug!(
+                sample_rate_hz = info.sample_rate,
+                channels = info.channels,
+                pre_skip = info.pre_skip,
+                scaled_skip = scaled_skip,
+                "parsed OpusHead"
+                );
                 continue;
             }
 
@@ -165,6 +175,22 @@ impl OggOpusDecoder {
                 continue;
             }
 
+            if !self.logged_first_audio {
+                debug!(
+                    packet_len = packet.data.len(),
+                    samples_per_channel = samples,
+                    pre_skip_remaining = self.pre_skip_remaining,
+                    "decoded Opus packet"
+                );
+            } else {
+                trace!(
+                    packet_len = packet.data.len(),
+                    samples_per_channel = samples,
+                    pre_skip_remaining = self.pre_skip_remaining,
+                    "decoded Opus packet"
+                );
+            }
+
             let mut start = 0;
             if self.pre_skip_remaining > 0 {
                 let skip = self.pre_skip_remaining.min(samples);
@@ -173,9 +199,12 @@ impl OggOpusDecoder {
             }
 
             let end = samples * info.channels as usize;
+            trace!(pcm_samples_written = end.saturating_sub(start), "appending decoded PCM");
             for sample in &tmp[start..end] {
                 pcm_bytes.extend_from_slice(&sample.to_le_bytes());
             }
+
+            self.logged_first_audio = true;
         }
 
         if pcm_bytes.is_empty() {

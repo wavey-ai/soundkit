@@ -4,7 +4,7 @@ use libflac_sys::*;
 use soundkit::audio_packet::{Decoder, Encoder};
 use std::cell::RefCell;
 use std::rc::Rc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, trace};
 
 pub struct FlacEncoder {
     encoder: *mut ffi::FLAC__StreamEncoder,
@@ -62,7 +62,7 @@ impl Encoder for FlacEncoder {
         return self.reset();
     }
 
-    fn encode_i16(&mut self, input: &[i16], output: &mut [u8]) -> Result<usize, String> {
+    fn encode_i16(&mut self, _input: &[i16], _output: &mut [u8]) -> Result<usize, String> {
         Err("Not implemented.".to_string())
     }
 
@@ -151,6 +151,8 @@ pub struct FlacDecoder {
     output_buffer: Vec<i32>,
     input_buffer: Vec<u8>,
     input_position: usize,
+    sample_rate: Option<u32>,
+    channels: Option<u8>,
 }
 
 impl FlacDecoder {
@@ -161,6 +163,8 @@ impl FlacDecoder {
             output_buffer: Vec::new(),
             input_buffer: Vec::new(),
             input_position: 0,
+            sample_rate: None,
+            channels: None,
         }
     }
 
@@ -189,12 +193,20 @@ impl FlacDecoder {
             }
         }
     }
+
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.sample_rate
+    }
+
+    pub fn channels(&self) -> Option<u8> {
+        self.channels
+    }
 }
 impl Decoder for FlacDecoder {
     fn decode_i16(
         &mut self,
-        input: &[u8],
-        output: &mut [i16],
+        _input: &[u8],
+        _output: &mut [i16],
         _fec: bool,
     ) -> Result<usize, String> {
         Err("not implemented.".to_string())
@@ -206,34 +218,63 @@ impl Decoder for FlacDecoder {
         output: &mut [i32],
         _fec: bool,
     ) -> Result<usize, String> {
-        // Reset internal buffers
+        // Reset decoded buffer for this call
         self.output_buffer.clear();
-        self.input_buffer.clear();
-        self.input_position = 0;
 
-        // Copy input data to internal buffer
-        self.input_buffer.extend_from_slice(input);
+        if !input.is_empty() {
+            self.input_buffer.extend_from_slice(input);
+        }
 
-        unsafe {
-            // Process the entire input
-            let result = ffi::FLAC__stream_decoder_process_single(self.decoder);
+        let mut total_written = 0usize;
+
+        // Process as many frames as we can with the buffered data.
+        while !self.input_buffer.is_empty() {
+            self.input_position = 0;
+
+            let result = unsafe { ffi::FLAC__stream_decoder_process_single(self.decoder) };
             if result == 0 {
-                let state = ffi::FLAC__stream_decoder_get_state(self.decoder);
+                let state = unsafe { ffi::FLAC__stream_decoder_get_state(self.decoder) };
                 return Err(format!(
                     "Failed to decode FLAC block, decoder state: {:?}",
                     state
                 ));
             }
+
+            let consumed = self.input_position.min(self.input_buffer.len());
+            if consumed > 0 {
+                self.input_buffer.drain(..consumed);
+                self.input_position = 0;
+            }
+
+            if self.output_buffer.is_empty() {
+                // need more data to form a full frame
+                if consumed == 0 {
+                    break;
+                }
+                continue;
+            }
+
+            let decoded_len = self.output_buffer.len();
+            if output.len().saturating_sub(total_written) < decoded_len {
+                return Err(format!(
+                    "Output buffer too small for decoded frame (needed {}, had {})",
+                    decoded_len,
+                    output.len().saturating_sub(total_written)
+                ));
+            }
+
+            output[total_written..total_written + decoded_len]
+                .copy_from_slice(&self.output_buffer);
+            total_written += decoded_len;
+            self.output_buffer.clear();
+
+            // Stop early if caller's buffer is nearly full; let them call again.
+            if output.len().saturating_sub(total_written) < 1024 {
+                break;
+            }
         }
 
-        // Copy decoded samples to the output buffer
-        let decoded_len = self.output_buffer.len();
-        if output.len() < decoded_len {
-            return Err("Output buffer too small".to_string());
-        }
-
-        output[..decoded_len].copy_from_slice(&self.output_buffer);
-        Ok(decoded_len)
+        Ok(total_written)
     }
 }
 
@@ -284,12 +325,33 @@ unsafe extern "C" fn write_callback_decode(
 
     let channels = (*frame).header.channels as usize;
     let blocksize = (*frame).header.blocksize as usize;
+    let first_frame = decoder.sample_rate.is_none() || decoder.channels.is_none();
+    decoder.sample_rate.get_or_insert((*frame).header.sample_rate);
+    decoder.channels.get_or_insert((*frame).header.channels as u8);
 
     let buffer = slice::from_raw_parts(buffer, channels);
     let buffer = buffer
         .iter()
         .map(|x| slice::from_raw_parts(*x, blocksize))
         .collect::<Vec<&[i32]>>();
+
+    if first_frame {
+        debug!(
+            sample_rate_hz = (*frame).header.sample_rate,
+            channels = (*frame).header.channels,
+            blocksize,
+            pcm_samples_written = blocksize * channels,
+            "decoded FLAC frame"
+        );
+    } else {
+        trace!(
+            sample_rate_hz = (*frame).header.sample_rate,
+            channels = (*frame).header.channels,
+            blocksize,
+            pcm_samples_written = blocksize * channels,
+            "decoded FLAC frame"
+        );
+    }
 
     for i in 0..blocksize {
         for j in 0..channels {
@@ -333,6 +395,7 @@ mod tests {
     use std::io::Read;
     use std::io::Write;
     use std::path::{Path, PathBuf};
+    use tracing_subscriber;
 
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -346,6 +409,52 @@ mod tests {
             .join("..")
             .join("golden")
             .join(file)
+    }
+
+    fn outputs_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("outputs")
+            .join(file)
+    }
+
+    #[test]
+    fn test_flac_decoder_streaming_decode() {
+        // decode the real fixture FLAC, not a freshly encoded one
+        let input_path = testdata_path("flac/A_Tusk_is_used_to_make_costly_gifts.flac");
+        let flac_bytes = fs::read(&input_path).unwrap();
+        assert!(!flac_bytes.is_empty(), "fixture flac missing or empty");
+
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
+
+        let mut decoder = FlacDecoder::new();
+        decoder.init().expect("Decoder initialization failed");
+
+        let mut decoded = Vec::new();
+        let mut scratch = vec![0i32; 8192];
+
+        for chunk in flac_bytes.chunks(4096) {
+            let written = decoder.decode_i32(chunk, &mut scratch, false).unwrap();
+            decoded.extend_from_slice(&scratch[..written]);
+        }
+
+        loop {
+            let written = decoder.decode_i32(&[], &mut scratch, false).unwrap();
+            if written == 0 {
+                break;
+            }
+            decoded.extend_from_slice(&scratch[..written]);
+        }
+
+        assert!(!decoded.is_empty(), "decoder produced no PCM samples");
+        assert_eq!(decoder.sample_rate(), Some(16_000), "fixture sample rate");
+        assert_eq!(decoder.channels(), Some(1), "fixture channel count");
+
+        let output_path = outputs_path("flac_decoder_streaming_decode_s32le.pcm");
+        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+        let pcm_bytes: Vec<u8> = decoded.iter().flat_map(|s| s.to_le_bytes()).collect();
+        fs::write(&output_path, pcm_bytes).unwrap();
     }
 
     fn run_flac_encoder_with_wav_file(file_path: &Path, output_path: &Path) {
@@ -443,13 +552,6 @@ mod tests {
 
     #[test]
     fn test_flac_encoder_with_wave_32bit() {
-        run_flac_encoder_with_wav_file(
-            &testdata_path("wav_32f/A_Tusk_is_used_to_make_costly_gifts.wav"),
-            &golden_path("flac/A_Tusk_is_used_to_make_costly_gifts_32float.flac"),
-        );
-    }
-
-    fn test_flac_encoder_with_wave_s32bit() {
         run_flac_encoder_with_wav_file(
             &testdata_path("wav_32f/A_Tusk_is_used_to_make_costly_gifts.wav"),
             &golden_path("flac/A_Tusk_is_used_to_make_costly_gifts_32float.flac"),

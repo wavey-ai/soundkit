@@ -7,13 +7,13 @@ use fdk_aac::enc::{
 use soundkit::audio_packet::{Decoder, Encoder};
 use std::cell::RefCell;
 use std::rc::Rc;
-use tracing::{debug, error};
+use tracing::{debug, error, trace};
 
 pub struct AacEncoder {
     encoder: AacLibEncoder,
     buffer: Rc<RefCell<Vec<u8>>>,
-    channels: u32,
-    sample_rate: u32,
+    _channels: u32,
+    _sample_rate: u32,
 }
 
 impl Encoder for AacEncoder {
@@ -41,8 +41,8 @@ impl Encoder for AacEncoder {
         AacEncoder {
             encoder,
             buffer: Rc::new(RefCell::new(Vec::new())),
-            channels,
-            sample_rate,
+            _channels: channels,
+            _sample_rate: sample_rate,
         }
     }
 
@@ -51,13 +51,10 @@ impl Encoder for AacEncoder {
     }
 
     fn encode_i16(&mut self, input: &[i16], output: &mut [u8]) -> Result<usize, String> {
-        let mut encoded_info: AacEncodeInfo;
-        let mut result = Ok(());
-
         // Clear the internal buffer before encoding
         self.buffer.borrow_mut().clear();
 
-        encoded_info = match self.encoder.encode(input, output) {
+        let encoded_info: AacEncodeInfo = match self.encoder.encode(input, output) {
             Ok(info) => info,
             Err(err) => {
                 error!("Encoding failed: {:?}", err);
@@ -66,7 +63,7 @@ impl Encoder for AacEncoder {
         };
 
         if encoded_info.output_size > output.len() {
-            result = Err(format!(
+            return Err(format!(
                 "Output buffer too small: {} bytes needed but only {} bytes available",
                 encoded_info.output_size,
                 output.len(),
@@ -76,7 +73,7 @@ impl Encoder for AacEncoder {
         Ok(encoded_info.output_size)
     }
 
-    fn encode_i32(&mut self, input: &[i32], output: &mut [u8]) -> Result<usize, String> {
+    fn encode_i32(&mut self, _input: &[i32], _output: &mut [u8]) -> Result<usize, String> {
         Err("Not implemented.".to_string())
     }
 
@@ -94,9 +91,9 @@ impl Drop for AacEncoder {
 
 pub struct AacDecoder {
     decoder: AacLibDecoder,
-    output_buffer: Vec<i16>, // Stores decoded PCM data
-    input_buffer: Vec<u8>,   // Holds the raw AAC data
-    input_position: usize,   // Tracks current position in the input buffer
+    input_buffer: Vec<u8>,
+    sample_rate: Option<u32>,
+    channels: Option<u8>,
 }
 
 impl AacDecoder {
@@ -105,14 +102,22 @@ impl AacDecoder {
 
         AacDecoder {
             decoder,
-            output_buffer: Vec::new(),
             input_buffer: Vec::new(),
-            input_position: 0,
+            sample_rate: None,
+            channels: None,
         }
     }
 
     pub fn init(&mut self) -> Result<(), String> {
         Ok(())
+    }
+
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.sample_rate
+    }
+
+    pub fn channels(&self) -> Option<u8> {
+        self.channels
     }
 }
 
@@ -123,32 +128,91 @@ impl Decoder for AacDecoder {
         output: &mut [i16],
         _fec: bool,
     ) -> Result<usize, String> {
-        self.output_buffer.clear();
-        self.input_buffer.clear();
-        self.input_position = 0;
-
-        self.input_buffer.extend_from_slice(input);
-
-        let bytes_consumed = match self.decoder.fill(&self.input_buffer[self.input_position..]) {
-            Ok(bytes) => bytes,
-            Err(err) => return Err(format!("Error filling decoder: {}", err)),
-        };
-
-        self.input_position += bytes_consumed;
-
-        match self.decoder.decode_frame(output) {
-            Ok(()) => {
-                let decoded_frame_size = self.decoder.decoded_frame_size();
-                Ok(decoded_frame_size)
-            }
-            Err(err) => Err(format!("Decoding error: {}", err)),
+        if !input.is_empty() {
+            self.input_buffer.extend_from_slice(input);
         }
+
+        let mut written = 0usize;
+        let mut total_consumed = 0usize;
+
+        loop {
+            let consumed = if self.input_buffer.is_empty() {
+                0
+            } else {
+                match self.decoder.fill(&self.input_buffer) {
+                    Ok(bytes) => bytes,
+                    Err(err) => return Err(format!("Error filling decoder: {}", err)),
+                }
+            };
+
+            if consumed > 0 {
+                total_consumed += consumed;
+                self.input_buffer.drain(..consumed);
+            }
+
+            let remaining = output.len().saturating_sub(written);
+            if remaining == 0 {
+                break;
+            }
+
+            match self.decoder.decode_frame(&mut output[written..]) {
+                Ok(()) => {
+                    let info = self.decoder.stream_info();
+                    let frame_samples =
+                        info.numChannels as usize * info.frameSize as usize;
+
+                    if frame_samples == 0 {
+                        break;
+                    }
+
+                    if remaining < frame_samples {
+                        return Err(format!(
+                            "Output buffer too small for decoded frame (needed {}, had {})",
+                            frame_samples, remaining
+                        ));
+                    }
+
+                    let first_frame = self.sample_rate.is_none() || self.channels.is_none();
+                    self.sample_rate.get_or_insert(info.sampleRate as u32);
+                    self.channels.get_or_insert(info.numChannels as u8);
+                    written += frame_samples;
+
+                    if first_frame {
+                        debug!(
+                            sample_rate_hz = info.sampleRate,
+                            channels = info.numChannels,
+                            frame_samples,
+                            bytes_consumed = total_consumed,
+                            "decoded AAC frame"
+                        );
+                    } else {
+                        trace!(
+                            sample_rate_hz = info.sampleRate,
+                            channels = info.numChannels,
+                            frame_samples,
+                            bytes_consumed = total_consumed,
+                            "decoded AAC frame"
+                        );
+                    }
+                }
+                Err(err) => {
+                    if err == DecoderError::NOT_ENOUGH_BITS {
+                        // need more data
+                        break;
+                    }
+
+                    return Err(format!("Decoding error: {}", err));
+                }
+            }
+        }
+
+        Ok(written)
     }
 
     fn decode_i32(
         &mut self,
-        input: &[u8],
-        output: &mut [i32],
+        _input: &[u8],
+        _output: &mut [i32],
         _fec: bool,
     ) -> Result<usize, String> {
         Err("Not implemented.".to_string())
@@ -172,6 +236,7 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::time::Instant;
+    use tracing_subscriber;
 
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -185,6 +250,53 @@ mod tests {
             .join("..")
             .join("golden")
             .join(file)
+    }
+
+    fn outputs_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("outputs")
+            .join(file)
+    }
+
+    #[test]
+    fn test_aac_decoder_streaming_decode() {
+        // use the real fixture AAC, not one we just encoded
+        let input_path = golden_path("aac/A_Tusk_is_used_to_make_costly_gifts_encoded.aac");
+        let aac_bytes = fs::read(&input_path).unwrap();
+        assert!(!aac_bytes.is_empty(), "fixture aac missing or empty");
+
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
+
+        let mut decoder = AacDecoder::new();
+        decoder.init().expect("Decoder initialization failed");
+
+        let mut decoded = Vec::new();
+        let mut scratch = vec![0i16; 4096];
+
+        for chunk in aac_bytes.chunks(2048) {
+            let written = decoder.decode_i16(chunk, &mut scratch, false).unwrap();
+            decoded.extend_from_slice(&scratch[..written]);
+        }
+
+        // final drain if anything buffered
+        loop {
+            let written = decoder.decode_i16(&[], &mut scratch, false).unwrap();
+            if written == 0 {
+                break;
+            }
+            decoded.extend_from_slice(&scratch[..written]);
+        }
+
+        assert!(!decoded.is_empty(), "decoder produced no PCM samples");
+        assert_eq!(decoder.sample_rate(), Some(16_000), "fixture sample rate");
+        assert_eq!(decoder.channels(), Some(2), "fixture channel count");
+
+        let output_path = outputs_path("aac_decoder_streaming_decode.pcm");
+        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+        let pcm_bytes: Vec<u8> = decoded.iter().flat_map(|s| s.to_le_bytes()).collect();
+        fs::write(&output_path, pcm_bytes).unwrap();
     }
 
     fn run_aac_encoder_with_wav_file(file_path: &Path, output_path: &Path) {
