@@ -308,6 +308,64 @@ pub fn s24le_to_i32_sample(sample_bytes: [u8; 3]) -> i32 {
     (sample << 8) >> 8 // sign extend
 }
 
+pub fn stereo_to_mono_take_left(input: &[i16]) -> Vec<i16> {
+    assert!(
+        input.len() % 2 == 0,
+        "Stereo buffer must contain an even number of samples"
+    );
+
+    let frames = input.len() / 2;
+    let mut out = Vec::with_capacity(frames);
+    for i in 0..frames {
+        out.push(input[2 * i]);
+    }
+    out
+}
+
+pub fn stereo_to_mono_inplace_take_left(samples: &mut [i16]) -> &mut [i16] {
+    assert!(
+        samples.len() % 2 == 0,
+        "Stereo buffer must contain an even number of samples"
+    );
+
+    let frames = samples.len() / 2;
+    for i in 0..frames {
+        samples[i] = samples[2 * i];
+    }
+    &mut samples[..frames]
+}
+
+pub fn stereo_to_mono_avg(input: &[i16]) -> Vec<i16> {
+    assert!(
+        input.len() % 2 == 0,
+        "Stereo buffer must contain an even number of samples"
+    );
+
+    let frames = input.len() / 2;
+    let mut out = Vec::with_capacity(frames);
+    for i in 0..frames {
+        let l = input[2 * i] as i32;
+        let r = input[2 * i + 1] as i32;
+        out.push(((l + r) / 2) as i16);
+    }
+    out
+}
+
+pub fn stereo_to_mono_inplace_avg(samples: &mut [i16]) -> &mut [i16] {
+    assert!(
+        samples.len() % 2 == 0,
+        "Stereo buffer must contain an even number of samples"
+    );
+
+    let frames = samples.len() / 2;
+    for i in 0..frames {
+        let l = samples[2 * i] as i32;
+        let r = samples[2 * i + 1] as i32;
+        samples[i] = ((l + r) / 2) as i16;
+    }
+    &mut samples[..frames]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,5 +431,33 @@ mod tests {
                 actual
             );
         }
+    }
+
+    #[test]
+    fn test_stereo_to_mono_take_left() {
+        let input = vec![10, 20, -30, -40, 50, 60];
+        let result = stereo_to_mono_take_left(&input);
+        assert_eq!(result, vec![10, -30, 50]);
+    }
+
+    #[test]
+    fn test_stereo_to_mono_inplace_take_left() {
+        let mut samples = vec![10, 20, -30, -40, 50, 60];
+        let mono = stereo_to_mono_inplace_take_left(&mut samples);
+        assert_eq!(mono, &[10, -30, 50]);
+    }
+
+    #[test]
+    fn test_stereo_to_mono_avg() {
+        let input = vec![100, -100, 50, 150, -200, 200];
+        let result = stereo_to_mono_avg(&input);
+        assert_eq!(result, vec![0, 100, 0]);
+    }
+
+    #[test]
+    fn test_stereo_to_mono_inplace_avg() {
+        let mut samples = vec![100, -100, 50, 150, -200, 200];
+        let mono = stereo_to_mono_inplace_avg(&mut samples);
+        assert_eq!(mono, &[0, 100, 0]);
     }
 }
