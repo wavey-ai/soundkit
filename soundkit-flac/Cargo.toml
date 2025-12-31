@@ -6,9 +6,15 @@ edition = "2021"
 [dependencies]
 access-unit = "0.1.1"
 libc = "0.2.158"
-libflac-sys = { git = "https://github.com/mgeier/libflac-sys.git" }
+libflac-sys = { git = "https://github.com/mgeier/libflac-sys.git", optional = true }
+claxon = { version = "0.4", optional = true }
 soundkit = { path = "../soundkit" }
 tracing = "0.1.40"
 
+[features]
+default = ["libflac"]
+libflac = ["libflac-sys"]
+claxon-decoder = ["claxon"]
+
 [dev-dependencies]
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

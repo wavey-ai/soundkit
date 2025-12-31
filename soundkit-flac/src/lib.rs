@@ -153,6 +153,7 @@ pub struct FlacDecoder {
     input_position: usize,
     sample_rate: Option<u32>,
     channels: Option<u8>,
+    bits_per_sample: Option<u8>,
 }
 
 impl FlacDecoder {
@@ -165,6 +166,7 @@ impl FlacDecoder {
             input_position: 0,
             sample_rate: None,
             channels: None,
+            bits_per_sample: None,
         }
     }
 
@@ -201,6 +203,10 @@ impl FlacDecoder {
     pub fn channels(&self) -> Option<u8> {
         self.channels
     }
+
+    pub fn bits_per_sample(&self) -> Option<u8> {
+        self.bits_per_sample
+    }
 }
 impl Decoder for FlacDecoder {
     fn decode_i16(
@@ -232,12 +238,17 @@ impl Decoder for FlacDecoder {
             self.input_position = 0;
 
             let result = unsafe { ffi::FLAC__stream_decoder_process_single(self.decoder) };
+            let mut end_of_stream = false;
             if result == 0 {
                 let state = unsafe { ffi::FLAC__stream_decoder_get_state(self.decoder) };
-                return Err(format!(
-                    "Failed to decode FLAC block, decoder state: {:?}",
-                    state
-                ));
+                if state == ffi::FLAC__STREAM_DECODER_END_OF_STREAM {
+                    end_of_stream = true;
+                } else {
+                    return Err(format!(
+                        "Failed to decode FLAC block, decoder state: {:?}",
+                        state
+                    ));
+                }
             }
 
             let consumed = self.input_position.min(self.input_buffer.len());
@@ -247,8 +258,8 @@ impl Decoder for FlacDecoder {
             }
 
             if self.output_buffer.is_empty() {
-                // need more data to form a full frame
-                if consumed == 0 {
+                // Need more data to form a full frame, or we've reached end-of-stream.
+                if consumed == 0 || end_of_stream {
                     break;
                 }
                 continue;
@@ -272,9 +283,31 @@ impl Decoder for FlacDecoder {
             if output.len().saturating_sub(total_written) < 1024 {
                 break;
             }
+
+            if end_of_stream {
+                break;
+            }
         }
 
         Ok(total_written)
+    }
+
+    fn decode_f32(
+        &mut self,
+        input: &[u8],
+        output: &mut [f32],
+        fec: bool,
+    ) -> Result<usize, String> {
+        // Decode to i32 then convert to f32
+        let mut i32_buf = vec![0i32; output.len()];
+        let samples = self.decode_i32(input, &mut i32_buf, fec)?;
+
+        for i in 0..samples {
+            // FLAC uses full 32-bit range
+            output[i] = (i32_buf[i] as f64 / i32::MAX as f64) as f32;
+        }
+
+        Ok(samples)
     }
 }
 
@@ -328,6 +361,7 @@ unsafe extern "C" fn write_callback_decode(
     let first_frame = decoder.sample_rate.is_none() || decoder.channels.is_none();
     decoder.sample_rate.get_or_insert((*frame).header.sample_rate);
     decoder.channels.get_or_insert((*frame).header.channels as u8);
+    decoder.bits_per_sample.get_or_insert((*frame).header.bits_per_sample as u8);
 
     let buffer = slice::from_raw_parts(buffer, channels);
     let buffer = buffer
@@ -339,6 +373,7 @@ unsafe extern "C" fn write_callback_decode(
         debug!(
             sample_rate_hz = (*frame).header.sample_rate,
             channels = (*frame).header.channels,
+            bits_per_sample = (*frame).header.bits_per_sample,
             blocksize,
             pcm_samples_written = blocksize * channels,
             "decoded FLAC frame"
@@ -386,16 +421,291 @@ unsafe extern "C" fn error_callback_decode(
     }
 }
 
+#[cfg(feature = "claxon-decoder")]
+mod claxon_decoder {
+    use claxon::{Block, FlacReader};
+    use soundkit::audio_packet::Decoder;
+    use std::io::Cursor;
+    use tracing::debug;
+
+    pub struct FlacDecoderClaxon {
+        input_buffer: Vec<u8>,
+        pending_samples_i32: Vec<i32>,
+        pending_samples_f32: Vec<f32>,
+        sample_rate: Option<u32>,
+        channels: Option<u8>,
+        bits_per_sample: Option<u8>,
+    }
+
+    impl FlacDecoderClaxon {
+        pub fn new() -> Self {
+            Self {
+                input_buffer: Vec::new(),
+                pending_samples_i32: Vec::new(),
+                pending_samples_f32: Vec::new(),
+                sample_rate: None,
+                channels: None,
+                bits_per_sample: None,
+            }
+        }
+
+        pub fn init(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+
+        pub fn sample_rate(&self) -> Option<u32> {
+            self.sample_rate
+        }
+
+        pub fn channels(&self) -> Option<u8> {
+            self.channels
+        }
+
+        fn extract_metadata_if_needed(&mut self) -> Result<(), String> {
+            if self.sample_rate.is_some() {
+                return Ok(());
+            }
+
+            let cursor = Cursor::new(&self.input_buffer[..]);
+            match FlacReader::new(cursor) {
+                Ok(reader) => {
+                    let streaminfo = reader.streaminfo();
+                    self.sample_rate = Some(streaminfo.sample_rate);
+                    self.channels = Some(streaminfo.channels as u8);
+                    self.bits_per_sample = Some(streaminfo.bits_per_sample as u8);
+
+                    debug!(
+                        sample_rate_hz = streaminfo.sample_rate,
+                        channels = streaminfo.channels,
+                        bits_per_sample = streaminfo.bits_per_sample,
+                        "initialized Claxon FLAC decoder"
+                    );
+
+                    Ok(())
+                }
+                Err(e) => Err(format!("Failed to read FLAC metadata: {:?}", e)),
+            }
+        }
+    }
+
+    impl Decoder for FlacDecoderClaxon {
+        fn decode_i16(
+            &mut self,
+            _input: &[u8],
+            _output: &mut [i16],
+            _fec: bool,
+        ) -> Result<usize, String> {
+            Err("Not implemented - FLAC uses i32 or f32".to_string())
+        }
+
+        fn decode_i32(
+            &mut self,
+            input: &[u8],
+            output: &mut [i32],
+            _fec: bool,
+        ) -> Result<usize, String> {
+            // Append new input data
+            if !input.is_empty() {
+                self.input_buffer.extend_from_slice(input);
+            }
+
+            // Extract metadata if we haven't yet
+            if self.sample_rate.is_none() && self.input_buffer.len() >= 42 {
+                self.extract_metadata_if_needed()?;
+            }
+
+            let mut written = 0;
+
+            // First, drain any pending samples
+            if !self.pending_samples_i32.is_empty() {
+                let to_copy = self.pending_samples_i32.len().min(output.len());
+                output[..to_copy].copy_from_slice(&self.pending_samples_i32[..to_copy]);
+                self.pending_samples_i32.drain(..to_copy);
+                written += to_copy;
+            }
+
+            // If we don't have metadata yet, can't decode
+            if self.sample_rate.is_none() {
+                return Ok(written);
+            }
+
+            // Try to decode frames from the buffer
+            let cursor = Cursor::new(&self.input_buffer[..]);
+            match FlacReader::new(cursor) {
+                Ok(mut reader) => {
+                    let channels = self.channels.unwrap() as usize;
+                    let mut blocks = reader.blocks();
+                    let mut current_block = Block::empty();
+
+                    loop {
+                        if written >= output.len() {
+                            break;
+                        }
+
+                        match blocks.read_next_or_eof(current_block.into_buffer()) {
+                            Ok(Some(block)) => {
+                                current_block = block;
+                                let duration = current_block.duration() as usize;
+
+                                // Interleave samples
+                                let mut frame_samples = Vec::with_capacity(duration * channels);
+                                for i in 0..duration {
+                                    for ch in 0..channels {
+                                        frame_samples.push(current_block.sample(ch as u32, i as u32));
+                                    }
+                                }
+
+                                // Copy what we can to output
+                                let remaining = output.len() - written;
+                                let to_copy = frame_samples.len().min(remaining);
+
+                                output[written..written + to_copy].copy_from_slice(&frame_samples[..to_copy]);
+                                written += to_copy;
+
+                                // Store any overflow in pending buffer
+                                if to_copy < frame_samples.len() {
+                                    self.pending_samples_i32.extend_from_slice(&frame_samples[to_copy..]);
+                                }
+                            }
+                            Ok(None) => {
+                                // End of stream
+                                break;
+                            }
+                            Err(_e) => {
+                                // Need more data, stop for now
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(_e) => {
+                    // Can't create reader yet, need more data
+                }
+            }
+
+            Ok(written)
+        }
+
+        fn decode_f32(
+            &mut self,
+            input: &[u8],
+            output: &mut [f32],
+            _fec: bool,
+        ) -> Result<usize, String> {
+            // Append new input data
+            if !input.is_empty() {
+                self.input_buffer.extend_from_slice(input);
+            }
+
+            // Extract metadata if we haven't yet
+            if self.sample_rate.is_none() && self.input_buffer.len() >= 42 {
+                self.extract_metadata_if_needed()?;
+            }
+
+            let mut written = 0;
+
+            // First, drain any pending samples
+            if !self.pending_samples_f32.is_empty() {
+                let to_copy = self.pending_samples_f32.len().min(output.len());
+                output[..to_copy].copy_from_slice(&self.pending_samples_f32[..to_copy]);
+                self.pending_samples_f32.drain(..to_copy);
+                written += to_copy;
+            }
+
+            // If we don't have metadata yet, can't decode
+            if self.sample_rate.is_none() {
+                return Ok(written);
+            }
+
+            // Try to decode frames from the buffer
+            let cursor = Cursor::new(&self.input_buffer[..]);
+            match FlacReader::new(cursor) {
+                Ok(mut reader) => {
+                    let channels = self.channels.unwrap() as usize;
+                    let bits_per_sample = self.bits_per_sample.unwrap() as i32;
+                    let scale = (1i64 << (bits_per_sample - 1)) as f32;
+                    let mut blocks = reader.blocks();
+                    let mut current_block = Block::empty();
+
+                    loop {
+                        if written >= output.len() {
+                            break;
+                        }
+
+                        match blocks.read_next_or_eof(current_block.into_buffer()) {
+                            Ok(Some(block)) => {
+                                current_block = block;
+                                let duration = current_block.duration() as usize;
+
+                                // Interleave and convert to f32
+                                let mut frame_samples = Vec::with_capacity(duration * channels);
+                                for i in 0..duration {
+                                    for ch in 0..channels {
+                                        let sample = current_block.sample(ch as u32, i as u32);
+                                        frame_samples.push((sample as f32) / scale);
+                                    }
+                                }
+
+                                // Copy what we can to output
+                                let remaining = output.len() - written;
+                                let to_copy = frame_samples.len().min(remaining);
+
+                                output[written..written + to_copy].copy_from_slice(&frame_samples[..to_copy]);
+                                written += to_copy;
+
+                                // Store any overflow in pending buffer
+                                if to_copy < frame_samples.len() {
+                                    self.pending_samples_f32.extend_from_slice(&frame_samples[to_copy..]);
+                                }
+                            }
+                            Ok(None) => {
+                                // End of stream
+                                break;
+                            }
+                            Err(_e) => {
+                                // Need more data, stop for now
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(_e) => {
+                    // Can't create reader yet, need more data
+                }
+            }
+
+            Ok(written)
+        }
+    }
+}
+
+#[cfg(feature = "claxon-decoder")]
+pub use claxon_decoder::FlacDecoderClaxon;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use soundkit::audio_bytes::{f32le_to_s24, s16le_to_i32, s24le_to_i32};
+    use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
     use soundkit::wav::WavStreamProcessor;
     use std::fs::{self, File};
     use std::io::Read;
     use std::io::Write;
     use std::path::{Path, PathBuf};
-    use tracing_subscriber;
+    use std::sync::Once;
+    use tracing::trace;
+
+    fn init_tracing() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_test_writer()
+                .try_init();
+        });
+    }
+
+    const TEST_FILE: &str = "A_Tusk_is_used_to_make_costly_gifts";
 
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -418,15 +728,53 @@ mod tests {
     }
 
     #[test]
+    fn test_flac_decode_waveform() {
+        let input_path = testdata_path(&format!("flac/{}.flac", TEST_FILE));
+        let flac_bytes = fs::read(&input_path).unwrap();
+        assert!(!flac_bytes.is_empty(), "fixture flac missing or empty");
+
+        init_tracing();
+
+        let mut decoder = FlacDecoder::new();
+        decoder.init().expect("Decoder initialization failed");
+
+        let mut decoded = Vec::new();
+        let mut scratch = vec![0i32; 8192];
+
+        for chunk in flac_bytes.chunks(4096) {
+            let written = decoder.decode_i32(chunk, &mut scratch, false).unwrap();
+            decoded.extend_from_slice(&scratch[..written]);
+        }
+
+        // Drain remaining
+        loop {
+            let written = decoder.decode_i32(&[], &mut scratch, false).unwrap();
+            if written == 0 {
+                break;
+            }
+            decoded.extend_from_slice(&scratch[..written]);
+        }
+
+        assert!(!decoded.is_empty(), "decoder produced no PCM samples");
+
+        // FLAC stores samples as i32 but scaled to original bit depth (16-bit for this test file)
+        let result = DecodeResult::from_i32_with_bits(
+            &decoded,
+            decoder.sample_rate().unwrap_or(16000),
+            decoder.channels().unwrap_or(1),
+            16, // 16-bit FLAC test file
+        );
+        print_waveform_with_header("FLAC", &result);
+    }
+
+    #[test]
     fn test_flac_decoder_streaming_decode() {
         // decode the real fixture FLAC, not a freshly encoded one
         let input_path = testdata_path("flac/A_Tusk_is_used_to_make_costly_gifts.flac");
         let flac_bytes = fs::read(&input_path).unwrap();
         assert!(!flac_bytes.is_empty(), "fixture flac missing or empty");
 
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .try_init();
+        init_tracing();
 
         let mut decoder = FlacDecoder::new();
         decoder.init().expect("Decoder initialization failed");
@@ -451,13 +799,15 @@ mod tests {
         assert_eq!(decoder.sample_rate(), Some(16_000), "fixture sample rate");
         assert_eq!(decoder.channels(), Some(1), "fixture channel count");
 
-        let output_path = outputs_path("flac_decoder_streaming_decode_s32le.pcm");
+        let output_path = outputs_path("A_Tusk_is_used_to_make_costly_gifts.s32le");
         fs::create_dir_all(output_path.parent().unwrap()).unwrap();
         let pcm_bytes: Vec<u8> = decoded.iter().flat_map(|s| s.to_le_bytes()).collect();
         fs::write(&output_path, pcm_bytes).unwrap();
     }
 
     fn run_flac_encoder_with_wav_file(file_path: &Path, output_path: &Path) {
+        init_tracing();
+
         let mut decoder = FlacDecoder::new();
         decoder.init().expect("Decoder initialization failed");
 
@@ -469,7 +819,11 @@ mod tests {
         let mut processor = WavStreamProcessor::new();
         let audio_data = processor.add(&file_buffer).unwrap().unwrap();
 
-        dbg!(file_path, audio_data.bits_per_sample());
+        trace!(
+            file = ?file_path,
+            bits_per_sample = audio_data.bits_per_sample(),
+            "loaded WAV for FLAC encoding"
+        );
 
         let mut encoder = FlacEncoder::new(
             audio_data.sampling_rate(),
@@ -508,9 +862,11 @@ mod tests {
                             false,
                         ) {
                             Ok(samples_read) => {
-                                println!(
-                                    "Decoded {} samples of {} data successfully.",
-                                    samples_read, encoded_len
+                                trace!(
+                                    chunk = i,
+                                    samples_read,
+                                    encoded_len,
+                                    "decoded FLAC chunk"
                                 );
                             }
                             Err(e) => panic!("Decoding failed: {}", e),
@@ -524,7 +880,7 @@ mod tests {
             }
         }
 
-        dbg!(n);
+        trace!(chunks_encoded = n, "FLAC encoding complete");
 
         fs::create_dir_all(output_path.parent().unwrap()).unwrap();
         let mut file = File::create(output_path).expect("Failed to create output file");

@@ -22,6 +22,7 @@ pub trait Encoder {
 pub trait Decoder {
     fn decode_i16(&mut self, input: &[u8], output: &mut [i16], fec: bool) -> Result<usize, String>;
     fn decode_i32(&mut self, input: &[u8], output: &mut [i32], fec: bool) -> Result<usize, String>;
+    fn decode_f32(&mut self, input: &[u8], output: &mut [f32], fec: bool) -> Result<usize, String>;
 }
 
 pub struct AudioList {

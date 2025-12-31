@@ -7,4 +7,6 @@ members = [
   "soundkit-opus",
   "soundkit-mp3",
   "soundkit-ogg-opus",
+  "soundkit-webm",
+  "soundkit-decoder",
 ]

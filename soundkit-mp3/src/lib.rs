@@ -312,6 +312,53 @@ impl AudioDecoder for Mp3Decoder {
 
         Ok(written)
     }
+
+    fn decode_f32(&mut self, input: &[u8], out: &mut [f32], _fec: bool) -> Result<usize, String> {
+        self.buffer.extend_from_slice(input);
+
+        let mut written = 0;
+        while !self.buffer.is_empty() {
+            let (consumed, frame) = self.inner.decode(&self.buffer, &mut self.pcm);
+
+            if consumed > 0 {
+                self.buffer.drain(..consumed);
+            }
+
+            let Some(info) = frame else {
+                if consumed == 0 {
+                    break;
+                } else {
+                    continue;
+                }
+            };
+
+            self.capture_header(&info);
+
+            // Zero-copy: nanomp3 already outputs f32
+            let channels = info.channels.num() as usize;
+            let frame_samples = info.samples_produced * channels;
+
+            if frame_samples > out[written..].len() {
+                return Err(format!(
+                    "Output buffer too small for decoded frame (needed {}, had {})",
+                    frame_samples,
+                    out[written..].len()
+                ));
+            }
+
+            out[written..written + frame_samples]
+                .copy_from_slice(&self.pcm[..frame_samples]);
+
+            self.log_frame_decode(&info, consumed, frame_samples);
+            written += frame_samples;
+
+            if out.len().saturating_sub(written) < MAX_SAMPLES_PER_FRAME {
+                break;
+            }
+        }
+
+        Ok(written)
+    }
 }
 
 fn f32_to_i16(sample: f32) -> i16 {
@@ -341,9 +388,23 @@ mod tests {
     use super::*;
     use mp3lame_encoder::max_required_buffer_size;
     use soundkit::audio_bytes::s16le_to_i16;
+    use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
     use soundkit::wav::WavStreamProcessor;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Once;
+
+    fn init_tracing() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_test_writer()
+                .try_init();
+        });
+    }
+
+    const TEST_FILE: &str = "A_Tusk_is_used_to_make_costly_gifts";
 
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -363,6 +424,42 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("outputs")
             .join(file)
+    }
+
+    #[test]
+    fn test_mp3_decode_waveform() {
+        let input_path = testdata_path(&format!("mp3/{}.mp3", TEST_FILE));
+        let mp3_bytes = fs::read(&input_path).unwrap();
+        assert!(!mp3_bytes.is_empty(), "fixture mp3 missing or empty");
+
+        init_tracing();
+
+        let mut decoder = Mp3Decoder::new();
+        let mut decoded = Vec::new();
+        let mut scratch = vec![0i16; MAX_SAMPLES_PER_FRAME * 2];
+
+        for chunk in mp3_bytes.chunks(4096) {
+            let written = decoder.decode_i16(chunk, &mut scratch, false).unwrap();
+            decoded.extend_from_slice(&scratch[..written]);
+        }
+
+        // Drain remaining
+        loop {
+            let written = decoder.decode_i16(&[], &mut scratch, false).unwrap();
+            if written == 0 {
+                break;
+            }
+            decoded.extend_from_slice(&scratch[..written]);
+        }
+
+        assert!(!decoded.is_empty(), "decoder produced no PCM samples");
+
+        let result = DecodeResult::new(
+            &decoded,
+            decoder.sample_rate().unwrap_or(16000),
+            decoder.channels().unwrap_or(1),
+        );
+        print_waveform_with_header("MP3", &result);
     }
 
     #[test]
@@ -418,9 +515,7 @@ mod tests {
         assert!(!mp3_bytes.is_empty(), "fixture mp3 missing or empty");
 
         // decode in small chunks to exercise streaming
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .try_init();
+        init_tracing();
         let mut dec = Mp3Decoder::new();
         let mut decoded = Vec::new();
         let mut scratch = vec![0i16; MAX_SAMPLES_PER_FRAME * 2];
@@ -447,7 +542,7 @@ mod tests {
         assert_eq!(dec.channels(), Some(1), "fixture channel count");
 
         // persist decoded PCM for manual inspection
-        let output_path = outputs_path("mp3_decoder_streaming_decode.pcm");
+        let output_path = outputs_path("A_Tusk_is_used_to_make_costly_gifts.s16le");
         fs::create_dir_all(output_path.parent().unwrap()).unwrap();
         let pcm_bytes: Vec<u8> = decoded.iter().flat_map(|s| s.to_le_bytes()).collect();
         fs::write(&output_path, pcm_bytes).unwrap();

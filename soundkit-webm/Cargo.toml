@@ -1,0 +1,16 @@
+[package]
+name = "soundkit-webm"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+description = "Streaming WebM audio decoder built on soundkit"
+repository = "https://github.com/wavey-ai/soundkit"
+
+[dependencies]
+frame-header = "0.2"
+soundkit = { version = "0.12.1", path = "../soundkit" }
+soundkit-opus = { version = "0.0.1", path = "../soundkit-opus" }
+tracing = "0.1.40"
+
+[lib]
+crate-type = ["cdylib", "rlib"]

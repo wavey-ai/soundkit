@@ -1,84 +1,160 @@
 use frame_header::{EncodingFlag, Endianness};
-use ogg::reading::{BasePacketReader, OggReadError, PageParser};
-use ogg::Packet;
+use memchr::memmem;
 use soundkit::audio_packet::Decoder;
 use soundkit::audio_types::AudioData;
 use soundkit_opus::OpusDecoder;
+use std::collections::VecDeque;
 use tracing::{debug, trace};
 
 const MAX_OPUS_FRAME_SAMPLES: usize = 5760; // 120 ms @ 48 kHz
 
-struct OggPager {
-    buffer: Vec<u8>,
-    base: BasePacketReader,
+// Zero-copy Ogg page header
+#[derive(Debug)]
+struct OggPageHeader {
+    _version: u8,
+    header_type: u8,
+    _granule_position: u64,
+    serial: u32,
+    _sequence: u32,
+    _checksum: u32,
+    segment_count: u8,
 }
 
-impl OggPager {
+impl OggPageHeader {
+    fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < 27 || &data[0..4] != b"OggS" {
+            return None;
+        }
+
+        Some(Self {
+            _version: data[4],
+            header_type: data[5],
+            _granule_position: u64::from_le_bytes(data[6..14].try_into().ok()?),
+            serial: u32::from_le_bytes(data[14..18].try_into().ok()?),
+            _sequence: u32::from_le_bytes(data[18..22].try_into().ok()?),
+            _checksum: u32::from_le_bytes(data[22..26].try_into().ok()?),
+            segment_count: data[26],
+        })
+    }
+
+    fn is_first_page(&self) -> bool {
+        self.header_type & 0x02 != 0
+    }
+}
+
+// Lightweight packet wrapper with metadata
+struct Packet {
+    data: Vec<u8>,
+    serial: u32,
+    first_in_stream: bool,
+}
+
+struct FastOggParser {
+    buffer: Vec<u8>,
+    pos: usize,
+    packet_buffer: Vec<u8>,
+    pending_packets: VecDeque<Packet>,
+}
+
+impl FastOggParser {
     fn new() -> Self {
         Self {
-            buffer: Vec::new(),
-            base: BasePacketReader::new(),
+            buffer: Vec::with_capacity(8192),
+            pos: 0,
+            packet_buffer: Vec::with_capacity(4096),
+            pending_packets: VecDeque::new(),
         }
     }
 
-    fn push(&mut self, data: &[u8]) -> Result<Vec<Packet>, OggReadError> {
+    fn push<'a>(&'a mut self, data: &[u8]) -> FastOggPackets<'a> {
         self.buffer.extend_from_slice(data);
-        let mut packets = Vec::new();
+        FastOggPackets { parser: self }
+    }
 
-        loop {
-            let header_pos = match find_capture_pattern(&self.buffer) {
-                Some(pos) => pos,
-                None => {
-                    // keep last 3 bytes in case a header spans the boundary
-                    if self.buffer.len() > 3 {
-                        let keep = 3;
-                        let drop = self.buffer.len() - keep;
-                        self.buffer.drain(..drop);
-                    }
-                    break;
-                }
-            };
-
-            if header_pos > 0 {
-                self.buffer.drain(..header_pos);
-            }
-
-            if self.buffer.len() < 27 {
-                break;
-            }
-
-            let mut header = [0u8; 27];
-            header.copy_from_slice(&self.buffer[..27]);
-            let (mut parser, seg_len) = PageParser::new(header)?;
-
-            if self.buffer.len() < 27 + seg_len {
-                break;
-            }
-
-            let segments = self.buffer[27..27 + seg_len].to_vec();
-            let body_len = parser.parse_segments(segments);
-
-            if self.buffer.len() < 27 + seg_len + body_len {
-                break;
-            }
-
-            let packet_data = self.buffer[27 + seg_len..27 + seg_len + body_len].to_vec();
-            let page = parser.parse_packet_data(packet_data)?;
-
-            self.base.push_page(page)?;
-            self.buffer.drain(..27 + seg_len + body_len);
-
-            while let Some(packet) = self.base.read_packet() {
-                packets.push(packet);
-            }
+    fn compact(&mut self) {
+        if self.pos > 0 {
+            self.buffer.drain(..self.pos);
+            self.pos = 0;
         }
-
-        Ok(packets)
     }
 }
 
-fn find_capture_pattern(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"OggS")
+struct FastOggPackets<'a> {
+    parser: &'a mut FastOggParser,
+}
+
+impl<'a> Iterator for FastOggPackets<'a> {
+    type Item = Packet;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(packet) = self.parser.pending_packets.pop_front() {
+            return Some(packet);
+        }
+
+        loop {
+            // Find next OggS
+            let search_start = self.parser.pos;
+            let oggs_pos = memmem::find(&self.parser.buffer[search_start..], b"OggS")?;
+            self.parser.pos = search_start + oggs_pos;
+
+            // Need at least 27 bytes for header
+            if self.parser.buffer.len() - self.parser.pos < 27 {
+                self.parser.compact();
+                return None;
+            }
+
+            // Parse header
+            let header = OggPageHeader::parse(&self.parser.buffer[self.parser.pos..])?;
+            let header_size = 27 + header.segment_count as usize;
+
+            if self.parser.buffer.len() - self.parser.pos < header_size {
+                self.parser.compact();
+                return None;
+            }
+
+            // Calculate body size from segment table
+            let segment_table =
+                &self.parser.buffer[self.parser.pos + 27..self.parser.pos + header_size];
+            let body_size: usize = segment_table.iter().map(|&x| x as usize).sum();
+
+            let total_size = header_size + body_size;
+            if self.parser.buffer.len() - self.parser.pos < total_size {
+                self.parser.compact();
+                return None;
+            }
+
+            // Parse segments one by one to extract individual packets
+            let body_start = self.parser.pos + header_size;
+            let mut seg_offset = 0;
+
+            for &seg_size in segment_table.iter() {
+                let seg_start = body_start + seg_offset;
+                let seg_end = seg_start + seg_size as usize;
+                self.parser
+                    .packet_buffer
+                    .extend_from_slice(&self.parser.buffer[seg_start..seg_end]);
+                seg_offset += seg_size as usize;
+
+                // Packet complete when segment < 255
+                if seg_size < 255 {
+                    let mut packet_data = Vec::new();
+                    std::mem::swap(&mut packet_data, &mut self.parser.packet_buffer);
+                    self.parser.pending_packets.push_back(Packet {
+                        data: packet_data,
+                        serial: header.serial,
+                        first_in_stream: header.is_first_page(),
+                    });
+                }
+            }
+
+            self.parser.pos += total_size;
+
+            self.parser.compact();
+            if let Some(packet) = self.parser.pending_packets.pop_front() {
+                return Some(packet);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -90,23 +166,25 @@ struct OpusStreamInfo {
 }
 
 pub struct OggOpusDecoder {
-    pager: OggPager,
+    parser: FastOggParser,
     opus: Option<OpusDecoder>,
     info: Option<OpusStreamInfo>,
     seen_tags: bool,
     pre_skip_remaining: usize,
     logged_first_audio: bool,
+    scratch_buffer: Vec<i16>,
 }
 
 impl OggOpusDecoder {
     pub fn new() -> Self {
         Self {
-            pager: OggPager::new(),
+            parser: FastOggParser::new(),
             opus: None,
             info: None,
             seen_tags: false,
             pre_skip_remaining: 0,
             logged_first_audio: false,
+            scratch_buffer: Vec::with_capacity(MAX_OPUS_FRAME_SAMPLES * 2), // Pre-allocate for stereo
         }
     }
 
@@ -116,7 +194,7 @@ impl OggOpusDecoder {
 
     /// Feed more bytes of an Ogg Opus stream. Returns decoded PCM when available.
     pub fn add(&mut self, data: &[u8]) -> Result<Option<AudioData>, String> {
-        let packets = self.pager.push(data).map_err(|e| format!("{:?}", e))?;
+        let packets = self.parser.push(data);
         let mut pcm_bytes = Vec::new();
 
         for packet in packets {
@@ -125,30 +203,29 @@ impl OggOpusDecoder {
             }
 
             if self.info.is_none() {
-                if !packet.first_in_stream() {
+                if !packet.first_in_stream {
                     return Err("Expected OpusHead as first packet".to_string());
                 }
                 let info = Self::parse_head(&packet)?;
-                let mut opus =
-                    OpusDecoder::new(info.sample_rate as usize, info.channels as usize);
+                let mut opus = OpusDecoder::new(info.sample_rate as usize, info.channels as usize);
                 opus.init()?;
                 let scaled_skip =
                     ((info.pre_skip as u64 * info.sample_rate as u64) / 48_000) as usize;
                 self.pre_skip_remaining = scaled_skip;
                 self.opus = Some(opus);
                 self.info = Some(info);
-            debug!(
-                sample_rate_hz = info.sample_rate,
-                channels = info.channels,
-                pre_skip = info.pre_skip,
-                scaled_skip = scaled_skip,
-                "parsed OpusHead"
+                debug!(
+                    sample_rate_hz = info.sample_rate,
+                    channels = info.channels,
+                    pre_skip = info.pre_skip,
+                    scaled_skip = scaled_skip,
+                    "parsed OpusHead"
                 );
                 continue;
             }
 
             let info = self.info.expect("info set after head");
-            if packet.stream_serial() != info.serial {
+            if packet.serial != info.serial {
                 return Err("Unexpected second logical bitstream".to_string());
             }
 
@@ -166,9 +243,14 @@ impl OggOpusDecoder {
                 .as_mut()
                 .ok_or_else(|| "Opus decoder not initialized".to_string())?;
 
-            let mut tmp = vec![0i16; MAX_OPUS_FRAME_SAMPLES * info.channels as usize];
+            // Reuse scratch buffer - resize if needed
+            let required_size = MAX_OPUS_FRAME_SAMPLES * info.channels as usize;
+            if self.scratch_buffer.len() < required_size {
+                self.scratch_buffer.resize(required_size, 0);
+            }
+
             let samples = decoder
-                .decode_i16(&packet.data, &mut tmp, false)
+                .decode_i16(packet.data.as_slice(), &mut self.scratch_buffer, false)
                 .map_err(|e| format!("Opus decode error: {e}"))?;
 
             if samples == 0 {
@@ -199,8 +281,11 @@ impl OggOpusDecoder {
             }
 
             let end = samples * info.channels as usize;
-            trace!(pcm_samples_written = end.saturating_sub(start), "appending decoded PCM");
-            for sample in &tmp[start..end] {
+            trace!(
+                pcm_samples_written = end.saturating_sub(start),
+                "appending decoded PCM"
+            );
+            for sample in &self.scratch_buffer[start..end] {
                 pcm_bytes.extend_from_slice(&sample.to_le_bytes());
             }
 
@@ -225,7 +310,7 @@ impl OggOpusDecoder {
     }
 
     fn parse_head(packet: &Packet) -> Result<OpusStreamInfo, String> {
-        let data = &packet.data;
+        let data = packet.data.as_slice();
         if data.len() < 19 || !data.starts_with(b"OpusHead") {
             return Err("Invalid OpusHead packet".to_string());
         }
@@ -241,7 +326,7 @@ impl OggOpusDecoder {
             sample_rate,
             channels,
             pre_skip,
-            serial: packet.stream_serial(),
+            serial: packet.serial,
         })
     }
 }
@@ -249,16 +334,36 @@ impl OggOpusDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soundkit::audio_bytes::deinterleave_vecs_i16;
+    use soundkit::audio_bytes::{deinterleave_vecs_i16, s16le_to_i16};
     use soundkit::audio_types::PcmData;
+    use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
     use soundkit::wav::generate_wav_buffer;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Once;
+
+    fn init_tracing() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_test_writer()
+                .try_init();
+        });
+    }
+
+    const TEST_FILE: &str = "A_Tusk_is_used_to_make_costly_gifts";
 
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("testdata")
+            .join(file)
+    }
+
+    fn outputs_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("outputs")
             .join(file)
     }
 
@@ -270,30 +375,92 @@ mod tests {
     }
 
     #[test]
-    fn decode_ogg_opus_stream() {
-        let data = fs::read(testdata_path("ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg"))
-            .unwrap();
+    fn test_ogg_opus_decode_waveform() {
+        let input_path = testdata_path(&format!("ogg_opus/{}.ogg", TEST_FILE));
+        let data = fs::read(&input_path).unwrap();
+        assert!(!data.is_empty(), "fixture ogg opus missing or empty");
+
+        init_tracing();
 
         let mut decoder = OggOpusDecoder::new();
         decoder.init().unwrap();
 
-        let mut total_samples = 0usize;
+        let mut decoded_bytes = Vec::new();
+        let mut sample_rate = 0u32;
+        let mut channels = 0u8;
+
+        for chunk in data.chunks(1024) {
+            if let Some(audio) = decoder.add(chunk).unwrap() {
+                sample_rate = audio.sampling_rate();
+                channels = audio.channel_count();
+                decoded_bytes.extend_from_slice(audio.data());
+            }
+        }
+
+        // Drain remaining
+        loop {
+            match decoder.add(&[]) {
+                Ok(Some(audio)) => {
+                    decoded_bytes.extend_from_slice(audio.data());
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+
+        assert!(!decoded_bytes.is_empty(), "decoder produced no PCM samples");
+
+        let decoded = s16le_to_i16(&decoded_bytes);
+        let result = DecodeResult::new(&decoded, sample_rate, channels);
+        print_waveform_with_header("Ogg Opus", &result);
+    }
+
+    #[test]
+    fn decode_ogg_opus_stream() {
+        let data = fs::read(testdata_path(
+            "ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg",
+        ))
+        .unwrap();
+
+        init_tracing();
+
+        let mut decoder = OggOpusDecoder::new();
+        decoder.init().unwrap();
+
+        let mut decoded = Vec::new();
         for chunk in data.chunks(1024) {
             if let Some(audio) = decoder.add(chunk).unwrap() {
                 assert_eq!(audio.bits_per_sample(), 16);
                 assert!(audio.channel_count() >= 1);
-                total_samples +=
-                    audio.data().len() / 2 / audio.channel_count() as usize;
+                decoded.extend_from_slice(audio.data());
             }
         }
 
-        assert!(total_samples > 0, "no samples decoded from ogg opus stream");
+        // Drain any remaining buffered data
+        loop {
+            match decoder.add(&[]) {
+                Ok(Some(audio)) => {
+                    decoded.extend_from_slice(audio.data());
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+
+        assert!(!decoded.is_empty(), "no samples decoded from ogg opus stream");
+
+        // Save PCM output for inspection
+        let output_path = outputs_path("A_Tusk_is_used_to_make_costly_gifts.s16le");
+        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+        fs::write(&output_path, decoded).unwrap();
     }
 
     #[test]
     fn decode_ogg_opus_and_write_wav() {
         let input_path = testdata_path("ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg");
         let data = fs::read(&input_path).unwrap();
+
+        init_tracing();
 
         let mut decoder = OggOpusDecoder::new();
         decoder.init().unwrap();
@@ -309,9 +476,12 @@ mod tests {
                 }
 
                 let channel_count = audio.channel_count() as usize;
-                let channels =
-                    pcm_channels.get_or_insert_with(|| vec![Vec::new(); channel_count]);
-                assert_eq!(channels.len(), channel_count, "channel count changed mid-stream");
+                let channels = pcm_channels.get_or_insert_with(|| vec![Vec::new(); channel_count]);
+                assert_eq!(
+                    channels.len(),
+                    channel_count,
+                    "channel count changed mid-stream"
+                );
 
                 let samples = deinterleave_vecs_i16(audio.data(), channel_count);
                 for (dst, src) in channels.iter_mut().zip(samples.iter()) {

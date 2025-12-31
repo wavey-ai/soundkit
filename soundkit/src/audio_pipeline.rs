@@ -2,10 +2,13 @@ use crate::audio_bytes::*;
 use crate::audio_packet::{encode_audio_packet, Encoder};
 use crate::audio_types::*;
 use crate::wav::WavStreamProcessor;
-
+use frame_header::{EncodingFlag, FrameHeader};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
+
+const COMMON_SAMPLE_RATES: [u32; 9] = [8000, 16000, 22050, 24000, 32000, 44100, 48000, 88200, 96000];
+const COMMON_BITS_PER_SAMPLE: [u8; 3] = [16, 24, 32];
 
 pub fn vec_f32_to_i16(input: Vec<f32>) -> Vec<i16> {
     let mut output: Vec<i16> = Vec::with_capacity(input.len());
@@ -65,15 +68,59 @@ pub fn deserialize_audio(
 }
 
 pub fn downsample_audio(audio: &AudioData, sampling_rate: usize) -> Result<Vec<Vec<f32>>, String> {
-    let audio_data =
-        deserialize_audio(audio.data(), audio.bits_per_sample(), audio.channel_count());
+    let channel_count = audio.channel_count() as usize;
+    if channel_count == 0 {
+        return Err("Channel count must be > 0".to_string());
+    }
 
-    let data: Vec<Vec<f32>> = match audio_data {
-        Ok(PcmData::I16(data)) => data.into_iter().map(vec_i16_to_f32).collect(),
-        Ok(PcmData::I32(data)) => data.into_iter().map(vec_i32_to_f32).collect(),
-        Ok(PcmData::F32(data)) => data,
-        _ => Vec::new(),
+    if !COMMON_BITS_PER_SAMPLE.contains(&audio.bits_per_sample()) {
+        return Err(format!(
+            "Unsupported bits_per_sample: {}",
+            audio.bits_per_sample()
+        ));
+    }
+
+    let output_rate = u32::try_from(sampling_rate)
+        .map_err(|_| "sampling_rate out of range".to_string())?;
+    let input_rate = audio.sampling_rate();
+
+    if input_rate == 0 || output_rate == 0 {
+        return Err("sampling_rate must be > 0".to_string());
+    }
+
+    if !COMMON_SAMPLE_RATES.contains(&input_rate) {
+        return Err(format!("Unsupported input sample_rate: {}", input_rate));
+    }
+
+    if !COMMON_SAMPLE_RATES.contains(&output_rate) {
+        return Err(format!("Unsupported output sample_rate: {}", output_rate));
+    }
+
+    let data: Vec<Vec<f32>> = if audio.bits_per_sample() == 32
+        && audio.audio_format() != EncodingFlag::PCMFloat
+    {
+        let interleaved = s32le_to_i32(audio.data());
+        let mut channels =
+            vec![Vec::with_capacity(interleaved.len() / channel_count); channel_count];
+        for (index, sample) in interleaved.into_iter().enumerate() {
+            channels[index % channel_count].push(sample);
+        }
+        channels.into_iter().map(vec_i32_to_f32).collect()
+    } else {
+        let audio_data =
+            deserialize_audio(audio.data(), audio.bits_per_sample(), audio.channel_count())
+                .map_err(|e| format!("deserialize_audio failed: {}", e))?;
+
+        match audio_data {
+            PcmData::I16(data) => data.into_iter().map(vec_i16_to_f32).collect(),
+            PcmData::I32(data) => data.into_iter().map(vec_i32_to_f32).collect(),
+            PcmData::F32(data) => data,
+        }
     };
+
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
 
     let params = SincInterpolationParameters {
         sinc_len: 256,
@@ -84,11 +131,11 @@ pub fn downsample_audio(audio: &AudioData, sampling_rate: usize) -> Result<Vec<V
     };
 
     let mut resampler = SincFixedIn::<f32>::new(
-        sampling_rate as f64 / audio.sampling_rate() as f64,
+        output_rate as f64 / input_rate as f64,
         2.0,
         params,
         data[0].len(),
-        2,
+        data.len(),
     )
     .unwrap();
 
@@ -169,11 +216,6 @@ impl<E: Encoder> AudioEncoder<E> {
             data.extend_from_slice(&widow.data());
         }
 
-        let sampling_rate = audio_data.sampling_rate();
-        let bits_per_sample = audio_data.bits_per_sample();
-        let audio_format = Some(audio_data.audio_format());
-        let endianness = audio_data.endianness();
-
         for chunk in data.chunks(chunk_size) {
             let flag = if chunk.len() < chunk_size {
                 EncodingFlag::PCMFloat
@@ -194,25 +236,35 @@ impl<E: Encoder> AudioEncoder<E> {
                 return Ok(());
             }
 
-            let packet = encode_audio_packet(
-                &chunk.to_vec(),
-                audio_data.channel_count() as usize,
-                audio_data.channel_count() as usize,
-                audio_data.sampling_rate() as usize,
-                self.frame_size,
+            let header = FrameHeader::new(
                 audio_data.audio_format(),
-                self.encoding_flag,
-                &mut self.encoder,
+                self.frame_size
+                    .try_into()
+                    .map_err(|_| "frame_size out of range".to_string())?,
+                audio_data.sampling_rate(),
+                audio_data.channel_count(),
+                audio_data.bits_per_sample(),
+                audio_data.endianness(),
+                None,
+                None,
             )?;
 
-            self.packets.push(packet);
+            let mut fullbuf = Vec::with_capacity(header.size() + chunk.len());
+            header
+                .encode(&mut fullbuf)
+                .map_err(|e| format!("Failed to encode frame header: {}", e))?;
+            fullbuf.extend_from_slice(chunk);
+
+            let packet = encode_audio_packet(self.encoding_flag, &mut self.encoder, &fullbuf)?;
+
+            self.packets.push(packet.to_vec());
         }
 
         Ok(())
     }
 
     fn reset(&mut self) {
-        self.encoder.reset();
+        let _ = self.encoder.reset();
 
         self.wav_reader = WavStreamProcessor::new();
     }
@@ -242,7 +294,7 @@ mod tests {
         let mut processor = WavStreamProcessor::new();
         let mut buffer = [0u8; 1024 * 1024];
 
-        let mut result = vec![Vec::new(); 2];
+        let mut result: Vec<Vec<f32>> = Vec::new();
         loop {
             let bytes_read = file.read(&mut buffer).unwrap();
             if bytes_read == 0 {
@@ -254,10 +306,19 @@ mod tests {
                 Ok(Some(audio_data)) => {
                     let samples = downsample_audio(&audio_data, 8_000).unwrap();
 
-                    assert!(samples[0].len() > 0);
+                    assert!(!samples.is_empty());
+                    assert!(!samples[0].is_empty());
 
-                    for i in 0..processor.channel_count() {
-                        result[i].extend_from_slice(&samples[i])
+                    if result.is_empty() {
+                        result = vec![Vec::new(); samples.len()];
+                    }
+
+                    assert_eq!(result.len(), samples.len());
+
+                    for (channel_result, channel_samples) in
+                        result.iter_mut().zip(samples.iter())
+                    {
+                        channel_result.extend_from_slice(channel_samples)
                     }
                 }
                 Ok(None) => continue,

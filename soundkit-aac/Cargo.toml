@@ -4,11 +4,19 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-access-unit = "0.1.1"
-fdk-aac = { git = "https://github.com/wavey-ai/fdk-aac-rs.git" }
+access-unit = { path = "../../access-unit" }
+fdk-aac = { git = "https://github.com/wavey-ai/fdk-aac-rs.git", optional = true }
+symphonia = { version = "0.5", features = ["aac"], optional = true }
+mp4 = { version = "0.14.0", optional = true }
 
 soundkit = { path = "../soundkit" }
 tracing = "0.1.40"
 
+[features]
+default = ["fdk"]
+fdk = ["fdk-aac"]
+symphonia-decoder = ["symphonia"]
+mp4-decoder = ["fdk-aac", "mp4"]
+
 [dev-dependencies]
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

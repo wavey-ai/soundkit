@@ -1,0 +1,20 @@
+[package]
+name = "soundkit-decoder"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Streaming audio decoder pipeline with automatic format detection"
+repository = "https://github.com/wavey-ai/soundkit"
+
+[dependencies]
+soundkit = { path = "../soundkit" }
+access-unit = { path = "../../access-unit" }
+soundkit-mp3 = { path = "../soundkit-mp3" }
+soundkit-aac = { path = "../soundkit-aac", features = ["mp4-decoder"] }
+soundkit-flac = { path = "../soundkit-flac" }
+soundkit-opus = { path = "../soundkit-opus" }
+soundkit-ogg-opus = { path = "../soundkit-ogg-opus" }
+soundkit-webm = { path = "../soundkit-webm" }
+rtrb = "0.3"
+frame-header = "0.2.0"
+bytes = "1"
