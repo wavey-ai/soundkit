@@ -7,7 +7,7 @@ description = "Streaming WebM audio decoder built on soundkit"
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-frame-header = "0.2"
+frame-header = { git = "https://github.com/wavey-ai/frame-header.git" }
 soundkit = { version = "0.12.1", path = "../soundkit" }
 soundkit-opus = { version = "0.0.1", path = "../soundkit-opus" }
 tracing = "0.1.40"

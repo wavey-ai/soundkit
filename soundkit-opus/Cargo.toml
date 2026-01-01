@@ -10,7 +10,7 @@ readme = "README.md"
 [dependencies]
 libopus = { git = "https://github.com/wavey-ai/opus-rs" }
 soundkit = { version = "0.12.1", path = "../soundkit" }
-frame-header = "0.2.0"
+frame-header = { git = "https://github.com/wavey-ai/frame-header.git" }
 tracing = "0.1.40"
 
 [dev-dependencies]
