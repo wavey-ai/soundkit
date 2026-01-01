@@ -184,7 +184,8 @@ impl WavStreamProcessor {
                 }
 
                 StreamWavState::Finished => {
-                    return Err("Already finished processing WAV file.".to_string());
+                    // Gracefully return None when finished - no more data available
+                    return Ok(None);
                 }
             }
         }

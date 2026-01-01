@@ -14,6 +14,7 @@ use soundkit_flac::FlacDecoder;
 use soundkit_mp3::Mp3Decoder;
 use soundkit_ogg_opus::OggOpusDecoder;
 use soundkit_opus::OpusStreamDecoder;
+use soundkit::wav::WavStreamProcessor;
 use soundkit_webm::WebmDecoder;
 use std::thread;
 
@@ -108,6 +109,8 @@ enum FormatDecoder {
     OggOpus(OggOpusDecoder),
     /// WebM container decoder (typically Opus audio)
     WebM(WebmDecoder),
+    /// WAV decoder (raw PCM in RIFF container)
+    Wav(WavStreamProcessor),
 }
 
 /// Helper to decode using the Decoder trait and drain all buffered frames.
@@ -243,6 +246,9 @@ impl StreamingDecoder for FormatDecoder {
                 process_with_add_api(dec, chunk, |d, data| d.add(data))
             }
             FormatDecoder::WebM(dec) => {
+                process_with_add_api(dec, chunk, |d, data| d.add(data))
+            }
+            FormatDecoder::Wav(dec) => {
                 process_with_add_api(dec, chunk, |d, data| d.add(data))
             }
         }
@@ -518,6 +524,10 @@ fn detect_and_init_decoder(buffer: &[u8]) -> Result<FormatDecoder, DecodeError> 
                 .init()
                 .map_err(|e| DecodeError::DecoderInitFailed(e))?;
             Ok(FormatDecoder::WebM(decoder))
+        }
+        AudioType::Wav => {
+            let decoder = WavStreamProcessor::new();
+            Ok(FormatDecoder::Wav(decoder))
         }
         AudioType::Unknown => Err(DecodeError::FormatDetectionFailed),
         other => Err(DecodeError::UnsupportedFormat(other)),
@@ -1456,6 +1466,7 @@ mod tests {
             ("m4a", "m4a"),
             ("mp3", "mp3"),
             ("webm", "webm"),
+            ("wav", "wav"),
         ];
 
         let mut results: Vec<(&str, DecodeResult)> = Vec::new();
