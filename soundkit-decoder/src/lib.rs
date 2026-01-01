@@ -9,7 +9,7 @@ use soundkit::audio_pipeline::{
 };
 use soundkit::audio_packet::Decoder;
 use soundkit::audio_types::{AudioData, PcmData};
-use soundkit_aac::AacDecoderMp4;
+use soundkit_aac::{AacDecoder, AacDecoderMp4};
 use soundkit_flac::FlacDecoder;
 use soundkit_mp3::Mp3Decoder;
 use soundkit_ogg_opus::OggOpusDecoder;
@@ -96,8 +96,10 @@ enum PipelineState {
 enum FormatDecoder {
     /// MP3 decoder using minimp3
     Mp3(Mp3Decoder),
+    /// Raw AAC (ADTS) decoder
+    Aac(AacDecoder),
     /// AAC decoder for M4A/MP4 containers
-    Aac(AacDecoderMp4),
+    M4a(AacDecoderMp4),
     /// FLAC decoder - boxed because libFLAC stores a raw pointer to self during init
     Flac(Box<FlacDecoder>),
     /// Raw Opus stream decoder
@@ -216,6 +218,12 @@ impl StreamingDecoder for FormatDecoder {
                 })
             }
             FormatDecoder::Aac(dec) => {
+                decode_i16_with_drain(dec, chunk, |d, samples, output| {
+                    let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
+                    Some(create_audio_data_i16(sample_rate, channels, &output[..samples]))
+                })
+            }
+            FormatDecoder::M4a(dec) => {
                 decode_i16_with_drain(dec, chunk, |d, samples, output| {
                     let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
                     Some(create_audio_data_i16(sample_rate, channels, &output[..samples]))
@@ -466,11 +474,20 @@ fn detect_and_init_decoder(buffer: &[u8]) -> Result<FormatDecoder, DecodeError> 
             Ok(FormatDecoder::Mp3(decoder))
         }
         AudioType::AAC => {
-            let mut decoder = AacDecoderMp4::new();
+            // Raw AAC (ADTS format)
+            let mut decoder = AacDecoder::new();
             decoder
                 .init()
                 .map_err(|e| DecodeError::DecoderInitFailed(e))?;
             Ok(FormatDecoder::Aac(decoder))
+        }
+        AudioType::M4A => {
+            // AAC in M4A/MP4 container
+            let mut decoder = AacDecoderMp4::new();
+            decoder
+                .init()
+                .map_err(|e| DecodeError::DecoderInitFailed(e))?;
+            Ok(FormatDecoder::M4a(decoder))
         }
         AudioType::FLAC => {
             // Box the decoder BEFORE init() so the address is stable
