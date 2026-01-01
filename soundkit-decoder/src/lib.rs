@@ -1453,6 +1453,7 @@ mod tests {
             ("opus", "opus"),
             ("ogg_opus", "ogg_opus"),
             ("aac", "aac"),
+            ("m4a", "m4a"),
             ("mp3", "mp3"),
             ("webm", "webm"),
         ];
