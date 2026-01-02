@@ -590,10 +590,37 @@ fn create_audio_data_i16(sample_rate: u32, channels: u8, samples: &[i16]) -> Aud
 
 /// Create AudioData from i32 samples with specified bit depth.
 /// FLAC stores samples as i32 but with values in the original bit depth range.
+/// This function converts to the appropriate byte representation.
 fn create_audio_data_i32_with_bits(sample_rate: u32, channels: u8, bits_per_sample: u8, samples: &[i32]) -> AudioData {
-    let mut bytes = Vec::with_capacity(samples.len() * 4);
-    for &sample in samples {
-        bytes.extend_from_slice(&sample.to_le_bytes());
+    let bytes_per_sample = ((bits_per_sample + 7) / 8) as usize;
+    let mut bytes = Vec::with_capacity(samples.len() * bytes_per_sample);
+
+    match bits_per_sample {
+        1..=8 => {
+            // 8-bit: samples are in range -128 to 127, convert to unsigned 0-255
+            for &sample in samples {
+                bytes.push((sample + 128) as u8);
+            }
+        }
+        9..=16 => {
+            // 16-bit: samples are in range -32768 to 32767
+            for &sample in samples {
+                bytes.extend_from_slice(&(sample as i16).to_le_bytes());
+            }
+        }
+        17..=24 => {
+            // 24-bit: write 3 bytes per sample
+            for &sample in samples {
+                let le = sample.to_le_bytes();
+                bytes.extend_from_slice(&le[0..3]);
+            }
+        }
+        _ => {
+            // 32-bit: write full i32
+            for &sample in samples {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
     }
 
     AudioData::new(
