@@ -10,7 +10,7 @@ use soundkit::audio_pipeline::{
 use soundkit::audio_packet::Decoder;
 use soundkit::audio_types::{AudioData, PcmData};
 use soundkit_aac::{AacDecoder, AacDecoderMp4};
-use soundkit_flac::FlacDecoder;
+use soundkit_flac::FlacDecoderClaxon;
 use soundkit_mp3::Mp3Decoder;
 use soundkit_ogg_opus::OggOpusDecoder;
 use soundkit_opus::OpusStreamDecoder;
@@ -101,8 +101,8 @@ enum FormatDecoder {
     Aac(AacDecoder),
     /// AAC decoder for M4A/MP4 containers
     M4a(AacDecoderMp4),
-    /// FLAC decoder - boxed because libFLAC stores a raw pointer to self during init
-    Flac(Box<FlacDecoder>),
+    /// FLAC decoder using pure-Rust claxon (avoids libFLAC FFI release-mode bug)
+    Flac(FlacDecoderClaxon),
     /// Raw Opus stream decoder
     Opus(OpusStreamDecoder),
     /// Ogg-wrapped Opus decoder
@@ -233,7 +233,7 @@ impl StreamingDecoder for FormatDecoder {
                 })
             }
             FormatDecoder::Flac(dec) => {
-                decode_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                decode_with_drain(dec, chunk, |d, samples, output| {
                     let (sample_rate, channels, bits) =
                         (d.sample_rate()?, d.channels()?, d.bits_per_sample()?);
                     Some(create_audio_data_i32_with_bits(sample_rate, channels, bits, &output[..samples]))
@@ -496,9 +496,8 @@ fn detect_and_init_decoder(buffer: &[u8]) -> Result<FormatDecoder, DecodeError> 
             Ok(FormatDecoder::M4a(decoder))
         }
         AudioType::FLAC => {
-            // Box the decoder BEFORE init() so the address is stable
-            // (libFLAC stores a raw pointer to self during init)
-            let mut decoder = Box::new(FlacDecoder::new());
+            // Use pure-Rust claxon decoder (avoids libFLAC FFI release-mode bug)
+            let mut decoder = FlacDecoderClaxon::new();
             decoder
                 .init()
                 .map_err(|e| DecodeError::DecoderInitFailed(e))?;

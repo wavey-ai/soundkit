@@ -431,10 +431,13 @@ mod claxon_decoder {
     pub struct FlacDecoderClaxon {
         input_buffer: Vec<u8>,
         pending_samples_i32: Vec<i32>,
-        pending_samples_f32: Vec<f32>,
         sample_rate: Option<u32>,
         channels: Option<u8>,
         bits_per_sample: Option<u8>,
+        /// Total samples we've already returned from pending buffer
+        samples_returned: usize,
+        /// Flag to track if we've finished decoding the entire stream
+        finished: bool,
     }
 
     impl FlacDecoderClaxon {
@@ -442,10 +445,11 @@ mod claxon_decoder {
             Self {
                 input_buffer: Vec::new(),
                 pending_samples_i32: Vec::new(),
-                pending_samples_f32: Vec::new(),
                 sample_rate: None,
                 channels: None,
                 bits_per_sample: None,
+                samples_returned: 0,
+                finished: false,
             }
         }
 
@@ -461,30 +465,83 @@ mod claxon_decoder {
             self.channels
         }
 
-        fn extract_metadata_if_needed(&mut self) -> Result<(), String> {
-            if self.sample_rate.is_some() {
+        pub fn bits_per_sample(&self) -> Option<u8> {
+            self.bits_per_sample
+        }
+
+        /// Decode all available FLAC frames from the input buffer into pending_samples_i32
+        fn decode_all_available(&mut self) -> Result<(), String> {
+            if self.finished || self.input_buffer.is_empty() {
                 return Ok(());
             }
 
             let cursor = Cursor::new(&self.input_buffer[..]);
-            match FlacReader::new(cursor) {
-                Ok(reader) => {
-                    let streaminfo = reader.streaminfo();
-                    self.sample_rate = Some(streaminfo.sample_rate);
-                    self.channels = Some(streaminfo.channels as u8);
-                    self.bits_per_sample = Some(streaminfo.bits_per_sample as u8);
+            let mut reader = match FlacReader::new(cursor) {
+                Ok(r) => r,
+                Err(_) => return Ok(()), // Need more data for header
+            };
 
-                    debug!(
-                        sample_rate_hz = streaminfo.sample_rate,
-                        channels = streaminfo.channels,
-                        bits_per_sample = streaminfo.bits_per_sample,
-                        "initialized Claxon FLAC decoder"
-                    );
+            // Extract metadata on first successful parse
+            if self.sample_rate.is_none() {
+                let streaminfo = reader.streaminfo();
+                self.sample_rate = Some(streaminfo.sample_rate);
+                self.channels = Some(streaminfo.channels as u8);
+                self.bits_per_sample = Some(streaminfo.bits_per_sample as u8);
 
-                    Ok(())
-                }
-                Err(e) => Err(format!("Failed to read FLAC metadata: {:?}", e)),
+                debug!(
+                    sample_rate_hz = streaminfo.sample_rate,
+                    channels = streaminfo.channels,
+                    bits_per_sample = streaminfo.bits_per_sample,
+                    "initialized Claxon FLAC decoder"
+                );
             }
+
+            let channels = self.channels.unwrap() as usize;
+            let mut blocks = reader.blocks();
+            let mut current_block = Block::empty();
+
+            // Skip samples we've already returned
+            let mut samples_to_skip = self.samples_returned;
+
+            loop {
+                match blocks.read_next_or_eof(current_block.into_buffer()) {
+                    Ok(Some(block)) => {
+                        current_block = block;
+                        let duration = current_block.duration() as usize;
+                        let frame_samples = duration * channels;
+
+                        // If we've already returned these samples, skip them
+                        if samples_to_skip >= frame_samples {
+                            samples_to_skip -= frame_samples;
+                            continue;
+                        }
+
+                        // Interleave samples
+                        for i in 0..duration {
+                            for ch in 0..channels {
+                                let sample_idx = i * channels + ch;
+                                if sample_idx >= samples_to_skip {
+                                    self.pending_samples_i32.push(
+                                        current_block.sample(ch as u32, i as u32),
+                                    );
+                                }
+                            }
+                        }
+                        samples_to_skip = 0;
+                    }
+                    Ok(None) => {
+                        // End of stream
+                        self.finished = true;
+                        break;
+                    }
+                    Err(_e) => {
+                        // Incomplete frame - need more data or reached partial end
+                        break;
+                    }
+                }
+            }
+
+            Ok(())
         }
     }
 
@@ -509,81 +566,18 @@ mod claxon_decoder {
                 self.input_buffer.extend_from_slice(input);
             }
 
-            // Extract metadata if we haven't yet
-            if self.sample_rate.is_none() && self.input_buffer.len() >= 42 {
-                self.extract_metadata_if_needed()?;
-            }
+            // Try to decode more frames
+            self.decode_all_available()?;
 
-            let mut written = 0;
-
-            // First, drain any pending samples
-            if !self.pending_samples_i32.is_empty() {
-                let to_copy = self.pending_samples_i32.len().min(output.len());
+            // Return samples from pending buffer
+            let to_copy = self.pending_samples_i32.len().min(output.len());
+            if to_copy > 0 {
                 output[..to_copy].copy_from_slice(&self.pending_samples_i32[..to_copy]);
                 self.pending_samples_i32.drain(..to_copy);
-                written += to_copy;
+                self.samples_returned += to_copy;
             }
 
-            // If we don't have metadata yet, can't decode
-            if self.sample_rate.is_none() {
-                return Ok(written);
-            }
-
-            // Try to decode frames from the buffer
-            let cursor = Cursor::new(&self.input_buffer[..]);
-            match FlacReader::new(cursor) {
-                Ok(mut reader) => {
-                    let channels = self.channels.unwrap() as usize;
-                    let mut blocks = reader.blocks();
-                    let mut current_block = Block::empty();
-
-                    loop {
-                        if written >= output.len() {
-                            break;
-                        }
-
-                        match blocks.read_next_or_eof(current_block.into_buffer()) {
-                            Ok(Some(block)) => {
-                                current_block = block;
-                                let duration = current_block.duration() as usize;
-
-                                // Interleave samples
-                                let mut frame_samples = Vec::with_capacity(duration * channels);
-                                for i in 0..duration {
-                                    for ch in 0..channels {
-                                        frame_samples.push(current_block.sample(ch as u32, i as u32));
-                                    }
-                                }
-
-                                // Copy what we can to output
-                                let remaining = output.len() - written;
-                                let to_copy = frame_samples.len().min(remaining);
-
-                                output[written..written + to_copy].copy_from_slice(&frame_samples[..to_copy]);
-                                written += to_copy;
-
-                                // Store any overflow in pending buffer
-                                if to_copy < frame_samples.len() {
-                                    self.pending_samples_i32.extend_from_slice(&frame_samples[to_copy..]);
-                                }
-                            }
-                            Ok(None) => {
-                                // End of stream
-                                break;
-                            }
-                            Err(_e) => {
-                                // Need more data, stop for now
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(_e) => {
-                    // Can't create reader yet, need more data
-                }
-            }
-
-            Ok(written)
+            Ok(to_copy)
         }
 
         fn decode_f32(
@@ -592,89 +586,20 @@ mod claxon_decoder {
             output: &mut [f32],
             _fec: bool,
         ) -> Result<usize, String> {
-            // Append new input data
-            if !input.is_empty() {
-                self.input_buffer.extend_from_slice(input);
-            }
+            // Decode to i32 first, then convert
+            let mut i32_output = vec![0i32; output.len()];
+            let samples = self.decode_i32(input, &mut i32_output, _fec)?;
 
-            // Extract metadata if we haven't yet
-            if self.sample_rate.is_none() && self.input_buffer.len() >= 42 {
-                self.extract_metadata_if_needed()?;
-            }
+            if samples > 0 {
+                let bits = self.bits_per_sample.unwrap_or(16) as i32;
+                let scale = (1i64 << (bits - 1)) as f32;
 
-            let mut written = 0;
-
-            // First, drain any pending samples
-            if !self.pending_samples_f32.is_empty() {
-                let to_copy = self.pending_samples_f32.len().min(output.len());
-                output[..to_copy].copy_from_slice(&self.pending_samples_f32[..to_copy]);
-                self.pending_samples_f32.drain(..to_copy);
-                written += to_copy;
-            }
-
-            // If we don't have metadata yet, can't decode
-            if self.sample_rate.is_none() {
-                return Ok(written);
-            }
-
-            // Try to decode frames from the buffer
-            let cursor = Cursor::new(&self.input_buffer[..]);
-            match FlacReader::new(cursor) {
-                Ok(mut reader) => {
-                    let channels = self.channels.unwrap() as usize;
-                    let bits_per_sample = self.bits_per_sample.unwrap() as i32;
-                    let scale = (1i64 << (bits_per_sample - 1)) as f32;
-                    let mut blocks = reader.blocks();
-                    let mut current_block = Block::empty();
-
-                    loop {
-                        if written >= output.len() {
-                            break;
-                        }
-
-                        match blocks.read_next_or_eof(current_block.into_buffer()) {
-                            Ok(Some(block)) => {
-                                current_block = block;
-                                let duration = current_block.duration() as usize;
-
-                                // Interleave and convert to f32
-                                let mut frame_samples = Vec::with_capacity(duration * channels);
-                                for i in 0..duration {
-                                    for ch in 0..channels {
-                                        let sample = current_block.sample(ch as u32, i as u32);
-                                        frame_samples.push((sample as f32) / scale);
-                                    }
-                                }
-
-                                // Copy what we can to output
-                                let remaining = output.len() - written;
-                                let to_copy = frame_samples.len().min(remaining);
-
-                                output[written..written + to_copy].copy_from_slice(&frame_samples[..to_copy]);
-                                written += to_copy;
-
-                                // Store any overflow in pending buffer
-                                if to_copy < frame_samples.len() {
-                                    self.pending_samples_f32.extend_from_slice(&frame_samples[to_copy..]);
-                                }
-                            }
-                            Ok(None) => {
-                                // End of stream
-                                break;
-                            }
-                            Err(_e) => {
-                                // Need more data, stop for now
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(_e) => {
-                    // Can't create reader yet, need more data
+                for i in 0..samples {
+                    output[i] = (i32_output[i] as f32) / scale;
                 }
             }
 
-            Ok(written)
+            Ok(samples)
         }
     }
 }
@@ -912,5 +837,164 @@ mod tests {
             &testdata_path("wav_32f/A_Tusk_is_used_to_make_costly_gifts.wav"),
             &golden_path("flac/A_Tusk_is_used_to_make_costly_gifts_32float.flac"),
         );
+    }
+
+    #[cfg(feature = "claxon-decoder")]
+    mod claxon_tests {
+        use super::*;
+        use crate::FlacDecoderClaxon;
+        use soundkit::audio_packet::Decoder;
+
+        /// Decode FLAC using claxon decoder
+        fn decode_with_claxon(flac_bytes: &[u8]) -> (Vec<i32>, Option<u32>, Option<u8>, Option<u8>) {
+            let mut decoder = FlacDecoderClaxon::new();
+            decoder.init().expect("Claxon decoder initialization failed");
+
+            let mut decoded = Vec::new();
+            let mut scratch = vec![0i32; 8192];
+
+            // Feed all data at once (claxon works best this way)
+            let written = decoder.decode_i32(flac_bytes, &mut scratch, false).unwrap();
+            decoded.extend_from_slice(&scratch[..written]);
+
+            // Drain remaining
+            loop {
+                let written = decoder.decode_i32(&[], &mut scratch, false).unwrap();
+                if written == 0 {
+                    break;
+                }
+                decoded.extend_from_slice(&scratch[..written]);
+            }
+
+            (decoded, decoder.sample_rate(), decoder.channels(), decoder.bits_per_sample())
+        }
+
+        /// Decode FLAC using libflac decoder
+        fn decode_with_libflac(flac_bytes: &[u8]) -> (Vec<i32>, Option<u32>, Option<u8>, Option<u8>) {
+            let mut decoder = FlacDecoder::new();
+            decoder.init().expect("libFLAC decoder initialization failed");
+
+            let mut decoded = Vec::new();
+            let mut scratch = vec![0i32; 8192];
+
+            for chunk in flac_bytes.chunks(4096) {
+                let written = decoder.decode_i32(chunk, &mut scratch, false).unwrap();
+                decoded.extend_from_slice(&scratch[..written]);
+            }
+
+            // Drain remaining
+            loop {
+                let written = decoder.decode_i32(&[], &mut scratch, false).unwrap();
+                if written == 0 {
+                    break;
+                }
+                decoded.extend_from_slice(&scratch[..written]);
+            }
+
+            (decoded, decoder.sample_rate(), decoder.channels(), decoder.bits_per_sample())
+        }
+
+        #[test]
+        fn test_claxon_decode_waveform() {
+            let input_path = testdata_path(&format!("flac/{}.flac", TEST_FILE));
+            let flac_bytes = fs::read(&input_path).unwrap();
+            assert!(!flac_bytes.is_empty(), "fixture flac missing or empty");
+
+            init_tracing();
+
+            let (decoded, sample_rate, channels, bits) = decode_with_claxon(&flac_bytes);
+
+            assert!(!decoded.is_empty(), "claxon decoder produced no PCM samples");
+            assert_eq!(sample_rate, Some(16_000), "sample rate");
+            assert_eq!(channels, Some(1), "channels");
+            assert_eq!(bits, Some(16), "bits per sample");
+
+            let result = DecodeResult::from_i32_with_bits(
+                &decoded,
+                sample_rate.unwrap_or(16000),
+                channels.unwrap_or(1),
+                bits.unwrap_or(16),
+            );
+            print_waveform_with_header("FLAC (claxon)", &result);
+        }
+
+        #[test]
+        fn test_compare_libflac_vs_claxon() {
+            let input_path = testdata_path(&format!("flac/{}.flac", TEST_FILE));
+            let flac_bytes = fs::read(&input_path).unwrap();
+            assert!(!flac_bytes.is_empty(), "fixture flac missing or empty");
+
+            init_tracing();
+
+            let (libflac_samples, libflac_sr, libflac_ch, libflac_bits) = decode_with_libflac(&flac_bytes);
+            let (claxon_samples, claxon_sr, claxon_ch, claxon_bits) = decode_with_claxon(&flac_bytes);
+
+            // Compare metadata
+            assert_eq!(libflac_sr, claxon_sr, "sample rate mismatch");
+            assert_eq!(libflac_ch, claxon_ch, "channel count mismatch");
+            assert_eq!(libflac_bits, claxon_bits, "bits per sample mismatch");
+
+            println!(
+                "  Sample counts: libflac={}, claxon={}",
+                libflac_samples.len(),
+                claxon_samples.len()
+            );
+
+            // libflac has issues draining the last frame, so claxon may have more samples
+            // Compare the overlapping portion
+            let min_len = libflac_samples.len().min(claxon_samples.len());
+
+            // Compare actual samples (should be bit-exact for lossless codec)
+            let mut mismatches = 0;
+            let mut max_diff: i64 = 0;
+            for i in 0..min_len {
+                let a = libflac_samples[i];
+                let b = claxon_samples[i];
+                if a != b {
+                    mismatches += 1;
+                    let diff = (a as i64 - b as i64).abs();
+                    if diff > max_diff {
+                        max_diff = diff;
+                    }
+                    if mismatches <= 10 {
+                        trace!(
+                            sample = i,
+                            libflac = a,
+                            claxon = b,
+                            diff = a - b,
+                            "sample mismatch"
+                        );
+                    }
+                }
+            }
+
+            if mismatches > 0 {
+                println!(
+                    "  Decoder comparison: {} mismatches out of {} samples compared, max diff: {}",
+                    mismatches,
+                    min_len,
+                    max_diff
+                );
+            }
+
+            // Both decoders should produce identical output for the overlapping portion
+            assert_eq!(
+                mismatches, 0,
+                "libflac and claxon produced different output in overlapping range: {} mismatches",
+                mismatches
+            );
+
+            // Claxon should produce at least as many samples as libflac
+            assert!(
+                claxon_samples.len() >= libflac_samples.len(),
+                "claxon produced fewer samples than libflac"
+            );
+
+            println!(
+                "  ✓ Decoders match on {} overlapping samples (claxon has {} extra samples)",
+                min_len,
+                claxon_samples.len().saturating_sub(libflac_samples.len())
+            );
+        }
     }
 }

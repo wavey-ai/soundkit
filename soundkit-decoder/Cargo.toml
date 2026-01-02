@@ -11,7 +11,7 @@ soundkit = { path = "../soundkit" }
 access-unit = { git = "https://github.com/wavey-ai/access-unit.git" }
 soundkit-mp3 = { path = "../soundkit-mp3" }
 soundkit-aac = { path = "../soundkit-aac", features = ["mp4-decoder"] }
-soundkit-flac = { path = "../soundkit-flac" }
+soundkit-flac = { path = "../soundkit-flac", features = ["claxon-decoder"] }
 soundkit-opus = { path = "../soundkit-opus" }
 soundkit-ogg-opus = { path = "../soundkit-ogg-opus" }
 soundkit-webm = { path = "../soundkit-webm" }
