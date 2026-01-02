@@ -2,7 +2,7 @@ use mp3lame_encoder::{
     max_required_buffer_size, Bitrate, Builder, FlushNoGap, InterleavedPcm, MonoPcm,
 };
 use nanomp3::{Decoder as NanoDecoder, FrameInfo, MAX_SAMPLES_PER_FRAME};
-use soundkit::audio_packet::{Decoder as AudioDecoder, Encoder};
+use soundkit::audio_packet::{Decoder, Encoder};
 use std::mem::MaybeUninit;
 use std::vec::Vec;
 use std::slice;
@@ -159,6 +159,11 @@ impl Mp3Decoder {
         self.channels
     }
 
+    /// Get current buffer length (for debugging)
+    pub fn buffer_len(&self) -> usize {
+        self.buffer.len()
+    }
+
     pub fn reset(&mut self) {
         self.inner = NanoDecoder::new();
         self.buffer.clear();
@@ -246,7 +251,7 @@ impl Default for Mp3Decoder {
     }
 }
 
-impl AudioDecoder for Mp3Decoder {
+impl Decoder for Mp3Decoder {
     fn decode_i16(&mut self, input: &[u8], out: &mut [i16], _fec: bool) -> Result<usize, String> {
         self.buffer.extend_from_slice(input);
 
@@ -259,15 +264,10 @@ impl AudioDecoder for Mp3Decoder {
             }
 
             let Some(info) = frame else {
-                if consumed == 0 {
-                    break;
-                } else {
-                    continue;
-                }
+                break;
             };
 
             self.capture_header(&info);
-
             let frame_written = self.write_frame_i16(&info, &mut out[written..])?;
             self.log_frame_decode(&info, consumed, frame_written);
             written += frame_written;
@@ -292,15 +292,10 @@ impl AudioDecoder for Mp3Decoder {
             }
 
             let Some(info) = frame else {
-                if consumed == 0 {
-                    break;
-                } else {
-                    continue;
-                }
+                break;
             };
 
             self.capture_header(&info);
-
             let frame_written = self.write_frame_i32(&info, &mut out[written..])?;
             self.log_frame_decode(&info, consumed, frame_written);
             written += frame_written;
@@ -325,16 +320,11 @@ impl AudioDecoder for Mp3Decoder {
             }
 
             let Some(info) = frame else {
-                if consumed == 0 {
-                    break;
-                } else {
-                    continue;
-                }
+                break;
             };
 
             self.capture_header(&info);
 
-            // Zero-copy: nanomp3 already outputs f32
             let channels = info.channels.num() as usize;
             let frame_samples = info.samples_produced * channels;
 
@@ -346,9 +336,7 @@ impl AudioDecoder for Mp3Decoder {
                 ));
             }
 
-            out[written..written + frame_samples]
-                .copy_from_slice(&self.pcm[..frame_samples]);
-
+            out[written..written + frame_samples].copy_from_slice(&self.pcm[..frame_samples]);
             self.log_frame_decode(&info, consumed, frame_samples);
             written += frame_samples;
 
@@ -546,5 +534,171 @@ mod tests {
         fs::create_dir_all(output_path.parent().unwrap()).unwrap();
         let pcm_bytes: Vec<u8> = decoded.iter().flat_map(|s| s.to_le_bytes()).collect();
         fs::write(&output_path, pcm_bytes).unwrap();
+    }
+
+    /// Test that simulates the pipeline detection pattern:
+    /// First 8192 bytes at once, then small chunks
+    #[test]
+    fn test_mp3_detection_pattern() {
+        let input_path = testdata_path("mp3/A_Tusk_is_used_to_make_costly_gifts.mp3");
+        let mp3_bytes = fs::read(&input_path).unwrap();
+        assert!(!mp3_bytes.is_empty(), "fixture mp3 missing or empty");
+
+        init_tracing();
+
+        const MIN_DETECTION: usize = 8192;
+        const SMALL_CHUNK: usize = 256;
+
+        let mut decoder = Mp3Decoder::new();
+        let mut decoded = Vec::new();
+        let mut scratch = vec![0i16; MAX_SAMPLES_PER_FRAME * 2];
+
+        // Phase 1: Detection - process first 8192 bytes at once
+        let detection_bytes = &mp3_bytes[..MIN_DETECTION.min(mp3_bytes.len())];
+        let written = decoder.decode_i16(detection_bytes, &mut scratch, false).unwrap();
+        decoded.extend_from_slice(&scratch[..written]);
+        println!("Detection phase: {} bytes in, {} samples out", detection_bytes.len(), written);
+
+        // Drain after detection
+        loop {
+            let w = decoder.decode_i16(&[], &mut scratch, false).unwrap();
+            if w == 0 { break; }
+            decoded.extend_from_slice(&scratch[..w]);
+            println!("Detection drain: {} samples", w);
+        }
+
+        let detection_samples = decoded.len();
+        println!("After detection: {} samples total", detection_samples);
+
+        println!("Decoder buffer len after detection: {}", decoder.buffer_len());
+
+        // Phase 2: Remaining bytes in small chunks
+        let mut chunks_processed = 0;
+        let mut post_detection_samples = 0;
+        let mut total_bytes_added = 0usize;
+        for chunk in mp3_bytes[MIN_DETECTION..].chunks(SMALL_CHUNK) {
+            total_bytes_added += chunk.len();
+            let buf_before = decoder.buffer_len();
+            let written = decoder.decode_i16(chunk, &mut scratch, false).unwrap();
+            let buf_after = decoder.buffer_len();
+            if written > 0 || chunks_processed < 5 {
+                println!("Chunk {}: {} bytes in, buf {}→{}, {} samples out",
+                    chunks_processed, chunk.len(), buf_before, buf_after, written);
+            }
+            if written > 0 {
+                decoded.extend_from_slice(&scratch[..written]);
+                post_detection_samples += written;
+            }
+            chunks_processed += 1;
+
+            // Drain after each chunk (like the pipeline does)
+            loop {
+                let w = decoder.decode_i16(&[], &mut scratch, false).unwrap();
+                if w == 0 { break; }
+                decoded.extend_from_slice(&scratch[..w]);
+                post_detection_samples += w;
+                println!("Chunk {} drain: {} samples, buf now {}", chunks_processed, w, decoder.buffer_len());
+            }
+        }
+
+        println!("Total bytes added post-detection: {}", total_bytes_added);
+        println!("Final buffer len: {}", decoder.buffer_len());
+
+        // Final flush
+        loop {
+            let w = decoder.decode_i16(&[], &mut scratch, false).unwrap();
+            if w == 0 { break; }
+            decoded.extend_from_slice(&scratch[..w]);
+            post_detection_samples += w;
+            println!("Final flush: {} samples", w);
+        }
+
+        println!("Post-detection: {} chunks processed, {} samples", chunks_processed, post_detection_samples);
+        println!("Total: {} samples ({} bytes PCM)", decoded.len(), decoded.len() * 2);
+    }
+
+    /// Test that chunk size doesn't affect decoded output
+    /// This reproduces the issue where HTTP/3 (small chunks) produces different output than HTTP/2 (large chunks)
+    #[test]
+    fn test_mp3_chunk_size_invariance() {
+        let input_path = testdata_path("mp3/A_Tusk_is_used_to_make_costly_gifts.mp3");
+        let mp3_bytes = fs::read(&input_path).unwrap();
+        assert!(!mp3_bytes.is_empty(), "fixture mp3 missing or empty");
+
+        init_tracing();
+
+        // Decode with large chunks (simulating HTTP/2)
+        let large_chunk_output = {
+            let mut decoder = Mp3Decoder::new();
+            let mut decoded = Vec::new();
+            let mut scratch = vec![0i16; MAX_SAMPLES_PER_FRAME * 2];
+
+            // Send all data in 2 large chunks (like HTTP/2)
+            let mid = mp3_bytes.len() / 2;
+            for chunk in [&mp3_bytes[..mid], &mp3_bytes[mid..]] {
+                let written = decoder.decode_i16(chunk, &mut scratch, false).unwrap();
+                decoded.extend_from_slice(&scratch[..written]);
+            }
+
+            // Drain remaining
+            loop {
+                let written = decoder.decode_i16(&[], &mut scratch, false).unwrap();
+                if written == 0 {
+                    break;
+                }
+                decoded.extend_from_slice(&scratch[..written]);
+            }
+
+            decoded
+        };
+
+        // Decode with small chunks (simulating HTTP/3)
+        let small_chunk_output = {
+            let mut decoder = Mp3Decoder::new();
+            let mut decoded = Vec::new();
+            let mut scratch = vec![0i16; MAX_SAMPLES_PER_FRAME * 2];
+
+            // Send data in many small chunks (like HTTP/3 with QUIC)
+            for chunk in mp3_bytes.chunks(1200) {
+                let written = decoder.decode_i16(chunk, &mut scratch, false).unwrap();
+                decoded.extend_from_slice(&scratch[..written]);
+            }
+
+            // Drain remaining
+            loop {
+                let written = decoder.decode_i16(&[], &mut scratch, false).unwrap();
+                if written == 0 {
+                    break;
+                }
+                decoded.extend_from_slice(&scratch[..written]);
+            }
+
+            decoded
+        };
+
+        println!("Large chunk output: {} samples ({} bytes PCM)",
+            large_chunk_output.len(),
+            large_chunk_output.len() * 2);
+        println!("Small chunk output: {} samples ({} bytes PCM)",
+            small_chunk_output.len(),
+            small_chunk_output.len() * 2);
+
+        assert_eq!(
+            large_chunk_output.len(),
+            small_chunk_output.len(),
+            "Chunk size should not affect decoded output length! \
+             Large: {} samples, Small: {} samples, \
+             Difference: {} samples ({} bytes)",
+            large_chunk_output.len(),
+            small_chunk_output.len(),
+            (large_chunk_output.len() as i64 - small_chunk_output.len() as i64).abs(),
+            ((large_chunk_output.len() as i64 - small_chunk_output.len() as i64).abs() * 2)
+        );
+
+        assert_eq!(
+            large_chunk_output,
+            small_chunk_output,
+            "Decoded PCM should be identical regardless of input chunk size"
+        );
     }
 }

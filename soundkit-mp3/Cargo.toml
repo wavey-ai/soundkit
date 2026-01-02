@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 mp3lame-encoder = "0.2.1"
 mp3lame-sys = "0.1.9"
-nanomp3 = "0.1.1"
+nanomp3 = { git = "https://github.com/wavey-ai/nanomp3.git" }
 soundkit = { path = "../soundkit" }
 tracing = "0.1.40"
 

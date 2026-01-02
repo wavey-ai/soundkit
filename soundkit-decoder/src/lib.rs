@@ -1703,4 +1703,119 @@ mod tests {
             benchmark_format_folder(fmt, Some(resample_opts));
         }
     }
+
+    /// Helper to fully decode MP3 data through the pipeline and return all decoded bytes
+    fn decode_mp3_fully(data: Bytes, chunk_size: Option<usize>) -> Vec<u8> {
+        let mut pipeline = DecodePipeline::spawn_with_buffers(1024, 4096);
+
+        let mut chunks_sent = 0usize;
+        let mut bytes_sent = 0usize;
+
+        if let Some(cs) = chunk_size {
+            // Send in chunks
+            for start in (0..data.len()).step_by(cs) {
+                let end = (start + cs).min(data.len());
+                let chunk = data.slice(start..end);
+                bytes_sent += chunk.len();
+                chunks_sent += 1;
+                while pipeline.send(chunk.clone()).is_err() {
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                }
+                // Brief pause between chunks to simulate network
+                std::thread::sleep(std::time::Duration::from_micros(50));
+            }
+        } else {
+            // Send all at once
+            bytes_sent = data.len();
+            chunks_sent = 1;
+            pipeline.send(data).unwrap();
+        }
+
+        // Wait for all chunks to be processed before EOF
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Send EOF
+        while pipeline.send(Bytes::new()).is_err() {
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+
+        println!("Sent {} bytes in {} chunks", bytes_sent, chunks_sent);
+
+        // Collect all output
+        let mut output = Vec::new();
+        let mut idle_iters = 0u32;
+        let max_idle = 500u32;
+        let mut frame_count = 0usize;
+        let mut frame_sizes = Vec::new();
+
+        loop {
+            match pipeline.try_recv() {
+                Some(Ok(audio_data)) => {
+                    frame_count += 1;
+                    frame_sizes.push(audio_data.data().len());
+                    output.extend_from_slice(audio_data.data());
+                    idle_iters = 0;
+                }
+                Some(Err(e)) => panic!("Decode error: {:?}", e),
+                None => {
+                    idle_iters += 1;
+                    if idle_iters >= max_idle {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+        }
+
+        println!("Received {} frames, {} bytes total", frame_count, output.len());
+        if frame_count > 0 && frame_count <= 20 {
+            println!("Frame sizes: {:?}", frame_sizes);
+        }
+        output
+    }
+
+    /// Test that the pipeline produces identical output regardless of input chunk size
+    /// This is critical for HTTP/3 (small chunks) vs HTTP/2 (large chunks) compatibility
+    #[test]
+    fn test_mp3_pipeline_chunk_invariance() {
+        let data = Bytes::from(
+            fs::read(testdata_path("mp3/A_Tusk_is_used_to_make_costly_gifts.mp3")).unwrap(),
+        );
+
+        // Decode with all data at once (like HTTP/2 with large buffers)
+        let large_output = decode_mp3_fully(data.clone(), None);
+
+        // Decode with small chunks (like HTTP/3 with QUIC)
+        let small_output = decode_mp3_fully(data.clone(), Some(1200));
+
+        // Decode with very small chunks (extreme case)
+        let tiny_output = decode_mp3_fully(data, Some(256));
+
+        println!("All-at-once output: {} bytes", large_output.len());
+        println!("1200-byte chunks output: {} bytes", small_output.len());
+        println!("256-byte chunks output: {} bytes", tiny_output.len());
+
+        assert_eq!(
+            large_output.len(),
+            small_output.len(),
+            "Pipeline should produce identical output regardless of chunk size! \
+             All-at-once: {} bytes, 1200-byte chunks: {} bytes, \
+             Difference: {} bytes",
+            large_output.len(),
+            small_output.len(),
+            (large_output.len() as i64 - small_output.len() as i64).abs()
+        );
+
+        assert_eq!(
+            large_output.len(),
+            tiny_output.len(),
+            "Pipeline should produce identical output regardless of chunk size! \
+             All-at-once: {} bytes, 256-byte chunks: {} bytes, \
+             Difference: {} bytes",
+            large_output.len(),
+            tiny_output.len(),
+            (large_output.len() as i64 - tiny_output.len() as i64).abs()
+        );
+
+    }
 }
