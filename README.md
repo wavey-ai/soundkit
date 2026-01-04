@@ -1,5 +1,7 @@
 # soundkit
 
+[![CI](https://github.com/wavey-ai/soundkit/actions/workflows/ci.yml/badge.svg)](https://github.com/wavey-ai/soundkit/actions/workflows/ci.yml)
+
 A lightweight, extensible Rust audio toolbox providing:
 
 - **Raw sample conversions** (16 ↔ 32 bit, 24 bit, float ↔ int)
