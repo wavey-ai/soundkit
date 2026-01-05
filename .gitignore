@@ -2,7 +2,19 @@
 **/*.rs.bk
 Cargo.lock
 test/out.wav
-golden/
+# Ignore most golden but allow specific test fixtures
+golden/*
+!golden/aac/
+golden/aac/*
+!golden/aac/A_Tusk_is_used_to_make_costly_gifts_encoded.aac
+!golden/flac/
+golden/flac/*
+!golden/flac/A_Tusk_is_used_to_make_costly_gifts_16bit.flac
+!golden/flac/A_Tusk_is_used_to_make_costly_gifts_24bit.flac
+!golden/flac/A_Tusk_is_used_to_make_costly_gifts_32float.flac
+!golden/mp3/
+golden/mp3/*
+!golden/mp3/A_Tusk_is_used_to_make_costly_gifts_encoded.mp3
 !soundkit-decoder/testdata/golden/
 .idea/
 .vscode/
