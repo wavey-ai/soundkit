@@ -17,7 +17,16 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake automake autoconf libtool nasm libopus-dev
+          sudo apt-get install -y cmake automake autoconf libtool nasm
+      - name: Build and install libopus 1.5.2
+        run: |
+          curl -sL https://github.com/xiph/opus/releases/download/v1.5.2/opus-1.5.2.tar.gz | tar xz
+          cd opus-1.5.2
+          ./configure --prefix=/usr/local
+          make -j$(nproc)
+          sudo make install
+          sudo ldconfig
+          echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig" >> $GITHUB_ENV
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
