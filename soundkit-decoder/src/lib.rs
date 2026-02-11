@@ -3,9 +3,10 @@ pub use bytes::Bytes;
 use bytes::BytesMut;
 use frame_header::{EncodingFlag, Endianness};
 use rtrb::{Consumer, Producer, RingBuffer};
+use rubato::{SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction, Resampler};
 use soundkit::audio_bytes::{interleave_vecs_i16, s32le_to_i32};
 use soundkit::audio_pipeline::{
-    deserialize_audio, downsample_audio, vec_f32_to_i16, vec_i16_to_f32, vec_i32_to_f32,
+    deserialize_audio, vec_f32_to_i16, vec_i16_to_f32, vec_i32_to_f32,
 };
 use soundkit::audio_packet::Decoder;
 use soundkit::audio_types::{AudioData, PcmData};
@@ -78,6 +79,129 @@ impl Default for DecodeOptions {
             output_sample_rate: None,
             output_channels: None,
         }
+    }
+}
+
+/// Persistent resampler that maintains filter state across decoded frames.
+///
+/// Creating a new `rubato::SincFixedIn` per frame discards the sinc filter's
+/// internal delay buffer, losing samples at every frame boundary.  Over a
+/// long file, these per-frame losses accumulate to seconds of missing audio.
+///
+/// `StreamingResampler` keeps a single resampler alive for the entire stream,
+/// accumulates decoded samples until a full chunk is ready, and emits
+/// properly resampled output without inter-frame discontinuities.
+struct StreamingResampler {
+    resampler: SincFixedIn<f32>,
+    chunk_size: usize,
+    channels: usize,
+    /// Per-channel accumulation buffer for decoded samples.
+    accum: Vec<Vec<f32>>,
+    /// Target output format parameters.
+    output_sample_rate: u32,
+}
+
+/// Fixed chunk size fed to the sinc resampler.  Larger chunks amortise
+/// the constant overhead of the filter tails.  The value does NOT need
+/// to match the codec frame size – we accumulate into `accum` and drain
+/// in `chunk_size` increments.
+const RESAMPLE_CHUNK_SIZE: usize = 4096;
+
+impl StreamingResampler {
+    fn new(
+        input_sample_rate: u32,
+        output_sample_rate: u32,
+        channels: usize,
+    ) -> Result<Self, String> {
+        let params = SincInterpolationParameters {
+            sinc_len: 256,
+            f_cutoff: 0.95,
+            interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 256,
+            window: WindowFunction::BlackmanHarris2,
+        };
+
+        let resampler = SincFixedIn::<f32>::new(
+            output_sample_rate as f64 / input_sample_rate as f64,
+            2.0,
+            params,
+            RESAMPLE_CHUNK_SIZE,
+            channels,
+        )
+        .map_err(|e| format!("Failed to create resampler: {}", e))?;
+
+        Ok(Self {
+            resampler,
+            chunk_size: RESAMPLE_CHUNK_SIZE,
+            channels,
+            accum: vec![Vec::new(); channels],
+            output_sample_rate,
+        })
+    }
+
+    /// Feed decoded f32 samples (one Vec per channel) into the resampler.
+    /// Returns zero or more chunks of resampled output.
+    fn process(&mut self, input: &[Vec<f32>]) -> Result<Vec<Vec<Vec<f32>>>, String> {
+        // Append to per-channel accumulators
+        for (ch, samples) in input.iter().enumerate() {
+            if ch < self.channels {
+                self.accum[ch].extend_from_slice(samples);
+            }
+        }
+
+        let mut outputs = Vec::new();
+
+        // Process full chunks
+        while self.accum[0].len() >= self.chunk_size {
+            let chunk: Vec<Vec<f32>> = self
+                .accum
+                .iter_mut()
+                .map(|ch| ch.drain(..self.chunk_size).collect())
+                .collect();
+
+            let resampled = self
+                .resampler
+                .process(&chunk, None)
+                .map_err(|e| format!("Resample failed: {}", e))?;
+            outputs.push(resampled);
+        }
+
+        Ok(outputs)
+    }
+
+    /// Flush remaining samples at end-of-stream.  Uses `process_partial`
+    /// for the tail and then `process_partial` with None input to drain
+    /// the resampler's internal delay line.
+    fn flush(&mut self) -> Result<Vec<Vec<Vec<f32>>>, String> {
+        let mut outputs = Vec::new();
+
+        // Process any remaining accumulated samples
+        let remaining = self.accum[0].len();
+        if remaining > 0 {
+            let chunk: Vec<Vec<f32>> = self
+                .accum
+                .iter_mut()
+                .map(|ch| ch.drain(..).collect())
+                .collect();
+
+            let resampled = self
+                .resampler
+                .process_partial(Some(&chunk), None)
+                .map_err(|e| format!("Resample partial failed: {}", e))?;
+            outputs.push(resampled);
+        }
+
+        // Final flush to drain the resampler's internal delay buffer
+        let flushed = self
+            .resampler
+            .process_partial(None::<&[Vec<f32>]>, None)
+            .map_err(|e| format!("Resample flush failed: {}", e))?;
+        // Only include if it contains actual samples
+        if flushed.iter().any(|ch| !ch.is_empty()) {
+            outputs.push(flushed);
+        }
+
+        Ok(outputs)
     }
 }
 
@@ -374,6 +498,11 @@ fn pipeline_worker(
         bytes_collected: 0,
     };
 
+    // Persistent resampler – created lazily on first decoded frame that
+    // needs sample-rate conversion.  Stays alive for the entire stream
+    // so the sinc filter state is never discarded between frames.
+    let mut resampler: Option<StreamingResampler> = None;
+
     loop {
         // Try to get next chunk
         let chunk = match input_rx.pop() {
@@ -403,8 +532,9 @@ fn pipeline_worker(
                                 buffer.as_ref(),
                                 &mut output_tx,
                                 &options,
+                                &mut resampler,
                             );
-                            flush_decoder(&mut decoder, &mut output_tx, &options);
+                            flush_decoder(&mut decoder, &mut output_tx, &options, &mut resampler);
                         }
                         Err(e) => {
                             push_output(&mut output_tx, Err(e.clone()));
@@ -427,6 +557,7 @@ fn pipeline_worker(
                                     buffer.as_ref(),
                                     &mut output_tx,
                                     &options,
+                                    &mut resampler,
                                 );
                                 Some(PipelineState::Decoding { decoder })
                             }
@@ -454,10 +585,10 @@ fn pipeline_worker(
 
             PipelineState::Decoding { mut decoder } => {
                 if is_eof {
-                    flush_decoder(&mut decoder, &mut output_tx, &options);
+                    flush_decoder(&mut decoder, &mut output_tx, &options, &mut resampler);
                     None
                 } else {
-                    process_with_decoder(&mut decoder, chunk.as_ref(), &mut output_tx, &options);
+                    process_with_decoder(&mut decoder, chunk.as_ref(), &mut output_tx, &options, &mut resampler);
                     Some(PipelineState::Decoding { decoder })
                 }
             }
@@ -540,11 +671,12 @@ fn process_with_decoder(
     chunk: &[u8],
     output_tx: &mut Producer<DecodeOutput>,
     options: &DecodeOptions,
+    resampler: &mut Option<StreamingResampler>,
 ) {
     match decoder.process(chunk) {
         Ok(audio_frames) => {
             for audio_data in audio_frames {
-                push_audio_data(output_tx, audio_data, options);
+                push_audio_data(output_tx, audio_data, options, resampler);
             }
         }
         Err(e) => {
@@ -558,16 +690,22 @@ fn flush_decoder(
     decoder: &mut FormatDecoder,
     output_tx: &mut Producer<DecodeOutput>,
     options: &DecodeOptions,
+    resampler: &mut Option<StreamingResampler>,
 ) {
     match decoder.flush() {
         Ok(audio_frames) => {
             for audio_data in audio_frames {
-                push_audio_data(output_tx, audio_data, options);
+                push_audio_data(output_tx, audio_data, options, resampler);
             }
         }
         Err(e) => {
             push_output(output_tx, Err(DecodeError::DecodingFailed(e)));
         }
+    }
+
+    // Flush the persistent resampler to drain its internal delay buffers
+    if let Some(rs) = resampler.take() {
+        flush_streaming_resampler(rs, output_tx, options);
     }
 }
 
@@ -652,19 +790,101 @@ fn push_audio_data(
     output_tx: &mut Producer<DecodeOutput>,
     audio_data: AudioData,
     options: &DecodeOptions,
+    resampler: &mut Option<StreamingResampler>,
 ) {
-    let output = match apply_output_options(audio_data, options) {
-        Ok(audio_data) => Ok(audio_data),
-        Err(err) => Err(err),
-    };
+    match apply_output_options(audio_data, options, resampler) {
+        Ok(frames) => {
+            for frame in frames {
+                push_output(output_tx, Ok(frame));
+            }
+        }
+        Err(err) => {
+            push_output(output_tx, Err(err));
+        }
+    }
+}
 
-    push_output(output_tx, output);
+/// Emit resampled output chunks as AudioData frames.
+fn emit_resampled_chunks(
+    chunks: Vec<Vec<Vec<f32>>>,
+    target_bits_per_sample: u8,
+    target_channels: u8,
+    target_sample_rate: u32,
+    output_format: EncodingFlag,
+) -> Result<Vec<AudioData>, DecodeError> {
+    let mut out = Vec::with_capacity(chunks.len());
+    for mut resampled_channels in chunks {
+        // Downmix if needed (resampler outputs the same channel count as input)
+        let ch_count = if target_channels < resampled_channels.len() as u8 {
+            resampled_channels = downmix_channels(&resampled_channels, target_channels);
+            target_channels
+        } else {
+            resampled_channels.len() as u8
+        };
+
+        let bytes =
+            f32_channels_to_bytes(&resampled_channels, target_bits_per_sample, output_format)
+                .map_err(|e| {
+                    DecodeError::DecodingFailed(format!("Output conversion failed: {}", e))
+                })?;
+
+        out.push(AudioData::new(
+            target_bits_per_sample,
+            ch_count,
+            target_sample_rate,
+            bytes,
+            output_format,
+            Endianness::LittleEndian,
+        ));
+    }
+    Ok(out)
+}
+
+/// Flush the streaming resampler at end-of-stream and emit remaining samples.
+fn flush_streaming_resampler(
+    mut rs: StreamingResampler,
+    output_tx: &mut Producer<DecodeOutput>,
+    options: &DecodeOptions,
+) {
+    let target_bits_per_sample = options.output_bits_per_sample.unwrap_or(16);
+    let target_channels = options.output_channels.unwrap_or(1);
+    let target_sample_rate = rs.output_sample_rate;
+    let output_format = EncodingFlag::PCMSigned;
+
+    match rs.flush() {
+        Ok(chunks) => {
+            match emit_resampled_chunks(
+                chunks,
+                target_bits_per_sample,
+                target_channels,
+                target_sample_rate,
+                output_format,
+            ) {
+                Ok(frames) => {
+                    for frame in frames {
+                        push_output(output_tx, Ok(frame));
+                    }
+                }
+                Err(e) => push_output(output_tx, Err(e)),
+            }
+        }
+        Err(e) => {
+            push_output(
+                output_tx,
+                Err(DecodeError::DecodingFailed(format!(
+                    "Resampler flush failed: {}",
+                    e
+                ))),
+            );
+        }
+    }
 }
 
 fn apply_output_options(
     audio_data: AudioData,
     options: &DecodeOptions,
-) -> Result<AudioData, DecodeError> {
+    resampler: &mut Option<StreamingResampler>,
+) -> Result<Vec<AudioData>, DecodeError> {
     let target_sample_rate = options
         .output_sample_rate
         .unwrap_or(audio_data.sampling_rate());
@@ -680,7 +900,7 @@ fn apply_output_options(
         && target_bits_per_sample == audio_data.bits_per_sample()
         && target_channels == audio_data.channel_count()
     {
-        return Ok(audio_data);
+        return Ok(vec![audio_data]);
     }
 
     if target_sample_rate == 0 {
@@ -702,24 +922,57 @@ fn apply_output_options(
         ));
     }
 
-    // Convert to f32 channels, resampling if needed
-    let mut channels = if target_sample_rate != audio_data.sampling_rate() {
-        if audio_data.sampling_rate() == 0 {
+    // Convert decoded audio to f32 channels
+    let channels = if target_sample_rate != audio_data.sampling_rate() {
+        // Resampling needed — use the persistent streaming resampler
+        let input_sr = audio_data.sampling_rate();
+        if input_sr == 0 {
             return Err(DecodeError::DecodingFailed(
                 "Input sample rate must be > 0".to_string(),
             ));
         }
 
-        downsample_audio(&audio_data, target_sample_rate as usize).map_err(|e| {
-            DecodeError::DecodingFailed(format!("Output resample failed: {}", e))
-        })?
+        let input_channels = audio_data_to_f32_channels(&audio_data)
+            .map_err(|e| DecodeError::DecodingFailed(format!("Conversion failed: {}", e)))?;
+
+        // Lazily create the resampler on first frame
+        if resampler.is_none() {
+            *resampler = Some(
+                StreamingResampler::new(input_sr, target_sample_rate, input_channels.len())
+                    .map_err(|e| DecodeError::DecodingFailed(e))?,
+            );
+        }
+
+        let rs = resampler.as_mut().unwrap();
+        let output_format = if target_bits_per_sample == 32
+            && audio_data.audio_format() == EncodingFlag::PCMFloat
+        {
+            EncodingFlag::PCMFloat
+        } else {
+            EncodingFlag::PCMSigned
+        };
+
+        // Feed samples into the streaming resampler
+        let chunks = rs
+            .process(&input_channels)
+            .map_err(|e| DecodeError::DecodingFailed(e))?;
+
+        // The resampler may produce zero or more complete chunks
+        return emit_resampled_chunks(
+            chunks,
+            target_bits_per_sample,
+            target_channels,
+            target_sample_rate,
+            output_format,
+        );
     } else {
         audio_data_to_f32_channels(&audio_data).map_err(|e| {
             DecodeError::DecodingFailed(format!("Output conversion failed: {}", e))
         })?
     };
 
-    // Downmix channels if needed
+    // No resampling path — apply channel downmix + bit depth conversion
+    let mut channels = channels;
     let output_channel_count = if target_channels < channels.len() as u8 {
         channels = downmix_channels(&channels, target_channels);
         target_channels
@@ -738,14 +991,14 @@ fn apply_output_options(
     let bytes = f32_channels_to_bytes(&channels, target_bits_per_sample, output_format)
         .map_err(|e| DecodeError::DecodingFailed(format!("Output conversion failed: {}", e)))?;
 
-    Ok(AudioData::new(
+    Ok(vec![AudioData::new(
         target_bits_per_sample,
         output_channel_count,
         target_sample_rate,
         bytes,
         output_format,
         Endianness::LittleEndian,
-    ))
+    )])
 }
 
 /// Downmix multiple channels to target channel count
