@@ -4,17 +4,17 @@ use bytes::BytesMut;
 use frame_header::{EncodingFlag, Endianness};
 use rtrb::{Consumer, Producer, RingBuffer};
 use soundkit::audio_bytes::{interleave_vecs_i16, s32le_to_i32};
+use soundkit::audio_packet::Decoder;
 use soundkit::audio_pipeline::{
     deserialize_audio, downsample_audio, vec_f32_to_i16, vec_i16_to_f32, vec_i32_to_f32,
 };
-use soundkit::audio_packet::Decoder;
 use soundkit::audio_types::{AudioData, PcmData};
+use soundkit::wav::WavStreamProcessor;
 use soundkit_aac::{AacDecoder, AacDecoderMp4};
 use soundkit_flac::FlacDecoderClaxon;
 use soundkit_mp3::Mp3Decoder;
 use soundkit_ogg_opus::OggOpusDecoder;
 use soundkit_opus::OpusStreamDecoder;
-use soundkit::wav::WavStreamProcessor;
 use soundkit_webm::WebmDecoder;
 use std::thread;
 
@@ -186,7 +186,11 @@ where
 
 /// Helper to process using the add() API and drain all buffered packets.
 /// Works for Opus, OggOpus, WebM which return Option<AudioData>.
-fn process_with_add_api<D, F>(decoder: &mut D, chunk: &[u8], add_fn: F) -> Result<Vec<AudioData>, String>
+fn process_with_add_api<D, F>(
+    decoder: &mut D,
+    chunk: &[u8],
+    add_fn: F,
+) -> Result<Vec<AudioData>, String>
 where
     F: Fn(&mut D, &[u8]) -> Result<Option<AudioData>, String>,
 {
@@ -214,43 +218,44 @@ where
 impl StreamingDecoder for FormatDecoder {
     fn process(&mut self, chunk: &[u8]) -> Result<Vec<AudioData>, String> {
         match self {
-            FormatDecoder::Mp3(dec) => {
-                decode_i16_with_drain(dec, chunk, |d, samples, output| {
-                    let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
-                    Some(create_audio_data_i16(sample_rate, channels, &output[..samples]))
-                })
-            }
-            FormatDecoder::Aac(dec) => {
-                decode_i16_with_drain(dec, chunk, |d, samples, output| {
-                    let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
-                    Some(create_audio_data_i16(sample_rate, channels, &output[..samples]))
-                })
-            }
-            FormatDecoder::M4a(dec) => {
-                decode_i16_with_drain(dec, chunk, |d, samples, output| {
-                    let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
-                    Some(create_audio_data_i16(sample_rate, channels, &output[..samples]))
-                })
-            }
-            FormatDecoder::Flac(dec) => {
-                decode_with_drain(dec, chunk, |d, samples, output| {
-                    let (sample_rate, channels, bits) =
-                        (d.sample_rate()?, d.channels()?, d.bits_per_sample()?);
-                    Some(create_audio_data_i32_with_bits(sample_rate, channels, bits, &output[..samples]))
-                })
-            }
-            FormatDecoder::Opus(dec) => {
-                process_with_add_api(dec, chunk, |d, data| d.add(data))
-            }
-            FormatDecoder::OggOpus(dec) => {
-                process_with_add_api(dec, chunk, |d, data| d.add(data))
-            }
-            FormatDecoder::WebM(dec) => {
-                process_with_add_api(dec, chunk, |d, data| d.add(data))
-            }
-            FormatDecoder::Wav(dec) => {
-                process_with_add_api(dec, chunk, |d, data| d.add(data))
-            }
+            FormatDecoder::Mp3(dec) => decode_i16_with_drain(dec, chunk, |d, samples, output| {
+                let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
+                Some(create_audio_data_i16(
+                    sample_rate,
+                    channels,
+                    &output[..samples],
+                ))
+            }),
+            FormatDecoder::Aac(dec) => decode_i16_with_drain(dec, chunk, |d, samples, output| {
+                let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
+                Some(create_audio_data_i16(
+                    sample_rate,
+                    channels,
+                    &output[..samples],
+                ))
+            }),
+            FormatDecoder::M4a(dec) => decode_i16_with_drain(dec, chunk, |d, samples, output| {
+                let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
+                Some(create_audio_data_i16(
+                    sample_rate,
+                    channels,
+                    &output[..samples],
+                ))
+            }),
+            FormatDecoder::Flac(dec) => decode_with_drain(dec, chunk, |d, samples, output| {
+                let (sample_rate, channels, bits) =
+                    (d.sample_rate()?, d.channels()?, d.bits_per_sample()?);
+                Some(create_audio_data_i32_with_bits(
+                    sample_rate,
+                    channels,
+                    bits,
+                    &output[..samples],
+                ))
+            }),
+            FormatDecoder::Opus(dec) => process_with_add_api(dec, chunk, |d, data| d.add(data)),
+            FormatDecoder::OggOpus(dec) => process_with_add_api(dec, chunk, |d, data| d.add(data)),
+            FormatDecoder::WebM(dec) => process_with_add_api(dec, chunk, |d, data| d.add(data)),
+            FormatDecoder::Wav(dec) => process_with_add_api(dec, chunk, |d, data| d.add(data)),
         }
     }
 
@@ -282,10 +287,7 @@ impl DecodePipeline {
     ///
     /// - `input_buffer`: Number of input chunks that can be buffered
     /// - `output_buffer`: Number of decoded AudioData frames that can be buffered
-    pub fn spawn_with_buffers(
-        input_buffer: usize,
-        output_buffer: usize,
-    ) -> DecodePipelineHandle {
+    pub fn spawn_with_buffers(input_buffer: usize, output_buffer: usize) -> DecodePipelineHandle {
         Self::spawn_with_buffers_and_options(input_buffer, output_buffer, DecodeOptions::default())
     }
 
@@ -461,7 +463,6 @@ fn pipeline_worker(
                     Some(PipelineState::Decoding { decoder })
                 }
             }
-
         };
 
         match next_state {
@@ -591,7 +592,12 @@ fn create_audio_data_i16(sample_rate: u32, channels: u8, samples: &[i16]) -> Aud
 /// Create AudioData from i32 samples with specified bit depth.
 /// FLAC stores samples as i32 but with values in the original bit depth range.
 /// This function converts to the appropriate byte representation.
-fn create_audio_data_i32_with_bits(sample_rate: u32, channels: u8, bits_per_sample: u8, samples: &[i32]) -> AudioData {
+fn create_audio_data_i32_with_bits(
+    sample_rate: u32,
+    channels: u8,
+    bits_per_sample: u8,
+    samples: &[i32],
+) -> AudioData {
     let bytes_per_sample = ((bits_per_sample + 7) / 8) as usize;
     let mut bytes = Vec::with_capacity(samples.len() * bytes_per_sample);
 
@@ -710,13 +716,11 @@ fn apply_output_options(
             ));
         }
 
-        downsample_audio(&audio_data, target_sample_rate as usize).map_err(|e| {
-            DecodeError::DecodingFailed(format!("Output resample failed: {}", e))
-        })?
+        downsample_audio(&audio_data, target_sample_rate as usize)
+            .map_err(|e| DecodeError::DecodingFailed(format!("Output resample failed: {}", e)))?
     } else {
-        audio_data_to_f32_channels(&audio_data).map_err(|e| {
-            DecodeError::DecodingFailed(format!("Output conversion failed: {}", e))
-        })?
+        audio_data_to_f32_channels(&audio_data)
+            .map_err(|e| DecodeError::DecodingFailed(format!("Output conversion failed: {}", e)))?
     };
 
     // Downmix channels if needed
@@ -727,13 +731,12 @@ fn apply_output_options(
         channels.len() as u8
     };
 
-    let output_format = if target_bits_per_sample == 32
-        && audio_data.audio_format() == EncodingFlag::PCMFloat
-    {
-        EncodingFlag::PCMFloat
-    } else {
-        EncodingFlag::PCMSigned
-    };
+    let output_format =
+        if target_bits_per_sample == 32 && audio_data.audio_format() == EncodingFlag::PCMFloat {
+            EncodingFlag::PCMFloat
+        } else {
+            EncodingFlag::PCMSigned
+        };
 
     let bytes = f32_channels_to_bytes(&channels, target_bits_per_sample, output_format)
         .map_err(|e| DecodeError::DecodingFailed(format!("Output conversion failed: {}", e)))?;
@@ -878,13 +881,11 @@ fn f32_channels_to_bytes(
             Ok(interleave_vecs_i16(&channels_i16))
         }
         24 => {
-            let channels_i32: Vec<Vec<i32>> =
-                channels.iter().map(|c| vec_f32_to_s24(c)).collect();
+            let channels_i32: Vec<Vec<i32>> = channels.iter().map(|c| vec_f32_to_s24(c)).collect();
             Ok(interleave_vecs_s24(channels_i32.as_slice()))
         }
         32 => {
-            let channels_i32: Vec<Vec<i32>> =
-                channels.iter().map(|c| vec_f32_to_i32(c)).collect();
+            let channels_i32: Vec<Vec<i32>> = channels.iter().map(|c| vec_f32_to_i32(c)).collect();
             Ok(interleave_vecs_i32(channels_i32.as_slice()))
         }
         bits => Err(format!("Unsupported output bits per sample: {}", bits)),
@@ -1038,7 +1039,10 @@ mod tests {
     #[test]
     fn test_decode_flac() {
         let data = Bytes::from(
-            fs::read(testdata_path("flac/A_Tusk_is_used_to_make_costly_gifts.flac")).unwrap(),
+            fs::read(testdata_path(
+                "flac/A_Tusk_is_used_to_make_costly_gifts.flac",
+            ))
+            .unwrap(),
         );
 
         let mut pipeline = DecodePipeline::spawn();
@@ -1073,7 +1077,10 @@ mod tests {
     #[test]
     fn test_decode_opus() {
         let data = Bytes::from(
-            fs::read(testdata_path("opus/A_Tusk_is_used_to_make_costly_gifts.opus")).unwrap(),
+            fs::read(testdata_path(
+                "opus/A_Tusk_is_used_to_make_costly_gifts.opus",
+            ))
+            .unwrap(),
         );
 
         let mut pipeline = DecodePipeline::spawn();
@@ -1107,7 +1114,10 @@ mod tests {
     #[test]
     fn test_decode_ogg_opus() {
         let data = Bytes::from(
-            fs::read(testdata_path("ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg")).unwrap(),
+            fs::read(testdata_path(
+                "ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg",
+            ))
+            .unwrap(),
         );
 
         let mut pipeline = DecodePipeline::spawn();
@@ -1141,7 +1151,10 @@ mod tests {
     #[test]
     fn test_decode_webm() {
         let data = Bytes::from(
-            fs::read(testdata_path("webm/A_Tusk_is_used_to_make_costly_gifts.webm")).unwrap(),
+            fs::read(testdata_path(
+                "webm/A_Tusk_is_used_to_make_costly_gifts.webm",
+            ))
+            .unwrap(),
         );
 
         let mut pipeline = DecodePipeline::spawn();
@@ -1206,7 +1219,6 @@ mod tests {
 
         assert!(frame_count > 0, "No frames decoded from chunked input");
     }
-
 
     #[test]
     fn test_detection_failure() {
@@ -1416,7 +1428,10 @@ mod tests {
         };
 
         // Find max for normalization
-        let max_peak = display_peaks.iter().fold(0.0f32, |a, &b| a.max(b)).max(0.001);
+        let max_peak = display_peaks
+            .iter()
+            .fold(0.0f32, |a, &b| a.max(b))
+            .max(0.001);
 
         // Build waveform lines (top half only, mirrored)
         let half_height = WAVEFORM_HEIGHT / 2;
@@ -1429,7 +1444,10 @@ mod tests {
                 .map(|&p| {
                     let normalized = p / max_peak;
                     if normalized >= threshold {
-                        let level = ((normalized - threshold) * half_height as f32 * (chars.len() - 1) as f32) as usize;
+                        let level = ((normalized - threshold)
+                            * half_height as f32
+                            * (chars.len() - 1) as f32)
+                            as usize;
                         chars[level.min(chars.len() - 1)]
                     } else {
                         ' '
@@ -1450,7 +1468,10 @@ mod tests {
                 .map(|&p| {
                     let normalized = p / max_peak;
                     if normalized >= threshold {
-                        let level = ((normalized - threshold) * half_height as f32 * (chars.len() - 1) as f32) as usize;
+                        let level = ((normalized - threshold)
+                            * half_height as f32
+                            * (chars.len() - 1) as f32)
+                            as usize;
                         chars[level.min(chars.len() - 1)]
                     } else {
                         ' '
@@ -1472,7 +1493,10 @@ mod tests {
         samples
             .chunks(bin_size)
             .map(|chunk| {
-                let max_abs = chunk.iter().map(|&s| (s as f32).abs()).fold(0.0f32, f32::max);
+                let max_abs = chunk
+                    .iter()
+                    .map(|&s| (s as f32).abs())
+                    .fold(0.0f32, f32::max);
                 max_abs / 32768.0 // Normalize to 0.0-1.0
             })
             .collect()
@@ -1614,7 +1638,11 @@ mod tests {
 
         println!(
             "  {:<10} {:>3} files  {:>5.1}s  {:>5.1} files/s  {:>4.2} MB/s",
-            format_name, successful_files, elapsed.as_secs_f64(), files_per_sec, mb_per_sec
+            format_name,
+            successful_files,
+            elapsed.as_secs_f64(),
+            files_per_sec,
+            mb_per_sec
         );
     }
 
@@ -1647,7 +1675,10 @@ mod tests {
                 None => break,
             }
         }
-        println!("Native:    {} Hz, {} ch, {} frames", native_sr, native_ch, native_frames);
+        println!(
+            "Native:    {} Hz, {} ch, {} frames",
+            native_sr, native_ch, native_frames
+        );
 
         // Resampled decode
         let options = DecodeOptions {
@@ -1675,9 +1706,16 @@ mod tests {
                 None => break,
             }
         }
-        println!("Resampled: {} Hz, {} ch, {} frames", resample_sr, resample_ch, resample_frames);
+        println!(
+            "Resampled: {} Hz, {} ch, {} frames",
+            resample_sr, resample_ch, resample_frames
+        );
 
-        assert!(native_sr > 0, "Native sample rate should be detected, got {}", native_sr);
+        assert!(
+            native_sr > 0,
+            "Native sample rate should be detected, got {}",
+            native_sr
+        );
         assert_eq!(resample_sr, 16_000, "Resampled should be 16kHz");
         assert_eq!(resample_ch, 1, "Resampled should be mono");
     }
@@ -1767,7 +1805,11 @@ mod tests {
             }
         }
 
-        println!("Received {} frames, {} bytes total", frame_count, output.len());
+        println!(
+            "Received {} frames, {} bytes total",
+            frame_count,
+            output.len()
+        );
         if frame_count > 0 && frame_count <= 20 {
             println!("Frame sizes: {:?}", frame_sizes);
         }
@@ -1816,6 +1858,5 @@ mod tests {
             tiny_output.len(),
             (large_output.len() as i64 - tiny_output.len() as i64).abs()
         );
-
     }
 }

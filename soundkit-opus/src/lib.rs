@@ -1,7 +1,7 @@
+use frame_header::{EncodingFlag, Endianness};
 use libopus::{decoder, encoder};
 use soundkit::audio_packet::{Decoder, Encoder};
 use soundkit::audio_types::AudioData;
-use frame_header::{EncodingFlag, Endianness};
 use tracing::{debug, trace};
 
 pub struct OpusEncoder {
@@ -126,7 +126,12 @@ impl Decoder for OpusDecoder {
 
         Ok(samples_per_channel)
     }
-    fn decode_i32(&mut self, _input: &[u8], _output: &mut [i32], _fec: bool) -> Result<usize, String> {
+    fn decode_i32(
+        &mut self,
+        _input: &[u8],
+        _output: &mut [i32],
+        _fec: bool,
+    ) -> Result<usize, String> {
         return Err("not implemented.".to_string());
     }
 
@@ -206,10 +211,7 @@ impl OpusStreamDecoder {
             self.pre_skip_remaining = pre_skip as usize * self.channels.unwrap() as usize;
 
             let channels = self.channels.unwrap();
-            let decoder = OpusDecoder::new(
-                self.sample_rate.unwrap() as usize,
-                channels as usize,
-            );
+            let decoder = OpusDecoder::new(self.sample_rate.unwrap() as usize, channels as usize);
 
             self.decoder = Some(decoder);
             self.header_parsed = true;
@@ -300,8 +302,8 @@ mod tests {
     use std::io::Read;
     use std::io::Write;
     use std::path::{Path, PathBuf};
-    use std::time::Instant;
     use std::sync::Once;
+    use std::time::Instant;
     use tracing::debug;
     use tracing_subscriber;
 
@@ -344,9 +346,7 @@ mod tests {
             .join(file)
     }
 
-    fn parse_length_prefixed_opus(
-        data: &[u8],
-    ) -> Result<(RawOpusHeader, Vec<&[u8]>), String> {
+    fn parse_length_prefixed_opus(data: &[u8]) -> Result<(RawOpusHeader, Vec<&[u8]>), String> {
         if data.len() < 19 || !data.starts_with(b"OpusHead") {
             return Err("Missing OpusHead".to_string());
         }
@@ -432,24 +432,20 @@ mod tests {
             parse_length_prefixed_opus(&opus_bytes).expect("failed to parse opus fixture");
 
         const MAX_OPUS_FRAME_SAMPLES: usize = 5760; // 120 ms @ 48kHz
-        let mut decoder =
-            OpusDecoder::new(header.sample_rate as usize, header.channels as usize);
+        let mut decoder = OpusDecoder::new(header.sample_rate as usize, header.channels as usize);
         decoder.init().expect("Decoder initialization failed");
 
         let mut decoded = Vec::new();
-        let mut scratch =
-            vec![0i16; MAX_OPUS_FRAME_SAMPLES * header.channels as usize];
+        let mut scratch = vec![0i16; MAX_OPUS_FRAME_SAMPLES * header.channels as usize];
         let mut pre_skip = header.pre_skip as usize * header.channels as usize;
 
         for packet in packets {
-            let samples_per_channel =
-                decoder.decode_i16(packet, &mut scratch, false).unwrap();
+            let samples_per_channel = decoder.decode_i16(packet, &mut scratch, false).unwrap();
             if samples_per_channel == 0 {
                 continue;
             }
 
-            let mut frame_samples =
-                samples_per_channel * header.channels as usize;
+            let mut frame_samples = samples_per_channel * header.channels as usize;
             let mut start = 0;
             if pre_skip > 0 {
                 let skip = pre_skip.min(frame_samples);
@@ -542,12 +538,7 @@ mod tests {
                             false,
                         ) {
                             Ok(samples_read) => {
-                                debug!(
-                                    chunk = i,
-                                    samples_read,
-                                    encoded_len,
-                                    "decoded opus chunk"
-                                );
+                                debug!(chunk = i, samples_read, encoded_len, "decoded opus chunk");
                                 for sample in &decoded_samples
                                     [..samples_read * audio_data.channel_count() as usize]
                                 {

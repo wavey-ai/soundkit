@@ -447,7 +447,10 @@ mod tests {
             }
         }
 
-        assert!(!decoded.is_empty(), "no samples decoded from ogg opus stream");
+        assert!(
+            !decoded.is_empty(),
+            "no samples decoded from ogg opus stream"
+        );
 
         // Save PCM output for inspection
         let output_path = outputs_path("A_Tusk_is_used_to_make_costly_gifts.s16le");

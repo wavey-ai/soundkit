@@ -7,7 +7,8 @@ use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 
-const COMMON_SAMPLE_RATES: [u32; 9] = [8000, 16000, 22050, 24000, 32000, 44100, 48000, 88200, 96000];
+const COMMON_SAMPLE_RATES: [u32; 9] =
+    [8000, 16000, 22050, 24000, 32000, 44100, 48000, 88200, 96000];
 const COMMON_BITS_PER_SAMPLE: [u8; 3] = [16, 24, 32];
 
 pub fn vec_f32_to_i16(input: Vec<f32>) -> Vec<i16> {
@@ -80,8 +81,8 @@ pub fn downsample_audio(audio: &AudioData, sampling_rate: usize) -> Result<Vec<V
         ));
     }
 
-    let output_rate = u32::try_from(sampling_rate)
-        .map_err(|_| "sampling_rate out of range".to_string())?;
+    let output_rate =
+        u32::try_from(sampling_rate).map_err(|_| "sampling_rate out of range".to_string())?;
     let input_rate = audio.sampling_rate();
 
     if input_rate == 0 || output_rate == 0 {
@@ -96,27 +97,26 @@ pub fn downsample_audio(audio: &AudioData, sampling_rate: usize) -> Result<Vec<V
         return Err(format!("Unsupported output sample_rate: {}", output_rate));
     }
 
-    let data: Vec<Vec<f32>> = if audio.bits_per_sample() == 32
-        && audio.audio_format() != EncodingFlag::PCMFloat
-    {
-        let interleaved = s32le_to_i32(audio.data());
-        let mut channels =
-            vec![Vec::with_capacity(interleaved.len() / channel_count); channel_count];
-        for (index, sample) in interleaved.into_iter().enumerate() {
-            channels[index % channel_count].push(sample);
-        }
-        channels.into_iter().map(vec_i32_to_f32).collect()
-    } else {
-        let audio_data =
-            deserialize_audio(audio.data(), audio.bits_per_sample(), audio.channel_count())
-                .map_err(|e| format!("deserialize_audio failed: {}", e))?;
+    let data: Vec<Vec<f32>> =
+        if audio.bits_per_sample() == 32 && audio.audio_format() != EncodingFlag::PCMFloat {
+            let interleaved = s32le_to_i32(audio.data());
+            let mut channels =
+                vec![Vec::with_capacity(interleaved.len() / channel_count); channel_count];
+            for (index, sample) in interleaved.into_iter().enumerate() {
+                channels[index % channel_count].push(sample);
+            }
+            channels.into_iter().map(vec_i32_to_f32).collect()
+        } else {
+            let audio_data =
+                deserialize_audio(audio.data(), audio.bits_per_sample(), audio.channel_count())
+                    .map_err(|e| format!("deserialize_audio failed: {}", e))?;
 
-        match audio_data {
-            PcmData::I16(data) => data.into_iter().map(vec_i16_to_f32).collect(),
-            PcmData::I32(data) => data.into_iter().map(vec_i32_to_f32).collect(),
-            PcmData::F32(data) => data,
-        }
-    };
+            match audio_data {
+                PcmData::I16(data) => data.into_iter().map(vec_i16_to_f32).collect(),
+                PcmData::I32(data) => data.into_iter().map(vec_i32_to_f32).collect(),
+                PcmData::F32(data) => data,
+            }
+        };
 
     if data.is_empty() {
         return Ok(Vec::new());
@@ -315,9 +315,7 @@ mod tests {
 
                     assert_eq!(result.len(), samples.len());
 
-                    for (channel_result, channel_samples) in
-                        result.iter_mut().zip(samples.iter())
-                    {
+                    for (channel_result, channel_samples) in result.iter_mut().zip(samples.iter()) {
                         channel_result.extend_from_slice(channel_samples)
                     }
                 }
@@ -328,7 +326,8 @@ mod tests {
 
         match generate_wav_buffer(&PcmData::F32(result), 8_000) {
             Ok(wav_buffer) => {
-                let output_path = file_path.with_file_name("A_Tusk_is_used_to_make_costly_gifts_8kz.wav");
+                let output_path =
+                    file_path.with_file_name("A_Tusk_is_used_to_make_costly_gifts_8kz.wav");
                 let mut file = File::create(output_path).expect("Could not create file");
                 file.write_all(&wav_buffer)
                     .expect("Could not write to file");

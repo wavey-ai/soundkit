@@ -4,8 +4,8 @@ use mp3lame_encoder::{
 use nanomp3::{Decoder as NanoDecoder, FrameInfo, MAX_SAMPLES_PER_FRAME};
 use soundkit::audio_packet::{Decoder, Encoder};
 use std::mem::MaybeUninit;
-use std::vec::Vec;
 use std::slice;
+use std::vec::Vec;
 
 pub struct Mp3Encoder {
     inner: mp3lame_encoder::Encoder,
@@ -43,7 +43,11 @@ impl Mp3Encoder {
     }
 
     /// Encode a single PCM chunk without flushing (stream-friendly).
-    pub fn encode_chunk_to_vec(&mut self, samples: &[i16], out: &mut Vec<u8>) -> Result<usize, String> {
+    pub fn encode_chunk_to_vec(
+        &mut self,
+        samples: &[i16],
+        out: &mut Vec<u8>,
+    ) -> Result<usize, String> {
         let reserve = max_required_buffer_size(samples.len());
         let start = out.len();
         out.resize(start + reserve, 0);
@@ -489,8 +493,7 @@ mod tests {
         assert_eq!(out[0], 0xFF, "MP3 frames should start with 0xFF");
 
         // write exactly the written bytes to disk for manual inspection
-        let output_path =
-            golden_path("mp3/A_Tusk_is_used_to_make_costly_gifts_encoded.mp3");
+        let output_path = golden_path("mp3/A_Tusk_is_used_to_make_costly_gifts_encoded.mp3");
         fs::create_dir_all(output_path.parent().unwrap()).unwrap();
         fs::write(&output_path, &out[..]).unwrap();
     }
@@ -522,10 +525,7 @@ mod tests {
             decoded.extend_from_slice(&scratch[..written]);
         }
 
-        assert!(
-            !decoded.is_empty(),
-            "decoder produced no PCM samples"
-        );
+        assert!(!decoded.is_empty(), "decoder produced no PCM samples");
         assert_eq!(dec.sample_rate(), Some(16_000), "fixture sample rate");
         assert_eq!(dec.channels(), Some(1), "fixture channel count");
 
@@ -555,14 +555,22 @@ mod tests {
 
         // Phase 1: Detection - process first 8192 bytes at once
         let detection_bytes = &mp3_bytes[..MIN_DETECTION.min(mp3_bytes.len())];
-        let written = decoder.decode_i16(detection_bytes, &mut scratch, false).unwrap();
+        let written = decoder
+            .decode_i16(detection_bytes, &mut scratch, false)
+            .unwrap();
         decoded.extend_from_slice(&scratch[..written]);
-        println!("Detection phase: {} bytes in, {} samples out", detection_bytes.len(), written);
+        println!(
+            "Detection phase: {} bytes in, {} samples out",
+            detection_bytes.len(),
+            written
+        );
 
         // Drain after detection
         loop {
             let w = decoder.decode_i16(&[], &mut scratch, false).unwrap();
-            if w == 0 { break; }
+            if w == 0 {
+                break;
+            }
             decoded.extend_from_slice(&scratch[..w]);
             println!("Detection drain: {} samples", w);
         }
@@ -570,7 +578,10 @@ mod tests {
         let detection_samples = decoded.len();
         println!("After detection: {} samples total", detection_samples);
 
-        println!("Decoder buffer len after detection: {}", decoder.buffer_len());
+        println!(
+            "Decoder buffer len after detection: {}",
+            decoder.buffer_len()
+        );
 
         // Phase 2: Remaining bytes in small chunks
         let mut chunks_processed = 0;
@@ -582,8 +593,14 @@ mod tests {
             let written = decoder.decode_i16(chunk, &mut scratch, false).unwrap();
             let buf_after = decoder.buffer_len();
             if written > 0 || chunks_processed < 5 {
-                println!("Chunk {}: {} bytes in, buf {}→{}, {} samples out",
-                    chunks_processed, chunk.len(), buf_before, buf_after, written);
+                println!(
+                    "Chunk {}: {} bytes in, buf {}→{}, {} samples out",
+                    chunks_processed,
+                    chunk.len(),
+                    buf_before,
+                    buf_after,
+                    written
+                );
             }
             if written > 0 {
                 decoded.extend_from_slice(&scratch[..written]);
@@ -594,10 +611,17 @@ mod tests {
             // Drain after each chunk (like the pipeline does)
             loop {
                 let w = decoder.decode_i16(&[], &mut scratch, false).unwrap();
-                if w == 0 { break; }
+                if w == 0 {
+                    break;
+                }
                 decoded.extend_from_slice(&scratch[..w]);
                 post_detection_samples += w;
-                println!("Chunk {} drain: {} samples, buf now {}", chunks_processed, w, decoder.buffer_len());
+                println!(
+                    "Chunk {} drain: {} samples, buf now {}",
+                    chunks_processed,
+                    w,
+                    decoder.buffer_len()
+                );
             }
         }
 
@@ -607,14 +631,23 @@ mod tests {
         // Final flush
         loop {
             let w = decoder.decode_i16(&[], &mut scratch, false).unwrap();
-            if w == 0 { break; }
+            if w == 0 {
+                break;
+            }
             decoded.extend_from_slice(&scratch[..w]);
             post_detection_samples += w;
             println!("Final flush: {} samples", w);
         }
 
-        println!("Post-detection: {} chunks processed, {} samples", chunks_processed, post_detection_samples);
-        println!("Total: {} samples ({} bytes PCM)", decoded.len(), decoded.len() * 2);
+        println!(
+            "Post-detection: {} chunks processed, {} samples",
+            chunks_processed, post_detection_samples
+        );
+        println!(
+            "Total: {} samples ({} bytes PCM)",
+            decoded.len(),
+            decoded.len() * 2
+        );
     }
 
     /// Test that chunk size doesn't affect decoded output
@@ -676,12 +709,16 @@ mod tests {
             decoded
         };
 
-        println!("Large chunk output: {} samples ({} bytes PCM)",
+        println!(
+            "Large chunk output: {} samples ({} bytes PCM)",
             large_chunk_output.len(),
-            large_chunk_output.len() * 2);
-        println!("Small chunk output: {} samples ({} bytes PCM)",
+            large_chunk_output.len() * 2
+        );
+        println!(
+            "Small chunk output: {} samples ({} bytes PCM)",
             small_chunk_output.len(),
-            small_chunk_output.len() * 2);
+            small_chunk_output.len() * 2
+        );
 
         assert_eq!(
             large_chunk_output.len(),
@@ -696,8 +733,7 @@ mod tests {
         );
 
         assert_eq!(
-            large_chunk_output,
-            small_chunk_output,
+            large_chunk_output, small_chunk_output,
             "Decoded PCM should be identical regardless of input chunk size"
         );
     }

@@ -158,8 +158,7 @@ impl Decoder for AacDecoder {
             match self.decoder.decode_frame(&mut output[written..]) {
                 Ok(()) => {
                     let info = self.decoder.stream_info();
-                    let frame_samples =
-                        info.numChannels as usize * info.frameSize as usize;
+                    let frame_samples = info.numChannels as usize * info.frameSize as usize;
 
                     if frame_samples == 0 {
                         break;
@@ -218,12 +217,7 @@ impl Decoder for AacDecoder {
         Err("Not implemented.".to_string())
     }
 
-    fn decode_f32(
-        &mut self,
-        input: &[u8],
-        output: &mut [f32],
-        fec: bool,
-    ) -> Result<usize, String> {
+    fn decode_f32(&mut self, input: &[u8], output: &mut [f32], fec: bool) -> Result<usize, String> {
         // Decode to i16 then convert to f32
         let mut i16_buf = vec![0i16; output.len()];
         let samples = self.decode_i16(input, &mut i16_buf, fec)?;
@@ -244,17 +238,17 @@ impl Drop for AacDecoder {
 
 #[cfg(feature = "symphonia-decoder")]
 mod symphonia_decoder {
+    use access_unit::is_mp4;
     use soundkit::audio_packet::Decoder;
     use std::io::{self, Cursor, Read};
+    use symphonia::core::audio::{AudioBufferRef, Signal};
     use symphonia::core::codecs::{Decoder as SymphoniaDecoder, DecoderOptions};
     use symphonia::core::errors::Error as SymphoniaError;
     use symphonia::core::formats::{FormatOptions, FormatReader};
     use symphonia::core::io::{MediaSourceStream, ReadOnlySource};
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
-    use symphonia::core::audio::{AudioBufferRef, Signal};
     use tracing::{debug, trace};
-    use access_unit::is_mp4;
 
     /// A Read adapter that wraps a Cursor for streaming bytes
     struct ByteStreamReader {
@@ -349,7 +343,12 @@ mod symphonia_decoder {
 
             // Probe the format
             let probed = symphonia::default::get_probe()
-                .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+                .format(
+                    &hint,
+                    mss,
+                    &FormatOptions::default(),
+                    &MetadataOptions::default(),
+                )
                 .map_err(|e| format!("Failed to probe format: {}", e))?;
 
             let format = probed.format;
@@ -388,7 +387,6 @@ mod symphonia_decoder {
 
             Ok(())
         }
-
     }
 
     fn convert_audio_buffer_to_f32(audio_buf: &AudioBufferRef) -> Vec<f32> {
@@ -402,16 +400,22 @@ mod symphonia_decoder {
                 let sample = match audio_buf {
                     AudioBufferRef::F32(buf) => buf.chan(ch_idx)[frame_idx],
                     AudioBufferRef::F64(buf) => buf.chan(ch_idx)[frame_idx] as f32,
-                    AudioBufferRef::S32(buf) => (buf.chan(ch_idx)[frame_idx] as f32) / (i32::MAX as f32),
-                    AudioBufferRef::S16(buf) => (buf.chan(ch_idx)[frame_idx] as f32) / (i16::MAX as f32),
-                    AudioBufferRef::S8(buf) => (buf.chan(ch_idx)[frame_idx] as f32) / (i8::MAX as f32),
+                    AudioBufferRef::S32(buf) => {
+                        (buf.chan(ch_idx)[frame_idx] as f32) / (i32::MAX as f32)
+                    }
+                    AudioBufferRef::S16(buf) => {
+                        (buf.chan(ch_idx)[frame_idx] as f32) / (i16::MAX as f32)
+                    }
+                    AudioBufferRef::S8(buf) => {
+                        (buf.chan(ch_idx)[frame_idx] as f32) / (i8::MAX as f32)
+                    }
                     AudioBufferRef::U32(buf) => {
                         let s = buf.chan(ch_idx)[frame_idx] as i64 - (u32::MAX as i64 / 2);
                         (s as f32) / ((u32::MAX as i64 / 2) as f32)
                     }
                     AudioBufferRef::U24(buf) => {
                         let val = buf.chan(ch_idx)[frame_idx].inner();
-                        let s = val as i64 - ((1i64 << 23));
+                        let s = val as i64 - (1i64 << 23);
                         (s as f32) / ((1i64 << 23) as f32)
                     }
                     AudioBufferRef::U16(buf) => {
@@ -446,16 +450,22 @@ mod symphonia_decoder {
                 let sample = match audio_buf {
                     AudioBufferRef::F32(buf) => buf.chan(ch_idx)[frame_idx],
                     AudioBufferRef::F64(buf) => buf.chan(ch_idx)[frame_idx] as f32,
-                    AudioBufferRef::S32(buf) => (buf.chan(ch_idx)[frame_idx] as f32) / (i32::MAX as f32),
-                    AudioBufferRef::S16(buf) => (buf.chan(ch_idx)[frame_idx] as f32) / (i16::MAX as f32),
-                    AudioBufferRef::S8(buf) => (buf.chan(ch_idx)[frame_idx] as f32) / (i8::MAX as f32),
+                    AudioBufferRef::S32(buf) => {
+                        (buf.chan(ch_idx)[frame_idx] as f32) / (i32::MAX as f32)
+                    }
+                    AudioBufferRef::S16(buf) => {
+                        (buf.chan(ch_idx)[frame_idx] as f32) / (i16::MAX as f32)
+                    }
+                    AudioBufferRef::S8(buf) => {
+                        (buf.chan(ch_idx)[frame_idx] as f32) / (i8::MAX as f32)
+                    }
                     AudioBufferRef::U32(buf) => {
                         let s = buf.chan(ch_idx)[frame_idx] as i64 - (u32::MAX as i64 / 2);
                         (s as f32) / ((u32::MAX as i64 / 2) as f32)
                     }
                     AudioBufferRef::U24(buf) => {
                         let val = buf.chan(ch_idx)[frame_idx].inner();
-                        let s = val as i64 - ((1i64 << 23));
+                        let s = val as i64 - (1i64 << 23);
                         (s as f32) / ((1i64 << 23) as f32)
                     }
                     AudioBufferRef::U16(buf) => {
@@ -561,7 +571,8 @@ mod symphonia_decoder {
 
                         // Store any overflow
                         if to_copy < samples.len() {
-                            self.pending_samples_i16.extend_from_slice(&samples[to_copy..]);
+                            self.pending_samples_i16
+                                .extend_from_slice(&samples[to_copy..]);
                         }
                     }
                     Err(SymphoniaError::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
@@ -668,7 +679,8 @@ mod symphonia_decoder {
 
                         // Store any overflow
                         if to_copy < samples.len() {
-                            self.pending_samples_f32.extend_from_slice(&samples[to_copy..]);
+                            self.pending_samples_f32
+                                .extend_from_slice(&samples[to_copy..]);
                         }
                     }
                     Err(SymphoniaError::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
@@ -696,10 +708,10 @@ pub use symphonia_decoder::AacDecoderSymphonia;
 mod mp4_decoder {
     use access_unit::aac::create_adts_header;
     use fdk_aac::dec::{Decoder as AacLibDecoder, Transport as DecoderTransport};
-    use mp4::{Mp4Reader, MediaType};
+    use mp4::{MediaType, Mp4Reader};
     use soundkit::audio_packet::Decoder;
     use std::io::Cursor;
-    use tracing::{debug, trace, error};
+    use tracing::{debug, error, trace};
 
     pub struct AacDecoderMp4 {
         input_buffer: Vec<u8>,
@@ -711,7 +723,7 @@ mod mp4_decoder {
         sample_rate: Option<u32>,
         channels: Option<u8>,
         initialized: bool,
-        adts_buffer: Vec<u8>,  // Buffer of ADTS frames ready for decoding
+        adts_buffer: Vec<u8>, // Buffer of ADTS frames ready for decoding
     }
 
     impl AacDecoderMp4 {
@@ -782,7 +794,8 @@ mod mp4_decoder {
                     }
 
                     if let Some(track_id) = audio_track_id {
-                        let sample_count = mp4.sample_count(track_id)
+                        let sample_count = mp4
+                            .sample_count(track_id)
                             .map_err(|e| format!("Failed to get sample count: {}", e))?;
 
                         self.track_id = Some(track_id);
@@ -815,7 +828,6 @@ mod mp4_decoder {
                 }
             }
         }
-
     }
 
     impl Decoder for AacDecoderMp4 {
@@ -881,11 +893,11 @@ mod mp4_decoder {
                 // Create ADTS header for this sample using access-unit function
                 // codec_id 0x66 = AAC-LC
                 let adts_header = create_adts_header(
-                    0x66,  // AAC-LC
+                    0x66, // AAC-LC
                     self.channels.unwrap_or(2),
                     self.sample_rate.unwrap_or(44100),
                     sample.bytes.len(),
-                    false  // no CRC
+                    false, // no CRC
                 );
 
                 // Combine ADTS header + raw AAC data and add to buffer
@@ -1206,12 +1218,7 @@ mod tests {
                             false,
                         ) {
                             Ok(samples_read) => {
-                                trace!(
-                                    chunk = i,
-                                    samples_read,
-                                    encoded_len,
-                                    "decoded AAC chunk"
-                                );
+                                trace!(chunk = i, samples_read, encoded_len, "decoded AAC chunk");
                             }
                             Err(e) => panic!("Decoding failed: {}", e),
                         }
@@ -1225,8 +1232,7 @@ mod tests {
         }
 
         fs::create_dir_all(output_path.parent().unwrap()).unwrap();
-        let mut file = File::create(output_path)
-            .expect("Failed to create output file");
+        let mut file = File::create(output_path).expect("Failed to create output file");
         file.write_all(&encoded_data)
             .expect("Failed to write to output file");
 

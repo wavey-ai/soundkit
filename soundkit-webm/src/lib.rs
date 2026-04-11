@@ -190,7 +190,10 @@ impl WebmDecoder {
         };
 
         if id != EBML_ID {
-            return Err(format!("Invalid WebM: expected EBML header, got 0x{:X}", id));
+            return Err(format!(
+                "Invalid WebM: expected EBML header, got 0x{:X}",
+                id
+            ));
         }
 
         let (size, size_len) = match read_vint(&self.buffer[id_len..]) {
@@ -347,11 +350,11 @@ impl WebmDecoder {
                     // Parse Audio element children
                     let mut audio_pos = 0;
                     while audio_pos + 2 <= elem_data.len() {
-                        let (audio_id, audio_id_len) = match read_element_id(&elem_data[audio_pos..])
-                        {
-                            Some(x) => x,
-                            None => break,
-                        };
+                        let (audio_id, audio_id_len) =
+                            match read_element_id(&elem_data[audio_pos..]) {
+                                Some(x) => x,
+                                None => break,
+                            };
 
                         let (audio_size, audio_size_len) =
                             match read_vint(&elem_data[audio_pos + audio_id_len..]) {
@@ -371,7 +374,8 @@ impl WebmDecoder {
 
                         match audio_id {
                             SAMPLING_FREQUENCY_ID => {
-                                sample_rate = read_float(audio_elem_data, audio_size as usize) as u32;
+                                sample_rate =
+                                    read_float(audio_elem_data, audio_size as usize) as u32;
                                 if sample_rate == 0 {
                                     sample_rate = 48000;
                                 }
@@ -733,10 +737,7 @@ mod tests {
             let output_path = outputs_path("test.s16le");
             fs::create_dir_all(output_path.parent().unwrap()).unwrap();
             fs::write(&output_path, &decoded).unwrap();
-            println!(
-                "Decoded {} bytes from WebM",
-                decoded.len()
-            );
+            println!("Decoded {} bytes from WebM", decoded.len());
         }
     }
 }

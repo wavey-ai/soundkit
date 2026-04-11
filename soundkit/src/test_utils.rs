@@ -77,7 +77,8 @@ impl DecodeResult {
         };
 
         // Compute waveform peaks with proper bit depth
-        let waveform = compute_waveform_peaks_i32_bits(samples, WAVEFORM_WIDTH * 2, bits_per_sample);
+        let waveform =
+            compute_waveform_peaks_i32_bits(samples, WAVEFORM_WIDTH * 2, bits_per_sample);
 
         Self {
             bytes,
@@ -116,14 +117,21 @@ fn compute_waveform_peaks_i16(samples: &[i16], num_bins: usize) -> Vec<f32> {
     samples
         .chunks(bin_size)
         .map(|chunk| {
-            let max_abs = chunk.iter().map(|&s| (s as f32).abs()).fold(0.0f32, f32::max);
+            let max_abs = chunk
+                .iter()
+                .map(|&s| (s as f32).abs())
+                .fold(0.0f32, f32::max);
             max_abs / 32768.0
         })
         .collect()
 }
 
 /// Compute waveform peaks from i32 samples with explicit bit depth
-fn compute_waveform_peaks_i32_bits(samples: &[i32], num_bins: usize, bits_per_sample: u8) -> Vec<f32> {
+fn compute_waveform_peaks_i32_bits(
+    samples: &[i32],
+    num_bins: usize,
+    bits_per_sample: u8,
+) -> Vec<f32> {
     if samples.is_empty() || num_bins == 0 {
         return Vec::new();
     }
@@ -134,7 +142,10 @@ fn compute_waveform_peaks_i32_bits(samples: &[i32], num_bins: usize, bits_per_sa
     samples
         .chunks(bin_size)
         .map(|chunk| {
-            let max_abs = chunk.iter().map(|&s| (s as f64).abs()).fold(0.0f64, f64::max);
+            let max_abs = chunk
+                .iter()
+                .map(|&s| (s as f64).abs())
+                .fold(0.0f64, f64::max);
             (max_abs / max_value) as f32
         })
         .collect()
@@ -208,7 +219,10 @@ fn print_waveform(peaks: &[f32]) {
     };
 
     // Find max for normalization
-    let max_peak = display_peaks.iter().fold(0.0f32, |a, &b| a.max(b)).max(0.001);
+    let max_peak = display_peaks
+        .iter()
+        .fold(0.0f32, |a, &b| a.max(b))
+        .max(0.001);
 
     let half_height = WAVEFORM_HEIGHT / 2;
 
@@ -220,9 +234,9 @@ fn print_waveform(peaks: &[f32]) {
             .map(|&p| {
                 let normalized = p / max_peak;
                 if normalized >= threshold {
-                    let level =
-                        ((normalized - threshold) * half_height as f32 * (chars.len() - 1) as f32)
-                            as usize;
+                    let level = ((normalized - threshold)
+                        * half_height as f32
+                        * (chars.len() - 1) as f32) as usize;
                     chars[level.min(chars.len() - 1)]
                 } else {
                     ' '
@@ -243,9 +257,9 @@ fn print_waveform(peaks: &[f32]) {
             .map(|&p| {
                 let normalized = p / max_peak;
                 if normalized >= threshold {
-                    let level =
-                        ((normalized - threshold) * half_height as f32 * (chars.len() - 1) as f32)
-                            as usize;
+                    let level = ((normalized - threshold)
+                        * half_height as f32
+                        * (chars.len() - 1) as f32) as usize;
                     chars[level.min(chars.len() - 1)]
                 } else {
                     ' '

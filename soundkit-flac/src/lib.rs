@@ -274,8 +274,7 @@ impl Decoder for FlacDecoder {
                 ));
             }
 
-            output[total_written..total_written + decoded_len]
-                .copy_from_slice(&self.output_buffer);
+            output[total_written..total_written + decoded_len].copy_from_slice(&self.output_buffer);
             total_written += decoded_len;
             self.output_buffer.clear();
 
@@ -292,12 +291,7 @@ impl Decoder for FlacDecoder {
         Ok(total_written)
     }
 
-    fn decode_f32(
-        &mut self,
-        input: &[u8],
-        output: &mut [f32],
-        fec: bool,
-    ) -> Result<usize, String> {
+    fn decode_f32(&mut self, input: &[u8], output: &mut [f32], fec: bool) -> Result<usize, String> {
         // Decode to i32 then convert to f32
         let mut i32_buf = vec![0i32; output.len()];
         let samples = self.decode_i32(input, &mut i32_buf, fec)?;
@@ -359,9 +353,15 @@ unsafe extern "C" fn write_callback_decode(
     let channels = (*frame).header.channels as usize;
     let blocksize = (*frame).header.blocksize as usize;
     let first_frame = decoder.sample_rate.is_none() || decoder.channels.is_none();
-    decoder.sample_rate.get_or_insert((*frame).header.sample_rate);
-    decoder.channels.get_or_insert((*frame).header.channels as u8);
-    decoder.bits_per_sample.get_or_insert((*frame).header.bits_per_sample as u8);
+    decoder
+        .sample_rate
+        .get_or_insert((*frame).header.sample_rate);
+    decoder
+        .channels
+        .get_or_insert((*frame).header.channels as u8);
+    decoder
+        .bits_per_sample
+        .get_or_insert((*frame).header.bits_per_sample as u8);
 
     let buffer = slice::from_raw_parts(buffer, channels);
     let buffer = buffer
@@ -521,9 +521,8 @@ mod claxon_decoder {
                             for ch in 0..channels {
                                 let sample_idx = i * channels + ch;
                                 if sample_idx >= samples_to_skip {
-                                    self.pending_samples_i32.push(
-                                        current_block.sample(ch as u32, i as u32),
-                                    );
+                                    self.pending_samples_i32
+                                        .push(current_block.sample(ch as u32, i as u32));
                                 }
                             }
                         }
@@ -787,12 +786,7 @@ mod tests {
                             false,
                         ) {
                             Ok(samples_read) => {
-                                trace!(
-                                    chunk = i,
-                                    samples_read,
-                                    encoded_len,
-                                    "decoded FLAC chunk"
-                                );
+                                trace!(chunk = i, samples_read, encoded_len, "decoded FLAC chunk");
                             }
                             Err(e) => panic!("Decoding failed: {}", e),
                         }
@@ -846,9 +840,13 @@ mod tests {
         use soundkit::audio_packet::Decoder;
 
         /// Decode FLAC using claxon decoder
-        fn decode_with_claxon(flac_bytes: &[u8]) -> (Vec<i32>, Option<u32>, Option<u8>, Option<u8>) {
+        fn decode_with_claxon(
+            flac_bytes: &[u8],
+        ) -> (Vec<i32>, Option<u32>, Option<u8>, Option<u8>) {
             let mut decoder = FlacDecoderClaxon::new();
-            decoder.init().expect("Claxon decoder initialization failed");
+            decoder
+                .init()
+                .expect("Claxon decoder initialization failed");
 
             let mut decoded = Vec::new();
             let mut scratch = vec![0i32; 8192];
@@ -866,13 +864,22 @@ mod tests {
                 decoded.extend_from_slice(&scratch[..written]);
             }
 
-            (decoded, decoder.sample_rate(), decoder.channels(), decoder.bits_per_sample())
+            (
+                decoded,
+                decoder.sample_rate(),
+                decoder.channels(),
+                decoder.bits_per_sample(),
+            )
         }
 
         /// Decode FLAC using libflac decoder
-        fn decode_with_libflac(flac_bytes: &[u8]) -> (Vec<i32>, Option<u32>, Option<u8>, Option<u8>) {
+        fn decode_with_libflac(
+            flac_bytes: &[u8],
+        ) -> (Vec<i32>, Option<u32>, Option<u8>, Option<u8>) {
             let mut decoder = FlacDecoder::new();
-            decoder.init().expect("libFLAC decoder initialization failed");
+            decoder
+                .init()
+                .expect("libFLAC decoder initialization failed");
 
             let mut decoded = Vec::new();
             let mut scratch = vec![0i32; 8192];
@@ -891,7 +898,12 @@ mod tests {
                 decoded.extend_from_slice(&scratch[..written]);
             }
 
-            (decoded, decoder.sample_rate(), decoder.channels(), decoder.bits_per_sample())
+            (
+                decoded,
+                decoder.sample_rate(),
+                decoder.channels(),
+                decoder.bits_per_sample(),
+            )
         }
 
         #[test]
@@ -904,7 +916,10 @@ mod tests {
 
             let (decoded, sample_rate, channels, bits) = decode_with_claxon(&flac_bytes);
 
-            assert!(!decoded.is_empty(), "claxon decoder produced no PCM samples");
+            assert!(
+                !decoded.is_empty(),
+                "claxon decoder produced no PCM samples"
+            );
             assert_eq!(sample_rate, Some(16_000), "sample rate");
             assert_eq!(channels, Some(1), "channels");
             assert_eq!(bits, Some(16), "bits per sample");
@@ -926,8 +941,10 @@ mod tests {
 
             init_tracing();
 
-            let (libflac_samples, libflac_sr, libflac_ch, libflac_bits) = decode_with_libflac(&flac_bytes);
-            let (claxon_samples, claxon_sr, claxon_ch, claxon_bits) = decode_with_claxon(&flac_bytes);
+            let (libflac_samples, libflac_sr, libflac_ch, libflac_bits) =
+                decode_with_libflac(&flac_bytes);
+            let (claxon_samples, claxon_sr, claxon_ch, claxon_bits) =
+                decode_with_claxon(&flac_bytes);
 
             // Compare metadata
             assert_eq!(libflac_sr, claxon_sr, "sample rate mismatch");
@@ -971,9 +988,7 @@ mod tests {
             if mismatches > 0 {
                 println!(
                     "  Decoder comparison: {} mismatches out of {} samples compared, max diff: {}",
-                    mismatches,
-                    min_len,
-                    max_diff
+                    mismatches, min_len, max_diff
                 );
             }
 
