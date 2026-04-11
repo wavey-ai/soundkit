@@ -42,10 +42,7 @@ impl Encoder for FlacEncoder {
     ) -> Self {
         let buffer = Rc::new(RefCell::new(Vec::new()));
 
-        let encoder = unsafe {
-            let encoder = ffi::FLAC__stream_encoder_new();
-            encoder
-        };
+        let encoder = unsafe { ffi::FLAC__stream_encoder_new() };
 
         Self {
             encoder,
@@ -59,7 +56,7 @@ impl Encoder for FlacEncoder {
     }
 
     fn init(&mut self) -> Result<(), String> {
-        return self.reset();
+        self.reset()
     }
 
     fn encode_i16(&mut self, _input: &[i16], _output: &mut [u8]) -> Result<usize, String> {
@@ -206,6 +203,12 @@ impl FlacDecoder {
 
     pub fn bits_per_sample(&self) -> Option<u8> {
         self.bits_per_sample
+    }
+}
+
+impl Default for FlacDecoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 impl Decoder for FlacDecoder {
@@ -388,9 +391,9 @@ unsafe extern "C" fn write_callback_decode(
         );
     }
 
-    for i in 0..blocksize {
-        for j in 0..channels {
-            decoder.output_buffer.push(buffer[j][i]);
+    for sample_index in 0..blocksize {
+        for channel_buffer in buffer.iter().take(channels) {
+            decoder.output_buffer.push(channel_buffer[sample_index]);
         }
     }
 
@@ -438,6 +441,12 @@ mod claxon_decoder {
         samples_returned: usize,
         /// Flag to track if we've finished decoding the entire stream
         finished: bool,
+    }
+
+    impl Default for FlacDecoderClaxon {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl FlacDecoderClaxon {
@@ -753,7 +762,7 @@ mod tests {
             audio_data.sampling_rate(),
             audio_data.bits_per_sample() as u32,
             audio_data.channel_count() as u32,
-            0 as u32,
+            0_u32,
             5,
         );
         encoder.init().expect("Failed to initialize FLAC encoder");
@@ -775,7 +784,7 @@ mod tests {
         let mut decoded_samples = vec![0i32; chunk_size * 4];
         let mut n = 0;
         for (i, chunk) in i32_samples.chunks(chunk_size).enumerate() {
-            let mut output_buffer = vec![0u8; chunk.len() * std::mem::size_of::<i32>() * 2];
+            let mut output_buffer = vec![0u8; std::mem::size_of_val(chunk) * 2];
             match encoder.encode_i32(chunk, &mut output_buffer) {
                 Ok(encoded_len) => {
                     if encoded_len > 0 {

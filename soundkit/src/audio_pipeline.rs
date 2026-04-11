@@ -15,7 +15,7 @@ pub fn vec_f32_to_i16(input: Vec<f32>) -> Vec<i16> {
     let mut output: Vec<i16> = Vec::with_capacity(input.len());
 
     for value in input {
-        let clamped_value = value.max(-1.0).min(1.0);
+        let clamped_value = value.clamp(-1.0, 1.0);
         let scaled_value = (clamped_value * 32767.0) as i16;
         output.push(scaled_value);
     }
@@ -213,7 +213,7 @@ impl<E: Encoder> AudioEncoder<E> {
 
         let mut data = audio_data.data().to_owned();
         if let Some(widow) = self.widow.pop() {
-            data.extend_from_slice(&widow.data());
+            data.extend_from_slice(widow.data());
         }
 
         for chunk in data.chunks(chunk_size) {

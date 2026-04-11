@@ -331,6 +331,12 @@ impl OggOpusDecoder {
     }
 }
 
+impl Default for OggOpusDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -47,8 +47,8 @@ fn read_vint(data: &[u8]) -> Option<(u64, usize)> {
     // Read the value - mask off the length marker bits
     let mask = if len < 8 { 0xFFu8 >> len } else { 0 };
     let mut value = (first & mask) as u64;
-    for i in 1..len {
-        value = (value << 8) | data[i] as u64;
+    for byte in data.iter().take(len).skip(1) {
+        value = (value << 8) | *byte as u64;
     }
 
     Some((value, len))
@@ -72,8 +72,8 @@ fn read_element_id(data: &[u8]) -> Option<(u32, usize)> {
     }
 
     let mut id = 0u32;
-    for i in 0..len {
-        id = (id << 8) | data[i] as u32;
+    for byte in data.iter().take(len) {
+        id = (id << 8) | *byte as u32;
     }
 
     Some((id, len))
@@ -82,8 +82,8 @@ fn read_element_id(data: &[u8]) -> Option<(u32, usize)> {
 /// Read an EBML unsigned integer value
 fn read_uint(data: &[u8], size: usize) -> u64 {
     let mut value = 0u64;
-    for i in 0..size.min(8).min(data.len()) {
-        value = (value << 8) | data[i] as u64;
+    for byte in data.iter().take(size.min(8).min(data.len())) {
+        value = (value << 8) | *byte as u64;
     }
     value
 }
@@ -118,9 +118,9 @@ struct AudioTrackInfo {
 /// Parser state
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ParserState {
-    ReadingHeader,
-    ReadingTracks,
-    ReadingClusters,
+    Header,
+    Tracks,
+    Clusters,
 }
 
 /// Streaming WebM audio decoder
@@ -140,7 +140,7 @@ impl WebmDecoder {
     pub fn new() -> Self {
         Self {
             buffer: Vec::with_capacity(65536),
-            state: ParserState::ReadingHeader,
+            state: ParserState::Header,
             audio_track: None,
             opus_decoder: None,
             pending_audio: VecDeque::new(),
@@ -162,9 +162,9 @@ impl WebmDecoder {
         // Try to parse elements
         loop {
             let consumed = match self.state {
-                ParserState::ReadingHeader => self.parse_header()?,
-                ParserState::ReadingTracks => self.parse_tracks()?,
-                ParserState::ReadingClusters => self.parse_clusters()?,
+                ParserState::Header => self.parse_header()?,
+                ParserState::Tracks => self.parse_tracks()?,
+                ParserState::Clusters => self.parse_clusters()?,
             };
 
             if consumed == 0 {
@@ -228,7 +228,7 @@ impl WebmDecoder {
             };
 
             debug!("found Segment element");
-            self.state = ParserState::ReadingTracks;
+            self.state = ParserState::Tracks;
             return Ok(total_len + seg_id_len + seg_size_len);
         }
 
@@ -289,7 +289,7 @@ impl WebmDecoder {
                         self.init_decoder()?;
                         self.header_complete = true;
                     }
-                    self.state = ParserState::ReadingClusters;
+                    self.state = ParserState::Clusters;
                     return Ok(pos);
                 }
                 _ => {

@@ -24,6 +24,12 @@ pub struct WavStreamProcessor {
     data_chunk_collected: usize,
 }
 
+impl Default for WavStreamProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WavStreamProcessor {
     pub fn new() -> Self {
         Self {
@@ -154,8 +160,8 @@ impl WavStreamProcessor {
                 }
 
                 StreamWavState::ReadingData => {
-                    let bytes_per_sample = (self.bits_per_sample / 8) as usize;
-                    let bytes_per_frame = bytes_per_sample * self.channel_count as usize;
+                    let bytes_per_sample = self.bits_per_sample / 8;
+                    let bytes_per_frame = bytes_per_sample * self.channel_count;
 
                     if self.buffer.len() < bytes_per_frame {
                         return Ok(None); // Wait for more data.
@@ -300,7 +306,7 @@ mod tests {
             }
         }
 
-        assert!(audio_packets.len() > 0, "No audio packets processed");
+        assert!(!audio_packets.is_empty(), "No audio packets processed");
     }
 
     #[test]
@@ -317,9 +323,9 @@ mod tests {
         buf.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
         buf.extend_from_slice(&1u16.to_le_bytes()); // num channels = 1
         buf.extend_from_slice(&48_000u32.to_le_bytes()); // sample rate = 48000
-        let byte_rate = 48_000 * 1 * 3;
+        let byte_rate = 48_000 * 3;
         buf.extend_from_slice(&(byte_rate as u32).to_le_bytes());
-        let block_align = 1 * 3;
+        let block_align = 3;
         buf.extend_from_slice(&(block_align as u16).to_le_bytes());
         buf.extend_from_slice(&24u16.to_le_bytes()); // bits per sample = 24
         buf.extend_from_slice(b"data");

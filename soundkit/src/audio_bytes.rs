@@ -1,7 +1,10 @@
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 
 pub fn i16le_to_f32(bytes: &[u8]) -> Vec<f32> {
-    assert!(bytes.len() % 2 == 0, "Bytes length must be a multiple of 2");
+    assert!(
+        bytes.len().is_multiple_of(2),
+        "Bytes length must be a multiple of 2"
+    );
     bytes
         .chunks(2)
         .map(|chunk| {
@@ -20,7 +23,10 @@ pub fn i16_to_i16le(data: &[i16]) -> Vec<u8> {
 }
 
 pub fn i16le_to_i16(bytes: &[u8]) -> Vec<i16> {
-    assert!(bytes.len() % 2 == 0, "Bytes length must be a multiple of 2");
+    assert!(
+        bytes.len().is_multiple_of(2),
+        "Bytes length must be a multiple of 2"
+    );
     bytes
         .chunks(2)
         .map(|chunk| i16::from_le_bytes(chunk.try_into().unwrap()))
@@ -163,7 +169,7 @@ pub fn f32le_to_i16(data: &[u8]) -> Vec<i16> {
     let mut result = Vec::with_capacity(sample_count);
     data.chunks_exact(4).for_each(|chunk| {
         let f32_sample = LittleEndian::read_f32(chunk);
-        let i16_sample = (f32_sample.max(-1.0).min(1.0) * 32767.0) as i16;
+        let i16_sample = (f32_sample.clamp(-1.0, 1.0) * 32767.0) as i16;
         result.push(i16_sample);
     });
     result
@@ -174,7 +180,7 @@ pub fn f32be_to_i16(data: &[u8]) -> Vec<i16> {
     let mut result = Vec::with_capacity(sample_count);
     data.chunks_exact(4).for_each(|chunk| {
         let f32_sample = BigEndian::read_f32(chunk);
-        let i16_sample = (f32_sample.max(-1.0).min(1.0) * 32767.0) as i16;
+        let i16_sample = (f32_sample.clamp(-1.0, 1.0) * 32767.0) as i16;
         result.push(i16_sample);
     });
     result
@@ -185,7 +191,7 @@ pub fn f32le_to_i32(data: &[u8]) -> Vec<i32> {
     let mut result = Vec::with_capacity(sample_count);
     data.chunks_exact(4).for_each(|chunk| {
         let f32_sample = LittleEndian::read_f32(chunk);
-        let clamped = f32_sample.max(-1.0).min(1.0);
+        let clamped = f32_sample.clamp(-1.0, 1.0);
         let sample = if clamped >= 0.0 {
             (clamped * i32::MAX as f32) as i32
         } else {
@@ -201,7 +207,7 @@ pub fn f32le_to_s24(data: &[u8]) -> Vec<i32> {
     let mut result = Vec::with_capacity(sample_count);
     data.chunks_exact(4).for_each(|chunk| {
         let f32_sample = f32::from_le_bytes(chunk.try_into().unwrap());
-        let clamped = f32_sample.max(-1.0).min(1.0);
+        let clamped = f32_sample.clamp(-1.0, 1.0);
         let s24_max = 8388607; // 2^23 - 1
         let sample = if clamped >= 0.0 {
             (clamped * s24_max as f32) as i32
@@ -310,7 +316,7 @@ pub fn s24le_to_i32_sample(sample_bytes: [u8; 3]) -> i32 {
 
 pub fn stereo_to_mono_take_left(input: &[i16]) -> Vec<i16> {
     assert!(
-        input.len() % 2 == 0,
+        input.len().is_multiple_of(2),
         "Stereo buffer must contain an even number of samples"
     );
 
@@ -324,7 +330,7 @@ pub fn stereo_to_mono_take_left(input: &[i16]) -> Vec<i16> {
 
 pub fn stereo_to_mono_inplace_take_left(samples: &mut [i16]) -> &mut [i16] {
     assert!(
-        samples.len() % 2 == 0,
+        samples.len().is_multiple_of(2),
         "Stereo buffer must contain an even number of samples"
     );
 
@@ -337,7 +343,7 @@ pub fn stereo_to_mono_inplace_take_left(samples: &mut [i16]) -> &mut [i16] {
 
 pub fn stereo_to_mono_avg(input: &[i16]) -> Vec<i16> {
     assert!(
-        input.len() % 2 == 0,
+        input.len().is_multiple_of(2),
         "Stereo buffer must contain an even number of samples"
     );
 
@@ -353,7 +359,7 @@ pub fn stereo_to_mono_avg(input: &[i16]) -> Vec<i16> {
 
 pub fn stereo_to_mono_inplace_avg(samples: &mut [i16]) -> &mut [i16] {
     assert!(
-        samples.len() % 2 == 0,
+        samples.len().is_multiple_of(2),
         "Stereo buffer must contain an even number of samples"
     );
 
@@ -418,7 +424,7 @@ mod tests {
             0, 192, // -16384
             0, 128, // -32768
         ];
-        let expected = vec![0.0, 0.5, 0.9999694, -0.5, -1.0];
+        let expected = [0.0, 0.5, 0.9999694, -0.5, -1.0];
         let result = i16le_to_f32(&input);
 
         assert_eq!(result.len(), expected.len());

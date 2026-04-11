@@ -78,14 +78,12 @@ pub fn encode_audio_packet<E: Encoder>(
                 }
             };
 
-            let num_bytes;
-
-            match encoder.encode_i32(&src[..], &mut data[..]) {
-                Ok(n) => num_bytes = n,
+            let num_bytes = match encoder.encode_i32(&src[..], &mut data[..]) {
+                Ok(n) => n,
                 Err(e) => {
                     return Err(format!("Failed to encode chunk {:?}", e));
                 }
-            }
+            };
 
             if num_bytes == 0 {
                 return Err("Flac encoding: zero bytes".to_string());
@@ -103,7 +101,7 @@ pub fn encode_audio_packet<E: Encoder>(
                 }
                 24 => {
                     for bytes in buf.chunks_exact(3) {
-                        src.push((LE::read_i24(&bytes) >> 8) as i16);
+                        src.push((LE::read_i24(bytes) >> 8) as i16);
                     }
                 }
                 32 => {
@@ -144,7 +142,7 @@ pub fn encode_audio_packet<E: Encoder>(
             data.truncate(num_bytes);
         }
         EncodingFlag::PCMFloat => {
-            data.clone_from_slice(&buf[..]);
+            data.clone_from_slice(buf);
         }
         _ => {}
     }
@@ -152,10 +150,10 @@ pub fn encode_audio_packet<E: Encoder>(
     let mut chunk = Vec::new();
     let header = FrameHeader::new(
         encoding_format,
-        header.sample_size() as u16,
-        header.sample_rate() as u32,
-        header.channels() as u8,
-        header.bits_per_sample() as u8,
+        header.sample_size(),
+        header.sample_rate(),
+        header.channels(),
+        header.bits_per_sample(),
         Endianness::LittleEndian,
         header.id(),
         None,
@@ -171,7 +169,7 @@ pub fn encode_audio_packet<E: Encoder>(
 pub fn decode_audio_packet_scratch<D: Decoder>(
     buffer: Bytes,
     decoder: &mut D,
-    scratch: &mut Vec<f32>,
+    scratch: &mut [f32],
 ) -> Result<FrameHeader, String> {
     let header = FrameHeader::decode(&mut &buffer[..20])
         .map_err(|e| format!("Failed to decode header: {}", e))?;
@@ -183,7 +181,7 @@ pub fn decode_audio_packet_scratch<D: Decoder>(
             16 => {
                 for (i, sample_bytes) in data.chunks_exact(2).enumerate() {
                     let sample_i16 = i16::from_le_bytes([sample_bytes[0], sample_bytes[1]]);
-                    scratch[i] = f32::from(sample_i16) / f32::from(std::i16::MAX);
+                    scratch[i] = f32::from(sample_i16) / f32::from(i16::MAX);
                 }
             }
             24 => {
@@ -200,7 +198,7 @@ pub fn decode_audio_packet_scratch<D: Decoder>(
                         sample_bytes[2],
                         sample_bytes[3],
                     ]);
-                    scratch[i] = sample_i32 as f32 / std::i32::MAX as f32;
+                    scratch[i] = sample_i32 as f32 / i32::MAX as f32;
                 }
             }
             _ => {
@@ -227,7 +225,7 @@ pub fn decode_audio_packet_scratch<D: Decoder>(
                 .map_err(|e| format!("Opus decoding failed: {}", e))?;
 
             for (i, sample_i16) in dst[..num_samples_decoded].iter().enumerate() {
-                scratch[i] = f32::from(*sample_i16) / f32::from(std::i16::MAX);
+                scratch[i] = f32::from(*sample_i16) / f32::from(i16::MAX);
             }
         }
         _ => return Err("Unsupported encoding type".to_string()),
@@ -247,7 +245,7 @@ pub fn decode_audio_packet<D: Decoder>(buffer: Vec<u8>, decoder: &mut D) -> Opti
             16 => {
                 for sample_bytes in data.chunks_exact(2) {
                     let sample_i16 = i16::from_le_bytes([sample_bytes[0], sample_bytes[1]]);
-                    let sample_f32 = f32::from(sample_i16) / f32::from(std::i16::MAX);
+                    let sample_f32 = f32::from(sample_i16) / f32::from(i16::MAX);
                     samples.push(sample_f32);
                 }
             }
@@ -266,7 +264,7 @@ pub fn decode_audio_packet<D: Decoder>(buffer: Vec<u8>, decoder: &mut D) -> Opti
                         sample_bytes[2],
                         sample_bytes[3],
                     ]);
-                    let sample_f32: f32 = sample_i32 as f32 / std::i32::MAX as f32;
+                    let sample_f32: f32 = sample_i32 as f32 / i32::MAX as f32;
                     samples.push(sample_f32);
                 }
             }
@@ -285,12 +283,10 @@ pub fn decode_audio_packet<D: Decoder>(buffer: Vec<u8>, decoder: &mut D) -> Opti
         }
         EncodingFlag::Opus => {
             let mut dst = vec![0i16; header.sample_size() as usize * channel_count];
-            let _num_samples_decoded = decoder
-                .decode_i16(&data[..], &mut dst[..], false)
-                .unwrap_or(0);
+            let _num_samples_decoded = decoder.decode_i16(data, &mut dst[..], false).unwrap_or(0);
 
             for sample_i16 in dst {
-                let sample_f32 = f32::from(sample_i16) / f32::from(std::i16::MAX);
+                let sample_f32 = f32::from(sample_i16) / f32::from(i16::MAX);
                 samples.push(sample_f32);
             }
         }

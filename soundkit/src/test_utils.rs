@@ -1,5 +1,5 @@
-/// Test utilities for audio codec tests
-/// Provides waveform visualization and audio comparison helpers
+//! Test utilities for audio codec tests.
+//! Provides waveform visualization and audio comparison helpers.
 
 const WAVEFORM_WIDTH: usize = 60;
 const WAVEFORM_HEIGHT: usize = 8;
@@ -112,7 +112,7 @@ fn compute_waveform_peaks_i16(samples: &[i16], num_bins: usize) -> Vec<f32> {
         return Vec::new();
     }
 
-    let bin_size = (samples.len() + num_bins - 1) / num_bins;
+    let bin_size = samples.len().div_ceil(num_bins);
 
     samples
         .chunks(bin_size)
@@ -137,7 +137,7 @@ fn compute_waveform_peaks_i32_bits(
     }
 
     let max_value = (1i64 << (bits_per_sample - 1)) as f64;
-    let bin_size = (samples.len() + num_bins - 1) / num_bins;
+    let bin_size = samples.len().div_ceil(num_bins);
 
     samples
         .chunks(bin_size)

@@ -58,7 +58,7 @@ impl Encoder for OpusEncoder {
     fn reset(&mut self) -> Result<(), String> {
         match self
             .encoder
-            .set_option(encoder::OPUS_SET_BITRATE_REQUEST, self.bitrate as u32)
+            .set_option(encoder::OPUS_SET_BITRATE_REQUEST, self.bitrate)
         {
             Ok(_) => Ok(()),
             Err(e) => Err(format!("error reseting opus: {}", e)),
@@ -132,7 +132,7 @@ impl Decoder for OpusDecoder {
         _output: &mut [i32],
         _fec: bool,
     ) -> Result<usize, String> {
-        return Err("not implemented.".to_string());
+        Err("not implemented.".to_string())
     }
 
     fn decode_f32(&mut self, input: &[u8], output: &mut [f32], fec: bool) -> Result<usize, String> {
@@ -158,6 +158,12 @@ pub struct OpusStreamDecoder {
     channels: Option<u8>,
     pre_skip_remaining: usize,
     header_parsed: bool,
+}
+
+impl Default for OpusStreamDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OpusStreamDecoder {
@@ -228,14 +234,15 @@ impl OpusStreamDecoder {
         }
 
         // Try to decode a packet
-        if self.decoder.is_some() && self.buffer.len() >= 2 {
+        if self.buffer.len() >= 2 {
             let packet_len = u16::from_le_bytes([self.buffer[0], self.buffer[1]]) as usize;
 
             // Check if we have the complete packet
             if packet_len > 0 && self.buffer.len() >= 2 + packet_len {
                 let packet = &self.buffer[2..2 + packet_len];
-                let decoder = self.decoder.as_mut().unwrap();
-                let channels = self.channels.unwrap();
+                let (Some(decoder), Some(channels)) = (self.decoder.as_mut(), self.channels) else {
+                    return Ok(None);
+                };
 
                 let mut scratch = vec![0i16; MAX_OPUS_FRAME_SAMPLES * channels as usize];
 
@@ -305,8 +312,6 @@ mod tests {
     use std::sync::Once;
     use std::time::Instant;
     use tracing::debug;
-    use tracing_subscriber;
-
     const TEST_FILE: &str = "A_Tusk_is_used_to_make_costly_gifts";
 
     #[derive(Debug)]

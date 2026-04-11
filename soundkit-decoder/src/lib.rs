@@ -64,21 +64,11 @@ impl std::error::Error for DecodeError {}
 pub type DecodeOutput = Result<AudioData, DecodeError>;
 
 /// Output transformation options for the decoder pipeline
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct DecodeOptions {
     pub output_bits_per_sample: Option<u8>,
     pub output_sample_rate: Option<u32>,
     pub output_channels: Option<u8>,
-}
-
-impl Default for DecodeOptions {
-    fn default() -> Self {
-        Self {
-            output_bits_per_sample: None,
-            output_sample_rate: None,
-            output_channels: None,
-        }
-    }
 }
 
 /// Internal state machine for the pipeline
@@ -96,21 +86,21 @@ enum PipelineState {
 /// All variants implement StreamingDecoder through the enum's impl.
 enum FormatDecoder {
     /// MP3 decoder using minimp3
-    Mp3(Mp3Decoder),
+    Mp3(Box<Mp3Decoder>),
     /// Raw AAC (ADTS) decoder
-    Aac(AacDecoder),
+    Aac(Box<AacDecoder>),
     /// AAC decoder for M4A/MP4 containers
-    M4a(AacDecoderMp4),
+    M4a(Box<AacDecoderMp4>),
     /// FLAC decoder using pure-Rust claxon (avoids libFLAC FFI release-mode bug)
-    Flac(FlacDecoderClaxon),
+    Flac(Box<FlacDecoderClaxon>),
     /// Raw Opus stream decoder
-    Opus(OpusStreamDecoder),
+    Opus(Box<OpusStreamDecoder>),
     /// Ogg-wrapped Opus decoder
-    OggOpus(OggOpusDecoder),
+    OggOpus(Box<OggOpusDecoder>),
     /// WebM container decoder (typically Opus audio)
-    WebM(WebmDecoder),
+    WebM(Box<WebmDecoder>),
     /// WAV decoder (raw PCM in RIFF container)
-    Wav(WavStreamProcessor),
+    Wav(Box<WavStreamProcessor>),
 }
 
 /// Helper to decode using the Decoder trait and drain all buffered frames.
@@ -205,11 +195,8 @@ where
     }
 
     // Drain remaining buffered packets
-    loop {
-        match add_fn(decoder, &[])? {
-            Some(audio_data) => results.push(audio_data),
-            None => break,
-        }
+    while let Some(audio_data) = add_fn(decoder, &[])? {
+        results.push(audio_data);
     }
 
     Ok(results)
@@ -218,44 +205,60 @@ where
 impl StreamingDecoder for FormatDecoder {
     fn process(&mut self, chunk: &[u8]) -> Result<Vec<AudioData>, String> {
         match self {
-            FormatDecoder::Mp3(dec) => decode_i16_with_drain(dec, chunk, |d, samples, output| {
-                let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
-                Some(create_audio_data_i16(
-                    sample_rate,
-                    channels,
-                    &output[..samples],
-                ))
-            }),
-            FormatDecoder::Aac(dec) => decode_i16_with_drain(dec, chunk, |d, samples, output| {
-                let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
-                Some(create_audio_data_i16(
-                    sample_rate,
-                    channels,
-                    &output[..samples],
-                ))
-            }),
-            FormatDecoder::M4a(dec) => decode_i16_with_drain(dec, chunk, |d, samples, output| {
-                let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
-                Some(create_audio_data_i16(
-                    sample_rate,
-                    channels,
-                    &output[..samples],
-                ))
-            }),
-            FormatDecoder::Flac(dec) => decode_with_drain(dec, chunk, |d, samples, output| {
-                let (sample_rate, channels, bits) =
-                    (d.sample_rate()?, d.channels()?, d.bits_per_sample()?);
-                Some(create_audio_data_i32_with_bits(
-                    sample_rate,
-                    channels,
-                    bits,
-                    &output[..samples],
-                ))
-            }),
-            FormatDecoder::Opus(dec) => process_with_add_api(dec, chunk, |d, data| d.add(data)),
-            FormatDecoder::OggOpus(dec) => process_with_add_api(dec, chunk, |d, data| d.add(data)),
-            FormatDecoder::WebM(dec) => process_with_add_api(dec, chunk, |d, data| d.add(data)),
-            FormatDecoder::Wav(dec) => process_with_add_api(dec, chunk, |d, data| d.add(data)),
+            FormatDecoder::Mp3(dec) => {
+                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                    let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
+                    Some(create_audio_data_i16(
+                        sample_rate,
+                        channels,
+                        &output[..samples],
+                    ))
+                })
+            }
+            FormatDecoder::Aac(dec) => {
+                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                    let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
+                    Some(create_audio_data_i16(
+                        sample_rate,
+                        channels,
+                        &output[..samples],
+                    ))
+                })
+            }
+            FormatDecoder::M4a(dec) => {
+                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                    let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
+                    Some(create_audio_data_i16(
+                        sample_rate,
+                        channels,
+                        &output[..samples],
+                    ))
+                })
+            }
+            FormatDecoder::Flac(dec) => {
+                decode_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                    let (sample_rate, channels, bits) =
+                        (d.sample_rate()?, d.channels()?, d.bits_per_sample()?);
+                    Some(create_audio_data_i32_with_bits(
+                        sample_rate,
+                        channels,
+                        bits,
+                        &output[..samples],
+                    ))
+                })
+            }
+            FormatDecoder::Opus(dec) => {
+                process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
+            }
+            FormatDecoder::OggOpus(dec) => {
+                process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
+            }
+            FormatDecoder::WebM(dec) => {
+                process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
+            }
+            FormatDecoder::Wav(dec) => {
+                process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
+            }
         }
     }
 
@@ -478,59 +481,46 @@ fn detect_and_init_decoder(buffer: &[u8]) -> Result<FormatDecoder, DecodeError> 
     match audio_type {
         AudioType::MP3 => {
             let decoder = Mp3Decoder::new();
-            Ok(FormatDecoder::Mp3(decoder))
+            Ok(FormatDecoder::Mp3(Box::new(decoder)))
         }
         AudioType::AAC => {
             // Raw AAC (ADTS format)
             let mut decoder = AacDecoder::new();
-            decoder
-                .init()
-                .map_err(|e| DecodeError::DecoderInitFailed(e))?;
-            Ok(FormatDecoder::Aac(decoder))
+            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+            Ok(FormatDecoder::Aac(Box::new(decoder)))
         }
         AudioType::M4A => {
             // AAC in M4A/MP4 container
             let mut decoder = AacDecoderMp4::new();
-            decoder
-                .init()
-                .map_err(|e| DecodeError::DecoderInitFailed(e))?;
-            Ok(FormatDecoder::M4a(decoder))
+            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+            Ok(FormatDecoder::M4a(Box::new(decoder)))
         }
         AudioType::FLAC => {
             // Use pure-Rust claxon decoder (avoids libFLAC FFI release-mode bug)
             let mut decoder = FlacDecoderClaxon::new();
-            decoder
-                .init()
-                .map_err(|e| DecodeError::DecoderInitFailed(e))?;
-            Ok(FormatDecoder::Flac(decoder))
+            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+            Ok(FormatDecoder::Flac(Box::new(decoder)))
         }
         AudioType::Opus => {
             let mut decoder = OpusStreamDecoder::new();
-            decoder
-                .init()
-                .map_err(|e| DecodeError::DecoderInitFailed(e))?;
-            Ok(FormatDecoder::Opus(decoder))
+            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+            Ok(FormatDecoder::Opus(Box::new(decoder)))
         }
         AudioType::OggOpus => {
             let mut decoder = OggOpusDecoder::new();
-            decoder
-                .init()
-                .map_err(|e| DecodeError::DecoderInitFailed(e))?;
-            Ok(FormatDecoder::OggOpus(decoder))
+            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+            Ok(FormatDecoder::OggOpus(Box::new(decoder)))
         }
         AudioType::WebM => {
             let mut decoder = WebmDecoder::new();
-            decoder
-                .init()
-                .map_err(|e| DecodeError::DecoderInitFailed(e))?;
-            Ok(FormatDecoder::WebM(decoder))
+            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+            Ok(FormatDecoder::WebM(Box::new(decoder)))
         }
         AudioType::Wav => {
             let decoder = WavStreamProcessor::new();
-            Ok(FormatDecoder::Wav(decoder))
+            Ok(FormatDecoder::Wav(Box::new(decoder)))
         }
         AudioType::Unknown => Err(DecodeError::FormatDetectionFailed),
-        other => Err(DecodeError::UnsupportedFormat(other)),
     }
 }
 
@@ -598,7 +588,7 @@ fn create_audio_data_i32_with_bits(
     bits_per_sample: u8,
     samples: &[i32],
 ) -> AudioData {
-    let bytes_per_sample = ((bits_per_sample + 7) / 8) as usize;
+    let bytes_per_sample = bits_per_sample.div_ceil(8) as usize;
     let mut bytes = Vec::with_capacity(samples.len() * bytes_per_sample);
 
     match bits_per_sample {
@@ -659,10 +649,7 @@ fn push_audio_data(
     audio_data: AudioData,
     options: &DecodeOptions,
 ) {
-    let output = match apply_output_options(audio_data, options) {
-        Ok(audio_data) => Ok(audio_data),
-        Err(err) => Err(err),
-    };
+    let output = apply_output_options(audio_data, options);
 
     push_output(output_tx, output);
 }
@@ -895,7 +882,7 @@ fn f32_channels_to_bytes(
 fn vec_f32_to_i32(input: &[f32]) -> Vec<i32> {
     let mut output = Vec::with_capacity(input.len());
     for &value in input {
-        let clamped = value.max(-1.0).min(1.0);
+        let clamped = value.clamp(-1.0, 1.0);
         let sample = if clamped >= 0.0 {
             (clamped * i32::MAX as f32) as i32
         } else {
@@ -911,7 +898,7 @@ fn vec_f32_to_s24(input: &[f32]) -> Vec<i32> {
     let s24_max = 8_388_607.0;
 
     for &value in input {
-        let clamped = value.max(-1.0).min(1.0);
+        let clamped = value.clamp(-1.0, 1.0);
         let sample = if clamped >= 0.0 {
             (clamped * s24_max) as i32
         } else {
@@ -1488,7 +1475,7 @@ mod tests {
             return Vec::new();
         }
 
-        let bin_size = (samples.len() + num_bins - 1) / num_bins;
+        let bin_size = samples.len().div_ceil(num_bins);
 
         samples
             .chunks(bin_size)

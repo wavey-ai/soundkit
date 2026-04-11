@@ -121,6 +121,12 @@ impl AacDecoder {
     }
 }
 
+impl Default for AacDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Decoder for AacDecoder {
     fn decode_i16(
         &mut self,
@@ -726,6 +732,12 @@ mod mp4_decoder {
         adts_buffer: Vec<u8>, // Buffer of ADTS frames ready for decoding
     }
 
+    impl Default for AacDecoderMp4 {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl AacDecoderMp4 {
         pub fn new() -> Self {
             // Initialize FDK decoder in ADTS mode
@@ -1182,7 +1194,7 @@ mod tests {
             audio_data.sampling_rate(),
             audio_data.bits_per_sample() as u32,
             audio_data.channel_count() as u32,
-            0 as u32,
+            0_u32,
             5,
         );
         encoder.init().expect("Failed to initialize aac encoder");

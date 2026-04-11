@@ -336,7 +336,7 @@ pub fn stretch_interleaved(
 ) -> Result<Vec<f32>, StretchError> {
     config.validate()?;
     let channels = config.channels as usize;
-    if input.len() % channels != 0 {
+    if !input.len().is_multiple_of(channels) {
         return Err(StretchError::InputLengthNotInterleaved {
             sample_count: input.len(),
             channels,
