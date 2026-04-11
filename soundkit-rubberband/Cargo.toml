@@ -1,0 +1,13 @@
+[package]
+name = "soundkit-rubberband"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "High-level Rust wrapper for Rubber Band offline music stretching."
+repository = "https://github.com/wavey-ai/soundkit"
+
+[dependencies]
+bitflags = "2.6.0"
+frame-header = "0.2.0"
+soundkit = { path = "../soundkit" }
+soundkit-rubberband-sys = { path = "../soundkit-rubberband-sys" }

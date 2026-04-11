@@ -9,4 +9,6 @@ members = [
   "soundkit-ogg-opus",
   "soundkit-webm",
   "soundkit-decoder",
+  "soundkit-rubberband-sys",
+  "soundkit-rubberband",
 ]

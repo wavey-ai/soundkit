@@ -17,7 +17,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake automake autoconf libtool nasm
+          sudo apt-get install -y cmake automake autoconf libtool nasm librubberband-dev
       - name: Build and install libopus 1.5.2
         run: |
           curl -sL https://github.com/xiph/opus/releases/download/v1.5.2/opus-1.5.2.tar.gz | tar xz
@@ -31,6 +31,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: |
+          cargo test -p soundkit-rubberband
           cargo test -p soundkit
           cargo test -p soundkit-flac
           cargo test -p soundkit-mp3

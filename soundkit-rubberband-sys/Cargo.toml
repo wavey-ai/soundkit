@@ -1,0 +1,11 @@
+[package]
+name = "soundkit-rubberband-sys"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "Low-level Rust FFI bindings for the Rubber Band Library."
+repository = "https://github.com/wavey-ai/soundkit"
+links = "rubberband"
+
+[build-dependencies]
+pkg-config = "0.3"
