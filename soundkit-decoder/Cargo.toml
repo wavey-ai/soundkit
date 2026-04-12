@@ -9,7 +9,7 @@ repository = "https://github.com/wavey-ai/soundkit"
 [dependencies]
 soundkit = { path = "../soundkit" }
 access-unit = "0.1.2"
-soundkit-mp3 = { path = "../soundkit-mp3" }
+soundkit-mp3 = { path = "../soundkit-mp3", default-features = false }
 soundkit-aac = { path = "../soundkit-aac", features = ["mp4-decoder"] }
 soundkit-flac = { path = "../soundkit-flac", features = ["claxon-decoder"] }
 soundkit-opus = { path = "../soundkit-opus" }

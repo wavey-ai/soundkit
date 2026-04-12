@@ -3,9 +3,13 @@ name = "soundkit-mp3"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["encode"]
+encode = ["dep:mp3lame-encoder", "dep:mp3lame-sys"]
+
 [dependencies]
-mp3lame-encoder = "0.2.1"
-mp3lame-sys = "0.1.9"
+mp3lame-encoder = { version = "0.2.1", optional = true }
+mp3lame-sys = { version = "0.1.9", optional = true }
 nanomp3 = { git = "https://github.com/wavey-ai/nanomp3.git" }
 soundkit = { path = "../soundkit" }
 tracing = "0.1.40"

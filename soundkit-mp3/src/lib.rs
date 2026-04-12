@@ -1,17 +1,24 @@
+use nanomp3::{Decoder as NanoDecoder, FrameInfo, MAX_SAMPLES_PER_FRAME};
+use soundkit::audio_packet::Decoder;
+#[cfg(feature = "encode")]
+use soundkit::audio_packet::Encoder;
+#[cfg(feature = "encode")]
 use mp3lame_encoder::{
     max_required_buffer_size, Bitrate, Builder, FlushNoGap, InterleavedPcm, MonoPcm,
 };
-use nanomp3::{Decoder as NanoDecoder, FrameInfo, MAX_SAMPLES_PER_FRAME};
-use soundkit::audio_packet::{Decoder, Encoder};
+#[cfg(feature = "encode")]
 use std::mem::MaybeUninit;
+#[cfg(feature = "encode")]
 use std::slice;
 use std::vec::Vec;
 
+#[cfg(feature = "encode")]
 pub struct Mp3Encoder {
     inner: mp3lame_encoder::Encoder,
     channels: u8,
 }
 
+#[cfg(feature = "encode")]
 impl Mp3Encoder {
     /// Encode i16 samples into a standalone MP3 `Vec<u8>`, automatically sizing the buffer.
     pub fn encode_to_vec(&mut self, samples: &[i16]) -> Result<Vec<u8>, String> {
@@ -80,6 +87,7 @@ impl Mp3Encoder {
     }
 }
 
+#[cfg(feature = "encode")]
 impl Encoder for Mp3Encoder {
     fn new(
         sample_rate: u32,
@@ -378,13 +386,14 @@ fn f32_to_i32(sample: f32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mp3lame_encoder::max_required_buffer_size;
     use soundkit::audio_bytes::s16le_to_i16;
     use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
     use soundkit::wav::WavStreamProcessor;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Once;
+    #[cfg(feature = "encode")]
+    use mp3lame_encoder::max_required_buffer_size;
 
     fn init_tracing() {
         static INIT: Once = Once::new();
@@ -454,6 +463,7 @@ mod tests {
         print_waveform_with_header("MP3", &result);
     }
 
+    #[cfg(feature = "encode")]
     #[test]
     fn test_mp3_encoder_encode_i16() {
         // load a 16-bit WAV
