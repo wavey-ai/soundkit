@@ -68,6 +68,87 @@ pub fn deserialize_audio(
     }
 }
 
+pub fn audio_to_f32_channels(audio: &AudioData) -> Result<Vec<Vec<f32>>, String> {
+    let channel_count = audio.channel_count() as usize;
+    if channel_count == 0 {
+        return Err("Channel count must be > 0".to_string());
+    }
+
+    if audio.bits_per_sample() == 32 && audio.audio_format() != EncodingFlag::PCMFloat {
+        let interleaved = s32le_to_i32(audio.data());
+        let mut channels = vec![Vec::with_capacity(interleaved.len() / channel_count); channel_count];
+        for (index, sample) in interleaved.into_iter().enumerate() {
+            channels[index % channel_count].push(sample);
+        }
+        return Ok(channels.into_iter().map(vec_i32_to_f32).collect());
+    }
+
+    let pcm_data = deserialize_audio(audio.data(), audio.bits_per_sample(), audio.channel_count())
+        .map_err(|error| format!("deserialize_audio failed: {error}"))?;
+
+    match pcm_data {
+        PcmData::I16(data) => Ok(data.into_iter().map(vec_i16_to_f32).collect()),
+        PcmData::I32(data) => Ok(data.into_iter().map(vec_i32_to_f32).collect()),
+        PcmData::F32(data) => Ok(data),
+    }
+}
+
+pub fn audio_to_mono_f32(audio: &AudioData) -> Result<Vec<f32>, String> {
+    let channels = audio_to_f32_channels(audio)?;
+    mixdown_to_mono_f32(&channels)
+}
+
+pub fn mixdown_to_mono_f32(channels: &[Vec<f32>]) -> Result<Vec<f32>, String> {
+    if channels.is_empty() {
+        return Ok(Vec::new());
+    }
+    if channels.len() == 1 {
+        return Ok(channels[0].clone());
+    }
+
+    let sample_count = channels[0].len();
+    if channels.iter().any(|channel| channel.len() != sample_count) {
+        return Err("channel length mismatch".to_string());
+    }
+
+    let mut mono = vec![0.0f32; sample_count];
+    for channel in channels {
+        for (index, sample) in channel.iter().enumerate() {
+            mono[index] += *sample;
+        }
+    }
+
+    let scale = 1.0 / channels.len() as f32;
+    for sample in &mut mono {
+        *sample *= scale;
+    }
+
+    Ok(mono)
+}
+
+pub fn f32s_to_le_bytes(samples: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(samples));
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
+pub fn f32s_from_le_bytes(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+        return Err(format!(
+            "invalid f32le byte length {}; expected multiple of 4",
+            bytes.len()
+        ));
+    }
+
+    let mut samples = Vec::with_capacity(bytes.len() / std::mem::size_of::<f32>());
+    for chunk in bytes.chunks_exact(std::mem::size_of::<f32>()) {
+        samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(samples)
+}
+
 pub fn downsample_audio(audio: &AudioData, sampling_rate: usize) -> Result<Vec<Vec<f32>>, String> {
     let channel_count = audio.channel_count() as usize;
     if channel_count == 0 {
@@ -97,26 +178,7 @@ pub fn downsample_audio(audio: &AudioData, sampling_rate: usize) -> Result<Vec<V
         return Err(format!("Unsupported output sample_rate: {}", output_rate));
     }
 
-    let data: Vec<Vec<f32>> =
-        if audio.bits_per_sample() == 32 && audio.audio_format() != EncodingFlag::PCMFloat {
-            let interleaved = s32le_to_i32(audio.data());
-            let mut channels =
-                vec![Vec::with_capacity(interleaved.len() / channel_count); channel_count];
-            for (index, sample) in interleaved.into_iter().enumerate() {
-                channels[index % channel_count].push(sample);
-            }
-            channels.into_iter().map(vec_i32_to_f32).collect()
-        } else {
-            let audio_data =
-                deserialize_audio(audio.data(), audio.bits_per_sample(), audio.channel_count())
-                    .map_err(|e| format!("deserialize_audio failed: {}", e))?;
-
-            match audio_data {
-                PcmData::I16(data) => data.into_iter().map(vec_i16_to_f32).collect(),
-                PcmData::I32(data) => data.into_iter().map(vec_i32_to_f32).collect(),
-                PcmData::F32(data) => data,
-            }
-        };
+    let data = audio_to_f32_channels(audio)?;
 
     if data.is_empty() {
         return Ok(Vec::new());
@@ -273,6 +335,7 @@ impl<E: Encoder> AudioEncoder<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use frame_header::{EncodingFlag, Endianness};
     use crate::wav::generate_wav_buffer;
     use std::fs::File;
     use std::io::Read;
@@ -336,5 +399,36 @@ mod tests {
                 eprintln!("Error generating wav buffer: {}", err);
             }
         }
+    }
+
+    #[test]
+    fn test_audio_to_mono_f32_averages_channels() {
+        let audio = AudioData::new(
+            16,
+            2,
+            48_000,
+            interleave_vecs_i16(&[vec![32767, -32768], vec![-32768, 32767]]),
+            EncodingFlag::PCMSigned,
+            Endianness::LittleEndian,
+        );
+
+        let mono = audio_to_mono_f32(&audio).unwrap();
+        assert_eq!(mono.len(), 2);
+        assert!(mono[0].abs() < 0.01);
+        assert!(mono[1].abs() < 0.01);
+    }
+
+    #[test]
+    fn test_f32_roundtrip_le_bytes() {
+        let input = vec![0.0f32, 0.25, -0.5, 1.0];
+        let bytes = f32s_to_le_bytes(&input);
+        let output = f32s_from_le_bytes(&bytes).unwrap();
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_f32_from_le_bytes_rejects_truncated_input() {
+        let error = f32s_from_le_bytes(&[0, 1, 2]).unwrap_err();
+        assert!(error.contains("multiple of 4"));
     }
 }
