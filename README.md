@@ -18,6 +18,7 @@ A lightweight, extensible Rust audio toolbox providing:
 - **Container formats**:
   - **Ogg Opus** streaming decoder
   - **Ogg Speex** streaming decoder
+  - **Ogg Vorbis** streaming decoder
   - **WebM** container decoder (Opus audio)
   - **M4A/MP4** container support for AAC
 - **Streaming decode pipeline** with automatic format detection
@@ -53,13 +54,14 @@ A lightweight, extensible Rust audio toolbox providing:
 
 - **Streaming decode pipeline** (`soundkit-decoder`)
   Thread-based pipeline with automatic format detection for:
-  - MP3, FLAC, AAC (M4A/MP4), Opus, Ogg Opus, WebM
+  - MP3, FLAC, AAC (M4A/MP4), Opus, Ogg Opus, Ogg Vorbis, WebM
   - Explicit telephony/speech paths for raw PCM, AMR-NB, G.711, G.722, G.726, G.729, GSM, and Speex
   - Ring buffer I/O for backpressure handling
   - Optional output transformations (sample rate, bit depth, channel count)
 
 - **Container decoders**
   - `OggOpusDecoder`: streaming Ogg container parser with Opus decoding
+  - `VorbisDecoder`: streaming Ogg container parser with pure Rust Vorbis decoding via `lewton`
   - `WebmDecoder`: EBML/WebM container parser with Opus audio extraction
 
 - **WASM support**
@@ -85,8 +87,9 @@ coverage.
 | 7 | **GSM 06.10** | Legacy PBX and call-recording codec. Useful for archive compatibility rather than new integrations. | Implemented as `soundkit-gsm` using the reference `libgsm` backend through `gsm-sys`, with standard raw `.gsm` and Microsoft WAV-49 framing. `libgsm` permits use, copy, modification, and distribution with its notice preserved; packaged distributions should keep that notice. |
 | 8 | **G.726** | Shows up in PBX, recorder, and surveillance-adjacent voice systems. Lower priority than G.711/G.722/G.729. | Implemented as `soundkit-g726` for the common G.726-32 / G.721 4-bit profile using a pure Rust port of the unrestricted-use Sun reference ADPCM algorithm, with left/right raw packing and `DecodePipeline::spawn_g726(...)` support. This avoids a SpanDSP LGPL dependency. G.726 16/24/40 kbit/s profiles remain pending. |
 
-Vorbis/Ogg Vorbis remains useful for consumer media ingestion, but it is lower
-priority for call-center pipelines than the telephony codecs above. Ogg is only
-the container; Ogg Vorbis and Ogg Opus use different audio codecs.
+Ogg Vorbis is implemented as `soundkit-vorbis` using the pure Rust `lewton`
+decoder, with fixture/golden coverage and `DecodePipeline::spawn_vorbis()`
+support. Ogg is only the container; Ogg Vorbis and Ogg Opus use different audio
+codecs.
 
 ---

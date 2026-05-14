@@ -11,6 +11,7 @@ members = [
   "soundkit-g726",
   "soundkit-gsm",
   "soundkit-speex",
+  "soundkit-vorbis",
   "soundkit-opus",
   "soundkit-mp3",
   "soundkit-ogg-opus",

@@ -28,6 +28,7 @@ use soundkit_mp3::Mp3Decoder;
 use soundkit_ogg_opus::OggOpusDecoder;
 use soundkit_opus::OpusStreamDecoder;
 use soundkit_speex::SpeexDecoder;
+use soundkit_vorbis::VorbisDecoder;
 use soundkit_webm::WebmDecoder;
 use std::thread;
 
@@ -259,6 +260,8 @@ enum FormatDecoder {
     Gsm(Box<GsmDecoder>),
     /// Ogg-wrapped Speex stream
     Speex(Box<SpeexDecoder>),
+    /// Ogg-wrapped Vorbis stream
+    Vorbis(Box<VorbisDecoder>),
 }
 
 /// Helper to decode using the Decoder trait and drain all buffered frames.
@@ -475,6 +478,9 @@ impl StreamingDecoder for FormatDecoder {
                 })
             }
             FormatDecoder::Speex(dec) => {
+                process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
+            }
+            FormatDecoder::Vorbis(dec) => {
                 process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
             }
         }
@@ -734,6 +740,24 @@ impl DecodePipeline {
         )
     }
 
+    /// Create a pipeline for Ogg-wrapped Vorbis streams.
+    pub fn spawn_vorbis() -> DecodePipelineHandle {
+        Self::spawn_vorbis_with_options(DecodeOptions::default())
+    }
+
+    /// Create a Vorbis pipeline with output conversion options.
+    pub fn spawn_vorbis_with_options(options: DecodeOptions) -> DecodePipelineHandle {
+        let mut decoder = VorbisDecoder::new();
+        let _ = decoder.init();
+        let decoder = FormatDecoder::Vorbis(Box::new(decoder));
+        Self::spawn_with_initial_decoder(
+            DEFAULT_INPUT_BUFFER,
+            DEFAULT_OUTPUT_BUFFER,
+            options,
+            Some(decoder),
+        )
+    }
+
     fn spawn_with_initial_decoder(
         input_buffer: usize,
         output_buffer: usize,
@@ -927,6 +951,12 @@ fn pipeline_worker(
 
 /// Detect format and initialize appropriate decoder
 fn detect_and_init_decoder(buffer: &[u8]) -> Result<FormatDecoder, DecodeError> {
+    if is_ogg_vorbis(buffer) {
+        let mut decoder = VorbisDecoder::new();
+        decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+        return Ok(FormatDecoder::Vorbis(Box::new(decoder)));
+    }
+
     let audio_type = detect_audio(buffer);
     match audio_type {
         AudioType::MP3 => {
@@ -972,6 +1002,13 @@ fn detect_and_init_decoder(buffer: &[u8]) -> Result<FormatDecoder, DecodeError> 
         }
         AudioType::Unknown => Err(DecodeError::FormatDetectionFailed),
     }
+}
+
+fn is_ogg_vorbis(buffer: &[u8]) -> bool {
+    buffer.starts_with(b"OggS")
+        && buffer
+            .windows(b"\x01vorbis".len())
+            .any(|w| w == b"\x01vorbis")
 }
 
 /// Process a chunk through the decoder using the unified StreamingDecoder trait.
@@ -1861,6 +1898,59 @@ mod tests {
             .flat_map(|frame| frame.data().chunks_exact(2))
             .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
             .any(|sample| sample != 0));
+    }
+
+    #[test]
+    fn test_decode_explicit_vorbis_stream() {
+        let data = Bytes::from(
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("testdata")
+                    .join("vorbis/A_Tusk_is_used_to_make_costly_gifts.ogg"),
+            )
+            .unwrap(),
+        );
+
+        let mut pipeline = DecodePipeline::spawn_vorbis();
+        for start in (0..data.len()).step_by(997) {
+            let end = (start + 997).min(data.len());
+            pipeline.send(data.slice(start..end)).unwrap();
+        }
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert!(!frames.is_empty(), "No Vorbis frames decoded");
+        assert!(frames.iter().all(|frame| frame.bits_per_sample() == 16));
+        assert!(frames.iter().all(|frame| frame.channel_count() == 1));
+        assert!(frames.iter().all(|frame| frame.sampling_rate() == 8_000));
+        assert!(frames
+            .iter()
+            .flat_map(|frame| frame.data().chunks_exact(2))
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .any(|sample| sample != 0));
+    }
+
+    #[test]
+    fn test_decode_ogg_vorbis_autodetect() {
+        let data = Bytes::from(
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("testdata")
+                    .join("vorbis/A_Tusk_is_used_to_make_costly_gifts.ogg"),
+            )
+            .unwrap(),
+        );
+
+        let mut pipeline = DecodePipeline::spawn();
+        pipeline.send(data).unwrap();
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert!(!frames.is_empty(), "No autodetected Vorbis frames decoded");
+        assert!(frames.iter().all(|frame| frame.channel_count() == 1));
+        assert!(frames.iter().all(|frame| frame.sampling_rate() == 8_000));
     }
 
     #[test]
