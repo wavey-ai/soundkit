@@ -29,7 +29,10 @@ golden/g722/*
 !golden/g722/A_Tusk_is_used_to_make_costly_gifts.decoded.wav
 !golden/g726/
 golden/g726/*
-!golden/g726/A_Tusk_is_used_to_make_costly_gifts.decoded.wav
+!golden/g726/A_Tusk_is_used_to_make_costly_gifts_16.decoded.wav
+!golden/g726/A_Tusk_is_used_to_make_costly_gifts_24.decoded.wav
+!golden/g726/A_Tusk_is_used_to_make_costly_gifts_32.decoded.wav
+!golden/g726/A_Tusk_is_used_to_make_costly_gifts_40.decoded.wav
 !golden/g729/
 golden/g729/*
 !golden/g729/A_Tusk_is_used_to_make_costly_gifts.decoded.wav
@@ -91,7 +94,10 @@ testdata/g722/*
 !testdata/g722/A_Tusk_is_used_to_make_costly_gifts.g722
 !testdata/g726/
 testdata/g726/*
-!testdata/g726/A_Tusk_is_used_to_make_costly_gifts.g726
+!testdata/g726/A_Tusk_is_used_to_make_costly_gifts_16.g726
+!testdata/g726/A_Tusk_is_used_to_make_costly_gifts_24.g726
+!testdata/g726/A_Tusk_is_used_to_make_costly_gifts_32.g726
+!testdata/g726/A_Tusk_is_used_to_make_costly_gifts_40.g726
 !testdata/g729/
 testdata/g729/*
 !testdata/g729/A_Tusk_is_used_to_make_costly_gifts.g729

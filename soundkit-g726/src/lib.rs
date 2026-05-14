@@ -1,15 +1,16 @@
-// G.726-32 is implemented as a Rust port of the Sun Microsystems G.721
-// reference code, whose header permits unrestricted use, copying, and
-// modification without charge. No SpanDSP/libg726 C dependency is used here.
+// G.726 is implemented as a Rust port of the Sun Microsystems G.72x reference
+// code, whose header permits unrestricted use, copying, and modification
+// without charge. No SpanDSP/libg726 C dependency is used here.
 
 use soundkit::audio_packet::{Decoder, Encoder};
 
 pub const G726_SAMPLE_RATE: u32 = 8_000;
 pub const G726_CHANNELS: u8 = 1;
 
-const G726_BITS_PER_SAMPLE: usize = 4;
-const G726_SAMPLES_PER_BYTE: usize = 2;
+const G726_16K_BIT_RATE: u32 = 16_000;
+const G726_24K_BIT_RATE: u32 = 24_000;
 const G726_32K_BIT_RATE: u32 = 32_000;
+const G726_40K_BIT_RATE: u32 = 40_000;
 
 const POWER2: [i32; 15] = [
     1 << 0,
@@ -29,49 +30,142 @@ const POWER2: [i32; 15] = [
     1 << 14,
 ];
 
-const Q_TAB_721: [i32; 7] = [-124, 80, 178, 246, 300, 349, 400];
-const DQLN_TAB_721: [i32; 16] = [
+const Q_TAB_16: [i32; 1] = [261];
+const DQLN_TAB_16: [i32; 4] = [116, 365, 365, 116];
+const WI_TAB_16: [i32; 4] = [-22, 439, 439, -22];
+const FI_TAB_16: [i32; 4] = [0, 0xE00, 0xE00, 0];
+
+const Q_TAB_24: [i32; 3] = [8, 218, 331];
+const DQLN_TAB_24: [i32; 8] = [-2048, 135, 273, 373, 373, 273, 135, -2048];
+const WI_TAB_24: [i32; 8] = [-4, 30, 137, 582, 582, 137, 30, -4];
+const FI_TAB_24: [i32; 8] = [0, 0x200, 0x400, 0xE00, 0xE00, 0x400, 0x200, 0];
+
+const Q_TAB_32: [i32; 7] = [-124, 80, 178, 246, 300, 349, 400];
+const DQLN_TAB_32: [i32; 16] = [
     -2048, 4, 135, 213, 273, 323, 373, 425, 425, 373, 323, 273, 213, 135, 4, -2048,
 ];
-const WI_TAB_721: [i32; 16] = [
+const WI_TAB_32: [i32; 16] = [
     -12, 18, 41, 64, 112, 198, 355, 1122, 1122, 355, 198, 112, 64, 41, 18, -12,
 ];
-const FI_TAB_721: [i32; 16] = [
+const FI_TAB_32: [i32; 16] = [
     0, 0, 0, 0x200, 0x200, 0x200, 0x600, 0xE00, 0xE00, 0x600, 0x200, 0x200, 0x200, 0, 0, 0,
+];
+
+const Q_TAB_40: [i32; 15] = [
+    -122, -16, 68, 139, 198, 250, 298, 339, 378, 413, 445, 475, 502, 528, 553,
+];
+const DQLN_TAB_40: [i32; 32] = [
+    -2048, -66, 28, 104, 169, 224, 274, 318, 358, 395, 429, 459, 488, 514, 539, 566, 566, 539, 514,
+    488, 459, 429, 395, 358, 318, 274, 224, 169, 104, 28, -66, -2048,
+];
+const WI_TAB_40: [i32; 32] = [
+    14, 14, 24, 39, 40, 41, 58, 100, 141, 179, 219, 280, 358, 440, 529, 696, 696, 529, 440, 358,
+    280, 219, 179, 141, 100, 58, 41, 40, 39, 24, 14, 14,
+];
+const FI_TAB_40: [i32; 32] = [
+    0, 0, 0, 0, 0, 0x200, 0x200, 0x200, 0x200, 0x200, 0x400, 0x600, 0x800, 0xA00, 0xC00, 0xC00,
+    0xC00, 0xC00, 0xA00, 0x800, 0x600, 0x400, 0x200, 0x200, 0x200, 0x200, 0x200, 0, 0, 0, 0, 0,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum G726Rate {
+    /// G.726-16, 2-bit ADPCM.
+    Rate16000,
+    /// G.726-24, 3-bit ADPCM.
+    Rate24000,
     /// G.726-32, also known as the 4-bit G.721 ADPCM profile.
     Rate32000,
+    /// G.726-40, 5-bit ADPCM.
+    Rate40000,
 }
 
 impl G726Rate {
-    pub fn from_bitrate(_bit_rate: u32) -> Self {
-        Self::Rate32000
+    pub fn from_bitrate(bit_rate: u32) -> Self {
+        match bit_rate {
+            G726_16K_BIT_RATE => Self::Rate16000,
+            G726_24K_BIT_RATE => Self::Rate24000,
+            G726_40K_BIT_RATE => Self::Rate40000,
+            _ => Self::Rate32000,
+        }
     }
 
     pub fn bits_per_sample(self) -> usize {
         match self {
-            Self::Rate32000 => G726_BITS_PER_SAMPLE,
+            Self::Rate16000 => 2,
+            Self::Rate24000 => 3,
+            Self::Rate32000 => 4,
+            Self::Rate40000 => 5,
         }
     }
 
     pub fn bit_rate(self) -> u32 {
         match self {
+            Self::Rate16000 => G726_16K_BIT_RATE,
+            Self::Rate24000 => G726_24K_BIT_RATE,
             Self::Rate32000 => G726_32K_BIT_RATE,
+            Self::Rate40000 => G726_40K_BIT_RATE,
         }
     }
 
     fn samples_per_byte_group(self) -> usize {
         match self {
-            Self::Rate32000 => G726_SAMPLES_PER_BYTE,
+            Self::Rate16000 => 4,
+            Self::Rate24000 => 8,
+            Self::Rate32000 => 2,
+            Self::Rate40000 => 8,
         }
     }
 
     fn bytes_per_group(self) -> usize {
         match self {
+            Self::Rate16000 => 1,
+            Self::Rate24000 => 3,
             Self::Rate32000 => 1,
+            Self::Rate40000 => 5,
+        }
+    }
+
+    fn sign_bit(self) -> u8 {
+        1 << (self.bits_per_sample() - 1)
+    }
+
+    fn code_mask(self) -> u8 {
+        (1 << self.bits_per_sample()) - 1
+    }
+
+    fn q_table(self) -> &'static [i32] {
+        match self {
+            Self::Rate16000 => &Q_TAB_16,
+            Self::Rate24000 => &Q_TAB_24,
+            Self::Rate32000 => &Q_TAB_32,
+            Self::Rate40000 => &Q_TAB_40,
+        }
+    }
+
+    fn dqln_table(self) -> &'static [i32] {
+        match self {
+            Self::Rate16000 => &DQLN_TAB_16,
+            Self::Rate24000 => &DQLN_TAB_24,
+            Self::Rate32000 => &DQLN_TAB_32,
+            Self::Rate40000 => &DQLN_TAB_40,
+        }
+    }
+
+    fn wi_table(self) -> &'static [i32] {
+        match self {
+            Self::Rate16000 => &WI_TAB_16,
+            Self::Rate24000 => &WI_TAB_24,
+            Self::Rate32000 => &WI_TAB_32,
+            Self::Rate40000 => &WI_TAB_40,
+        }
+    }
+
+    fn fi_table(self) -> &'static [i32] {
+        match self {
+            Self::Rate16000 => &FI_TAB_16,
+            Self::Rate24000 => &FI_TAB_24,
+            Self::Rate32000 => &FI_TAB_32,
+            Self::Rate40000 => &FI_TAB_40,
         }
     }
 }
@@ -118,34 +212,58 @@ impl Default for G726Core {
 }
 
 impl G726Core {
-    fn encode_sample(&mut self, sample: i16) -> u8 {
-        // G.726-32 is the 4-bit G.721 algorithm. This Rust port follows the
-        // unrestricted-use Sun Microsystems reference implementation.
+    fn encode_sample(&mut self, sample: i16, rate: G726Rate) -> u8 {
         let sl = i32::from(sample) >> 2;
         let sezi = self.predictor_zero();
         let sez = sezi >> 1;
         let se = (sezi + self.predictor_pole()) >> 1;
         let d = sl - se;
         let y = self.step_size();
-        let i = quantize(d, y) as usize;
-        let dq = reconstruct((i & 0x08) != 0, DQLN_TAB_721[i], y);
-        let sr = if dq < 0 { se - (dq & 0x3FFF) } else { se + dq };
+        let i = quantize(d, y, rate.q_table(), rate.code_mask()) as usize;
+        let dq = reconstruct((i as u8 & rate.sign_bit()) != 0, rate.dqln_table()[i], y);
+        let dq_mask = if rate == G726Rate::Rate40000 {
+            0x7FFF
+        } else {
+            0x3FFF
+        };
+        let sr = if dq < 0 { se - (dq & dq_mask) } else { se + dq };
         let dqsez = sr + sez - se;
-        self.update(y, WI_TAB_721[i] << 5, FI_TAB_721[i], dq, sr, dqsez);
-        (i as u8) & 0x0F
+        self.update(
+            y,
+            rate.wi_table()[i] << 5,
+            rate.fi_table()[i],
+            dq,
+            sr,
+            dqsez,
+            rate,
+        );
+        (i as u8) & rate.code_mask()
     }
 
-    fn decode_code(&mut self, code: u8) -> i16 {
-        let i = usize::from(code & 0x0F);
+    fn decode_code(&mut self, code: u8, rate: G726Rate) -> i16 {
+        let i = usize::from(code & rate.code_mask());
         let sezi = self.predictor_zero();
         let sez = sezi >> 1;
         let sei = sezi + self.predictor_pole();
         let se = sei >> 1;
         let y = self.step_size();
-        let dq = reconstruct((i & 0x08) != 0, DQLN_TAB_721[i], y);
-        let sr = if dq < 0 { se - (dq & 0x3FFF) } else { se + dq };
+        let dq = reconstruct((i as u8 & rate.sign_bit()) != 0, rate.dqln_table()[i], y);
+        let dq_mask = if rate == G726Rate::Rate40000 {
+            0x7FFF
+        } else {
+            0x3FFF
+        };
+        let sr = if dq < 0 { se - (dq & dq_mask) } else { se + dq };
         let dqsez = sr - se + sez;
-        self.update(y, WI_TAB_721[i] << 5, FI_TAB_721[i], dq, sr, dqsez);
+        self.update(
+            y,
+            rate.wi_table()[i] << 5,
+            rate.fi_table()[i],
+            dq,
+            sr,
+            dqsez,
+            rate,
+        );
         (sr << 2).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
     }
 
@@ -178,7 +296,7 @@ impl G726Core {
         }
     }
 
-    fn update(&mut self, y: i32, wi: i32, fi: i32, dq: i32, sr: i32, dqsez: i32) {
+    fn update(&mut self, y: i32, wi: i32, fi: i32, dq: i32, sr: i32, dqsez: i32, rate: G726Rate) {
         let pk0 = i32::from(dqsez < 0);
         let mag = dq & 0x7FFF;
 
@@ -244,7 +362,8 @@ impl G726Core {
             self.a[0] = self.a[0].clamp(-a1ul, a1ul);
 
             for index in 0..6 {
-                self.b[index] -= self.b[index] >> 8;
+                let decay_shift = if rate == G726Rate::Rate40000 { 9 } else { 8 };
+                self.b[index] -= self.b[index] >> decay_shift;
                 if (dq & 0x7FFF) != 0 {
                     if (dq ^ self.dq[index]) >= 0 {
                         self.b[index] += 128;
@@ -342,18 +461,18 @@ fn fmult(an: i32, srn: i32) -> i32 {
     }
 }
 
-fn quantize(d: i32, y: i32) -> u8 {
+fn quantize(d: i32, y: i32, table: &[i32], code_mask: u8) -> u8 {
     let dqm = d.abs();
     let exp = quan(dqm >> 1, &POWER2) as i32;
     let mant = ((dqm << 7) >> exp) & 0x7F;
     let dl = (exp << 7) + mant;
     let dln = dl - (y >> 2);
-    let i = quan(dln, &Q_TAB_721);
+    let i = quan(dln, table);
 
     if d < 0 {
-        (15 - i) as u8
+        code_mask - i as u8
     } else if i == 0 {
-        15
+        code_mask
     } else {
         i as u8
     }
@@ -379,18 +498,59 @@ fn reconstruct(sign: bool, dqln: i32, y: i32) -> i32 {
     }
 }
 
-fn pack_codes(first: u8, second: u8, packing: G726Packing) -> u8 {
+fn pack_code_group(codes: &[u8], bits_per_code: usize, packing: G726Packing, output: &mut [u8]) {
+    output.fill(0);
+
     match packing {
-        G726Packing::Left => ((first & 0x0F) << 4) | (second & 0x0F),
-        G726Packing::Right => (first & 0x0F) | ((second & 0x0F) << 4),
-    }
+        G726Packing::Left => {
+            let mut bit_index = 0;
+            for &code in codes {
+                for bit in (0..bits_per_code).rev() {
+                    if ((code >> bit) & 1) != 0 {
+                        output[bit_index / 8] |= 1 << (7 - (bit_index % 8));
+                    }
+                    bit_index += 1;
+                }
+            }
+        }
+        G726Packing::Right => {
+            let mut bit_index = 0;
+            for &code in codes {
+                for bit in 0..bits_per_code {
+                    if ((code >> bit) & 1) != 0 {
+                        output[bit_index / 8] |= 1 << (bit_index % 8);
+                    }
+                    bit_index += 1;
+                }
+            }
+        }
+    };
 }
 
-fn unpack_codes(byte: u8, packing: G726Packing) -> [u8; 2] {
+fn unpack_code_group(input: &[u8], bits_per_code: usize, packing: G726Packing, output: &mut [u8]) {
+    output.fill(0);
+
     match packing {
-        G726Packing::Left => [byte >> 4, byte & 0x0F],
-        G726Packing::Right => [byte & 0x0F, byte >> 4],
-    }
+        G726Packing::Left => {
+            let mut bit_index = 0;
+            for code in output {
+                for _ in 0..bits_per_code {
+                    *code <<= 1;
+                    *code |= (input[bit_index / 8] >> (7 - (bit_index % 8))) & 1;
+                    bit_index += 1;
+                }
+            }
+        }
+        G726Packing::Right => {
+            let mut bit_index = 0;
+            for code in output {
+                for bit in 0..bits_per_code {
+                    *code |= ((input[bit_index / 8] >> (bit_index % 8)) & 1) << bit;
+                    bit_index += 1;
+                }
+            }
+        }
+    };
 }
 
 pub struct G726Encoder {
@@ -418,6 +578,21 @@ impl G726Encoder {
     pub fn new_32k_right() -> Self {
         Self::try_new(G726Rate::Rate32000, G726Packing::Right)
             .expect("failed to initialize G.726 encoder")
+    }
+
+    pub fn new_16k_left() -> Self {
+        Self::try_new(G726Rate::Rate16000, G726Packing::Left)
+            .expect("failed to initialize G.726-16 encoder")
+    }
+
+    pub fn new_24k_left() -> Self {
+        Self::try_new(G726Rate::Rate24000, G726Packing::Left)
+            .expect("failed to initialize G.726-24 encoder")
+    }
+
+    pub fn new_40k_left() -> Self {
+        Self::try_new(G726Rate::Rate40000, G726Packing::Left)
+            .expect("failed to initialize G.726-40 encoder")
     }
 
     pub fn encode_to_vec(&mut self, input: &[i16], output: &mut Vec<u8>) -> Result<usize, String> {
@@ -479,11 +654,22 @@ impl G726Encoder {
 
     fn encode_complete_samples(&mut self, samples: &[i16], output: &mut [u8]) -> usize {
         let mut written = 0;
-        for pair in samples.chunks_exact(G726_SAMPLES_PER_BYTE) {
-            let first = self.core.encode_sample(pair[0]);
-            let second = self.core.encode_sample(pair[1]);
-            output[written] = pack_codes(first, second, self.packing);
-            written += 1;
+        let group_samples = self.rate.samples_per_byte_group();
+        let group_bytes = self.rate.bytes_per_group();
+        let bits_per_code = self.rate.bits_per_sample();
+        let mut codes = vec![0u8; group_samples];
+
+        for group in samples.chunks_exact(group_samples) {
+            for (code, &sample) in codes.iter_mut().zip(group) {
+                *code = self.core.encode_sample(sample, self.rate);
+            }
+            pack_code_group(
+                &codes,
+                bits_per_code,
+                self.packing,
+                &mut output[written..written + group_bytes],
+            );
+            written += group_bytes;
         }
         written
     }
@@ -558,6 +744,7 @@ pub struct G726Decoder {
     core: G726Core,
     rate: G726Rate,
     packing: G726Packing,
+    pending_bytes: Vec<u8>,
 }
 
 impl G726Decoder {
@@ -566,6 +753,7 @@ impl G726Decoder {
             core: G726Core::default(),
             rate,
             packing,
+            pending_bytes: Vec::with_capacity(rate.bytes_per_group()),
         })
     }
 
@@ -577,6 +765,21 @@ impl G726Decoder {
     pub fn new_32k_right() -> Self {
         Self::try_new(G726Rate::Rate32000, G726Packing::Right)
             .expect("failed to initialize G.726 decoder")
+    }
+
+    pub fn new_16k_left() -> Self {
+        Self::try_new(G726Rate::Rate16000, G726Packing::Left)
+            .expect("failed to initialize G.726-16 decoder")
+    }
+
+    pub fn new_24k_left() -> Self {
+        Self::try_new(G726Rate::Rate24000, G726Packing::Left)
+            .expect("failed to initialize G.726-24 decoder")
+    }
+
+    pub fn new_40k_left() -> Self {
+        Self::try_new(G726Rate::Rate40000, G726Packing::Left)
+            .expect("failed to initialize G.726-40 decoder")
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -596,7 +799,14 @@ impl G726Decoder {
     }
 
     pub fn flush(&mut self) -> Result<(), String> {
-        Ok(())
+        if self.pending_bytes.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "G.726 stream ended with {} trailing partial-packet byte(s)",
+                self.pending_bytes.len()
+            ))
+        }
     }
 }
 
@@ -613,7 +823,10 @@ impl Decoder for G726Decoder {
         output: &mut [i16],
         _fec: bool,
     ) -> Result<usize, String> {
-        let required = input.len() * self.rate.samples_per_byte_group();
+        let group_bytes = self.rate.bytes_per_group();
+        let total_bytes = self.pending_bytes.len() + input.len();
+        let complete_bytes = (total_bytes / group_bytes) * group_bytes;
+        let required = (complete_bytes / group_bytes) * self.rate.samples_per_byte_group();
         if output.len() < required {
             return Err(format!(
                 "Output buffer too small for G.726 decode: need {}, have {}",
@@ -622,13 +835,26 @@ impl Decoder for G726Decoder {
             ));
         }
 
+        let mut bytes = Vec::with_capacity(total_bytes);
+        bytes.extend_from_slice(&self.pending_bytes);
+        bytes.extend_from_slice(input);
+
         let mut written = 0;
-        for &byte in input {
-            for code in unpack_codes(byte, self.packing) {
-                output[written] = self.core.decode_code(code);
+        let group_samples = self.rate.samples_per_byte_group();
+        let bits_per_code = self.rate.bits_per_sample();
+        let mut codes = vec![0u8; group_samples];
+        for group in bytes[..complete_bytes].chunks_exact(group_bytes) {
+            unpack_code_group(group, bits_per_code, self.packing, &mut codes);
+            for &code in &codes {
+                output[written] = self.core.decode_code(code, self.rate);
                 written += 1;
             }
         }
+
+        self.pending_bytes.clear();
+        self.pending_bytes
+            .extend_from_slice(&bytes[complete_bytes..]);
+
         Ok(written)
     }
 
@@ -638,7 +864,10 @@ impl Decoder for G726Decoder {
         output: &mut [i32],
         _fec: bool,
     ) -> Result<usize, String> {
-        let required = input.len() * self.rate.samples_per_byte_group();
+        let group_bytes = self.rate.bytes_per_group();
+        let total_bytes = self.pending_bytes.len() + input.len();
+        let complete_bytes = (total_bytes / group_bytes) * group_bytes;
+        let required = (complete_bytes / group_bytes) * self.rate.samples_per_byte_group();
         if output.len() < required {
             return Err(format!(
                 "Output buffer too small for G.726 decode: need {}, have {}",
@@ -661,7 +890,10 @@ impl Decoder for G726Decoder {
         output: &mut [f32],
         _fec: bool,
     ) -> Result<usize, String> {
-        let required = input.len() * self.rate.samples_per_byte_group();
+        let group_bytes = self.rate.bytes_per_group();
+        let total_bytes = self.pending_bytes.len() + input.len();
+        let complete_bytes = (total_bytes / group_bytes) * group_bytes;
+        let required = (complete_bytes / group_bytes) * self.rate.samples_per_byte_group();
         if output.len() < required {
             return Err(format!(
                 "Output buffer too small for G.726 decode: need {}, have {}",
@@ -718,8 +950,40 @@ mod tests {
             .collect()
     }
 
-    fn encode_samples(input: &[i16], packing: G726Packing) -> Vec<u8> {
-        let mut encoder = G726Encoder::try_new(G726Rate::Rate32000, packing).unwrap();
+    fn rates() -> [G726Rate; 4] {
+        [
+            G726Rate::Rate16000,
+            G726Rate::Rate24000,
+            G726Rate::Rate32000,
+            G726Rate::Rate40000,
+        ]
+    }
+
+    fn rate_suffix(rate: G726Rate) -> &'static str {
+        match rate {
+            G726Rate::Rate16000 => "16",
+            G726Rate::Rate24000 => "24",
+            G726Rate::Rate32000 => "32",
+            G726Rate::Rate40000 => "40",
+        }
+    }
+
+    fn fixture_path_for_rate(rate: G726Rate) -> PathBuf {
+        let suffix = rate_suffix(rate);
+        testdata_path(&format!(
+            "g726/A_Tusk_is_used_to_make_costly_gifts_{suffix}.g726"
+        ))
+    }
+
+    fn golden_path_for_rate(rate: G726Rate) -> PathBuf {
+        let suffix = rate_suffix(rate);
+        golden_path(&format!(
+            "g726/A_Tusk_is_used_to_make_costly_gifts_{suffix}.decoded.wav"
+        ))
+    }
+
+    fn encode_samples(input: &[i16], rate: G726Rate, packing: G726Packing) -> Vec<u8> {
+        let mut encoder = G726Encoder::try_new(rate, packing).unwrap();
         let mut encoded = Vec::new();
         for chunk in input.chunks(37) {
             encoder.encode_to_vec(chunk, &mut encoded).unwrap();
@@ -729,75 +993,87 @@ mod tests {
     }
 
     #[test]
-    fn streaming_encoder_matches_padded_whole_encode() {
+    fn streaming_encoder_matches_padded_whole_encode_for_all_rates() {
         let input = samples();
-        let mut padded = input.clone();
-        padded.resize(
-            input.len().div_ceil(G726_SAMPLES_PER_BYTE) * G726_SAMPLES_PER_BYTE,
-            0,
-        );
+        for rate in rates() {
+            let mut padded = input.clone();
+            padded.resize(
+                input.len().div_ceil(rate.samples_per_byte_group()) * rate.samples_per_byte_group(),
+                0,
+            );
 
-        let mut whole_encoder = G726Encoder::new_32k_left();
-        let mut whole = vec![0u8; padded.len() / G726_SAMPLES_PER_BYTE];
-        let whole_len = whole_encoder.encode_i16(&padded, &mut whole).unwrap();
-        whole.truncate(whole_len);
+            let mut whole_encoder = G726Encoder::try_new(rate, G726Packing::Left).unwrap();
+            let mut whole =
+                vec![0u8; (padded.len() / rate.samples_per_byte_group()) * rate.bytes_per_group()];
+            let whole_len = whole_encoder.encode_i16(&padded, &mut whole).unwrap();
+            whole.truncate(whole_len);
 
-        let mut stream_encoder = G726Encoder::new_32k_left();
-        let mut chunked = Vec::new();
-        let mut scratch = [0u8; 64];
-        for chunk in input.chunks(37) {
-            let written = stream_encoder.encode_i16(chunk, &mut scratch).unwrap();
-            chunked.extend_from_slice(&scratch[..written]);
+            let mut stream_encoder = G726Encoder::try_new(rate, G726Packing::Left).unwrap();
+            let mut chunked = Vec::new();
+            let mut scratch = [0u8; 64];
+            for chunk in input.chunks(37) {
+                let written = stream_encoder.encode_i16(chunk, &mut scratch).unwrap();
+                chunked.extend_from_slice(&scratch[..written]);
+            }
+            stream_encoder.flush_to_vec(&mut chunked).unwrap();
+
+            assert_eq!(chunked, whole, "rate {rate:?}");
         }
-        stream_encoder.flush_to_vec(&mut chunked).unwrap();
-
-        assert_eq!(chunked, whole);
     }
 
     #[test]
-    fn streaming_decoder_matches_whole_decode() {
-        let encoded = encode_samples(&samples(), G726Packing::Left);
+    fn streaming_decoder_matches_whole_decode_for_all_rates() {
+        for rate in rates() {
+            let encoded = encode_samples(&samples(), rate, G726Packing::Left);
 
-        let mut whole_decoder = G726Decoder::new_32k_left();
-        let mut whole = vec![0i16; encoded.len() * 2];
-        let whole_len = whole_decoder
-            .decode_i16(&encoded, &mut whole, false)
-            .unwrap();
-        whole.truncate(whole_len);
-
-        let mut stream_decoder = G726Decoder::new_32k_left();
-        let mut chunked = Vec::new();
-        let mut scratch = [0i16; 64];
-        for chunk in encoded.chunks(19) {
-            let written = stream_decoder
-                .decode_i16(chunk, &mut scratch, false)
+            let mut whole_decoder = G726Decoder::try_new(rate, G726Packing::Left).unwrap();
+            let mut whole = vec![
+                0i16;
+                (encoded.len() / rate.bytes_per_group())
+                    * rate.samples_per_byte_group()
+            ];
+            let whole_len = whole_decoder
+                .decode_i16(&encoded, &mut whole, false)
                 .unwrap();
-            chunked.extend_from_slice(&scratch[..written]);
-        }
-        stream_decoder.flush().unwrap();
+            whole.truncate(whole_len);
 
-        assert_eq!(chunked, whole);
+            let mut stream_decoder = G726Decoder::try_new(rate, G726Packing::Left).unwrap();
+            let mut chunked = Vec::new();
+            let mut scratch = [0i16; 64];
+            for chunk in encoded.chunks(1) {
+                let written = stream_decoder
+                    .decode_i16(chunk, &mut scratch, false)
+                    .unwrap();
+                chunked.extend_from_slice(&scratch[..written]);
+            }
+            stream_decoder.flush().unwrap();
+
+            assert_eq!(chunked, whole, "rate {rate:?}");
+        }
     }
 
     #[test]
     fn right_packing_round_trips_with_matching_decoder() {
-        let encoded = encode_samples(&samples(), G726Packing::Right);
+        let encoded = encode_samples(&samples(), G726Rate::Rate32000, G726Packing::Right);
 
         let mut right_decoder = G726Decoder::new_32k_right();
-        let mut decoded = vec![0i16; encoded.len() * 2];
+        let mut decoded = vec![0i16; encoded.len() * G726Rate::Rate32000.samples_per_byte_group()];
         let decoded_len = right_decoder
             .decode_i16(&encoded, &mut decoded, false)
             .unwrap();
         decoded.truncate(decoded_len);
 
-        assert_eq!(decoded.len(), encoded.len() * 2);
+        assert_eq!(
+            decoded.len(),
+            encoded.len() * G726Rate::Rate32000.samples_per_byte_group()
+        );
         assert!(decoded.iter().any(|&sample| sample != 0));
     }
 
     #[test]
     fn decoder_trait_supports_i16_i32_and_f32_output() {
-        let encoded = encode_samples(&samples(), G726Packing::Left);
-        let sample_count = encoded.len() * 2;
+        let encoded = encode_samples(&samples(), G726Rate::Rate32000, G726Packing::Left);
+        let sample_count = encoded.len() * G726Rate::Rate32000.samples_per_byte_group();
         let mut decoder_i16 = G726Decoder::new_32k_left();
         let mut decoder_i32 = G726Decoder::new_32k_left();
         let mut decoder_f32 = G726Decoder::new_32k_left();
@@ -827,137 +1103,167 @@ mod tests {
     #[ignore = "regenerates the committed G.726 fixture using ffmpeg"]
     fn generate_g726_fixture_with_ffmpeg() {
         let input = testdata_path("linear16_8/A_Tusk_is_used_to_make_costly_gifts.s16le");
-        let output = testdata_path("g726/A_Tusk_is_used_to_make_costly_gifts.g726");
-        fs::create_dir_all(output.parent().unwrap()).unwrap();
-        let status = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "s16le",
-                "-ar",
-                "8000",
-                "-ac",
-                "1",
-                "-i",
-            ])
-            .arg(&input)
-            .args(["-c:a", "g726", "-code_size", "4", "-f", "g726"])
-            .arg(&output)
-            .status()
-            .unwrap();
-        assert!(status.success());
+        for rate in rates() {
+            let output = fixture_path_for_rate(rate);
+            fs::create_dir_all(output.parent().unwrap()).unwrap();
+            let code_size = rate.bits_per_sample().to_string();
+            let status = Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "s16le",
+                    "-ar",
+                    "8000",
+                    "-ac",
+                    "1",
+                    "-i",
+                ])
+                .arg(&input)
+                .args(["-c:a", "g726", "-code_size", &code_size, "-f", "g726"])
+                .arg(&output)
+                .status()
+                .unwrap();
+            assert!(status.success(), "ffmpeg generate failed for {rate:?}");
+        }
     }
 
     #[test]
     fn decode_g726_fixture_and_write_golden_wav() {
-        let fixture = fs::read(testdata_path(
-            "g726/A_Tusk_is_used_to_make_costly_gifts.g726",
-        ))
-        .unwrap();
-        assert!(!fixture.is_empty(), "G.726 fixture missing or empty");
+        for rate in rates() {
+            let fixture = fs::read(fixture_path_for_rate(rate)).unwrap();
+            assert!(
+                !fixture.is_empty(),
+                "G.726 fixture missing or empty for {rate:?}"
+            );
 
-        let mut decoder = G726Decoder::new_32k_left();
-        let mut decoded = Vec::new();
-        let mut scratch = [0i16; 254];
+            let mut decoder = G726Decoder::try_new(rate, G726Packing::Left).unwrap();
+            let mut decoded = Vec::new();
+            let mut scratch = [0i16; 512];
 
-        for chunk in fixture.chunks(127) {
-            let written = decoder.decode_i16(chunk, &mut scratch, false).unwrap();
-            decoded.extend_from_slice(&scratch[..written]);
+            for chunk in fixture.chunks(127) {
+                let written = decoder.decode_i16(chunk, &mut scratch, false).unwrap();
+                decoded.extend_from_slice(&scratch[..written]);
+            }
+            decoder.flush().unwrap();
+
+            let expected_samples =
+                (fixture.len() / rate.bytes_per_group()) * rate.samples_per_byte_group();
+            assert_eq!(decoded.len(), expected_samples, "rate {rate:?}");
+            assert!(decoded.iter().any(|&sample| sample != 0), "rate {rate:?}");
+
+            let wav = soundkit::wav::generate_wav_buffer(
+                &soundkit::audio_types::PcmData::I16(vec![decoded]),
+                G726_SAMPLE_RATE,
+            )
+            .unwrap();
+            let output_path = golden_path_for_rate(rate);
+            fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+            fs::write(output_path, wav).unwrap();
         }
-        decoder.flush().unwrap();
-
-        assert_eq!(decoded.len(), fixture.len() * 2);
-        assert!(decoded.iter().any(|&sample| sample != 0));
-
-        let wav = soundkit::wav::generate_wav_buffer(
-            &soundkit::audio_types::PcmData::I16(vec![decoded]),
-            G726_SAMPLE_RATE,
-        )
-        .unwrap();
-        let output_path = golden_path("g726/A_Tusk_is_used_to_make_costly_gifts.decoded.wav");
-        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
-        fs::write(output_path, wav).unwrap();
     }
 
     #[test]
     fn ffmpeg_can_decode_g726_fixture() {
-        let input = testdata_path("g726/A_Tusk_is_used_to_make_costly_gifts.g726");
-        let output = std::env::temp_dir().join("soundkit-g726-fixture.s16le");
-        let status = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "g726",
-                "-ar",
-                "8000",
-                "-ac",
-                "1",
-                "-i",
-            ])
-            .arg(&input)
-            .args(["-f", "s16le", "-acodec", "pcm_s16le"])
-            .arg(&output)
-            .status()
-            .unwrap();
-        assert!(status.success());
+        for rate in rates() {
+            let input = fixture_path_for_rate(rate);
+            let output = std::env::temp_dir().join(format!("soundkit-g726-fixture-{rate:?}.s16le"));
+            let code_size = rate.bits_per_sample().to_string();
+            let status = Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "g726",
+                    "-code_size",
+                    &code_size,
+                    "-ar",
+                    "8000",
+                    "-ac",
+                    "1",
+                    "-i",
+                ])
+                .arg(&input)
+                .args(["-f", "s16le", "-acodec", "pcm_s16le"])
+                .arg(&output)
+                .status()
+                .unwrap();
+            assert!(status.success(), "ffmpeg decode failed for {rate:?}");
 
-        let decoded = fs::read(output).unwrap();
-        assert!(decoded
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-            .any(|sample| sample != 0));
+            let decoded = fs::read(output).unwrap();
+            assert!(
+                decoded
+                    .chunks_exact(2)
+                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                    .any(|sample| sample != 0),
+                "ffmpeg produced silence for {rate:?}"
+            );
+        }
     }
 
     #[test]
     fn ffmpeg_can_decode_native_encoder_output() {
         let samples = read_s16le_fixture("linear16_8/A_Tusk_is_used_to_make_costly_gifts.s16le");
-        let encoded = encode_samples(&samples, G726Packing::Left);
-        let input = std::env::temp_dir().join("soundkit-g726-native.g726");
-        let output = std::env::temp_dir().join("soundkit-g726-native.s16le");
-        fs::write(&input, encoded).unwrap();
+        for rate in rates() {
+            let encoded = encode_samples(&samples, rate, G726Packing::Left);
+            let input = std::env::temp_dir().join(format!("soundkit-g726-native-{rate:?}.g726"));
+            let output = std::env::temp_dir().join(format!("soundkit-g726-native-{rate:?}.s16le"));
+            fs::write(&input, encoded).unwrap();
 
-        let status = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-f",
-                "g726",
-                "-ar",
-                "8000",
-                "-ac",
-                "1",
-                "-i",
-            ])
-            .arg(&input)
-            .args(["-f", "s16le", "-acodec", "pcm_s16le"])
-            .arg(&output)
-            .status()
-            .unwrap();
-        assert!(status.success());
+            let code_size = rate.bits_per_sample().to_string();
+            let status = Command::new("ffmpeg")
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "g726",
+                    "-code_size",
+                    &code_size,
+                    "-ar",
+                    "8000",
+                    "-ac",
+                    "1",
+                    "-i",
+                ])
+                .arg(&input)
+                .args(["-f", "s16le", "-acodec", "pcm_s16le"])
+                .arg(&output)
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "ffmpeg decode native output failed for {rate:?}"
+            );
 
-        let decoded = fs::read(output).unwrap();
-        assert!(decoded
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-            .any(|sample| sample != 0));
+            let decoded = fs::read(output).unwrap();
+            assert!(
+                decoded
+                    .chunks_exact(2)
+                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                    .any(|sample| sample != 0),
+                "ffmpeg produced silence for native {rate:?}"
+            );
+        }
     }
 
     #[test]
     #[ignore = "writes a native encoder comparison fixture"]
     fn generate_g726_fixture_with_native_encoder() {
         let samples = read_s16le_fixture("linear16_8/A_Tusk_is_used_to_make_costly_gifts.s16le");
-        let encoded = encode_samples(&samples, G726Packing::Left);
-
-        let output_path = testdata_path("g726/A_Tusk_is_used_to_make_costly_gifts.native.g726");
-        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
-        fs::write(output_path, encoded).unwrap();
+        for rate in rates() {
+            let encoded = encode_samples(&samples, rate, G726Packing::Left);
+            let suffix = rate_suffix(rate);
+            let output_path = testdata_path(&format!(
+                "g726/A_Tusk_is_used_to_make_costly_gifts_{suffix}.native.g726"
+            ));
+            fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+            fs::write(output_path, encoded).unwrap();
+        }
     }
 }

@@ -255,7 +255,7 @@ enum FormatDecoder {
     G711(Box<G711Decoder>),
     /// Headerless G.722 64 kbit/s mono wideband stream
     G722(Box<G722Decoder>),
-    /// Headerless G.726-32 8 kHz mono ADPCM stream
+    /// Headerless G.726 8 kHz mono ADPCM stream
     G726(Box<G726Decoder>),
     /// Headerless G.729 8 kbit/s mono stream
     G729(Box<G729Decoder>),
@@ -681,9 +681,25 @@ impl DecodePipeline {
         packing: G726Packing,
         options: DecodeOptions,
     ) -> Result<DecodePipelineHandle, DecodeError> {
+        Self::spawn_g726_with_rate_and_options(G726Rate::Rate32000, packing, options)
+    }
+
+    /// Create a pipeline for headerless G.726 8 kHz mono streams at the selected bit rate.
+    pub fn spawn_g726_with_rate(
+        rate: G726Rate,
+        packing: G726Packing,
+    ) -> Result<DecodePipelineHandle, DecodeError> {
+        Self::spawn_g726_with_rate_and_options(rate, packing, DecodeOptions::default())
+    }
+
+    /// Create a G.726 pipeline with selected bit rate and output conversion options.
+    pub fn spawn_g726_with_rate_and_options(
+        rate: G726Rate,
+        packing: G726Packing,
+        options: DecodeOptions,
+    ) -> Result<DecodePipelineHandle, DecodeError> {
         let decoder = FormatDecoder::G726(Box::new(
-            G726Decoder::try_new(G726Rate::Rate32000, packing)
-                .map_err(DecodeError::DecoderInitFailed)?,
+            G726Decoder::try_new(rate, packing).map_err(DecodeError::DecoderInitFailed)?,
         ));
         Ok(Self::spawn_with_initial_decoder(
             DEFAULT_INPUT_BUFFER,
@@ -1025,29 +1041,6 @@ fn pipeline_worker(
 
 /// Detect format and initialize appropriate decoder
 fn detect_and_init_decoder(buffer: &[u8]) -> Result<FormatDecoder, DecodeError> {
-    if is_ogg_vorbis(buffer) {
-        let mut decoder = VorbisDecoder::new();
-        decoder.init().map_err(DecodeError::DecoderInitFailed)?;
-        return Ok(FormatDecoder::Vorbis(Box::new(decoder)));
-    }
-
-    if is_mp4_or_caf_alac(buffer) {
-        let mut decoder = AlacDecoder::new();
-        decoder.init().map_err(DecodeError::DecoderInitFailed)?;
-        return Ok(FormatDecoder::Alac(Box::new(decoder)));
-    }
-
-    if is_aiff_or_aifc(buffer) {
-        let mut decoder = AiffDecoder::new();
-        decoder.init().map_err(DecodeError::DecoderInitFailed)?;
-        return Ok(FormatDecoder::Aiff(Box::new(decoder)));
-    }
-
-    if soundkit_ac3::looks_like_ac3(buffer) {
-        let decoder = Ac3Decoder::try_new().map_err(DecodeError::DecoderInitFailed)?;
-        return Ok(FormatDecoder::Ac3(Box::new(decoder)));
-    }
-
     let audio_type = detect_audio(buffer);
     match audio_type {
         AudioType::MP3 => {
@@ -1082,6 +1075,16 @@ fn detect_and_init_decoder(buffer: &[u8]) -> Result<FormatDecoder, DecodeError> 
             decoder.init().map_err(DecodeError::DecoderInitFailed)?;
             Ok(FormatDecoder::OggOpus(Box::new(decoder)))
         }
+        AudioType::OggVorbis => {
+            let mut decoder = VorbisDecoder::new();
+            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+            Ok(FormatDecoder::Vorbis(Box::new(decoder)))
+        }
+        AudioType::OggSpeex => {
+            let mut decoder = SpeexDecoder::new();
+            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+            Ok(FormatDecoder::Speex(Box::new(decoder)))
+        }
         AudioType::WebM => {
             let mut decoder = WebmDecoder::new();
             decoder.init().map_err(DecodeError::DecoderInitFailed)?;
@@ -1091,28 +1094,22 @@ fn detect_and_init_decoder(buffer: &[u8]) -> Result<FormatDecoder, DecodeError> 
             let decoder = WavStreamProcessor::new();
             Ok(FormatDecoder::Wav(Box::new(decoder)))
         }
+        AudioType::ALAC => {
+            let mut decoder = AlacDecoder::new();
+            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+            Ok(FormatDecoder::Alac(Box::new(decoder)))
+        }
+        AudioType::AIFF => {
+            let mut decoder = AiffDecoder::new();
+            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+            Ok(FormatDecoder::Aiff(Box::new(decoder)))
+        }
+        AudioType::AC3 => {
+            let decoder = Ac3Decoder::try_new().map_err(DecodeError::DecoderInitFailed)?;
+            Ok(FormatDecoder::Ac3(Box::new(decoder)))
+        }
         AudioType::Unknown => Err(DecodeError::FormatDetectionFailed),
     }
-}
-
-fn is_ogg_vorbis(buffer: &[u8]) -> bool {
-    buffer.starts_with(b"OggS")
-        && buffer
-            .windows(b"\x01vorbis".len())
-            .any(|w| w == b"\x01vorbis")
-}
-
-fn is_mp4_or_caf_alac(buffer: &[u8]) -> bool {
-    (buffer.starts_with(b"caff") && buffer.windows(b"alac".len()).any(|w| w == b"alac"))
-        || (buffer.len() >= 12
-            && &buffer[4..8] == b"ftyp"
-            && buffer.windows(8).any(|w| &w[4..8] == b"alac"))
-}
-
-fn is_aiff_or_aifc(buffer: &[u8]) -> bool {
-    buffer.len() >= 12
-        && &buffer[0..4] == b"FORM"
-        && (&buffer[8..12] == b"AIFF" || &buffer[8..12] == b"AIFC")
 }
 
 /// Process a chunk through the decoder using the unified StreamingDecoder trait.
@@ -1815,41 +1812,60 @@ mod tests {
             })
             .collect();
 
-        let mut encoder = soundkit_g726::G726Encoder::new_32k_left();
-        let mut encoded = Vec::new();
-        encoder.encode_to_vec(&samples, &mut encoded).unwrap();
-        encoder.flush_to_vec(&mut encoded).unwrap();
+        for rate in [
+            G726Rate::Rate16000,
+            G726Rate::Rate24000,
+            G726Rate::Rate32000,
+            G726Rate::Rate40000,
+        ] {
+            let mut encoder = soundkit_g726::G726Encoder::try_new(rate, G726Packing::Left).unwrap();
+            let mut encoded = Vec::new();
+            encoder.encode_to_vec(&samples, &mut encoded).unwrap();
+            encoder.flush_to_vec(&mut encoded).unwrap();
 
-        let mut direct_decoder = soundkit_g726::G726Decoder::new_32k_left();
-        let mut expected = vec![0i16; encoded.len() * 2];
-        let expected_len = direct_decoder
-            .decode_i16(&encoded, &mut expected, false)
-            .unwrap();
-        expected.truncate(expected_len);
+            let mut direct_decoder =
+                soundkit_g726::G726Decoder::try_new(rate, G726Packing::Left).unwrap();
+            let expected_samples = (encoded.len() * 8) / rate.bits_per_sample();
+            let mut expected = vec![0i16; expected_samples];
+            let expected_len = direct_decoder
+                .decode_i16(&encoded, &mut expected, false)
+                .unwrap();
+            expected.truncate(expected_len);
 
-        let mut pipeline = DecodePipeline::spawn_g726(G726Packing::Left).unwrap();
-        for chunk in encoded.chunks(17) {
-            pipeline.send(Bytes::copy_from_slice(chunk)).unwrap();
+            let mut pipeline =
+                DecodePipeline::spawn_g726_with_rate(rate, G726Packing::Left).unwrap();
+            for chunk in encoded.chunks(7) {
+                pipeline.send(Bytes::copy_from_slice(chunk)).unwrap();
+            }
+            pipeline.send(Bytes::new()).unwrap();
+
+            let frames = recv_until_done(&mut pipeline);
+            assert!(!frames.is_empty(), "rate {rate:?}");
+            assert!(
+                frames.iter().all(|frame| frame.bits_per_sample() == 16),
+                "rate {rate:?}"
+            );
+            assert!(
+                frames.iter().all(|frame| frame.channel_count() == 1),
+                "rate {rate:?}"
+            );
+            assert!(
+                frames.iter().all(|frame| frame.sampling_rate() == 8_000),
+                "rate {rate:?}"
+            );
+
+            let decoded: Vec<i16> = frames
+                .iter()
+                .flat_map(|frame| {
+                    frame
+                        .data()
+                        .chunks_exact(2)
+                        .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            assert_eq!(decoded, expected, "rate {rate:?}");
         }
-        pipeline.send(Bytes::new()).unwrap();
-
-        let frames = recv_until_done(&mut pipeline);
-        assert!(!frames.is_empty());
-        assert!(frames.iter().all(|frame| frame.bits_per_sample() == 16));
-        assert!(frames.iter().all(|frame| frame.channel_count() == 1));
-        assert!(frames.iter().all(|frame| frame.sampling_rate() == 8_000));
-
-        let decoded: Vec<i16> = frames
-            .iter()
-            .flat_map(|frame| {
-                frame
-                    .data()
-                    .chunks_exact(2)
-                    .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        assert_eq!(decoded, expected);
     }
 
     #[test]

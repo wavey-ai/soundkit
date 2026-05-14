@@ -13,7 +13,7 @@ and a thread-based decode pipeline with automatic format detection.
 | WAV | `soundkit::wav` | Incremental RIFF/WAVE PCM parser plus `generate_wav_buffer`. |
 | Resampling | `soundkit::downsample_audio`, `soundkit-rubberband` | `rubato` sinc resampling and Rubber Band wrapper. |
 | Codecs | `soundkit-*` codec crates | Small wrappers around native Rust decoders where available, with C FFI only where useful or required. |
-| Decode pipeline | `soundkit-decoder` | Ring-buffered worker thread, autodetection, explicit telephony paths, optional output conversion. |
+| Decode pipeline | `soundkit-decoder` | Ring-buffered worker thread, `access-unit` autodetection, explicit telephony paths, optional output conversion. |
 | WASM | `soundkit::wasm` | Browser-oriented WAV-to-packet and WAV-to-PCM helpers. |
 
 ## Streaming Decode Matrix
@@ -42,7 +42,7 @@ the container layout can require enough metadata/media to be buffered first.
 | AMR-NB | `soundkit-amr` / OpenCORE AMR-NB | Explicit | Yes | 3GPP `.amr` magic and raw frame streams; C FFI backend. |
 | G.711 u-law / A-law | `soundkit-g711` | Explicit | Yes | Pure Rust PCMU/PCMA decode. |
 | G.722 | `soundkit-g722` / `ezk-g722` | Explicit | Yes | Pure Rust 64 kbit/s wideband speech decode. |
-| G.726-32 | `soundkit-g726` | Explicit | Yes | Pure Rust 32 kbit/s profile; 16/24/40 kbit/s profiles pending. |
+| G.726 | `soundkit-g726` | Explicit | Yes | Pure Rust 16/24/32/40 kbit/s profiles. |
 | G.729 | `soundkit-g729` / `g729-sys` | Explicit | Yes | Frame-buffered 8 kbit/s speech decode. |
 | GSM 06.10 / WAV-49 | `soundkit-gsm` / `libgsm` | Explicit | Yes | Standard raw GSM and Microsoft WAV-49 packet framing. |
 
@@ -53,7 +53,7 @@ the container layout can require enough metadata/media to be buffered first.
 | Autodetect common media files | `DecodePipeline::spawn()` |
 | Override output rate, depth, or channels | `DecodePipeline::spawn_with_options(options)` |
 | Headerless PCM | `DecodePipeline::spawn_raw_pcm(format)` |
-| Telephony and speech codecs | `spawn_g711`, `spawn_g722`, `spawn_g726`, `spawn_g729`, `spawn_gsm`, `spawn_amr_nb`, `spawn_speex` |
+| Telephony and speech codecs | `spawn_g711`, `spawn_g722`, `spawn_g726_with_rate`, `spawn_g729`, `spawn_gsm`, `spawn_amr_nb`, `spawn_speex` |
 | Consumer containers with explicit format | `spawn_vorbis`, `spawn_alac`, `spawn_aiff`, `spawn_ac3` |
 
 ```rust
@@ -116,5 +116,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Format | Status |
 | --- | --- |
 | AMR-WB | Pending a fixture-safe encoder path. |
-| G.726 16/24/40 kbit/s | Decoder API currently implements the common 32 kbit/s profile. |
 | Monkey's Audio / APE | Deferred because the local FFmpeg build can decode APE but cannot encode fixtures. |

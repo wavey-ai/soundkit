@@ -8,7 +8,7 @@ repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
 soundkit = { path = "../soundkit" }
-access-unit = "0.1.2"
+access-unit = { git = "https://github.com/wavey-ai/access-unit.git" }
 soundkit-amr = { path = "../soundkit-amr" }
 soundkit-g711 = { path = "../soundkit-g711" }
 soundkit-g722 = { path = "../soundkit-g722" }

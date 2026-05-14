@@ -34,7 +34,7 @@ containers and exposes explicit spawn paths for headerless telephony codecs.
 | AMR-NB | `spawn_amr_nb()` | Explicit | Yes | `soundkit-amr` / OpenCORE AMR-NB |
 | G.711 u-law / A-law | `spawn_g711(law, rate, channels)` | Explicit | Yes | `soundkit-g711` |
 | G.722 | `spawn_g722()` | Explicit | Yes | `soundkit-g722` / `ezk-g722` |
-| G.726-32 | `spawn_g726(packing)` | Explicit | Yes | `soundkit-g726` |
+| G.726 16/24/32/40 | `spawn_g726_with_rate(rate, packing)` | Explicit | Yes | `soundkit-g726` |
 | G.729 | `spawn_g729()` | Explicit | Yes | `soundkit-g729` / `g729-sys` |
 | GSM 06.10 / WAV-49 | `spawn_gsm(variant)` | Explicit | Yes | `soundkit-gsm` / `libgsm` |
 
@@ -84,8 +84,7 @@ let pipeline = DecodePipeline::spawn_with_options(DecodeOptions {
 
 | Format family | Detection path |
 | --- | --- |
-| Ogg Vorbis, ALAC, AIFF/AIFF-C, AC-3 | Local sniffers before generic media detection. |
-| MP3, AAC, M4A, FLAC, Opus, Ogg Opus, WebM, WAV | `access-unit` detection. |
+| MP3, AAC ADTS, M4A/MP4 AAC, FLAC, Opus, Ogg Opus, Ogg Vorbis, Ogg Speex, WebM, WAV, ALAC, AIFF/AIFF-C, AC-3 | `access-unit` detection. |
 | Headerless PCM and telephony codecs | Explicit spawn APIs because metadata is not present in the byte stream. |
 
 ## Current Gaps
@@ -94,5 +93,4 @@ let pipeline = DecodePipeline::spawn_with_options(DecodeOptions {
 | --- | --- |
 | ALAC and AIFF/AIFF-C | Seek-based readers make current wrappers EOF-buffered. |
 | AAC in M4A/MP4 | MP4 sample tables make live chunking layout-dependent; use ADTS for live AAC. |
-| G.726 | Only the common 32 kbit/s profile is implemented. |
 | APE | Deferred until fixtures can be generated with FFmpeg in this repo's test pattern. |

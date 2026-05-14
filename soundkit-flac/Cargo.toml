@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-access-unit = "0.1.1"
+access-unit = { git = "https://github.com/wavey-ai/access-unit.git" }
 libc = "0.2.158"
 libflac-sys = { git = "https://github.com/mgeier/libflac-sys.git", optional = true }
 claxon = { version = "0.4", optional = true }
