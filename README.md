@@ -63,3 +63,27 @@ A lightweight, extensible Rust audio toolbox providing:
   `WavToPkt` and `WavToPcm` bindings for streaming audio in the browser.
 
 ---
+
+## Contact-Center and STT Format Roadmap
+
+These formats are the next practical additions for Deepgram-style speech-to-text
+ingestion, SIP/RTP integrations, and call-center recording workflows. The order
+reflects expected product value for telephony audio rather than general media
+coverage.
+
+| Priority | Format / codec | Why it matters | Status / implementation path |
+| --- | --- | --- | --- |
+| 1 | **G.711 u-law / A-law** (`mulaw`, `alaw`, `PCMU`, `PCMA`) | Baseline PSTN and SIP trunk audio. Twilio Media Streams use 8 kHz mono u-law, and many contact-center recording/transcription paths accept PCMU/PCMA directly. | Implemented as native Rust in `soundkit-g711`, with streaming encode/decode helpers and explicit `DecodePipeline::spawn_g711(...)` support. |
+| 2 | **Raw PCM stream modes** (`linear16`, `linear32`, `L16`, `s16le`, `f32le`) | Common STT and contact-center handoff format. Deepgram raw streaming requires explicit encoding and sample rate; Amazon Connect-style streams are typically 8 kHz mono PCM. | Implemented in `soundkit::raw_pcm` with explicit stream descriptors, partial-frame buffering, and `DecodePipeline::spawn_raw_pcm(...)` support. |
+| 3 | **G.722** | Common wideband VoIP codec for higher-quality speech at 16 kHz while staying telephony-friendly. | Implemented as `soundkit-g722` using the native Rust `ezk-g722` codec core, with odd-sample buffering and `DecodePipeline::spawn_g722()` support. |
+| 4 | **G.729** | Still appears in bandwidth-constrained SIP and call-center deployments, and is accepted by Deepgram as an explicit raw/containerized encoding. | Implemented as `soundkit-g729` using the pure-Rust `g729-sys` backend, with 80-sample / 10-byte frame buffering and `DecodePipeline::spawn_g729()` support. |
+| 5 | **AMR-NB / AMR-WB** | Used in mobile/carrier audio and supported by Deepgram. AMR-NB is narrowband speech; AMR-WB is wideband speech. | Investigate OpenCORE/VisualOn-style C libraries and Rust FFI availability. Treat licensing and deployment packaging as part of the design. |
+| 6 | **Speex** | Legacy speech codec that still appears in older VoIP and recording archives; also supported by Deepgram. | Use `speex-sys` / `speex-safe` or a narrowly scoped FFI wrapper around `libspeex`. |
+| 7 | **GSM 06.10** | Legacy PBX and call-recording codec. Useful for archive compatibility rather than new integrations. | Use `gsm-sys` / `libgsm` if fixtures show real demand. Keep it optional. |
+| 8 | **G.726** | Shows up in PBX, recorder, and surveillance-adjacent voice systems. Lower priority than G.711/G.722/G.729. | Evaluate whether to implement the ADPCM codec directly or bind an existing telecom codec library. |
+
+Vorbis/Ogg Vorbis remains useful for consumer media ingestion, but it is lower
+priority for call-center pipelines than the telephony codecs above. Ogg is only
+the container; Ogg Vorbis and Ogg Opus use different audio codecs.
+
+---

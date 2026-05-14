@@ -10,9 +10,15 @@ use soundkit::audio_bytes::{interleave_vecs_i16, s32le_to_i32};
 use soundkit::audio_packet::Decoder;
 use soundkit::audio_pipeline::{deserialize_audio, vec_f32_to_i16, vec_i16_to_f32, vec_i32_to_f32};
 use soundkit::audio_types::{AudioData, PcmData};
+use soundkit::raw_pcm::RawPcmStreamProcessor;
+pub use soundkit::raw_pcm::{RawPcmFormat, RawPcmSampleFormat};
 use soundkit::wav::WavStreamProcessor;
 use soundkit_aac::{AacDecoder, AacDecoderMp4};
 use soundkit_flac::FlacDecoderClaxon;
+use soundkit_g711::G711Decoder;
+pub use soundkit_g711::G711Law;
+use soundkit_g722::G722Decoder;
+use soundkit_g729::G729Decoder;
 use soundkit_mp3::Mp3Decoder;
 use soundkit_ogg_opus::OggOpusDecoder;
 use soundkit_opus::OpusStreamDecoder;
@@ -44,6 +50,7 @@ pub enum DecodeError {
     DecodingFailed(String),
     InputBufferFull,
     UnsupportedFormat(AudioType),
+    InvalidInputFormat(String),
 }
 
 impl std::fmt::Display for DecodeError {
@@ -56,6 +63,7 @@ impl std::fmt::Display for DecodeError {
             DecodeError::DecodingFailed(msg) => write!(f, "Decoding failed: {}", msg),
             DecodeError::InputBufferFull => write!(f, "Input buffer full"),
             DecodeError::UnsupportedFormat(fmt) => write!(f, "Unsupported format: {:?}", fmt),
+            DecodeError::InvalidInputFormat(msg) => write!(f, "Invalid input format: {}", msg),
         }
     }
 }
@@ -229,6 +237,14 @@ enum FormatDecoder {
     WebM(Box<WebmDecoder>),
     /// WAV decoder (raw PCM in RIFF container)
     Wav(Box<WavStreamProcessor>),
+    /// Headerless raw PCM stream with caller-provided metadata
+    RawPcm(Box<RawPcmStreamProcessor>),
+    /// Headerless G.711 stream with caller-provided law/sample metadata
+    G711(Box<G711Decoder>),
+    /// Headerless G.722 64 kbit/s mono wideband stream
+    G722(Box<G722Decoder>),
+    /// Headerless G.729 8 kbit/s mono stream
+    G729(Box<G729Decoder>),
 }
 
 /// Helper to decode using the Decoder trait and drain all buffered frames.
@@ -387,12 +403,48 @@ impl StreamingDecoder for FormatDecoder {
             FormatDecoder::Wav(dec) => {
                 process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
             }
+            FormatDecoder::RawPcm(dec) => {
+                process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
+            }
+            FormatDecoder::G711(dec) => {
+                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                    Some(create_audio_data_i16(
+                        d.sample_rate(),
+                        d.channels(),
+                        &output[..samples],
+                    ))
+                })
+            }
+            FormatDecoder::G722(dec) => {
+                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                    Some(create_audio_data_i16(
+                        d.sample_rate(),
+                        d.channels(),
+                        &output[..samples],
+                    ))
+                })
+            }
+            FormatDecoder::G729(dec) => {
+                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                    Some(create_audio_data_i16(
+                        d.sample_rate(),
+                        d.channels(),
+                        &output[..samples],
+                    ))
+                })
+            }
         }
     }
 
     fn flush(&mut self) -> Result<Vec<AudioData>, String> {
-        // Flush is the same as process with empty input for all decoders
-        self.process(&[])
+        match self {
+            FormatDecoder::RawPcm(dec) => dec.flush().map(|frame| frame.into_iter().collect()),
+            FormatDecoder::G729(dec) => {
+                dec.flush()?;
+                Ok(Vec::new())
+            }
+            _ => self.process(&[]),
+        }
     }
 }
 
@@ -431,11 +483,118 @@ impl DecodePipeline {
         output_buffer: usize,
         options: DecodeOptions,
     ) -> DecodePipelineHandle {
+        Self::spawn_with_initial_decoder(input_buffer, output_buffer, options, None)
+    }
+
+    /// Create a pipeline for headerless raw PCM using caller-provided input metadata.
+    pub fn spawn_raw_pcm(format: RawPcmFormat) -> DecodePipelineHandle {
+        Self::spawn_raw_pcm_with_options(format, DecodeOptions::default())
+    }
+
+    /// Create a raw PCM pipeline with output conversion options.
+    pub fn spawn_raw_pcm_with_options(
+        format: RawPcmFormat,
+        options: DecodeOptions,
+    ) -> DecodePipelineHandle {
+        let decoder = FormatDecoder::RawPcm(Box::new(RawPcmStreamProcessor::new(format)));
+        Self::spawn_with_initial_decoder(
+            DEFAULT_INPUT_BUFFER,
+            DEFAULT_OUTPUT_BUFFER,
+            options,
+            Some(decoder),
+        )
+    }
+
+    /// Create a pipeline for headerless G.711 streams.
+    ///
+    /// These streams cannot be autodetected reliably, so the law, sample rate,
+    /// and channel count must come from the transport layer or integration.
+    pub fn spawn_g711(
+        law: G711Law,
+        sample_rate: u32,
+        channels: u8,
+    ) -> Result<DecodePipelineHandle, DecodeError> {
+        Self::spawn_g711_with_options(law, sample_rate, channels, DecodeOptions::default())
+    }
+
+    /// Create a G.711 pipeline with output conversion options.
+    pub fn spawn_g711_with_options(
+        law: G711Law,
+        sample_rate: u32,
+        channels: u8,
+        options: DecodeOptions,
+    ) -> Result<DecodePipelineHandle, DecodeError> {
+        if sample_rate == 0 {
+            return Err(DecodeError::InvalidInputFormat(
+                "G.711 sample rate must be > 0".to_string(),
+            ));
+        }
+        if channels == 0 {
+            return Err(DecodeError::InvalidInputFormat(
+                "G.711 channel count must be > 0".to_string(),
+            ));
+        }
+
+        let decoder = FormatDecoder::G711(Box::new(G711Decoder::new_with_law(
+            law,
+            sample_rate,
+            channels,
+        )));
+        Ok(Self::spawn_with_initial_decoder(
+            DEFAULT_INPUT_BUFFER,
+            DEFAULT_OUTPUT_BUFFER,
+            options,
+            Some(decoder),
+        ))
+    }
+
+    /// Create a pipeline for headerless G.722 64 kbit/s mono wideband streams.
+    pub fn spawn_g722() -> DecodePipelineHandle {
+        Self::spawn_g722_with_options(DecodeOptions::default())
+    }
+
+    /// Create a G.722 pipeline with output conversion options.
+    pub fn spawn_g722_with_options(options: DecodeOptions) -> DecodePipelineHandle {
+        let decoder = FormatDecoder::G722(Box::new(G722Decoder::new_64k()));
+        Self::spawn_with_initial_decoder(
+            DEFAULT_INPUT_BUFFER,
+            DEFAULT_OUTPUT_BUFFER,
+            options,
+            Some(decoder),
+        )
+    }
+
+    /// Create a pipeline for headerless G.729 8 kbit/s mono streams.
+    pub fn spawn_g729() -> Result<DecodePipelineHandle, DecodeError> {
+        Self::spawn_g729_with_options(DecodeOptions::default())
+    }
+
+    /// Create a G.729 pipeline with output conversion options.
+    pub fn spawn_g729_with_options(
+        options: DecodeOptions,
+    ) -> Result<DecodePipelineHandle, DecodeError> {
+        let decoder = FormatDecoder::G729(Box::new(
+            G729Decoder::try_new().map_err(DecodeError::DecoderInitFailed)?,
+        ));
+        Ok(Self::spawn_with_initial_decoder(
+            DEFAULT_INPUT_BUFFER,
+            DEFAULT_OUTPUT_BUFFER,
+            options,
+            Some(decoder),
+        ))
+    }
+
+    fn spawn_with_initial_decoder(
+        input_buffer: usize,
+        output_buffer: usize,
+        options: DecodeOptions,
+        initial_decoder: Option<FormatDecoder>,
+    ) -> DecodePipelineHandle {
         let (input_tx, input_rx) = RingBuffer::<Bytes>::new(input_buffer);
         let (output_tx, output_rx) = RingBuffer::<DecodeOutput>::new(output_buffer);
 
         let worker = thread::spawn(move || {
-            pipeline_worker(input_rx, output_tx, options);
+            pipeline_worker(input_rx, output_tx, options, initial_decoder);
         });
 
         DecodePipelineHandle {
@@ -501,11 +660,15 @@ fn pipeline_worker(
     mut input_rx: Consumer<Bytes>,
     mut output_tx: Producer<DecodeOutput>,
     options: DecodeOptions,
+    initial_decoder: Option<FormatDecoder>,
 ) {
     let mut resampler: Option<StreamingResampler> = None;
-    let mut state = PipelineState::Detecting {
-        buffer: BytesMut::new(),
-        bytes_collected: 0,
+    let mut state = match initial_decoder {
+        Some(decoder) => PipelineState::Decoding { decoder },
+        None => PipelineState::Detecting {
+            buffer: BytesMut::new(),
+            bytes_collected: 0,
+        },
     };
 
     loop {
@@ -1229,6 +1392,172 @@ mod tests {
             .join("testdata")
             .join("golden")
             .join(file)
+    }
+
+    fn recv_until_done(pipeline: &mut DecodePipelineHandle) -> Vec<AudioData> {
+        let mut frames = Vec::new();
+        for _ in 0..100 {
+            match pipeline.recv() {
+                Some(Ok(audio_data)) => frames.push(audio_data),
+                Some(Err(error)) => panic!("Decode error: {:?}", error),
+                None => break,
+            }
+        }
+        frames
+    }
+
+    #[test]
+    fn test_decode_explicit_raw_pcm_stream() {
+        let format = RawPcmFormat::linear16(8_000, 1).unwrap();
+        let mut pipeline = DecodePipeline::spawn_raw_pcm(format);
+
+        pipeline.send(Bytes::from_static(&[0x34])).unwrap();
+        pipeline
+            .send(Bytes::from_static(&[0x12, 0x78, 0x56]))
+            .unwrap();
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].bits_per_sample(), 16);
+        assert_eq!(frames[0].channel_count(), 1);
+        assert_eq!(frames[0].sampling_rate(), 8_000);
+        assert_eq!(frames[0].audio_format(), EncodingFlag::PCMSigned);
+        assert_eq!(frames[0].endianness(), Endianness::LittleEndian);
+        assert_eq!(frames[0].data(), &vec![0x34, 0x12, 0x78, 0x56]);
+    }
+
+    #[test]
+    fn test_decode_explicit_g711_mulaw_stream() {
+        let samples = [-12000i16, -1024, 0, 1024, 12000];
+        let mut encoded = vec![0u8; samples.len()];
+        soundkit_g711::encode_i16(G711Law::MuLaw, &samples, &mut encoded).unwrap();
+
+        let mut expected = vec![0i16; samples.len()];
+        soundkit_g711::decode_i16(G711Law::MuLaw, &encoded, &mut expected).unwrap();
+
+        let mut pipeline = DecodePipeline::spawn_g711(G711Law::MuLaw, 8_000, 1).unwrap();
+        pipeline
+            .send(Bytes::copy_from_slice(&encoded[..2]))
+            .unwrap();
+        pipeline
+            .send(Bytes::copy_from_slice(&encoded[2..]))
+            .unwrap();
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert_eq!(frames.len(), 2);
+        assert!(frames.iter().all(|frame| frame.bits_per_sample() == 16));
+        assert!(frames.iter().all(|frame| frame.channel_count() == 1));
+        assert!(frames.iter().all(|frame| frame.sampling_rate() == 8_000));
+
+        let decoded: Vec<i16> = frames
+            .iter()
+            .flat_map(|frame| {
+                frame
+                    .data()
+                    .chunks_exact(2)
+                    .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn test_decode_explicit_g711_rejects_invalid_metadata() {
+        assert!(DecodePipeline::spawn_g711(G711Law::MuLaw, 0, 1).is_err());
+        assert!(DecodePipeline::spawn_g711(G711Law::MuLaw, 8_000, 0).is_err());
+    }
+
+    #[test]
+    fn test_decode_explicit_g722_stream() {
+        let samples: Vec<i16> = (0..160)
+            .map(|index| {
+                let phase = index as f32 / 160.0 * PI * 6.0;
+                (phase.sin() * 10_000.0) as i16
+            })
+            .collect();
+
+        let mut encoder = soundkit_g722::G722Encoder::new_64k();
+        let mut encoded = Vec::new();
+        encoder.encode_to_vec(&samples, &mut encoded).unwrap();
+
+        let mut direct_decoder = soundkit_g722::G722Decoder::new_64k();
+        let mut expected = vec![0i16; encoded.len() * 2];
+        let expected_len = direct_decoder
+            .decode_i16(&encoded, &mut expected, false)
+            .unwrap();
+        expected.truncate(expected_len);
+
+        let mut pipeline = DecodePipeline::spawn_g722();
+        for chunk in encoded.chunks(7) {
+            pipeline.send(Bytes::copy_from_slice(chunk)).unwrap();
+        }
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert!(!frames.is_empty());
+        assert!(frames.iter().all(|frame| frame.bits_per_sample() == 16));
+        assert!(frames.iter().all(|frame| frame.channel_count() == 1));
+        assert!(frames.iter().all(|frame| frame.sampling_rate() == 16_000));
+
+        let decoded: Vec<i16> = frames
+            .iter()
+            .flat_map(|frame| {
+                frame
+                    .data()
+                    .chunks_exact(2)
+                    .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn test_decode_explicit_g729_stream() {
+        let samples: Vec<i16> = (0..240)
+            .map(|index| {
+                let phase = index as f32 / 80.0 * PI * 2.0;
+                (phase.sin() * 8_000.0) as i16
+            })
+            .collect();
+
+        let mut encoder = soundkit_g729::G729Encoder::new_voice();
+        let mut encoded = Vec::new();
+        encoder.encode_to_vec(&samples, &mut encoded).unwrap();
+
+        let mut direct_decoder = soundkit_g729::G729Decoder::new_voice();
+        let mut expected = vec![0i16; encoded.len() / 10 * 80];
+        let expected_len = direct_decoder
+            .decode_i16(&encoded, &mut expected, false)
+            .unwrap();
+        expected.truncate(expected_len);
+
+        let mut pipeline = DecodePipeline::spawn_g729().unwrap();
+        for chunk in encoded.chunks(7) {
+            pipeline.send(Bytes::copy_from_slice(chunk)).unwrap();
+        }
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert!(!frames.is_empty());
+        assert!(frames.iter().all(|frame| frame.bits_per_sample() == 16));
+        assert!(frames.iter().all(|frame| frame.channel_count() == 1));
+        assert!(frames.iter().all(|frame| frame.sampling_rate() == 8_000));
+
+        let decoded: Vec<i16> = frames
+            .iter()
+            .flat_map(|frame| {
+                frame
+                    .data()
+                    .chunks_exact(2)
+                    .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(decoded, expected);
     }
 
     #[test]

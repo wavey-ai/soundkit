@@ -1,0 +1,11 @@
+[package]
+name = "soundkit-g711"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Native Rust G.711 u-law and A-law codecs for soundkit."
+repository = "https://github.com/wavey-ai/soundkit"
+
+[dependencies]
+soundkit = { path = "../soundkit" }
+
