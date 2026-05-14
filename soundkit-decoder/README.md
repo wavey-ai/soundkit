@@ -5,8 +5,8 @@ Streaming audio decoder pipeline with automatic format detection for real-time a
 ## Features
 
 - **Lock-free streaming**: Uses `rtrb` ring buffers for efficient, allocation-free data flow
-- **Automatic format detection**: Detects MP3, AAC, FLAC, Opus, and Ogg Opus using `access-unit`
-- **Pure Rust decoders**: MP3 and AAC use 100% Rust; FLAC uses libFLAC for robust streaming
+- **Automatic format detection**: Detects MP3, AAC/M4A, FLAC, Opus, Ogg Opus, Ogg Vorbis, ALAC, AIFF/AIFF-C, raw AC-3, and WebM
+- **Mostly native Rust decoders**: Ogg Vorbis, ALAC, AIFF/AIFF-C, AC-3, G.711, G.722, G.726, G.729, and Speex use Rust decoder cores; selected codecs still use reference C libraries where needed
 - **Native f32 output**: Zero-copy f32 decoding for MP3 and AAC
 - **Error resilient**: Pipeline continues running after decode errors
 - **Channel-based API**: Simple producer/consumer pattern
@@ -85,6 +85,11 @@ loop {
 | **FLAC**      | libFLAC        | C (FFI)     | Native     | Reference decoder |
 | **Opus**      | libopus        | C (FFI)     | Converted  | Raw Opus streams (OpusHead format) |
 | **Ogg Opus**  | libopus        | C (FFI)     | Converted  | Opus in Ogg container |
+| **Ogg Vorbis** | lewton        | Pure Rust   | Converted  | Streaming Ogg Vorbis |
+| **ALAC**      | alac           | Pure Rust   | Converted  | M4A/MP4 and CAF; emits after EOF because container reader is seek-based |
+| **AIFF/AIFF-C** | aifc         | Pure Rust   | Converted  | PCM plus supported AIFF-C compression |
+| **AC-3**      | oxideav-ac3    | Pure Rust   | Converted  | Raw AC-3 syncframe streams |
+| **WebM Opus** | internal WebM + libopus | Rust + C FFI | Converted | WebM container with Opus audio |
 
 ### Encoding Support
 
@@ -115,6 +120,10 @@ pub trait Decoder {
 | AAC     | f32           | ✓   | ✓   | ✓ (zero-copy) | Symphonia outputs f32 natively |
 | FLAC    | i32           | -   | ✓   | ✓   | libFLAC outputs i32, normalized to f32 |
 | Opus    | i16           | ✓   | -   | ✓   | libopus outputs i16, scaled to f32 |
+| Vorbis  | i16           | ✓   | -   | ✓   | Lewton output is converted to S16LE |
+| ALAC    | PCM bits      | ✓   | ✓   | ✓   | 16/24/32-bit PCM emitted as little-endian signed PCM |
+| AIFF    | PCM bits      | ✓   | ✓   | ✓   | Integer PCM preserved where supported; f64 is converted to f32 |
+| AC-3    | i16           | ✓   | -   | ✓   | OxideAV output is S16LE |
 
 **Performance tip**: Use `decode_f32()` for MP3 and AAC to avoid wasteful f32→i16→f32 conversions.
 
@@ -134,7 +143,8 @@ pub trait Decoder {
 
 ### Format Detection
 
-Uses `access-unit` crate to detect format from byte stream:
+Uses fast local sniffing for Ogg Vorbis, ALAC, AIFF/AIFF-C, and AC-3, then
+falls back to the `access-unit` crate for the established media formats:
 1. Accumulate minimum 256 bytes
 2. Attempt format detection
 3. If unknown and < 4KB, continue accumulating
@@ -147,6 +157,11 @@ Uses `access-unit` crate to detect format from byte stream:
 - FLAC (Free Lossless Audio Codec)
 - Opus (raw OpusHead streams)
 - Ogg Opus (Opus in Ogg container)
+- Ogg Vorbis
+- ALAC in M4A/MP4 or CAF
+- AIFF / AIFF-C
+- Raw AC-3 syncframe streams
+- WebM Opus
 
 ## Benchmark Results
 

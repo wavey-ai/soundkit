@@ -17,6 +17,9 @@ soundkit-g729 = { path = "../soundkit-g729" }
 soundkit-gsm = { path = "../soundkit-gsm" }
 soundkit-speex = { path = "../soundkit-speex" }
 soundkit-vorbis = { path = "../soundkit-vorbis" }
+soundkit-alac = { path = "../soundkit-alac" }
+soundkit-aiff = { path = "../soundkit-aiff" }
+soundkit-ac3 = { path = "../soundkit-ac3" }
 soundkit-mp3 = { path = "../soundkit-mp3", default-features = false }
 soundkit-aac = { path = "../soundkit-aac", features = ["mp4-decoder"] }
 soundkit-flac = { path = "../soundkit-flac", features = ["claxon-decoder"] }

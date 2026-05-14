@@ -15,12 +15,15 @@ A lightweight, extensible Rust audio toolbox providing:
   - **MP3** (via `mp3lame-sys` / `minimp3`)
   - **AAC** (using `fdk-aac`)
   - **AMR-NB, G.711, G.722, G.726, G.729, GSM 06.10** telephony codecs
+  - **AC-3** raw syncframe decoding
 - **Container formats**:
   - **Ogg Opus** streaming decoder
   - **Ogg Speex** streaming decoder
   - **Ogg Vorbis** streaming decoder
   - **WebM** container decoder (Opus audio)
-  - **M4A/MP4** container support for AAC
+  - **M4A/MP4** container support for AAC and ALAC
+  - **CAF** container support for ALAC
+  - **AIFF / AIFF-C** container decoding
 - **Streaming decode pipeline** with automatic format detection
 - **WebAssembly bindings** (`wasm-bindgen`) for in-browser audio framing
 - **Pipeline helpers** for framing, encoding, mixing and more  
@@ -54,7 +57,7 @@ A lightweight, extensible Rust audio toolbox providing:
 
 - **Streaming decode pipeline** (`soundkit-decoder`)
   Thread-based pipeline with automatic format detection for:
-  - MP3, FLAC, AAC (M4A/MP4), Opus, Ogg Opus, Ogg Vorbis, WebM
+  - MP3, FLAC, AAC (M4A/MP4), Opus, Ogg Opus, Ogg Vorbis, ALAC (M4A/CAF), AIFF/AIFF-C, raw AC-3, WebM
   - Explicit telephony/speech paths for raw PCM, AMR-NB, G.711, G.722, G.726, G.729, GSM, and Speex
   - Ring buffer I/O for backpressure handling
   - Optional output transformations (sample rate, bit depth, channel count)
@@ -62,6 +65,8 @@ A lightweight, extensible Rust audio toolbox providing:
 - **Container decoders**
   - `OggOpusDecoder`: streaming Ogg container parser with Opus decoding
   - `VorbisDecoder`: streaming Ogg container parser with pure Rust Vorbis decoding via `lewton`
+  - `AlacDecoder`: pure Rust ALAC decode for M4A/MP4 and CAF containers
+  - `AiffDecoder`: pure Rust AIFF/AIFF-C decode for PCM, u-law/A-law, and ima4 variants
   - `WebmDecoder`: EBML/WebM container parser with Opus audio extraction
 
 - **WASM support**
@@ -87,9 +92,19 @@ coverage.
 | 7 | **GSM 06.10** | Legacy PBX and call-recording codec. Useful for archive compatibility rather than new integrations. | Implemented as `soundkit-gsm` using the reference `libgsm` backend through `gsm-sys`, with standard raw `.gsm` and Microsoft WAV-49 framing. `libgsm` permits use, copy, modification, and distribution with its notice preserved; packaged distributions should keep that notice. |
 | 8 | **G.726** | Shows up in PBX, recorder, and surveillance-adjacent voice systems. Lower priority than G.711/G.722/G.729. | Implemented as `soundkit-g726` for the common G.726-32 / G.721 4-bit profile using a pure Rust port of the unrestricted-use Sun reference ADPCM algorithm, with left/right raw packing and `DecodePipeline::spawn_g726(...)` support. This avoids a SpanDSP LGPL dependency. G.726 16/24/40 kbit/s profiles remain pending. |
 
-Ogg Vorbis is implemented as `soundkit-vorbis` using the pure Rust `lewton`
-decoder, with fixture/golden coverage and `DecodePipeline::spawn_vorbis()`
-support. Ogg is only the container; Ogg Vorbis and Ogg Opus use different audio
-codecs.
+## Consumer and Archive Format Coverage
+
+These formats are aimed at recorded media, uploads, archive compatibility, and
+consumer audio files rather than live telephony transports.
+
+| Format / codec | Status | Test coverage | License notes |
+| --- | --- | --- | --- |
+| **Ogg Vorbis** | Implemented as `soundkit-vorbis` using the pure Rust `lewton` decoder and streaming Ogg packet parsing. `DecodePipeline::spawn_vorbis()` and autodetection are available. | FFmpeg-generated fixture, native decode golden WAV, chunked-vs-whole decode, FFmpeg fixture decode, pipeline explicit/autodetect tests. | `lewton` is MIT OR Apache-2.0. |
+| **ALAC / Apple Lossless** (`.m4a`, `.caf`) | Implemented as `soundkit-alac` using the pure Rust `alac` decoder. `DecodePipeline::spawn_alac()` and M4A/CAF ALAC sniffing are available. The MP4/CAF reader is seek-based, so the pipeline buffers container bytes and emits on EOF. | FFmpeg-generated `.m4a` fixture, native decode golden WAV, chunked-vs-whole decode, native PCM equals FFmpeg PCM, pipeline explicit/autodetect tests, ffplay playback of the decoded WAV. | `alac` and `caf` are MIT/Apache-2.0. The M4A path depends on `mp4parse`, which is MPL-2.0. |
+| **AIFF / AIFF-C** | Implemented as `soundkit-aiff` using the pure Rust `aifc` reader. `DecodePipeline::spawn_aiff()` and FORM/AIFF or FORM/AIFC autodetection are available. The container reader is seek-based, so the pipeline buffers and emits on EOF. | FFmpeg-generated `.aiff` and `.aifc` fixtures, native decode golden WAVs, chunked-vs-whole decode, native PCM equals FFmpeg PCM, pipeline explicit/autodetect tests, ffplay playback of both decoded WAVs. | `aifc` is MIT OR Apache-2.0; its audio codec helper crate is 0BSD OR Apache-2.0. |
+| **AC-3 / Dolby Digital** (`.ac3`) | Implemented as `soundkit-ac3` using the pure Rust `oxideav-ac3` decoder. Raw syncframe streams decode incrementally and `DecodePipeline::spawn_ac3()` plus raw syncframe autodetection are available. | FFmpeg-generated raw `.ac3` fixture, native decode golden WAV, chunked-vs-whole decode, FFmpeg fixture decode, pipeline explicit/autodetect tests, ffplay playback of the decoded WAV. | `oxideav-ac3` is MIT. |
+| **Monkey's Audio / APE** | Pending. A pure Rust decoder exists (`ape-decoder`), but the local FFmpeg build can decode APE and does not expose an APE encoder, so it cannot currently satisfy the repo rule that new committed fixtures are regenerated with FFmpeg. | Not added in this pass. | `ape-decoder` is MIT OR Apache-2.0. |
+
+Ogg is only the container; Ogg Vorbis and Ogg Opus use different audio codecs.
 
 ---

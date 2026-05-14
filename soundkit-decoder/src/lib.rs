@@ -14,6 +14,9 @@ use soundkit::raw_pcm::RawPcmStreamProcessor;
 pub use soundkit::raw_pcm::{RawPcmFormat, RawPcmSampleFormat};
 use soundkit::wav::WavStreamProcessor;
 use soundkit_aac::{AacDecoder, AacDecoderMp4};
+use soundkit_ac3::Ac3Decoder;
+use soundkit_aiff::AiffDecoder;
+use soundkit_alac::AlacDecoder;
 use soundkit_amr::AmrNbDecoder;
 use soundkit_flac::FlacDecoderClaxon;
 use soundkit_g711::G711Decoder;
@@ -262,6 +265,12 @@ enum FormatDecoder {
     Speex(Box<SpeexDecoder>),
     /// Ogg-wrapped Vorbis stream
     Vorbis(Box<VorbisDecoder>),
+    /// ALAC in M4A/MP4 or CAF containers
+    Alac(Box<AlacDecoder>),
+    /// AIFF or AIFF-C container decoder
+    Aiff(Box<AiffDecoder>),
+    /// Raw AC-3 syncframe stream
+    Ac3(Box<Ac3Decoder>),
 }
 
 /// Helper to decode using the Decoder trait and drain all buffered frames.
@@ -481,6 +490,15 @@ impl StreamingDecoder for FormatDecoder {
                 process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
             }
             FormatDecoder::Vorbis(dec) => {
+                process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
+            }
+            FormatDecoder::Alac(dec) => {
+                process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
+            }
+            FormatDecoder::Aiff(dec) => {
+                process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
+            }
+            FormatDecoder::Ac3(dec) => {
                 process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
             }
         }
@@ -758,6 +776,62 @@ impl DecodePipeline {
         )
     }
 
+    /// Create a pipeline for ALAC in M4A/MP4 or CAF containers.
+    pub fn spawn_alac() -> DecodePipelineHandle {
+        Self::spawn_alac_with_options(DecodeOptions::default())
+    }
+
+    /// Create an ALAC pipeline with output conversion options.
+    pub fn spawn_alac_with_options(options: DecodeOptions) -> DecodePipelineHandle {
+        let mut decoder = AlacDecoder::new();
+        let _ = decoder.init();
+        let decoder = FormatDecoder::Alac(Box::new(decoder));
+        Self::spawn_with_initial_decoder(
+            DEFAULT_INPUT_BUFFER,
+            DEFAULT_OUTPUT_BUFFER,
+            options,
+            Some(decoder),
+        )
+    }
+
+    /// Create a pipeline for AIFF or AIFF-C containers.
+    pub fn spawn_aiff() -> DecodePipelineHandle {
+        Self::spawn_aiff_with_options(DecodeOptions::default())
+    }
+
+    /// Create an AIFF/AIFF-C pipeline with output conversion options.
+    pub fn spawn_aiff_with_options(options: DecodeOptions) -> DecodePipelineHandle {
+        let mut decoder = AiffDecoder::new();
+        let _ = decoder.init();
+        let decoder = FormatDecoder::Aiff(Box::new(decoder));
+        Self::spawn_with_initial_decoder(
+            DEFAULT_INPUT_BUFFER,
+            DEFAULT_OUTPUT_BUFFER,
+            options,
+            Some(decoder),
+        )
+    }
+
+    /// Create a pipeline for raw AC-3 syncframe streams.
+    pub fn spawn_ac3() -> Result<DecodePipelineHandle, DecodeError> {
+        Self::spawn_ac3_with_options(DecodeOptions::default())
+    }
+
+    /// Create a raw AC-3 pipeline with output conversion options.
+    pub fn spawn_ac3_with_options(
+        options: DecodeOptions,
+    ) -> Result<DecodePipelineHandle, DecodeError> {
+        let decoder = FormatDecoder::Ac3(Box::new(
+            Ac3Decoder::try_new().map_err(DecodeError::DecoderInitFailed)?,
+        ));
+        Ok(Self::spawn_with_initial_decoder(
+            DEFAULT_INPUT_BUFFER,
+            DEFAULT_OUTPUT_BUFFER,
+            options,
+            Some(decoder),
+        ))
+    }
+
     fn spawn_with_initial_decoder(
         input_buffer: usize,
         output_buffer: usize,
@@ -957,6 +1031,23 @@ fn detect_and_init_decoder(buffer: &[u8]) -> Result<FormatDecoder, DecodeError> 
         return Ok(FormatDecoder::Vorbis(Box::new(decoder)));
     }
 
+    if is_mp4_or_caf_alac(buffer) {
+        let mut decoder = AlacDecoder::new();
+        decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+        return Ok(FormatDecoder::Alac(Box::new(decoder)));
+    }
+
+    if is_aiff_or_aifc(buffer) {
+        let mut decoder = AiffDecoder::new();
+        decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+        return Ok(FormatDecoder::Aiff(Box::new(decoder)));
+    }
+
+    if soundkit_ac3::looks_like_ac3(buffer) {
+        let decoder = Ac3Decoder::try_new().map_err(DecodeError::DecoderInitFailed)?;
+        return Ok(FormatDecoder::Ac3(Box::new(decoder)));
+    }
+
     let audio_type = detect_audio(buffer);
     match audio_type {
         AudioType::MP3 => {
@@ -1009,6 +1100,19 @@ fn is_ogg_vorbis(buffer: &[u8]) -> bool {
         && buffer
             .windows(b"\x01vorbis".len())
             .any(|w| w == b"\x01vorbis")
+}
+
+fn is_mp4_or_caf_alac(buffer: &[u8]) -> bool {
+    (buffer.starts_with(b"caff") && buffer.windows(b"alac".len()).any(|w| w == b"alac"))
+        || (buffer.len() >= 12
+            && &buffer[4..8] == b"ftyp"
+            && buffer.windows(8).any(|w| &w[4..8] == b"alac"))
+}
+
+fn is_aiff_or_aifc(buffer: &[u8]) -> bool {
+    buffer.len() >= 12
+        && &buffer[0..4] == b"FORM"
+        && (&buffer[8..12] == b"AIFF" || &buffer[8..12] == b"AIFC")
 }
 
 /// Process a chunk through the decoder using the unified StreamingDecoder trait.
@@ -1951,6 +2055,175 @@ mod tests {
         assert!(!frames.is_empty(), "No autodetected Vorbis frames decoded");
         assert!(frames.iter().all(|frame| frame.channel_count() == 1));
         assert!(frames.iter().all(|frame| frame.sampling_rate() == 8_000));
+    }
+
+    #[test]
+    fn test_decode_explicit_alac_stream() {
+        let data = Bytes::from(
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("testdata")
+                    .join("alac/A_Tusk_is_used_to_make_costly_gifts.m4a"),
+            )
+            .unwrap(),
+        );
+
+        let mut pipeline = DecodePipeline::spawn_alac();
+        for start in (0..data.len()).step_by(997) {
+            let end = (start + 997).min(data.len());
+            pipeline.send(data.slice(start..end)).unwrap();
+        }
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert_eq!(frames.len(), 1, "ALAC should decode once EOF is signalled");
+        assert_eq!(frames[0].bits_per_sample(), 16);
+        assert_eq!(frames[0].channel_count(), 1);
+        assert_eq!(frames[0].sampling_rate(), 8_000);
+        assert!(frames[0]
+            .data()
+            .chunks_exact(2)
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .any(|sample| sample != 0));
+    }
+
+    #[test]
+    fn test_decode_alac_autodetect() {
+        let data = Bytes::from(
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("testdata")
+                    .join("alac/A_Tusk_is_used_to_make_costly_gifts.m4a"),
+            )
+            .unwrap(),
+        );
+
+        let mut pipeline = DecodePipeline::spawn();
+        pipeline.send(data).unwrap();
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert_eq!(frames.len(), 1, "No autodetected ALAC frame decoded");
+        assert_eq!(frames[0].channel_count(), 1);
+        assert_eq!(frames[0].sampling_rate(), 8_000);
+    }
+
+    #[test]
+    fn test_decode_explicit_aiff_streams() {
+        for fixture_name in [
+            "aiff/A_Tusk_is_used_to_make_costly_gifts.aiff",
+            "aifc/A_Tusk_is_used_to_make_costly_gifts.aifc",
+        ] {
+            let data = Bytes::from(
+                fs::read(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("..")
+                        .join("testdata")
+                        .join(fixture_name),
+                )
+                .unwrap(),
+            );
+
+            let mut pipeline = DecodePipeline::spawn_aiff();
+            for start in (0..data.len()).step_by(997) {
+                let end = (start + 997).min(data.len());
+                pipeline.send(data.slice(start..end)).unwrap();
+            }
+            pipeline.send(Bytes::new()).unwrap();
+
+            let frames = recv_until_done(&mut pipeline);
+            assert_eq!(frames.len(), 1, "{fixture_name} should decode at EOF");
+            assert_eq!(frames[0].bits_per_sample(), 16);
+            assert_eq!(frames[0].channel_count(), 1);
+            assert_eq!(frames[0].sampling_rate(), 8_000);
+            assert!(frames[0]
+                .data()
+                .chunks_exact(2)
+                .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+                .any(|sample| sample != 0));
+        }
+    }
+
+    #[test]
+    fn test_decode_aiff_autodetect() {
+        for fixture_name in [
+            "aiff/A_Tusk_is_used_to_make_costly_gifts.aiff",
+            "aifc/A_Tusk_is_used_to_make_costly_gifts.aifc",
+        ] {
+            let data = Bytes::from(
+                fs::read(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("..")
+                        .join("testdata")
+                        .join(fixture_name),
+                )
+                .unwrap(),
+            );
+
+            let mut pipeline = DecodePipeline::spawn();
+            pipeline.send(data).unwrap();
+            pipeline.send(Bytes::new()).unwrap();
+
+            let frames = recv_until_done(&mut pipeline);
+            assert_eq!(frames.len(), 1, "No autodetected AIFF frame decoded");
+            assert_eq!(frames[0].channel_count(), 1);
+            assert_eq!(frames[0].sampling_rate(), 8_000);
+        }
+    }
+
+    #[test]
+    fn test_decode_explicit_ac3_stream() {
+        let data = Bytes::from(
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("testdata")
+                    .join("ac3/A_Tusk_is_used_to_make_costly_gifts.ac3"),
+            )
+            .unwrap(),
+        );
+
+        let mut pipeline = DecodePipeline::spawn_ac3().unwrap();
+        for start in (0..data.len()).step_by(997) {
+            let end = (start + 997).min(data.len());
+            pipeline.send(data.slice(start..end)).unwrap();
+        }
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert!(!frames.is_empty(), "No AC-3 frames decoded");
+        assert!(frames.iter().all(|frame| frame.bits_per_sample() == 16));
+        assert!(frames.iter().all(|frame| frame.channel_count() == 1));
+        assert!(frames.iter().all(|frame| frame.sampling_rate() == 48_000));
+        assert!(frames
+            .iter()
+            .flat_map(|frame| frame.data().chunks_exact(2))
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .any(|sample| sample != 0));
+    }
+
+    #[test]
+    fn test_decode_ac3_autodetect() {
+        let data = Bytes::from(
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("testdata")
+                    .join("ac3/A_Tusk_is_used_to_make_costly_gifts.ac3"),
+            )
+            .unwrap(),
+        );
+
+        let mut pipeline = DecodePipeline::spawn();
+        pipeline.send(data).unwrap();
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert!(!frames.is_empty(), "No autodetected AC-3 frames decoded");
+        assert!(frames.iter().all(|frame| frame.channel_count() == 1));
+        assert!(frames.iter().all(|frame| frame.sampling_rate() == 48_000));
     }
 
     #[test]
