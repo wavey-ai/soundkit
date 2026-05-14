@@ -1,15 +1,11 @@
-use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, Decoder as OxideDecoder, Encoder as OxideEncoder,
-    Error as OxideError, Frame, Packet, SampleFormat, TimeBase,
-};
-use oxideav_gsm::frame::{FRAME_SIZE, MS_FRAME_SIZE};
 use soundkit::audio_packet::{Decoder, Encoder};
+use std::ptr::NonNull;
 
 pub const GSM_SAMPLE_RATE: u32 = 8_000;
 pub const GSM_CHANNELS: u8 = 1;
 pub const GSM_FRAME_SAMPLES: usize = 160;
-pub const GSM_FRAME_BYTES: usize = FRAME_SIZE;
-pub const GSM_MS_FRAME_BYTES: usize = MS_FRAME_SIZE;
+pub const GSM_FRAME_BYTES: usize = 33;
+pub const GSM_MS_FRAME_BYTES: usize = 65;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GsmVariant {
@@ -20,13 +16,6 @@ pub enum GsmVariant {
 }
 
 impl GsmVariant {
-    fn codec_id(self) -> &'static str {
-        match self {
-            Self::Standard => oxideav_gsm::CODEC_ID_STR,
-            Self::Microsoft => oxideav_gsm::CODEC_ID_MS_STR,
-        }
-    }
-
     fn packet_bytes(self) -> usize {
         match self {
             Self::Standard => GSM_FRAME_BYTES,
@@ -40,40 +29,65 @@ impl GsmVariant {
             Self::Microsoft => GSM_FRAME_SAMPLES * 2,
         }
     }
+}
 
-    fn frames_per_packet(self) -> usize {
-        match self {
-            Self::Standard => 1,
-            Self::Microsoft => 2,
+struct GsmState {
+    ptr: NonNull<gsm_sys::GsmState>,
+}
+
+impl GsmState {
+    fn new() -> Result<Self, String> {
+        let ptr = unsafe { gsm_sys::gsm_create() };
+        let ptr = NonNull::new(ptr).ok_or_else(|| "failed to initialize GSM state".to_string())?;
+        Ok(Self { ptr })
+    }
+
+    fn encode_standard(&mut self, samples: &[i16; GSM_FRAME_SAMPLES]) -> [u8; GSM_FRAME_BYTES] {
+        let mut input = *samples;
+        let mut output = [0u8; GSM_FRAME_BYTES];
+        unsafe { gsm_sys::gsm_encode(self.ptr.as_ptr(), input.as_mut_ptr(), output.as_mut_ptr()) };
+        output
+    }
+
+    fn decode_standard(
+        &mut self,
+        frame: &[u8; GSM_FRAME_BYTES],
+    ) -> Result<[i16; GSM_FRAME_SAMPLES], String> {
+        let mut input = *frame;
+        let mut output = [0i16; GSM_FRAME_SAMPLES];
+        let status = unsafe {
+            gsm_sys::gsm_decode(self.ptr.as_ptr(), input.as_mut_ptr(), output.as_mut_ptr())
+        };
+        if status < 0 {
+            return Err("GSM decoder rejected frame".to_string());
         }
+        Ok(output)
     }
 }
 
-fn codec_params(variant: GsmVariant) -> CodecParameters {
-    let mut params = CodecParameters::audio(CodecId::new(variant.codec_id()));
-    params.sample_rate = Some(GSM_SAMPLE_RATE);
-    params.channels = Some(GSM_CHANNELS as u16);
-    params.sample_format = Some(SampleFormat::S16);
-    params
+impl Drop for GsmState {
+    fn drop(&mut self) {
+        unsafe { gsm_sys::gsm_destroy(self.ptr.as_ptr()) };
+    }
 }
 
+// The libgsm state is owned exclusively and accessed only via `&mut self`.
+unsafe impl Send for GsmState {}
+
 pub struct GsmEncoder {
-    inner: Box<dyn OxideEncoder>,
+    state: GsmState,
     variant: GsmVariant,
     pending_samples: Vec<i16>,
-    pending_ms_half: bool,
-    pts: i64,
+    pending_ms_frame: Option<[u8; GSM_FRAME_BYTES]>,
 }
 
 impl GsmEncoder {
     pub fn try_new(variant: GsmVariant) -> Result<Self, String> {
         Ok(Self {
-            inner: oxideav_gsm::encoder::make_encoder(&codec_params(variant))
-                .map_err(oxide_error_to_string)?,
+            state: GsmState::new()?,
             variant,
             pending_samples: Vec::with_capacity(GSM_FRAME_SAMPLES),
-            pending_ms_half: false,
-            pts: 0,
+            pending_ms_frame: None,
         })
     }
 
@@ -108,8 +122,27 @@ impl GsmEncoder {
             ));
         }
 
-        self.send_complete_samples(&[], true)?;
-        self.drain_packets(output)
+        let mut written = 0;
+        if !self.pending_samples.is_empty() {
+            let mut frame = [0i16; GSM_FRAME_SAMPLES];
+            frame[..self.pending_samples.len()].copy_from_slice(&self.pending_samples);
+            self.pending_samples.clear();
+            let encoded = self.state.encode_standard(&frame);
+            self.emit_encoded_standard(encoded, output, &mut written)?;
+        }
+
+        if self.variant == GsmVariant::Microsoft {
+            if let Some(first) = self.pending_ms_frame.take() {
+                let silence = [0i16; GSM_FRAME_SAMPLES];
+                let second = self.state.encode_standard(&silence);
+                let packet = pack_ms_pair(&first, &second);
+                let end = written + GSM_MS_FRAME_BYTES;
+                output[written..end].copy_from_slice(&packet);
+                written = end;
+            }
+        }
+
+        Ok(written)
     }
 
     pub fn flush_to_vec(&mut self, output: &mut Vec<u8>) -> Result<usize, String> {
@@ -124,7 +157,6 @@ impl GsmEncoder {
     fn required_encode_bytes(&self, input_samples: usize, flush: bool) -> usize {
         let total_samples = self.pending_samples.len() + input_samples;
         let mut complete_frames = total_samples / GSM_FRAME_SAMPLES;
-
         if flush && total_samples % GSM_FRAME_SAMPLES != 0 {
             complete_frames += 1;
         }
@@ -132,89 +164,56 @@ impl GsmEncoder {
         match self.variant {
             GsmVariant::Standard => complete_frames * GSM_FRAME_BYTES,
             GsmVariant::Microsoft => {
-                let pending = self.pending_ms_half as usize;
+                let pending = usize::from(self.pending_ms_frame.is_some());
+                let frames = pending + complete_frames;
                 let packets = if flush {
-                    (pending + complete_frames).div_ceil(2)
+                    frames.div_ceil(2)
                 } else {
-                    (pending + complete_frames) / 2
+                    frames / 2
                 };
                 packets * GSM_MS_FRAME_BYTES
             }
         }
     }
 
-    fn send_complete_samples(&mut self, input: &[i16], flush: bool) -> Result<(), String> {
-        let total_samples = self.pending_samples.len() + input.len();
-        let mut complete_samples = (total_samples / GSM_FRAME_SAMPLES) * GSM_FRAME_SAMPLES;
-        if flush && total_samples % GSM_FRAME_SAMPLES != 0 {
-            complete_samples = total_samples.div_ceil(GSM_FRAME_SAMPLES) * GSM_FRAME_SAMPLES;
-        }
-
-        let mut samples = Vec::with_capacity(complete_samples);
-        samples.extend_from_slice(&self.pending_samples);
-        samples.extend_from_slice(input);
-
-        if flush && samples.len() < complete_samples {
-            samples.resize(complete_samples, 0);
-        }
-
-        let trailing = if complete_samples <= samples.len() {
-            samples[complete_samples..].to_vec()
-        } else {
-            Vec::new()
-        };
-        samples.truncate(complete_samples);
-
-        if !samples.is_empty() {
-            let bytes = i16_to_s16le(&samples);
-            let frame = Frame::Audio(AudioFrame {
-                samples: samples.len() as u32,
-                pts: Some(self.pts),
-                data: vec![bytes],
-            });
-            self.inner
-                .send_frame(&frame)
-                .map_err(oxide_error_to_string)?;
-            self.pts += samples.len() as i64;
-            let frame_count = samples.len() / GSM_FRAME_SAMPLES;
-            if self.variant == GsmVariant::Microsoft {
-                self.pending_ms_half = (self.pending_ms_half as usize + frame_count) % 2 != 0;
+    fn emit_encoded_standard(
+        &mut self,
+        frame: [u8; GSM_FRAME_BYTES],
+        output: &mut [u8],
+        written: &mut usize,
+    ) -> Result<(), String> {
+        match self.variant {
+            GsmVariant::Standard => {
+                let end = *written + GSM_FRAME_BYTES;
+                if end > output.len() {
+                    return Err(format!(
+                        "Output buffer too small for GSM encode: need {}, have {}",
+                        end,
+                        output.len()
+                    ));
+                }
+                output[*written..end].copy_from_slice(&frame);
+                *written = end;
             }
-        }
-
-        self.pending_samples.clear();
-        self.pending_samples.extend_from_slice(&trailing);
-
-        if flush {
-            self.pending_samples.clear();
-            self.inner.flush().map_err(oxide_error_to_string)?;
-            self.pending_ms_half = false;
-        }
-
-        Ok(())
-    }
-
-    fn drain_packets(&mut self, output: &mut [u8]) -> Result<usize, String> {
-        let mut written = 0;
-        loop {
-            match self.inner.receive_packet() {
-                Ok(packet) => {
-                    let end = written + packet.data.len();
+            GsmVariant::Microsoft => {
+                if let Some(first) = self.pending_ms_frame.take() {
+                    let packet = pack_ms_pair(&first, &frame);
+                    let end = *written + GSM_MS_FRAME_BYTES;
                     if end > output.len() {
                         return Err(format!(
-                            "Output buffer too small for GSM encode: need at least {}, have {}",
+                            "Output buffer too small for GSM-MS encode: need {}, have {}",
                             end,
                             output.len()
                         ));
                     }
-                    output[written..end].copy_from_slice(&packet.data);
-                    written = end;
+                    output[*written..end].copy_from_slice(&packet);
+                    *written = end;
+                } else {
+                    self.pending_ms_frame = Some(frame);
                 }
-                Err(OxideError::NeedMore) | Err(OxideError::Eof) => break,
-                Err(error) => return Err(oxide_error_to_string(error)),
             }
         }
-        Ok(written)
+        Ok(())
     }
 }
 
@@ -249,8 +248,26 @@ impl Encoder for GsmEncoder {
             ));
         }
 
-        self.send_complete_samples(input, false)?;
-        self.drain_packets(output)
+        let total_samples = self.pending_samples.len() + input.len();
+        let complete_samples = (total_samples / GSM_FRAME_SAMPLES) * GSM_FRAME_SAMPLES;
+
+        let mut samples = Vec::with_capacity(total_samples);
+        samples.extend_from_slice(&self.pending_samples);
+        samples.extend_from_slice(input);
+
+        let mut written = 0;
+        for chunk in samples[..complete_samples].chunks_exact(GSM_FRAME_SAMPLES) {
+            let mut frame = [0i16; GSM_FRAME_SAMPLES];
+            frame.copy_from_slice(chunk);
+            let encoded = self.state.encode_standard(&frame);
+            self.emit_encoded_standard(encoded, output, &mut written)?;
+        }
+
+        self.pending_samples.clear();
+        self.pending_samples
+            .extend_from_slice(&samples[complete_samples..]);
+
+        Ok(written)
     }
 
     fn encode_i32(&mut self, input: &[i32], output: &mut [u8]) -> Result<usize, String> {
@@ -259,17 +276,15 @@ impl Encoder for GsmEncoder {
     }
 
     fn reset(&mut self) -> Result<(), String> {
-        self.inner = oxideav_gsm::encoder::make_encoder(&codec_params(self.variant))
-            .map_err(oxide_error_to_string)?;
+        self.state = GsmState::new()?;
         self.pending_samples.clear();
-        self.pending_ms_half = false;
-        self.pts = 0;
+        self.pending_ms_frame = None;
         Ok(())
     }
 }
 
 pub struct GsmDecoder {
-    inner: Box<dyn OxideDecoder>,
+    state: GsmState,
     variant: GsmVariant,
     pending_bytes: Vec<u8>,
 }
@@ -277,8 +292,7 @@ pub struct GsmDecoder {
 impl GsmDecoder {
     pub fn try_new(variant: GsmVariant) -> Result<Self, String> {
         Ok(Self {
-            inner: oxideav_gsm::decoder::make_decoder(&codec_params(variant))
-                .map_err(oxide_error_to_string)?,
+            state: GsmState::new()?,
             variant,
             pending_bytes: Vec::with_capacity(variant.packet_bytes()),
         })
@@ -306,7 +320,7 @@ impl GsmDecoder {
 
     pub fn flush(&mut self) -> Result<(), String> {
         if self.pending_bytes.is_empty() {
-            self.inner.flush().map_err(oxide_error_to_string)
+            Ok(())
         } else {
             Err(format!(
                 "GSM stream ended with {} trailing partial-frame byte(s)",
@@ -348,31 +362,24 @@ impl Decoder for GsmDecoder {
         bytes.extend_from_slice(input);
 
         let mut written = 0;
-        let frames_per_packet = self.variant.frames_per_packet();
         for packet_data in bytes[..complete_bytes].chunks_exact(packet_bytes) {
-            let packet = Packet::new(
-                0,
-                TimeBase::new(1, GSM_SAMPLE_RATE as i64),
-                packet_data.to_vec(),
-            );
-            self.inner
-                .send_packet(&packet)
-                .map_err(oxide_error_to_string)?;
-
-            for _ in 0..frames_per_packet {
-                match self.inner.receive_frame() {
-                    Ok(Frame::Audio(frame)) => {
-                        let data = frame
-                            .data
-                            .first()
-                            .ok_or_else(|| "GSM decoder produced empty audio frame".to_string())?;
-                        for sample in s16le_to_i16(data) {
-                            output[written] = sample;
-                            written += 1;
-                        }
+            match self.variant {
+                GsmVariant::Standard => {
+                    let mut frame = [0u8; GSM_FRAME_BYTES];
+                    frame.copy_from_slice(packet_data);
+                    let decoded = self.state.decode_standard(&frame)?;
+                    output[written..written + GSM_FRAME_SAMPLES].copy_from_slice(&decoded);
+                    written += GSM_FRAME_SAMPLES;
+                }
+                GsmVariant::Microsoft => {
+                    let mut packet = [0u8; GSM_MS_FRAME_BYTES];
+                    packet.copy_from_slice(packet_data);
+                    let [first, second] = unpack_ms_pair(&packet);
+                    for frame in [first, second] {
+                        let decoded = self.state.decode_standard(&frame)?;
+                        output[written..written + GSM_FRAME_SAMPLES].copy_from_slice(&decoded);
+                        written += GSM_FRAME_SAMPLES;
                     }
-                    Ok(_) => {}
-                    Err(error) => return Err(oxide_error_to_string(error)),
                 }
             }
         }
@@ -433,23 +440,47 @@ impl Decoder for GsmDecoder {
     }
 }
 
+fn read_bit(input: &[u8], bit_index: usize) -> u8 {
+    (input[bit_index / 8] >> (7 - (bit_index % 8))) & 1
+}
+
+fn write_bit(output: &mut [u8], bit_index: usize, bit: u8) {
+    if bit != 0 {
+        output[bit_index / 8] |= 1 << (7 - (bit_index % 8));
+    }
+}
+
+fn pack_ms_pair(
+    first: &[u8; GSM_FRAME_BYTES],
+    second: &[u8; GSM_FRAME_BYTES],
+) -> [u8; GSM_MS_FRAME_BYTES] {
+    let mut output = [0u8; GSM_MS_FRAME_BYTES];
+    for index in 0..260 {
+        write_bit(&mut output, index, read_bit(first, index + 4));
+        write_bit(&mut output, index + 260, read_bit(second, index + 4));
+    }
+    output
+}
+
+fn unpack_ms_pair(packet: &[u8; GSM_MS_FRAME_BYTES]) -> [[u8; GSM_FRAME_BYTES]; 2] {
+    let mut first = [0u8; GSM_FRAME_BYTES];
+    let mut second = [0u8; GSM_FRAME_BYTES];
+    first[0] = 0xD0;
+    second[0] = 0xD0;
+    for index in 0..260 {
+        write_bit(&mut first, index + 4, read_bit(packet, index));
+        write_bit(&mut second, index + 4, read_bit(packet, index + 260));
+    }
+    [first, second]
+}
+
+#[cfg(test)]
 fn i16_to_s16le(input: &[i16]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(input.len() * 2);
     for &sample in input {
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
     bytes
-}
-
-fn s16le_to_i16(input: &[u8]) -> Vec<i16> {
-    input
-        .chunks_exact(2)
-        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect()
-}
-
-fn oxide_error_to_string(error: OxideError) -> String {
-    error.to_string()
 }
 
 #[cfg(test)]
@@ -471,12 +502,6 @@ mod tests {
             .join("..")
             .join("golden")
             .join(file)
-    }
-
-    fn read_s16le_fixture(path: &str) -> Vec<i16> {
-        let bytes = fs::read(testdata_path(path)).unwrap();
-        assert!(!bytes.is_empty(), "{path} missing or empty");
-        s16le_to_i16(&bytes)
     }
 
     fn samples() -> Vec<i16> {
@@ -617,14 +642,31 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "regenerates the committed GSM fixture from the 8 kHz linear16 fixture"]
+    #[ignore = "regenerates the committed GSM fixture from the 8 kHz linear16 fixture using SoX/libgsm"]
     fn generate_gsm_fixture_from_linear16_8() {
-        let samples = read_s16le_fixture("linear16_8/A_Tusk_is_used_to_make_costly_gifts.s16le");
-        let encoded = encode_fixture(&samples, GsmVariant::Standard);
+        let input = testdata_path("linear16_8/A_Tusk_is_used_to_make_costly_gifts.s16le");
+        let output = testdata_path("gsm/A_Tusk_is_used_to_make_costly_gifts.gsm");
+        fs::create_dir_all(output.parent().unwrap()).unwrap();
 
-        let output_path = testdata_path("gsm/A_Tusk_is_used_to_make_costly_gifts.gsm");
-        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
-        fs::write(output_path, encoded).unwrap();
+        let status = Command::new("sox")
+            .args([
+                "-t",
+                "raw",
+                "-r",
+                "8000",
+                "-e",
+                "signed-integer",
+                "-b",
+                "16",
+                "-c",
+                "1",
+            ])
+            .arg(&input)
+            .args(["-t", "gsm"])
+            .arg(&output)
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 
     #[test]
@@ -686,8 +728,15 @@ mod tests {
             }
         }
 
-        let decoded = fs::read(&output_path).unwrap();
-        assert!(!decoded.is_empty(), "ffmpeg produced empty GSM decode");
-        assert!(s16le_to_i16(&decoded).iter().any(|&sample| sample != 0));
+        let fixture = fs::read(&input_path).unwrap();
+        let mut decoder = GsmDecoder::new_standard();
+        let mut decoded = vec![0i16; fixture.len() / GSM_FRAME_BYTES * GSM_FRAME_SAMPLES];
+        let decoded_len = decoder.decode_i16(&fixture, &mut decoded, false).unwrap();
+        decoded.truncate(decoded_len);
+        let native = i16_to_s16le(&decoded);
+        let ffmpeg = fs::read(&output_path).unwrap();
+
+        assert!(!ffmpeg.is_empty(), "ffmpeg produced empty GSM decode");
+        assert_eq!(native, ffmpeg, "native GSM decode differs from ffmpeg");
     }
 }
