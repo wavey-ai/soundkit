@@ -14,14 +14,20 @@ use soundkit::raw_pcm::RawPcmStreamProcessor;
 pub use soundkit::raw_pcm::{RawPcmFormat, RawPcmSampleFormat};
 use soundkit::wav::WavStreamProcessor;
 use soundkit_aac::{AacDecoder, AacDecoderMp4};
+use soundkit_amr::AmrNbDecoder;
 use soundkit_flac::FlacDecoderClaxon;
 use soundkit_g711::G711Decoder;
 pub use soundkit_g711::G711Law;
 use soundkit_g722::G722Decoder;
+use soundkit_g726::G726Decoder;
+pub use soundkit_g726::{G726Packing, G726Rate};
 use soundkit_g729::G729Decoder;
+use soundkit_gsm::GsmDecoder;
+pub use soundkit_gsm::GsmVariant;
 use soundkit_mp3::Mp3Decoder;
 use soundkit_ogg_opus::OggOpusDecoder;
 use soundkit_opus::OpusStreamDecoder;
+use soundkit_speex::SpeexDecoder;
 use soundkit_webm::WebmDecoder;
 use std::thread;
 
@@ -239,12 +245,20 @@ enum FormatDecoder {
     Wav(Box<WavStreamProcessor>),
     /// Headerless raw PCM stream with caller-provided metadata
     RawPcm(Box<RawPcmStreamProcessor>),
+    /// AMR-NB file/raw frame stream
+    AmrNb(Box<AmrNbDecoder>),
     /// Headerless G.711 stream with caller-provided law/sample metadata
     G711(Box<G711Decoder>),
     /// Headerless G.722 64 kbit/s mono wideband stream
     G722(Box<G722Decoder>),
+    /// Headerless G.726-32 8 kHz mono ADPCM stream
+    G726(Box<G726Decoder>),
     /// Headerless G.729 8 kbit/s mono stream
     G729(Box<G729Decoder>),
+    /// Headerless GSM 06.10 8 kHz mono stream
+    Gsm(Box<GsmDecoder>),
+    /// Ogg-wrapped Speex stream
+    Speex(Box<SpeexDecoder>),
 }
 
 /// Helper to decode using the Decoder trait and drain all buffered frames.
@@ -406,6 +420,15 @@ impl StreamingDecoder for FormatDecoder {
             FormatDecoder::RawPcm(dec) => {
                 process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
             }
+            FormatDecoder::AmrNb(dec) => {
+                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                    Some(create_audio_data_i16(
+                        d.sample_rate(),
+                        d.channels(),
+                        &output[..samples],
+                    ))
+                })
+            }
             FormatDecoder::G711(dec) => {
                 decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
                     Some(create_audio_data_i16(
@@ -424,6 +447,15 @@ impl StreamingDecoder for FormatDecoder {
                     ))
                 })
             }
+            FormatDecoder::G726(dec) => {
+                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                    Some(create_audio_data_i16(
+                        d.sample_rate(),
+                        d.channels(),
+                        &output[..samples],
+                    ))
+                })
+            }
             FormatDecoder::G729(dec) => {
                 decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
                     Some(create_audio_data_i16(
@@ -433,13 +465,37 @@ impl StreamingDecoder for FormatDecoder {
                     ))
                 })
             }
+            FormatDecoder::Gsm(dec) => {
+                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                    Some(create_audio_data_i16(
+                        d.sample_rate(),
+                        d.channels(),
+                        &output[..samples],
+                    ))
+                })
+            }
+            FormatDecoder::Speex(dec) => {
+                process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
+            }
         }
     }
 
     fn flush(&mut self) -> Result<Vec<AudioData>, String> {
         match self {
             FormatDecoder::RawPcm(dec) => dec.flush().map(|frame| frame.into_iter().collect()),
+            FormatDecoder::AmrNb(dec) => {
+                dec.flush()?;
+                Ok(Vec::new())
+            }
             FormatDecoder::G729(dec) => {
+                dec.flush()?;
+                Ok(Vec::new())
+            }
+            FormatDecoder::G726(dec) => {
+                dec.flush()?;
+                Ok(Vec::new())
+            }
+            FormatDecoder::Gsm(dec) => {
                 dec.flush()?;
                 Ok(Vec::new())
             }
@@ -505,6 +561,30 @@ impl DecodePipeline {
         )
     }
 
+    /// Create a pipeline for AMR-NB streams.
+    ///
+    /// Both 3GPP AMR files with `#!AMR\n` magic and raw AMR-NB frame streams
+    /// are accepted. AMR-WB is intentionally separate because it has a
+    /// different sample rate, frame size, and OpenCORE API.
+    pub fn spawn_amr_nb() -> Result<DecodePipelineHandle, DecodeError> {
+        Self::spawn_amr_nb_with_options(DecodeOptions::default())
+    }
+
+    /// Create an AMR-NB pipeline with output conversion options.
+    pub fn spawn_amr_nb_with_options(
+        options: DecodeOptions,
+    ) -> Result<DecodePipelineHandle, DecodeError> {
+        let decoder = FormatDecoder::AmrNb(Box::new(
+            AmrNbDecoder::try_new().map_err(DecodeError::DecoderInitFailed)?,
+        ));
+        Ok(Self::spawn_with_initial_decoder(
+            DEFAULT_INPUT_BUFFER,
+            DEFAULT_OUTPUT_BUFFER,
+            options,
+            Some(decoder),
+        ))
+    }
+
     /// Create a pipeline for headerless G.711 streams.
     ///
     /// These streams cannot be autodetected reliably, so the law, sample rate,
@@ -564,6 +644,31 @@ impl DecodePipeline {
         )
     }
 
+    /// Create a pipeline for headerless G.726-32 8 kHz mono streams.
+    ///
+    /// Use `G726Packing::Left` for raw `ffmpeg -f g726` streams and
+    /// `G726Packing::Right` for `ffmpeg -f g726le` streams.
+    pub fn spawn_g726(packing: G726Packing) -> Result<DecodePipelineHandle, DecodeError> {
+        Self::spawn_g726_with_options(packing, DecodeOptions::default())
+    }
+
+    /// Create a G.726-32 pipeline with output conversion options.
+    pub fn spawn_g726_with_options(
+        packing: G726Packing,
+        options: DecodeOptions,
+    ) -> Result<DecodePipelineHandle, DecodeError> {
+        let decoder = FormatDecoder::G726(Box::new(
+            G726Decoder::try_new(G726Rate::Rate32000, packing)
+                .map_err(DecodeError::DecoderInitFailed)?,
+        ));
+        Ok(Self::spawn_with_initial_decoder(
+            DEFAULT_INPUT_BUFFER,
+            DEFAULT_OUTPUT_BUFFER,
+            options,
+            Some(decoder),
+        ))
+    }
+
     /// Create a pipeline for headerless G.729 8 kbit/s mono streams.
     pub fn spawn_g729() -> Result<DecodePipelineHandle, DecodeError> {
         Self::spawn_g729_with_options(DecodeOptions::default())
@@ -582,6 +687,51 @@ impl DecodePipeline {
             options,
             Some(decoder),
         ))
+    }
+
+    /// Create a pipeline for headerless GSM 06.10 streams.
+    ///
+    /// Use `GsmVariant::Standard` for raw `.gsm`/ETSI 33-byte frames and
+    /// `GsmVariant::Microsoft` for WAV-49 / `gsm_ms` 65-byte two-frame packets.
+    pub fn spawn_gsm(variant: GsmVariant) -> Result<DecodePipelineHandle, DecodeError> {
+        Self::spawn_gsm_with_options(variant, DecodeOptions::default())
+    }
+
+    /// Create a GSM pipeline with output conversion options.
+    pub fn spawn_gsm_with_options(
+        variant: GsmVariant,
+        options: DecodeOptions,
+    ) -> Result<DecodePipelineHandle, DecodeError> {
+        let decoder = FormatDecoder::Gsm(Box::new(
+            GsmDecoder::try_new(variant).map_err(DecodeError::DecoderInitFailed)?,
+        ));
+        Ok(Self::spawn_with_initial_decoder(
+            DEFAULT_INPUT_BUFFER,
+            DEFAULT_OUTPUT_BUFFER,
+            options,
+            Some(decoder),
+        ))
+    }
+
+    /// Create a pipeline for Ogg-wrapped Speex streams.
+    ///
+    /// Speex-in-Ogg is not currently autodetected by `access-unit`, so callers
+    /// should choose this explicit path when the transport/container is known.
+    pub fn spawn_speex() -> DecodePipelineHandle {
+        Self::spawn_speex_with_options(DecodeOptions::default())
+    }
+
+    /// Create a Speex pipeline with output conversion options.
+    pub fn spawn_speex_with_options(options: DecodeOptions) -> DecodePipelineHandle {
+        let mut decoder = SpeexDecoder::new();
+        let _ = decoder.init();
+        let decoder = FormatDecoder::Speex(Box::new(decoder));
+        Self::spawn_with_initial_decoder(
+            DEFAULT_INPUT_BUFFER,
+            DEFAULT_OUTPUT_BUFFER,
+            options,
+            Some(decoder),
+        )
     }
 
     fn spawn_with_initial_decoder(
@@ -1516,6 +1666,52 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_explicit_g726_stream() {
+        let samples: Vec<i16> = (0..400)
+            .map(|index| {
+                let phase = index as f32 / 80.0 * PI * 2.0;
+                (phase.sin() * 8_000.0) as i16
+            })
+            .collect();
+
+        let mut encoder = soundkit_g726::G726Encoder::new_32k_left();
+        let mut encoded = Vec::new();
+        encoder.encode_to_vec(&samples, &mut encoded).unwrap();
+        encoder.flush_to_vec(&mut encoded).unwrap();
+
+        let mut direct_decoder = soundkit_g726::G726Decoder::new_32k_left();
+        let mut expected = vec![0i16; encoded.len() * 2];
+        let expected_len = direct_decoder
+            .decode_i16(&encoded, &mut expected, false)
+            .unwrap();
+        expected.truncate(expected_len);
+
+        let mut pipeline = DecodePipeline::spawn_g726(G726Packing::Left).unwrap();
+        for chunk in encoded.chunks(17) {
+            pipeline.send(Bytes::copy_from_slice(chunk)).unwrap();
+        }
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert!(!frames.is_empty());
+        assert!(frames.iter().all(|frame| frame.bits_per_sample() == 16));
+        assert!(frames.iter().all(|frame| frame.channel_count() == 1));
+        assert!(frames.iter().all(|frame| frame.sampling_rate() == 8_000));
+
+        let decoded: Vec<i16> = frames
+            .iter()
+            .flat_map(|frame| {
+                frame
+                    .data()
+                    .chunks_exact(2)
+                    .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
     fn test_decode_explicit_g729_stream() {
         let samples: Vec<i16> = (0..240)
             .map(|index| {
@@ -1558,6 +1754,113 @@ mod tests {
             })
             .collect();
         assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn test_decode_explicit_amr_nb_stream() {
+        let data = Bytes::from(
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("testdata")
+                    .join("amr_nb/A_Tusk_is_used_to_make_costly_gifts.amr"),
+            )
+            .unwrap(),
+        );
+
+        let mut pipeline = DecodePipeline::spawn_amr_nb().unwrap();
+        for start in (0..data.len()).step_by(997) {
+            let end = (start + 997).min(data.len());
+            pipeline.send(data.slice(start..end)).unwrap();
+        }
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert!(!frames.is_empty(), "No AMR-NB frames decoded");
+        assert!(frames.iter().all(|frame| frame.bits_per_sample() == 16));
+        assert!(frames.iter().all(|frame| frame.channel_count() == 1));
+        assert!(frames.iter().all(|frame| frame.sampling_rate() == 8_000));
+        assert!(frames
+            .iter()
+            .flat_map(|frame| frame.data().chunks_exact(2))
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .any(|sample| sample != 0));
+    }
+
+    #[test]
+    fn test_decode_explicit_gsm_stream() {
+        let samples: Vec<i16> = (0..480)
+            .map(|index| {
+                let phase = index as f32 / 80.0 * PI * 2.0;
+                (phase.sin() * 8_000.0) as i16
+            })
+            .collect();
+
+        let mut encoder = soundkit_gsm::GsmEncoder::new_standard();
+        let mut encoded = Vec::new();
+        encoder.encode_to_vec(&samples, &mut encoded).unwrap();
+
+        let mut direct_decoder = soundkit_gsm::GsmDecoder::new_standard();
+        let mut expected = vec![0i16; encoded.len() / 33 * 160];
+        let expected_len = direct_decoder
+            .decode_i16(&encoded, &mut expected, false)
+            .unwrap();
+        expected.truncate(expected_len);
+
+        let mut pipeline = DecodePipeline::spawn_gsm(GsmVariant::Standard).unwrap();
+        for chunk in encoded.chunks(19) {
+            pipeline.send(Bytes::copy_from_slice(chunk)).unwrap();
+        }
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert!(!frames.is_empty());
+        assert!(frames.iter().all(|frame| frame.bits_per_sample() == 16));
+        assert!(frames.iter().all(|frame| frame.channel_count() == 1));
+        assert!(frames.iter().all(|frame| frame.sampling_rate() == 8_000));
+
+        let decoded: Vec<i16> = frames
+            .iter()
+            .flat_map(|frame| {
+                frame
+                    .data()
+                    .chunks_exact(2)
+                    .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn test_decode_explicit_speex_stream() {
+        let data = Bytes::from(
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("testdata")
+                    .join("speex/A_Tusk_is_used_to_make_costly_gifts.spx"),
+            )
+            .unwrap(),
+        );
+
+        let mut pipeline = DecodePipeline::spawn_speex();
+        for start in (0..data.len()).step_by(997) {
+            let end = (start + 997).min(data.len());
+            pipeline.send(data.slice(start..end)).unwrap();
+        }
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert!(!frames.is_empty(), "No Speex frames decoded");
+        assert!(frames.iter().all(|frame| frame.bits_per_sample() == 16));
+        assert!(frames.iter().all(|frame| frame.channel_count() == 1));
+        assert!(frames.iter().all(|frame| frame.sampling_rate() == 8_000));
+        assert!(frames
+            .iter()
+            .flat_map(|frame| frame.data().chunks_exact(2))
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .any(|sample| sample != 0));
     }
 
     #[test]

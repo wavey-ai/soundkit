@@ -1,0 +1,13 @@
+[package]
+name = "soundkit-amr"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "OpenCORE AMR-NB codec wrapper for soundkit."
+repository = "https://github.com/wavey-ai/soundkit"
+
+[dependencies]
+soundkit = { path = "../soundkit" }
+
+[build-dependencies]
+pkg-config = "0.3"

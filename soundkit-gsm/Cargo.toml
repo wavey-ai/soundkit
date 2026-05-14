@@ -1,0 +1,12 @@
+[package]
+name = "soundkit-gsm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Pure Rust GSM 06.10 codec wrapper for soundkit."
+repository = "https://github.com/wavey-ai/soundkit"
+
+[dependencies]
+oxideav-core = "0.1"
+oxideav-gsm = "0.0.8"
+soundkit = { path = "../soundkit" }
