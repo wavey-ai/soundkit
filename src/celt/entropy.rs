@@ -71,6 +71,10 @@ impl RangeEncoder {
         &self.buf[..self.storage as usize]
     }
 
+    pub fn range_data(&self) -> &[u8] {
+        self.buffer()
+    }
+
     pub fn range_bytes(&self) -> u32 {
         self.offs
     }
