@@ -1,4 +1,3 @@
-#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,8 +9,6 @@
 #define SAMPLE_RATE 48000
 #define CHANNELS 2
 #define MAX_PACKET_BYTES 1275
-#define PI_F 3.14159265358979323846f
-
 static const int FRAME_SIZES[] = {120, 240, 480, 960};
 static const int BITRATES[] = {48000, 96000, 128000};
 
@@ -25,10 +22,11 @@ typedef struct {
     int repeats;
     int seconds;
     BenchMode mode;
+    int dump_packets;
 } Options;
 
 static void usage(void) {
-    fprintf(stderr, "usage: raw_celt_bench_c [--repeats n] [--seconds n] [--mode cbr|vbr|both]\n");
+    fprintf(stderr, "usage: raw_celt_bench_c [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--dump-packets n]\n");
     exit(2);
 }
 
@@ -46,6 +44,7 @@ static Options parse_options(int argc, char **argv) {
     options.repeats = 21;
     options.seconds = 4;
     options.mode = MODE_BOTH;
+    options.dump_packets = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--repeats") == 0) {
             if (++i >= argc) usage();
@@ -64,6 +63,9 @@ static Options parse_options(int argc, char **argv) {
             } else {
                 usage();
             }
+        } else if (strcmp(argv[i], "--dump-packets") == 0) {
+            if (++i >= argc) usage();
+            options.dump_packets = parse_positive_int(argv[i]);
         } else {
             usage();
         }
@@ -91,6 +93,16 @@ static double median(double *samples, int count) {
     return samples[count / 2];
 }
 
+static float centered_u16(uint32_t value) {
+    return (float)((int)(value & 0xffffu) - 32768) * (1.0f / 32768.0f);
+}
+
+static float triangle_wave(uint32_t phase) {
+    int p = (int)(phase & 0xffffu);
+    int v = p < 32768 ? p - 16384 : 49152 - p;
+    return (float)v * (1.0f / 16384.0f);
+}
+
 static float *generate_fixture(int seconds, int *total_frames) {
     *total_frames = SAMPLE_RATE * seconds;
     float *pcm = (float *)malloc((size_t)(*total_frames) * CHANNELS * sizeof(float));
@@ -101,22 +113,16 @@ static float *generate_fixture(int seconds, int *total_frames) {
 
     uint32_t noise = 0x12345678u;
     for (int i = 0; i < *total_frames; i++) {
-        float t = (float)i / (float)SAMPLE_RATE;
         noise = noise * 1664525u + 1013904223u;
-        float n = (float)(noise >> 9) / (float)(1u << 23) - 1.0f;
-        float transient = 0.35f * expf(-900.0f * (t - 1.37f) * (t - 1.37f));
-        float left =
-            0.29f * sinf(2.0f * PI_F * 261.63f * t) +
-            0.17f * sinf(2.0f * PI_F * 659.25f * t + 0.2f) +
-            0.05f * sinf(2.0f * PI_F * 4210.0f * t) +
-            0.015f * n +
-            transient;
-        float right =
-            0.25f * sinf(2.0f * PI_F * 329.63f * t + 0.4f) -
-            0.13f * sinf(2.0f * PI_F * 880.0f * t) +
-            0.05f * sinf(2.0f * PI_F * 3910.0f * t + 0.7f) -
-            0.012f * n -
-            0.8f * transient;
+        float tri_a = triangle_wave((uint32_t)i * 713u);
+        float tri_b = triangle_wave((uint32_t)i * 1451u + 0x4000u);
+        float tri_c = triangle_wave((uint32_t)i * 977u + 0x2000u);
+        float tri_d = triangle_wave((uint32_t)i * 3511u + 0x6000u);
+        float n = centered_u16(noise) * (1.0f / 4096.0f);
+        uint32_t pulse = (uint32_t)i & 8191u;
+        float transient = pulse < 64u ? (float)(64u - pulse) * (1.0f / 512.0f) : 0.0f;
+        float left = 0.25f * tri_a + 0.125f * tri_b + n + transient;
+        float right = 0.21875f * tri_c - 0.09375f * tri_d - n - 0.5f * transient;
         if (left > 1.0f) left = 1.0f;
         if (left < -1.0f) left = -1.0f;
         if (right > 1.0f) right = 1.0f;
@@ -317,6 +323,62 @@ static double time_decode(
     return value;
 }
 
+static void print_packet_hex(const unsigned char *packet, int len) {
+    for (int i = 0; i < len; i++) {
+        printf("%02x", packet[i]);
+    }
+    printf("\n");
+}
+
+static void dump_packets(
+    const Options *options,
+    const float *pcm,
+    int total_frames,
+    unsigned char *packets,
+    int *packet_lens
+) {
+    printf("impl\tmode\tframe_size\tframe_ms\tbitrate\tframe\tlen\thex\n");
+    for (BenchMode mode = MODE_CBR; mode <= MODE_VBR; mode++) {
+        if (options->mode != MODE_BOTH && options->mode != mode) {
+            continue;
+        }
+        for (size_t i = 0; i < sizeof(FRAME_SIZES) / sizeof(FRAME_SIZES[0]); i++) {
+            int frame_size = FRAME_SIZES[i];
+            int packet_count = total_frames / frame_size;
+            for (size_t j = 0; j < sizeof(BITRATES) / sizeof(BITRATES[0]); j++) {
+                int bitrate = BITRATES[j];
+                int min_packet = 0;
+                int max_packet = 0;
+                uint64_t checksum = 0;
+                encode_packets(
+                    pcm,
+                    total_frames,
+                    frame_size,
+                    bitrate,
+                    mode,
+                    packets,
+                    packet_lens,
+                    &min_packet,
+                    &max_packet,
+                    &checksum);
+                int limit = options->dump_packets < packet_count ? options->dump_packets : packet_count;
+                for (int frame = 0; frame < limit; frame++) {
+                    const unsigned char *packet = packets + (size_t)frame * MAX_PACKET_BYTES;
+                    printf(
+                        "c\t%s\t%d\t%.1f\t%d\t%d\t%d\t",
+                        mode_label(mode),
+                        frame_size,
+                        (double)frame_size * 1000.0 / (double)SAMPLE_RATE,
+                        bitrate,
+                        frame,
+                        packet_lens[frame]);
+                    print_packet_hex(packet, packet_lens[frame]);
+                }
+            }
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     Options options = parse_options(argc, argv);
     int total_frames = 0;
@@ -328,6 +390,14 @@ int main(int argc, char **argv) {
     if (!packets || !packet_lens) {
         fprintf(stderr, "out of memory\n");
         exit(1);
+    }
+
+    if (options.dump_packets > 0) {
+        dump_packets(&options, pcm, total_frames, packets, packet_lens);
+        free(packet_lens);
+        free(packets);
+        free(pcm);
+        return 0;
     }
 
     printf("impl\tmode\tframe_size\tframe_ms\tbitrate\tencode_ms\tdecode_ms\tbytes\tmin_packet\tmax_packet\tchecksum\n");

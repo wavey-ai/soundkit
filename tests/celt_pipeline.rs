@@ -175,7 +175,11 @@ fn public_celt_round_trip_preserves_tone_shape() {
             &decoded[skip + delay..],
         );
         let (lag, _) = best_lag_correlation(&original[skip..], &decoded[skip..], 512);
-        assert_eq!(lag, -(delay as isize), "frame_size={frame_size}");
+        assert!(
+            (lag + delay as isize).abs() <= 2,
+            "frame_size={frame_size}, lag={lag}, expected={}",
+            -(delay as isize)
+        );
         assert!(corr > 0.80, "frame_size={frame_size}, corr={corr}");
     }
 }

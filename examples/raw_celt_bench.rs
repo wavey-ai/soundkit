@@ -27,6 +27,7 @@ struct Options {
     repeats: usize,
     seconds: usize,
     mode: Option<BenchMode>,
+    dump_packets: Option<usize>,
 }
 
 struct EncodeResult {
@@ -38,7 +39,9 @@ struct EncodeResult {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: raw_celt_bench [--repeats n] [--seconds n] [--mode cbr|vbr|both]");
+    eprintln!(
+        "usage: raw_celt_bench [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--dump-packets n]"
+    );
     std::process::exit(2);
 }
 
@@ -47,6 +50,7 @@ fn parse_options() -> Options {
         repeats: 21,
         seconds: 4,
         mode: None,
+        dump_packets: None,
     };
     let args = env::args().collect::<Vec<_>>();
     let mut i = 1usize;
@@ -75,11 +79,19 @@ fn parse_options() -> Options {
                     _ => usage(),
                 };
             }
+            "--dump-packets" => {
+                i += 1;
+                options.dump_packets = Some(
+                    args.get(i)
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or_else(|| usage()),
+                );
+            }
             _ => usage(),
         }
         i += 1;
     }
-    if options.repeats == 0 || options.seconds == 0 {
+    if options.repeats == 0 || options.seconds == 0 || options.dump_packets == Some(0) {
         usage();
     }
     options
@@ -98,24 +110,34 @@ fn generate_fixture(seconds: usize) -> Vec<f32> {
     let mut pcm = Vec::with_capacity(frames * CHANNELS);
     let mut noise = 0x1234_5678u32;
     for i in 0..frames {
-        let t = i as f32 / SAMPLE_RATE as f32;
         noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let n = ((noise >> 9) as f32 / ((1u32 << 23) as f32)) - 1.0;
-        let transient = 0.35 * (-900.0 * (t - 1.37) * (t - 1.37)).exp();
-        let left = 0.29 * (2.0 * std::f32::consts::PI * 261.63 * t).sin()
-            + 0.17 * (2.0 * std::f32::consts::PI * 659.25 * t + 0.2).sin()
-            + 0.05 * (2.0 * std::f32::consts::PI * 4210.0 * t).sin()
-            + 0.015 * n
-            + transient;
-        let right = 0.25 * (2.0 * std::f32::consts::PI * 329.63 * t + 0.4).sin()
-            - 0.13 * (2.0 * std::f32::consts::PI * 880.0 * t).sin()
-            + 0.05 * (2.0 * std::f32::consts::PI * 3910.0 * t + 0.7).sin()
-            - 0.012 * n
-            - 0.8 * transient;
+        let tri_a = triangle_wave((i as u32).wrapping_mul(713));
+        let tri_b = triangle_wave((i as u32).wrapping_mul(1451).wrapping_add(0x4000));
+        let tri_c = triangle_wave((i as u32).wrapping_mul(977).wrapping_add(0x2000));
+        let tri_d = triangle_wave((i as u32).wrapping_mul(3511).wrapping_add(0x6000));
+        let n = centered_u16(noise) * (1.0 / 4096.0);
+        let pulse = (i as u32) & 8191;
+        let transient = if pulse < 64 {
+            (64 - pulse) as f32 * (1.0 / 512.0)
+        } else {
+            0.0
+        };
+        let left = 0.25 * tri_a + 0.125 * tri_b + n + transient;
+        let right = 0.21875 * tri_c - 0.09375 * tri_d - n - 0.5 * transient;
         pcm.push(left.clamp(-1.0, 1.0));
         pcm.push(right.clamp(-1.0, 1.0));
     }
     pcm
+}
+
+fn centered_u16(value: u32) -> f32 {
+    ((value & 0xffff) as i32 - 32_768) as f32 * (1.0 / 32_768.0)
+}
+
+fn triangle_wave(phase: u32) -> f32 {
+    let p = (phase & 0xffff) as i32;
+    let v = if p < 32_768 { p - 16_384 } else { 49_152 - p };
+    v as f32 * (1.0 / 16_384.0)
 }
 
 fn median(samples: &mut [f64]) -> f64 {
@@ -248,9 +270,48 @@ fn time_decode(
     Ok((median(&mut times), last_checksum))
 }
 
+fn print_packet_hex(packet: &[u8]) {
+    for byte in packet {
+        print!("{byte:02x}");
+    }
+    println!();
+}
+
+fn dump_packets(
+    pcm: &[f32],
+    options: &Options,
+    limit: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("impl\tmode\tframe_size\tframe_ms\tbitrate\tframe\tlen\thex");
+    for &mode in modes(options) {
+        for &frame_size in &CELT_FRAME_SIZES_48K {
+            for &bitrate in &BITRATES {
+                let encoded = encode_packets(pcm, frame_size, bitrate, mode)?;
+                for (frame, packet) in encoded.packets.iter().take(limit).enumerate() {
+                    print!(
+                        "rust\t{}\t{}\t{:.1}\t{}\t{}\t{}\t",
+                        mode.label(),
+                        frame_size,
+                        frame_size as f64 * 1000.0 / SAMPLE_RATE as f64,
+                        bitrate,
+                        frame,
+                        packet.len()
+                    );
+                    print_packet_hex(packet);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = parse_options();
     let pcm = generate_fixture(options.seconds);
+    if let Some(limit) = options.dump_packets {
+        return dump_packets(&pcm, &options, limit);
+    }
+
     println!("impl\tmode\tframe_size\tframe_ms\tbitrate\tencode_ms\tdecode_ms\tbytes\tmin_packet\tmax_packet\tchecksum");
     for &mode in modes(&options) {
         for &frame_size in &CELT_FRAME_SIZES_48K {

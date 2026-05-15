@@ -605,7 +605,7 @@ fn quant_band_n1(
 ) -> u32 {
     let mut sign = false;
     if ctx.remaining_bits >= 1 << BITRES {
-        sign = coder.encode_or_decode_bit(x[0] < 0.0, 1);
+        sign = coder.encode_or_decode_bits(u32::from(x[0] < 0.0), 1) != 0;
         ctx.remaining_bits -= 1 << BITRES;
     }
     if ctx.resynth {

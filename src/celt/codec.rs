@@ -15,6 +15,7 @@ const BITRES: i32 = 3;
 
 pub const TRIM_ICDF: [u8; 11] = [126, 124, 119, 109, 87, 41, 19, 9, 4, 2, 0];
 pub const SPREAD_ICDF: [u8; 4] = [25, 23, 2, 0];
+pub const TAPSET_ICDF: [u8; 3] = [2, 1, 0];
 
 const TF_SELECT_TABLE: [[i32; 8]; 4] = [
     [0, -1, 0, -1, 0, -1, 0, -1],
@@ -172,6 +173,49 @@ pub fn decode_spread_decision(total_bits: i32, dec: &mut RangeDecoder) -> i32 {
     }
 }
 
+pub fn encode_prefilter_disabled(start: usize, total_bits: i32, enc: &mut RangeEncoder) -> bool {
+    if start == 0 && enc.tell() + 16 <= total_bits {
+        enc.encode_bit_logp(false, 1);
+        true
+    } else {
+        false
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecodedPrefilter {
+    pub pitch: i32,
+    pub qgain: i32,
+    pub tapset: i32,
+}
+
+pub fn decode_prefilter(
+    start: usize,
+    total_bits: i32,
+    dec: &mut RangeDecoder,
+) -> Option<DecodedPrefilter> {
+    if start != 0 || dec.tell() + 16 > total_bits {
+        return None;
+    }
+    if !dec.decode_bit_logp(1) {
+        return None;
+    }
+
+    let octave = dec.decode_uint(6) as i32;
+    let pitch = ((16 << octave) + dec.decode_bits((4 + octave) as u32) as i32) - 1;
+    let qgain = dec.decode_bits(3) as i32;
+    let tapset = if dec.tell() + 2 <= total_bits {
+        dec.decode_icdf(&TAPSET_ICDF, 2) as i32
+    } else {
+        0
+    };
+    Some(DecodedPrefilter {
+        pitch,
+        qgain,
+        tapset,
+    })
+}
+
 pub fn encode_dynalloc_offsets(
     mode: &CeltMode,
     start: usize,
@@ -300,6 +344,7 @@ pub struct CeltFrameConfig {
     pub intensity: usize,
     pub dual_stereo: bool,
     pub disable_inv: bool,
+    pub last_coded_bands: usize,
 }
 
 impl CeltFrameConfig {
@@ -319,6 +364,7 @@ impl CeltFrameConfig {
             intensity: mode.nb_ebands,
             dual_stereo: false,
             disable_inv: false,
+            last_coded_bands: 0,
         })
     }
 }
@@ -330,6 +376,7 @@ pub struct CeltFrameEncodeResult {
     pub tf_res: Vec<i32>,
     pub collapse_masks: Vec<u8>,
     pub silence: bool,
+    pub prefilter_symbol: bool,
     pub is_transient: bool,
     pub spread: i32,
     pub alloc_trim: i32,
@@ -343,6 +390,7 @@ pub struct CeltFrameDecodeResult {
     pub tf_res: Vec<i32>,
     pub collapse_masks: Vec<u8>,
     pub silence: bool,
+    pub prefilter: Option<DecodedPrefilter>,
     pub is_transient: bool,
     pub spread: i32,
     pub alloc_trim: i32,
@@ -414,6 +462,7 @@ pub fn encode_spectral_frame(
     if enc.tell() == 1 && enc.tell() < total_bits {
         enc.encode_bit_logp(silence, 15);
     }
+    let prefilter_symbol = encode_prefilter_disabled(config.start, total_bits, &mut enc);
     let is_transient = encode_transient_flag(config.lm, total_bits, config.is_transient, &mut enc);
 
     let mut band_log_e = vec![0.0f32; config.channels * mode.nb_ebands];
@@ -491,7 +540,7 @@ pub fn encode_spectral_frame(
             config.channels,
             config.lm,
             Some(&mut allocation_coder),
-            mode.nb_ebands,
+            config.last_coded_bands,
             config.end.saturating_sub(1),
         )
     };
@@ -531,7 +580,7 @@ pub fn encode_spectral_frame(
                 allocation.coded_bands,
                 seed,
                 0,
-                true,
+                false,
             );
         } else {
             let y = y.as_deref_mut().ok_or(Error::BadArg)?;
@@ -557,7 +606,7 @@ pub fn encode_spectral_frame(
                 seed,
                 0,
                 config.disable_inv,
-                true,
+                false,
             );
         }
     }
@@ -598,6 +647,7 @@ pub fn encode_spectral_frame(
         tf_res,
         collapse_masks,
         silence,
+        prefilter_symbol,
         is_transient,
         spread,
         alloc_trim,
@@ -633,6 +683,7 @@ pub fn decode_spectral_frame(
     } else {
         false
     };
+    let prefilter = decode_prefilter(config.start, total_bits, &mut dec);
     let is_transient = decode_transient_flag(config.lm, total_bits, &mut dec);
     let intra = if dec.tell() + 3 <= total_bits {
         dec.decode_bit_logp(3)
@@ -792,6 +843,7 @@ pub fn decode_spectral_frame(
         tf_res,
         collapse_masks,
         silence,
+        prefilter,
         is_transient,
         spread,
         alloc_trim,

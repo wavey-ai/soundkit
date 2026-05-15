@@ -174,9 +174,20 @@ fn compute_twiddles(nfft: usize) -> Vec<KissFftCpx> {
     (0..nfft)
         .map(|i| {
             let phase = (-2.0 * PI / nfft as f64) * i as f64;
-            KissFftCpx::new(phase.cos() as f32, phase.sin() as f32)
+            KissFftCpx::new(
+                round_static_float(phase.cos()),
+                round_static_float(phase.sin()),
+            )
         })
         .collect()
+}
+
+fn round_static_float(value: f64) -> f32 {
+    if value == 0.0 {
+        return value as f32;
+    }
+    let scale = 10f64.powi(7 - value.abs().log10().floor() as i32);
+    (value * scale).round() as f32 / scale as f32
 }
 
 fn kf_bfly2(fout: &mut [KissFftCpx], m: usize, n: usize) {

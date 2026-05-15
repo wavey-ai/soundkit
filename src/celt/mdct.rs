@@ -37,7 +37,9 @@ impl MdctLookup {
         for _ in 0..=maxshift {
             trig_offset.push(trig.len());
             for i in 0..n2 {
-                trig.push((2.0 * PI * (i as f64 + 0.125) / cur_n as f64).cos() as f32);
+                trig.push(round_static_float_phase(
+                    2.0 * PI * (i as f64 + 0.125) / cur_n as f64,
+                ));
             }
             n2 >>= 1;
             cur_n >>= 1;
@@ -66,6 +68,15 @@ impl MdctLookup {
         let len = self.n_for_shift(shift) >> 1;
         &self.trig[offset..offset + len]
     }
+}
+
+fn round_static_float_phase(phase: f64) -> f32 {
+    let value = phase.cos();
+    if value == 0.0 {
+        return value as f32;
+    }
+    let scale = 10f64.powi(7 - value.abs().log10().floor() as i32);
+    (value * scale).round() as f32 / scale as f32
 }
 
 /// Compute a forward MDCT and scale by `4/N`.

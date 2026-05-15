@@ -104,6 +104,28 @@ compressed packet byte sizes.
 | vbr | 20.0 ms | 96 kb/s | 12.21 ms | -49.3% | 9.27 ms | +61.5% | 24.07 ms | 5.74 ms | 47909 | 48440 | 231-271 | 241-312 |
 | vbr | 20.0 ms | 128 kb/s | 13.08 ms | -48.4% | 10.42 ms | +66.3% | 25.36 ms | 6.26 ms | 63878 | 64520 | 307-362 | 321-407 |
 
+## Encoder Parity Next Steps
+
+CBR byte parity is the active target before VBR parity. On the deterministic
+raw CELT fixture, the first 2.5 ms CBR packets at 48 kb/s and 96 kb/s are
+byte-identical with libopus. The remaining 2.5 ms / 128 kb/s mismatch is in
+stereo theta selection for band 16: the packet controls, allocation, fine
+energy, and earlier PVQ vectors match before that point.
+
+Resume from this checkpoint:
+
+1. Compare the left-channel analysis path against libopus for band 16 at
+   2.5 ms / 128 kb/s: `dc_reject`, `celt_preemphasis`, `clt_mdct_forward`,
+   `compute_band_energies`, and `normalise_bands`.
+2. Fix the analysis delta so band 16 chooses the same quantized stereo theta
+   as libopus, then re-run first-packet CBR dumps for 2.5 ms at 48, 96, and
+   128 kb/s.
+3. Extend the same byte-parity check across 5, 10, and 20 ms CBR frames and
+   multiple sequential packets so encoder state updates are covered.
+4. After CBR is bit-identical for the raw CELT matrix, port libopus'
+   constrained VBR target/reservoir logic and repeat the packet dump checks in
+   VBR mode.
+
 ## License
 
 BSD-3-Clause, matching upstream libopus. See [LICENSE](LICENSE).

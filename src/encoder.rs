@@ -2,8 +2,10 @@ use crate::celt::bands::{
     compute_band_energies, hysteresis_decision, normalise_bands, SPREAD_NORMAL,
 };
 use crate::celt::codec::{encode_spectral_frame, CeltFrameConfig};
+use crate::celt::mathops::{celt_log2, celt_sqrt};
 use crate::celt::mdct::clt_mdct_forward;
 use crate::celt::modes::CeltMode;
+use crate::celt::quant_bands::amp2_log2;
 use crate::constants::{valid_channels, valid_sample_rate};
 use crate::packet;
 use crate::{Error, Result};
@@ -22,6 +24,20 @@ const INTENSITY_HYSTERESIS: [f32; 21] = [
     1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 4.0, 5.0, 6.0,
     8.0, 8.0,
 ];
+const CELT_SIG_SCALE: f32 = 32_768.0;
+const TRANSIENT_INV_TABLE: [u8; 128] = [
+    255, 255, 156, 110, 86, 70, 59, 51, 45, 40, 37, 33, 31, 28, 26, 25, 23, 22, 21, 20, 19, 18, 17,
+    16, 16, 15, 15, 14, 13, 13, 12, 12, 12, 12, 11, 11, 11, 10, 10, 10, 9, 9, 9, 9, 9, 9, 8, 8, 8,
+    8, 8, 7, 7, 7, 7, 7, 7, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2,
+];
+
+#[derive(Clone, Copy, Debug)]
+struct TransientAnalysis {
+    is_transient: bool,
+    tf_estimate: f32,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Application {
@@ -49,11 +65,14 @@ pub struct Encoder {
     bitrate: i32,
     old_band_e: Vec<f32>,
     preemph_mem: Vec<f32>,
+    hp_mem: Vec<f32>,
     overlap_mem: Vec<Vec<f32>>,
     seed: u32,
     intensity: usize,
     delayed_intra: f32,
     stream_channels: usize,
+    stereo_saving: f32,
+    last_coded_bands: usize,
     vbr: bool,
     vbr_reservoir: f32,
     vbr_prev_energy: f32,
@@ -73,11 +92,14 @@ impl Encoder {
             bitrate,
             old_band_e: vec![0.0; channels * mode.nb_ebands],
             preemph_mem: vec![0.0; channels],
+            hp_mem: vec![0.0; channels * 2],
             overlap_mem: vec![vec![0.0; mode.overlap]; channels],
             seed: 0,
             intensity: 0,
             delayed_intra: 1.0,
             stream_channels: channels,
+            stereo_saving: 0.0,
+            last_coded_bands: 0,
             vbr: false,
             vbr_reservoir: 0.0,
             vbr_prev_energy: 0.0,
@@ -209,12 +231,176 @@ impl Encoder {
         rate.min(self.bitrate - overhead)
     }
 
-    fn alloc_trim_for_rate(equiv_rate: i32) -> i32 {
-        if equiv_rate < 64_000 {
-            4
-        } else {
-            5
+    fn transient_analysis(inputs: &[Vec<f32>], channels: usize, len: usize) -> TransientAnalysis {
+        let len2 = len / 2;
+        let mut mask_metric = 0i32;
+
+        for input in inputs.iter().take(channels) {
+            let mut tmp = vec![0.0f32; len];
+            let mut mem0 = 0.0f32;
+            let mut mem1 = 0.0f32;
+            for i in 0..len {
+                let x = input[i];
+                let y = mem0 + x;
+                let mem00 = mem0;
+                mem0 = mem0 - x + 0.5 * mem1;
+                mem1 = x - mem00;
+                tmp[i] = y;
+            }
+            tmp.iter_mut().take(12).for_each(|sample| *sample = 0.0);
+
+            let mut mean = 0.0f32;
+            mem0 = 0.0;
+            let forward_decay = 0.0625f32;
+            for i in 0..len2 {
+                let x2 = tmp[2 * i] * tmp[2 * i] + tmp[2 * i + 1] * tmp[2 * i + 1];
+                mean += x2;
+                mem0 = x2 + (1.0 - forward_decay) * mem0;
+                tmp[i] = forward_decay * mem0;
+            }
+
+            mem0 = 0.0;
+            let mut max_e = 0.0f32;
+            for i in (0..len2).rev() {
+                mem0 = tmp[i] + 0.875 * mem0;
+                tmp[i] = 0.125 * mem0;
+                max_e = max_e.max(tmp[i]);
+            }
+
+            mean = celt_sqrt(mean * max_e * 0.5 * len2 as f32);
+            let norm = len2 as f32 / (1e-15f32 + mean);
+            let mut unmask = 0i32;
+            for i in (12..len2.saturating_sub(5)).step_by(4) {
+                let id = (64.0 * norm * (tmp[i] + 1e-15f32))
+                    .floor()
+                    .clamp(0.0, 127.0) as usize;
+                unmask += i32::from(TRANSIENT_INV_TABLE[id]);
+            }
+            unmask = 64 * unmask * 4 / (6 * (len2 as i32 - 17));
+            if unmask > mask_metric {
+                mask_metric = unmask;
+            }
         }
+
+        let is_transient = mask_metric > 200;
+        let tf_max = celt_sqrt(27.0 * mask_metric as f32).max(42.0) - 42.0;
+        let tf_estimate = celt_sqrt((0.0069 * tf_max.min(163.0) - 0.139).max(0.0));
+        TransientAnalysis {
+            is_transient,
+            tf_estimate,
+        }
+    }
+
+    fn compute_mdcts(
+        mode: &CeltMode,
+        inputs: &[Vec<f32>],
+        freq: &mut [f32],
+        channels: usize,
+        stream_channels: usize,
+        lm: usize,
+        short_blocks: usize,
+    ) {
+        let frame_size = mode.short_mdct_size << lm;
+        if short_blocks > 0 {
+            let shift = mode.max_lm;
+            for (c, input) in inputs.iter().take(channels).enumerate() {
+                for b in 0..short_blocks {
+                    let input_offset = b * mode.short_mdct_size;
+                    let output_offset = c * frame_size + b;
+                    clt_mdct_forward(
+                        &mode.mdct,
+                        &input[input_offset..],
+                        &mut freq[output_offset..],
+                        &mode.window,
+                        mode.overlap,
+                        shift,
+                        short_blocks,
+                    );
+                }
+            }
+        } else {
+            let shift = mode.max_lm - lm;
+            for (c, input) in inputs.iter().take(channels).enumerate() {
+                clt_mdct_forward(
+                    &mode.mdct,
+                    input,
+                    &mut freq[c * frame_size..(c + 1) * frame_size],
+                    &mode.window,
+                    mode.overlap,
+                    shift,
+                    1,
+                );
+            }
+        }
+
+        if channels == 2 && stream_channels == 1 {
+            for i in 0..frame_size {
+                freq[i] = 0.5 * (freq[i] + freq[frame_size + i]);
+            }
+        }
+    }
+
+    fn alloc_trim_analysis(
+        mode: &CeltMode,
+        norm: &[f32],
+        band_log_e: &[f32],
+        end: usize,
+        lm: usize,
+        channels: usize,
+        n: usize,
+        intensity: usize,
+        stereo_saving: &mut f32,
+        tf_estimate: f32,
+        equiv_rate: i32,
+    ) -> i32 {
+        let mut trim = 5.0f32;
+        if equiv_rate < 64_000 {
+            trim = 4.0;
+        } else if equiv_rate < 80_000 {
+            let frac = (equiv_rate - 64_000) >> 10;
+            trim = 4.0 + (1.0 / 16.0) * frac as f32;
+        }
+
+        if channels == 2 {
+            let mut sum = 0.0f32;
+            for i in 0..8 {
+                let band_start = (mode.ebands[i] as usize) << lm;
+                let band_end = (mode.ebands[i + 1] as usize) << lm;
+                let partial = (band_start..band_end)
+                    .map(|j| norm[j] * norm[n + j])
+                    .sum::<f32>();
+                sum += partial;
+            }
+            sum = (0.125 * sum).abs().min(1.0);
+            let mut min_xc = sum;
+            for i in 8..intensity {
+                let band_start = (mode.ebands[i] as usize) << lm;
+                let band_end = (mode.ebands[i + 1] as usize) << lm;
+                let partial = (band_start..band_end)
+                    .map(|j| norm[j] * norm[n + j])
+                    .sum::<f32>();
+                min_xc = min_xc.min(partial.abs());
+            }
+            min_xc = min_xc.abs().min(1.0);
+            let log_xc = celt_log2(1.001 - sum * sum);
+            let log_xc2 = (0.5 * log_xc).max(celt_log2(1.001 - min_xc * min_xc));
+            trim += (-4.0f32).max(0.75 * log_xc);
+            *stereo_saving = (*stereo_saving + 0.25).min(-0.5 * log_xc2);
+        }
+
+        let mut diff = 0.0f32;
+        for c in 0..channels {
+            for i in 0..end.saturating_sub(1) {
+                diff += band_log_e[i + c * mode.nb_ebands] * (2 + 2 * i as i32 - end as i32) as f32;
+            }
+        }
+        if end > 1 {
+            diff /= (channels * (end - 1)) as f32;
+        }
+
+        trim -= ((diff + 1.0) / 6.0).clamp(-2.0, 2.0);
+        trim -= 2.0 * tf_estimate;
+        (0.5 + trim).floor().clamp(0.0, 10.0) as i32
     }
 
     fn stereo_analysis(mode: &CeltMode, x: &[f32], y: &[f32], lm: usize) -> bool {
@@ -237,6 +423,194 @@ impl Encoder {
         }
         (((mode.ebands[13] as usize) << (lm + 1)) + thetas) as f32 * sum_ms
             > ((mode.ebands[13] as usize) << (lm + 1)) as f32 * sum_lr
+    }
+
+    fn dc_reject_frame(&mut self, pcm: &[f32], frame_size: usize) -> Vec<f32> {
+        let cutoff_hz = 3.0f32;
+        let coef = 6.3 * cutoff_hz / self.sample_rate as f32;
+        let coef2 = 1.0 - coef;
+        let mut filtered = vec![0.0f32; frame_size * self.channels];
+
+        if self.channels == 2 {
+            let mut m0 = self.hp_mem[0];
+            let mut m2 = self.hp_mem[2];
+            for i in 0..frame_size {
+                let left = pcm[2 * i];
+                let right = pcm[2 * i + 1];
+                filtered[2 * i] = left - m0;
+                filtered[2 * i + 1] = right - m2;
+                m0 = coef * left + 1e-30f32 + coef2 * m0;
+                m2 = coef * right + 1e-30f32 + coef2 * m2;
+            }
+            self.hp_mem[0] = m0;
+            self.hp_mem[2] = m2;
+        } else {
+            let mut m0 = self.hp_mem[0];
+            for i in 0..frame_size {
+                let sample = pcm[i];
+                filtered[i] = sample - m0;
+                m0 = coef * sample + 1e-30f32 + coef2 * m0;
+            }
+            self.hp_mem[0] = m0;
+        }
+
+        filtered
+    }
+
+    fn encode_filtered_f32_with_frame_bytes(
+        &mut self,
+        pcm: &[f32],
+        frame_size: usize,
+        frame_bytes: usize,
+    ) -> Result<Vec<u8>> {
+        let lm = self.frame_lm(frame_size)?;
+        Self::validate_frame_bytes(frame_bytes)?;
+        let stream_channels = self.choose_stream_channels(frame_size, frame_bytes);
+        let mut config = CeltFrameConfig::new(&self.mode, lm, stream_channels, frame_bytes)?;
+        config.spread = SPREAD_NORMAL;
+        config.last_coded_bands = self.last_coded_bands;
+        let equiv_rate = self.equiv_rate(frame_bytes, lm);
+
+        let n = frame_size;
+        let m = 1usize << lm;
+        let overlap = self.mode.overlap;
+
+        let mut inputs = Vec::with_capacity(self.channels);
+        for c in 0..self.channels {
+            let mut input = vec![0.0f32; 2 * n];
+            input[..overlap].copy_from_slice(&self.overlap_mem[c]);
+            for i in 0..n {
+                let sample = pcm[i * self.channels + c] * CELT_SIG_SCALE;
+                input[overlap + i] = sample - self.preemph_mem[c];
+                self.preemph_mem[c] = self.mode.preemph[0] * sample;
+            }
+            self.overlap_mem[c].copy_from_slice(&input[n..n + overlap]);
+            inputs.push(input);
+        }
+
+        let transient = Self::transient_analysis(&inputs, self.channels, n + overlap);
+        config.is_transient = lm > 0 && transient.is_transient && (frame_bytes * 8) as i32 >= 16;
+
+        let mut freq = vec![0.0f32; self.channels * n];
+        let short_blocks = if config.is_transient { m } else { 0 };
+        Self::compute_mdcts(
+            &self.mode,
+            &inputs,
+            &mut freq,
+            self.channels,
+            stream_channels,
+            lm,
+            short_blocks,
+        );
+
+        let eff_end = self.mode.eff_ebands;
+        let mut band_e = vec![0.0f32; stream_channels * self.mode.nb_ebands];
+        compute_band_energies(&self.mode, &freq, &mut band_e, eff_end, stream_channels, lm);
+        let mut band_log_e = vec![0.0f32; stream_channels * self.mode.nb_ebands];
+        amp2_log2(
+            &self.mode,
+            eff_end,
+            config.end,
+            &band_e,
+            &mut band_log_e,
+            stream_channels,
+        );
+        let mut norm = vec![0.0f32; stream_channels * n];
+        normalise_bands(
+            &self.mode,
+            &freq,
+            &mut norm,
+            &band_e,
+            eff_end,
+            stream_channels,
+            m,
+        );
+
+        if stream_channels == 1 {
+            config.alloc_trim = Self::alloc_trim_analysis(
+                &self.mode,
+                &norm,
+                &band_log_e,
+                config.end,
+                lm,
+                stream_channels,
+                n,
+                config.intensity,
+                &mut self.stereo_saving,
+                transient.tf_estimate,
+                equiv_rate,
+            );
+        } else {
+            {
+                let (left, right) = norm.split_at_mut(n);
+                self.intensity = hysteresis_decision(
+                    (equiv_rate / 1000) as f32,
+                    &INTENSITY_THRESHOLDS,
+                    &INTENSITY_HYSTERESIS,
+                    INTENSITY_THRESHOLDS.len(),
+                    self.intensity,
+                )
+                .clamp(config.start, config.end);
+                config.intensity = self.intensity;
+                config.dual_stereo = lm != 0 && Self::stereo_analysis(&self.mode, left, right, lm);
+            }
+            config.alloc_trim = Self::alloc_trim_analysis(
+                &self.mode,
+                &norm,
+                &band_log_e,
+                config.end,
+                lm,
+                stream_channels,
+                n,
+                config.intensity,
+                &mut self.stereo_saving,
+                transient.tf_estimate,
+                equiv_rate,
+            );
+        }
+
+        let encoded = if stream_channels == 1 {
+            encode_spectral_frame(
+                &self.mode,
+                &config,
+                &mut norm,
+                None,
+                &band_e,
+                &mut self.old_band_e[..self.mode.nb_ebands],
+                &mut self.delayed_intra,
+                &mut self.seed,
+            )?
+        } else {
+            let (left, right) = norm.split_at_mut(n);
+            encode_spectral_frame(
+                &self.mode,
+                &config,
+                left,
+                Some(right),
+                &band_e,
+                &mut self.old_band_e,
+                &mut self.delayed_intra,
+                &mut self.seed,
+            )?
+        };
+        self.last_coded_bands = if self.last_coded_bands != 0 {
+            (self.last_coded_bands + 1).min(
+                self.last_coded_bands
+                    .saturating_sub(1)
+                    .max(encoded.allocation.coded_bands),
+            )
+        } else {
+            encoded.allocation.coded_bands
+        };
+        if self.channels == 2 && stream_channels == 1 {
+            let (left, right) = self.old_band_e.split_at_mut(self.mode.nb_ebands);
+            right[..self.mode.nb_ebands].copy_from_slice(left);
+        }
+
+        let mut packet = Vec::with_capacity(1 + encoded.data.len());
+        packet.push(packet::make_celt_only_fullband_toc(lm, stream_channels)?);
+        packet.extend_from_slice(&encoded.data);
+        Ok(packet)
     }
 
     fn opus_equiv_rate_for_packet(&self, frame_size: usize, frame_bytes: usize) -> i32 {
@@ -298,15 +672,19 @@ impl Encoder {
     }
 
     pub fn encode_f32(&mut self, pcm: &[f32], frame_size: usize) -> Result<Vec<u8>> {
+        if self.sample_rate != 48_000 {
+            return Err(Error::Unimplemented);
+        }
         if pcm.len() < frame_size * self.channels {
             return Err(Error::BadArg);
         }
+        let filtered = self.dc_reject_frame(pcm, frame_size);
         let frame_bytes = if self.vbr {
-            self.vbr_frame_bytes(pcm, frame_size)
+            self.vbr_frame_bytes(&filtered, frame_size)
         } else {
             self.frame_bytes_for_bitrate(frame_size)
         };
-        self.encode_f32_with_frame_bytes(pcm, frame_size, frame_bytes)
+        self.encode_filtered_f32_with_frame_bytes(&filtered, frame_size, frame_bytes)
     }
 
     pub fn encode_f32_with_frame_bytes(
@@ -321,106 +699,7 @@ impl Encoder {
         if pcm.len() < frame_size * self.channels {
             return Err(Error::BadArg);
         }
-        let lm = self.frame_lm(frame_size)?;
-        Self::validate_frame_bytes(frame_bytes)?;
-        let stream_channels = self.choose_stream_channels(frame_size, frame_bytes);
-        let mut config = CeltFrameConfig::new(&self.mode, lm, stream_channels, frame_bytes)?;
-        config.spread = SPREAD_NORMAL;
-        let equiv_rate = self.equiv_rate(frame_bytes, lm);
-        config.alloc_trim = Self::alloc_trim_for_rate(equiv_rate);
-
-        let n = frame_size;
-        let m = 1usize << lm;
-        let shift = self.mode.max_lm - lm;
-        let overlap = self.mode.overlap;
-
-        let mut inputs = Vec::with_capacity(self.channels);
-        for c in 0..self.channels {
-            let mut input = vec![0.0f32; 2 * n];
-            input[..overlap].copy_from_slice(&self.overlap_mem[c]);
-            for i in 0..n {
-                let sample = pcm[i * self.channels + c];
-                input[overlap + i] = sample - self.preemph_mem[c];
-                self.preemph_mem[c] = self.mode.preemph[0] * sample;
-            }
-            self.overlap_mem[c].copy_from_slice(&input[n..n + overlap]);
-            inputs.push(input);
-        }
-
-        let mut freq = vec![0.0f32; self.channels * n];
-        for (c, input) in inputs.iter().enumerate() {
-            clt_mdct_forward(
-                &self.mode.mdct,
-                input,
-                &mut freq[c * n..(c + 1) * n],
-                &self.mode.window,
-                overlap,
-                shift,
-                1,
-            );
-        }
-        if self.channels == 2 && stream_channels == 1 {
-            for i in 0..n {
-                freq[i] = 0.5 * (freq[i] + freq[n + i]);
-            }
-        }
-
-        let eff_end = self.mode.eff_ebands;
-        let mut band_e = vec![0.0f32; stream_channels * self.mode.nb_ebands];
-        compute_band_energies(&self.mode, &freq, &mut band_e, eff_end, stream_channels, lm);
-        let mut norm = vec![0.0f32; stream_channels * n];
-        normalise_bands(
-            &self.mode,
-            &freq,
-            &mut norm,
-            &band_e,
-            eff_end,
-            stream_channels,
-            m,
-        );
-
-        let encoded = if stream_channels == 1 {
-            encode_spectral_frame(
-                &self.mode,
-                &config,
-                &mut norm,
-                None,
-                &band_e,
-                &mut self.old_band_e[..self.mode.nb_ebands],
-                &mut self.delayed_intra,
-                &mut self.seed,
-            )?
-        } else {
-            let (left, right) = norm.split_at_mut(n);
-            self.intensity = hysteresis_decision(
-                (equiv_rate / 1000) as f32,
-                &INTENSITY_THRESHOLDS,
-                &INTENSITY_HYSTERESIS,
-                INTENSITY_THRESHOLDS.len(),
-                self.intensity,
-            )
-            .clamp(config.start, config.end);
-            config.intensity = self.intensity;
-            config.dual_stereo = lm != 0 && Self::stereo_analysis(&self.mode, left, right, lm);
-            encode_spectral_frame(
-                &self.mode,
-                &config,
-                left,
-                Some(right),
-                &band_e,
-                &mut self.old_band_e,
-                &mut self.delayed_intra,
-                &mut self.seed,
-            )?
-        };
-        if self.channels == 2 && stream_channels == 1 {
-            let (left, right) = self.old_band_e.split_at_mut(self.mode.nb_ebands);
-            right[..self.mode.nb_ebands].copy_from_slice(left);
-        }
-
-        let mut packet = Vec::with_capacity(1 + encoded.data.len());
-        packet.push(packet::make_celt_only_fullband_toc(lm, stream_channels)?);
-        packet.extend_from_slice(&encoded.data);
-        Ok(packet)
+        let filtered = self.dc_reject_frame(pcm, frame_size);
+        self.encode_filtered_f32_with_frame_bytes(&filtered, frame_size, frame_bytes)
     }
 }

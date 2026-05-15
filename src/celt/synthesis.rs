@@ -6,6 +6,8 @@ use crate::celt::mdct::clt_mdct_backward;
 use crate::celt::modes::CeltMode;
 use crate::{Error, Result};
 
+const CELT_SIG_SCALE: f32 = 32_768.0;
+
 pub fn celt_synthesis(
     mode: &CeltMode,
     x: &[f32],
@@ -133,9 +135,9 @@ pub fn deemphasis_interleaved(
     for c in 0..c_count {
         let mut mem = preemph_mem[c];
         for j in 0..n {
-            let tmp = channels[c][j] + mem;
+            let tmp = channels[c][j] + 1e-30f32 + mem;
             mem = coef0 * tmp;
-            pcm[j * c_count + c] = tmp;
+            pcm[j * c_count + c] = tmp / CELT_SIG_SCALE;
         }
         preemph_mem[c] = mem;
     }
