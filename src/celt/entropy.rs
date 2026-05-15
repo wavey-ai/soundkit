@@ -83,6 +83,10 @@ impl RangeEncoder {
         self.error
     }
 
+    pub fn storage_bytes(&self) -> usize {
+        self.storage as usize
+    }
+
     pub fn tell(&self) -> i32 {
         self.nbits_total - ec_ilog(self.rng)
     }
@@ -367,6 +371,10 @@ impl RangeDecoder {
 
     pub fn error(&self) -> i32 {
         self.error
+    }
+
+    pub fn storage_bytes(&self) -> usize {
+        self.storage as usize
     }
 
     pub fn tell(&self) -> i32 {
