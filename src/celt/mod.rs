@@ -9,4 +9,5 @@ pub mod mdct;
 pub mod modes;
 pub mod quant_bands;
 pub mod rate;
+pub mod synthesis;
 pub mod vq;
