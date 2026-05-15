@@ -33,6 +33,7 @@ fn official_celt_synthesis_outputs_interleaved_pcm() {
     }
 
     let mut old_enc = vec![0.0f32; 2 * mode.nb_ebands];
+    let mut energy_error = vec![0.0f32; 2 * mode.nb_ebands];
     let mut delayed_intra = 1.0f32;
     let mut seed_enc = 0x1234_5678;
     let encoded = encode_spectral_frame(
@@ -42,6 +43,7 @@ fn official_celt_synthesis_outputs_interleaved_pcm() {
         Some(&mut y),
         &band_e,
         &mut old_enc,
+        &mut energy_error,
         &mut delayed_intra,
         &mut seed_enc,
     )

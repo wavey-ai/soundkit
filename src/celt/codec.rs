@@ -3,10 +3,12 @@
 
 use crate::celt::bands::{quant_all_bands_mono, quant_all_bands_stereo, BandCoder, SPREAD_NORMAL};
 use crate::celt::entropy::{RangeDecoder, RangeEncoder};
+use crate::celt::mathops::ec_ilog;
 use crate::celt::modes::CeltMode;
+use crate::celt::pitch::PrefilterDecision;
 use crate::celt::quant_bands::{
     amp2_log2, quant_coarse_energy, quant_energy_finalise, quant_fine_energy,
-    unquant_coarse_energy, unquant_energy_finalise, unquant_fine_energy,
+    unquant_coarse_energy, unquant_energy_finalise, unquant_fine_energy, E_MEANS,
 };
 use crate::celt::rate::{clt_compute_allocation, Allocation, AllocationCoder};
 use crate::{Error, Result};
@@ -173,13 +175,28 @@ pub fn decode_spread_decision(total_bits: i32, dec: &mut RangeDecoder) -> i32 {
     }
 }
 
-pub fn encode_prefilter_disabled(start: usize, total_bits: i32, enc: &mut RangeEncoder) -> bool {
-    if start == 0 && enc.tell() + 16 <= total_bits {
-        enc.encode_bit_logp(false, 1);
-        true
-    } else {
-        false
+pub fn encode_prefilter(
+    start: usize,
+    total_bits: i32,
+    prefilter: Option<PrefilterDecision>,
+    enc: &mut RangeEncoder,
+) -> bool {
+    if start != 0 || enc.tell() + 16 > total_bits {
+        return false;
     }
+    let Some(prefilter) = prefilter.filter(|prefilter| prefilter.enabled) else {
+        enc.encode_bit_logp(false, 1);
+        return false;
+    };
+
+    enc.encode_bit_logp(true, 1);
+    let pitch = (prefilter.pitch + 1) as u32;
+    let octave = ec_ilog(pitch) - 5;
+    enc.encode_uint(octave as u32, 6);
+    enc.encode_bits(pitch - (16 << octave), (4 + octave) as u32);
+    enc.encode_bits(prefilter.qgain as u32, 3);
+    enc.encode_icdf(prefilter.tapset as usize, &TAPSET_ICDF, 2);
+    true
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -309,6 +326,189 @@ pub fn decode_dynalloc_offsets(
     total_boost
 }
 
+fn median_of_3(x: &[f32]) -> f32 {
+    debug_assert!(x.len() >= 3);
+    let (t0, t1) = if x[0] > x[1] {
+        (x[1], x[0])
+    } else {
+        (x[0], x[1])
+    };
+    let t2 = x[2];
+    if t1 < t2 {
+        t1
+    } else if t0 < t2 {
+        t2
+    } else {
+        t0
+    }
+}
+
+fn median_of_5(x: &[f32]) -> f32 {
+    debug_assert!(x.len() >= 5);
+    let t2 = x[2];
+    let (mut t0, mut t1) = if x[0] > x[1] {
+        (x[1], x[0])
+    } else {
+        (x[0], x[1])
+    };
+    let (mut t3, mut t4) = if x[3] > x[4] {
+        (x[4], x[3])
+    } else {
+        (x[3], x[4])
+    };
+    if t0 > t3 {
+        std::mem::swap(&mut t0, &mut t3);
+        std::mem::swap(&mut t1, &mut t4);
+    }
+    if t2 > t1 {
+        if t1 < t3 {
+            t2.min(t3)
+        } else {
+            t4.min(t1)
+        }
+    } else if t2 < t3 {
+        t1.min(t3)
+    } else {
+        t2.min(t4)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dynalloc_analysis(
+    mode: &CeltMode,
+    band_log_e: &[f32],
+    band_log_e2: &[f32],
+    old_band_e: &[f32],
+    start: usize,
+    end: usize,
+    channels: usize,
+    lm: usize,
+    packet_bytes: usize,
+    is_transient: bool,
+    vbr: bool,
+    constrained_vbr: bool,
+    offsets: &mut [i32],
+) {
+    const LSB_DEPTH: i32 = 24;
+
+    offsets[..mode.nb_ebands].fill(0);
+    if packet_bytes < 30 + 5 * lm {
+        return;
+    }
+
+    let mut noise_floor = vec![0.0f32; mode.nb_ebands];
+    for i in 0..end {
+        noise_floor[i] = 0.0625 * mode.log_n[i] as f32 + 0.5 + (9 - LSB_DEPTH) as f32 - E_MEANS[i]
+            + 0.0062 * (i as f32 + 5.0) * (i as f32 + 5.0);
+    }
+
+    let mut follower = vec![0.0f32; channels * mode.nb_ebands];
+    let mut band_log_e3 = vec![0.0f32; mode.nb_ebands];
+    for c in 0..channels {
+        let channel = c * mode.nb_ebands;
+        band_log_e3[..end].copy_from_slice(&band_log_e2[channel..channel + end]);
+        if lm == 0 {
+            for i in 0..end.min(8) {
+                band_log_e3[i] = band_log_e2[channel + i].max(old_band_e[channel + i]);
+            }
+        }
+
+        let f = &mut follower[channel..channel + mode.nb_ebands];
+        let mut last = 0usize;
+        if end > 0 {
+            f[0] = band_log_e3[0];
+        }
+        for i in 1..end {
+            if band_log_e3[i] > band_log_e3[i - 1] + 0.5 {
+                last = i;
+            }
+            f[i] = (f[i - 1] + 1.5).min(band_log_e3[i]);
+        }
+        for i in (0..last).rev() {
+            f[i] = f[i].min((f[i + 1] + 2.0).min(band_log_e3[i]));
+        }
+
+        let offset = 1.0;
+        if end >= 5 {
+            for i in 2..end - 2 {
+                f[i] = f[i].max(median_of_5(&band_log_e3[i - 2..]) - offset);
+            }
+        }
+        if end >= 3 {
+            let tmp = median_of_3(&band_log_e3[0..]) - offset;
+            f[0] = f[0].max(tmp);
+            if end > 1 {
+                f[1] = f[1].max(tmp);
+            }
+            let tmp = median_of_3(&band_log_e3[end - 3..]) - offset;
+            if end > 1 {
+                f[end - 2] = f[end - 2].max(tmp);
+            }
+            f[end - 1] = f[end - 1].max(tmp);
+        }
+
+        for i in 0..end {
+            f[i] = f[i].max(noise_floor[i]);
+        }
+    }
+
+    if channels == 2 {
+        for i in start..end {
+            let right = mode.nb_ebands + i;
+            follower[right] = follower[right].max(follower[i] - 4.0);
+            follower[i] = follower[i].max(follower[right] - 4.0);
+            follower[i] = 0.5
+                * ((band_log_e[i] - follower[i]).max(0.0)
+                    + (band_log_e[mode.nb_ebands + i] - follower[right]).max(0.0));
+        }
+    } else {
+        for i in start..end {
+            follower[i] = (band_log_e[i] - follower[i]).max(0.0);
+        }
+    }
+
+    if (!vbr || constrained_vbr) && !is_transient {
+        for value in follower.iter_mut().take(end).skip(start) {
+            *value *= 0.5;
+        }
+    }
+    for (i, value) in follower.iter_mut().enumerate().take(end).skip(start) {
+        if i < 8 {
+            *value *= 2.0;
+        }
+        if i >= 12 {
+            *value *= 0.5;
+        }
+    }
+
+    let mut total_boost = 0;
+    for i in start..end {
+        let width = (channels as i32 * (mode.ebands[i + 1] as i32 - mode.ebands[i] as i32)) << lm;
+        let follower = follower[i].min(4.0);
+        let (boost, boost_bits) = if width < 6 {
+            let boost = follower as i32;
+            (boost, boost * width << BITRES)
+        } else if width > 48 {
+            let boost = (follower * 8.0) as i32;
+            (boost, (boost * width << BITRES) / 8)
+        } else {
+            let boost = (follower * width as f32 / 6.0) as i32;
+            (boost, boost * 6 << BITRES)
+        };
+
+        if (!vbr || (constrained_vbr && !is_transient))
+            && ((total_boost + boost_bits) >> BITRES >> 3) > 2 * packet_bytes as i32 / 3
+        {
+            let cap = (2 * packet_bytes as i32 / 3) << BITRES << 3;
+            offsets[i] = cap - total_boost;
+            break;
+        }
+
+        offsets[i] = boost;
+        total_boost += boost_bits;
+    }
+}
+
 pub fn encode_alloc_trim(
     alloc_trim: i32,
     total_bits_frac: i32,
@@ -345,6 +545,9 @@ pub struct CeltFrameConfig {
     pub dual_stereo: bool,
     pub disable_inv: bool,
     pub last_coded_bands: usize,
+    pub vbr: bool,
+    pub constrained_vbr: bool,
+    pub prefilter: Option<PrefilterDecision>,
 }
 
 impl CeltFrameConfig {
@@ -365,6 +568,9 @@ impl CeltFrameConfig {
             dual_stereo: false,
             disable_inv: false,
             last_coded_bands: 0,
+            vbr: false,
+            constrained_vbr: false,
+            prefilter: None,
         })
     }
 }
@@ -403,6 +609,7 @@ fn validate_spectral_args(
     y_len: Option<usize>,
     band_e_len: usize,
     old_band_e_len: usize,
+    energy_error_len: usize,
 ) -> Result<usize> {
     if config.lm > mode.max_lm
         || config.start >= config.end
@@ -417,6 +624,7 @@ fn validate_spectral_args(
         || (config.channels == 2 && y_len.unwrap_or(0) < n)
         || band_e_len < config.channels * mode.nb_ebands
         || old_band_e_len < config.channels * mode.nb_ebands
+        || energy_error_len < config.channels * mode.nb_ebands
     {
         return Err(Error::BadArg);
     }
@@ -439,6 +647,7 @@ pub fn encode_spectral_frame(
     mut y: Option<&mut [f32]>,
     band_e: &[f32],
     old_band_e: &mut [f32],
+    energy_error: &mut [f32],
     delayed_intra: &mut f32,
     seed: &mut u32,
 ) -> Result<CeltFrameEncodeResult> {
@@ -449,6 +658,7 @@ pub fn encode_spectral_frame(
         y.as_ref().map(|slice| slice.len()),
         band_e.len(),
         old_band_e.len(),
+        energy_error.len(),
     )?;
     if config.channels == 1 && y.is_some() {
         return Err(Error::BadArg);
@@ -462,7 +672,7 @@ pub fn encode_spectral_frame(
     if enc.tell() == 1 && enc.tell() < total_bits {
         enc.encode_bit_logp(silence, 15);
     }
-    let prefilter_symbol = encode_prefilter_disabled(config.start, total_bits, &mut enc);
+    let prefilter_symbol = encode_prefilter(config.start, total_bits, config.prefilter, &mut enc);
     let is_transient = encode_transient_flag(config.lm, total_bits, config.is_transient, &mut enc);
 
     let mut band_log_e = vec![0.0f32; config.channels * mode.nb_ebands];
@@ -474,6 +684,31 @@ pub fn encode_spectral_frame(
         &mut band_log_e,
         config.channels,
     );
+    let band_log_e2 = band_log_e.clone();
+    let mut offsets = vec![0i32; mode.nb_ebands];
+    dynalloc_analysis(
+        mode,
+        &band_log_e,
+        &band_log_e2,
+        old_band_e,
+        config.start,
+        config.end,
+        config.channels,
+        config.lm,
+        config.packet_bytes,
+        is_transient,
+        config.vbr,
+        config.constrained_vbr,
+        &mut offsets,
+    );
+    for c in 0..config.channels {
+        for i in config.start..config.end {
+            let idx = i + c * mode.nb_ebands;
+            if (band_log_e[idx] - old_band_e[idx]).abs() < 2.0 {
+                band_log_e[idx] -= 0.25 * energy_error[idx];
+            }
+        }
+    }
     let mut error = vec![0.0f32; config.channels * mode.nb_ebands];
     quant_coarse_energy(
         mode,
@@ -494,7 +729,6 @@ pub fn encode_spectral_frame(
         0,
         false,
     );
-
     let mut tf_res = vec![0i32; mode.nb_ebands];
     tf_encode(
         config.start,
@@ -508,7 +742,6 @@ pub fn encode_spectral_frame(
     let spread = encode_spread_decision(config.spread, total_bits, &mut enc);
 
     let cap = init_caps(mode, config.lm, config.channels);
-    let mut offsets = vec![0i32; mode.nb_ebands];
     let total_boost = encode_dynalloc_offsets(
         mode,
         config.start,
@@ -604,7 +837,7 @@ pub fn encode_spectral_frame(
                 config.lm,
                 allocation.coded_bands,
                 seed,
-                0,
+                9,
                 config.disable_inv,
                 false,
             );
@@ -626,6 +859,13 @@ pub fn encode_spectral_frame(
         &mut enc,
         config.channels,
     );
+    energy_error[..config.channels * mode.nb_ebands].fill(0.0);
+    for c in 0..config.channels {
+        for i in config.start..config.end {
+            let idx = i + c * mode.nb_ebands;
+            energy_error[idx] = error[idx].clamp(-0.5, 0.5);
+        }
+    }
     enc.finish();
     if enc.error() != 0 {
         return Err(Error::BufferTooSmall);
@@ -671,6 +911,7 @@ pub fn decode_spectral_frame(
         Some(mode.short_mdct_size << config.lm),
         config.channels * mode.nb_ebands,
         old_band_e.len(),
+        config.channels * mode.nb_ebands,
     )?;
 
     let total_bits = (data.len() * 8) as i32;

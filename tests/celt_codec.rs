@@ -156,6 +156,7 @@ fn official_celt_spectral_frame_round_trips_stereo_bands() {
     }
 
     let mut old_enc = vec![0.0f32; 2 * mode.nb_ebands];
+    let mut energy_error = vec![0.0f32; 2 * mode.nb_ebands];
     let mut delayed_intra = 1.0f32;
     let mut seed_enc = 0x7654_3210;
     let encoded = encode_spectral_frame(
@@ -165,6 +166,7 @@ fn official_celt_spectral_frame_round_trips_stereo_bands() {
         Some(&mut y_enc),
         &band_e,
         &mut old_enc,
+        &mut energy_error,
         &mut delayed_intra,
         &mut seed_enc,
     )

@@ -1,10 +1,11 @@
 use crate::celt::bands::{
-    compute_band_energies, hysteresis_decision, normalise_bands, SPREAD_NORMAL,
+    compute_band_energies, hysteresis_decision, normalise_bands, spreading_decision, SPREAD_NORMAL,
 };
 use crate::celt::codec::{encode_spectral_frame, CeltFrameConfig};
 use crate::celt::mathops::{celt_log2, celt_sqrt};
 use crate::celt::mdct::clt_mdct_forward;
 use crate::celt::modes::CeltMode;
+use crate::celt::pitch::{run_prefilter, COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD};
 use crate::celt::quant_bands::amp2_log2;
 use crate::constants::{valid_channels, valid_sample_rate};
 use crate::packet;
@@ -64,9 +65,18 @@ pub struct Encoder {
     mode: CeltMode,
     bitrate: i32,
     old_band_e: Vec<f32>,
+    energy_error: Vec<f32>,
     preemph_mem: Vec<f32>,
     hp_mem: Vec<f32>,
     overlap_mem: Vec<Vec<f32>>,
+    prefilter_mem: Vec<Vec<f32>>,
+    prefilter_period: usize,
+    prefilter_gain: f32,
+    prefilter_tapset: usize,
+    tonal_average: i32,
+    hf_average: i32,
+    tapset_decision: i32,
+    spread_decision: i32,
     seed: u32,
     intensity: usize,
     delayed_intra: f32,
@@ -91,9 +101,18 @@ impl Encoder {
             application,
             bitrate,
             old_band_e: vec![0.0; channels * mode.nb_ebands],
+            energy_error: vec![0.0; channels * mode.nb_ebands],
             preemph_mem: vec![0.0; channels],
             hp_mem: vec![0.0; channels * 2],
             overlap_mem: vec![vec![0.0; mode.overlap]; channels],
+            prefilter_mem: vec![vec![0.0; COMBFILTER_MAXPERIOD]; channels],
+            prefilter_period: 0,
+            prefilter_gain: 0.0,
+            prefilter_tapset: 0,
+            tonal_average: 256,
+            hf_average: 0,
+            tapset_decision: 0,
+            spread_decision: SPREAD_NORMAL,
             seed: 0,
             intensity: 0,
             delayed_intra: 1.0,
@@ -469,6 +488,8 @@ impl Encoder {
         let mut config = CeltFrameConfig::new(&self.mode, lm, stream_channels, frame_bytes)?;
         config.spread = SPREAD_NORMAL;
         config.last_coded_bands = self.last_coded_bands;
+        config.vbr = self.vbr;
+        config.constrained_vbr = self.vbr;
         let equiv_rate = self.equiv_rate(frame_bytes, lm);
 
         let n = frame_size;
@@ -484,8 +505,35 @@ impl Encoder {
                 input[overlap + i] = sample - self.preemph_mem[c];
                 self.preemph_mem[c] = self.mode.preemph[0] * sample;
             }
-            self.overlap_mem[c].copy_from_slice(&input[n..n + overlap]);
             inputs.push(input);
+        }
+
+        let prefilter_enabled =
+            frame_bytes > 12 * stream_channels && (frame_bytes * 8) as i32 >= 16;
+        let prefilter_tapset = self.tapset_decision as usize;
+        let (prefilter, prefilter_gain) = run_prefilter(
+            &self.mode,
+            &mut inputs,
+            &mut self.prefilter_mem,
+            self.prefilter_period,
+            self.prefilter_gain,
+            self.prefilter_tapset,
+            prefilter_tapset,
+            prefilter_enabled,
+            frame_bytes,
+            self.channels,
+            n,
+        );
+        config.prefilter = Some(prefilter);
+        self.prefilter_period = if prefilter.pitch > 0 {
+            prefilter.pitch as usize
+        } else {
+            COMBFILTER_MINPERIOD
+        };
+        self.prefilter_gain = prefilter_gain;
+        self.prefilter_tapset = prefilter_tapset;
+        for c in 0..self.channels {
+            self.overlap_mem[c].copy_from_slice(&inputs[c][n..n + overlap]);
         }
 
         let transient = Self::transient_analysis(&inputs, self.channels, n + overlap);
@@ -525,6 +573,26 @@ impl Encoder {
             stream_channels,
             m,
         );
+        if !config.is_transient && frame_bytes >= 10 * stream_channels && stream_channels > 0 {
+            let spread_weight = vec![32i32; self.mode.nb_ebands];
+            config.spread = spreading_decision(
+                &self.mode,
+                &norm,
+                &mut self.tonal_average,
+                self.spread_decision,
+                &mut self.hf_average,
+                &mut self.tapset_decision,
+                prefilter.enabled,
+                eff_end,
+                stream_channels,
+                m,
+                &spread_weight,
+            );
+            self.spread_decision = config.spread;
+        } else {
+            config.spread = SPREAD_NORMAL;
+            self.spread_decision = config.spread;
+        }
 
         if stream_channels == 1 {
             config.alloc_trim = Self::alloc_trim_analysis(
@@ -577,6 +645,7 @@ impl Encoder {
                 None,
                 &band_e,
                 &mut self.old_band_e[..self.mode.nb_ebands],
+                &mut self.energy_error[..self.mode.nb_ebands],
                 &mut self.delayed_intra,
                 &mut self.seed,
             )?
@@ -589,10 +658,14 @@ impl Encoder {
                 Some(right),
                 &band_e,
                 &mut self.old_band_e,
+                &mut self.energy_error,
                 &mut self.delayed_intra,
                 &mut self.seed,
             )?
         };
+        if stream_channels == 2 {
+            self.intensity = encoded.allocation.intensity;
+        }
         self.last_coded_bands = if self.last_coded_bands != 0 {
             (self.last_coded_bands + 1).min(
                 self.last_coded_bands
@@ -604,6 +677,8 @@ impl Encoder {
         };
         if self.channels == 2 && stream_channels == 1 {
             let (left, right) = self.old_band_e.split_at_mut(self.mode.nb_ebands);
+            right[..self.mode.nb_ebands].copy_from_slice(left);
+            let (left, right) = self.energy_error.split_at_mut(self.mode.nb_ebands);
             right[..self.mode.nb_ebands].copy_from_slice(left);
         }
 

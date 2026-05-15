@@ -14,8 +14,10 @@ used as behavioral reference material during the port.
 - CELT entropy/range coder
 - CELT mathops, laplace, CWRS/PVQ, DFT, MDCT, mode construction, rate
   allocation, frame control symbols, spectral frame coding, quantized energy,
-  band quantization, band helpers, synthesis/deemphasis, rotation, and
-  algebraic VQ
+  band quantization, dynamic allocation analysis, theta RDO, energy-error
+  feedback, pitch prefilter signaling/filtering, decoder postfiltering, spread
+  decision state, band helpers, synthesis/deemphasis, rotation, and algebraic
+  VQ
 - experimental 48 kHz CELT-only raw packet encode/decode through the Rust
   `Encoder`/`Decoder` types for 2.5, 5, 10, and 20 ms fullband frames
   with CBR, constrained VBR, or exact compressed-frame-byte controls
@@ -106,25 +108,39 @@ compressed packet byte sizes.
 
 ## Encoder Parity Next Steps
 
-CBR byte parity is the active target before VBR parity. On the deterministic
-raw CELT fixture, the first 2.5 ms CBR packets at 48 kb/s and 96 kb/s are
-byte-identical with libopus. The remaining 2.5 ms / 128 kb/s mismatch is in
-stereo theta selection for band 16: the packet controls, allocation, fine
-energy, and earlier PVQ vectors match before that point.
+CBR byte parity remains the active target before VBR parity. On the
+deterministic raw CELT fixture, the first six 2.5 ms CBR packets at 48, 96, and
+128 kb/s are byte-identical with libopus. Across a 40-packet run, the first
+divergence is frame 8 at 48 and 96 kb/s, and frame 7 at 128 kb/s.
+
+The 2.5 ms / 128 kb/s frame-7 mismatch is narrowed to allocation trim:
+prefilter signaling, coarse energy, TF/spread decisions, dynalloc signaling,
+and total boost match libopus before Rust writes trim 5 where C writes trim 4.
+
+The 5, 10, and 20 ms CBR paths still diverge from frame 0. The first traced
+5 ms / 128 kb/s mismatch happens after matching coarse energy: Rust currently
+encodes all TF flags as 1 with 192 dynalloc boost, while libopus encodes all TF
+flags as 0 with 288 boost.
+
+Ported in this checkpoint:
+
+- energy-error feedback
+- dynalloc analysis
+- theta RDO for stereo CELT bands
+- CELT pitch prefilter signaling and input filtering
+- CELT decoder postfilter state and filtering
+- spread decision state
 
 Resume from this checkpoint:
 
-1. Compare the left-channel analysis path against libopus for band 16 at
-   2.5 ms / 128 kb/s: `dc_reject`, `celt_preemphasis`, `clt_mdct_forward`,
-   `compute_band_energies`, and `normalise_bands`.
-2. Fix the analysis delta so band 16 chooses the same quantized stereo theta
-   as libopus, then re-run first-packet CBR dumps for 2.5 ms at 48, 96, and
+1. Fix `alloc_trim_analysis` or its encoder state inputs for the 2.5 ms
+   frame-7 trim 5 vs 4 mismatch.
+2. Extend 2.5 ms CBR byte parity past the 40-packet fixture at 48, 96, and
    128 kb/s.
-3. Extend the same byte-parity check across 5, 10, and 20 ms CBR frames and
-   multiple sequential packets so encoder state updates are covered.
+3. Port the remaining official TF analysis and transient-path details for
+   `LM > 0`, then repeat 5, 10, and 20 ms CBR packet dumps.
 4. After CBR is bit-identical for the raw CELT matrix, port libopus'
-   constrained VBR target/reservoir logic and repeat the packet dump checks in
-   VBR mode.
+   constrained VBR target/reservoir logic and repeat VBR packet dumps.
 
 ## License
 

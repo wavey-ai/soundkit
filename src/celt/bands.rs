@@ -570,6 +570,20 @@ impl BandCoder<'_> {
             Self::Decode(dec) => alg_unquant(x, n, k, spread, b, dec, gain),
         }
     }
+
+    fn clone_encoder(&mut self) -> Option<RangeEncoder> {
+        match self {
+            Self::Encode(enc) => Some((**enc).clone()),
+            Self::Decode(_) => None,
+        }
+    }
+
+    fn restore_encoder(&mut self, saved: RangeEncoder) {
+        match self {
+            Self::Encode(enc) => **enc = saved,
+            Self::Decode(_) => unreachable!("theta RDO only runs while encoding"),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -585,6 +599,7 @@ struct BandContext<'a> {
     resynth: bool,
     avoid_split_noise: bool,
     disable_inv: bool,
+    theta_round: i32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -653,20 +668,30 @@ fn compute_theta(
 
     if qn != 1 {
         if coder.is_encode() {
-            itheta = (itheta * qn + 8192) >> 14;
-            if !stereo && ctx.avoid_split_noise && itheta > 0 && itheta < qn {
-                let unquantized = itheta * 16384 / qn;
-                let imid = bitexact_cos(unquantized as i16);
-                let iside = bitexact_cos((16384 - unquantized) as i16);
-                let delta = frac_mul16(
-                    (n as i32 - 1) << 7,
-                    bitexact_log2tan(iside as i32, imid as i32),
-                );
-                if delta > *b {
-                    itheta = qn;
-                } else if delta < -*b {
-                    itheta = 0;
+            if !stereo || ctx.theta_round == 0 {
+                itheta = (itheta * qn + 8192) >> 14;
+                if !stereo && ctx.avoid_split_noise && itheta > 0 && itheta < qn {
+                    let unquantized = itheta * 16384 / qn;
+                    let imid = bitexact_cos(unquantized as i16);
+                    let iside = bitexact_cos((16384 - unquantized) as i16);
+                    let delta = frac_mul16(
+                        (n as i32 - 1) << 7,
+                        bitexact_log2tan(iside as i32, imid as i32),
+                    );
+                    if delta > *b {
+                        itheta = qn;
+                    } else if delta < -*b {
+                        itheta = 0;
+                    }
                 }
+            } else {
+                let bias = if itheta > 8192 {
+                    32767 / qn
+                } else {
+                    -32767 / qn
+                };
+                let down = (itheta * qn + bias).clamp(0, (qn - 1) << 14) >> 14;
+                itheta = if ctx.theta_round < 0 { down } else { down + 1 };
             }
         }
 
@@ -810,6 +835,19 @@ fn compute_theta(
         itheta,
         qalloc,
     }
+}
+
+fn compute_channel_weights(ex: f32, ey: f32) -> (f32, f32) {
+    let min_e = ex.min(ey);
+    (ex + min_e / 3.0, ey + min_e / 3.0)
+}
+
+fn inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
+    x.iter()
+        .zip(y.iter())
+        .take(n)
+        .map(|(left, right)| left * right)
+        .sum()
 }
 
 fn shift_right_i32(value: i32, shift: isize) -> i32 {
@@ -1339,7 +1377,7 @@ pub fn quant_all_bands_mono(
     lm: usize,
     coded_bands: usize,
     seed: &mut u32,
-    complexity: i32,
+    _complexity: i32,
     encode_resynth: bool,
 ) {
     assert!(start < end);
@@ -1358,7 +1396,7 @@ pub fn quant_all_bands_mono(
     let mut norm = vec![0.0f32; norm_limit.saturating_sub(norm_offset)];
 
     let encode = coder.is_encode();
-    let theta_rdo = encode && complexity >= 8;
+    let theta_rdo = false;
     let resynth = !encode || theta_rdo || encode_resynth;
     let mut lowband_offset = 0usize;
     let mut update_lowband = true;
@@ -1374,6 +1412,7 @@ pub fn quant_all_bands_mono(
         resynth,
         avoid_split_noise: blocks > 1,
         disable_inv: false,
+        theta_round: 0,
     };
 
     for i in start..end {
@@ -1537,6 +1576,7 @@ pub fn quant_all_bands_stereo(
         resynth,
         avoid_split_noise: blocks > 1,
         disable_inv,
+        theta_round: 0,
     };
 
     for i in start..end {
@@ -1663,19 +1703,101 @@ pub fn quant_all_bands_stereo(
                 y_cm,
             );
         } else {
-            x_cm = quant_band_stereo(
-                &mut ctx,
-                coder,
-                &mut x[band_start..band_end],
-                &mut y[band_start..band_end],
-                n,
-                b,
-                blocks,
-                lowband_vec.as_deref(),
-                lm as isize,
-                lowband_out.as_deref_mut(),
-                x_cm | y_cm,
-            );
+            let cm = x_cm | y_cm;
+            if theta_rdo && i < intensity {
+                let enc_save = coder
+                    .clone_encoder()
+                    .expect("theta RDO only runs while encoding");
+                let ctx_save = ctx.clone();
+                let x_save = x[band_start..band_end].to_vec();
+                let y_save = y[band_start..band_end].to_vec();
+                let (w0, w1) = compute_channel_weights(band_e[i], band_e[i + mode.nb_ebands]);
+
+                let mut enc_down = enc_save.clone();
+                let mut coder_down = BandCoder::Encode(&mut enc_down);
+                let mut ctx_down = ctx_save.clone();
+                ctx_down.theta_round = -1;
+                let mut x_down = x_save.clone();
+                let mut y_down = y_save.clone();
+                let mut lowband_down = if !last && resynth {
+                    Some(vec![0.0f32; n])
+                } else {
+                    None
+                };
+                let x_cm_down = quant_band_stereo(
+                    &mut ctx_down,
+                    &mut coder_down,
+                    &mut x_down,
+                    &mut y_down,
+                    n,
+                    b,
+                    blocks,
+                    lowband_vec.as_deref(),
+                    lm as isize,
+                    lowband_down.as_deref_mut(),
+                    cm,
+                );
+                let dist_down =
+                    w0 * inner_prod(&x_save, &x_down, n) + w1 * inner_prod(&y_save, &y_down, n);
+
+                let mut enc_up = enc_save;
+                let mut coder_up = BandCoder::Encode(&mut enc_up);
+                let mut ctx_up = ctx_save;
+                ctx_up.theta_round = 1;
+                let mut x_up = x_save.clone();
+                let mut y_up = y_save.clone();
+                let mut lowband_up = if !last && resynth {
+                    Some(vec![0.0f32; n])
+                } else {
+                    None
+                };
+                let x_cm_up = quant_band_stereo(
+                    &mut ctx_up,
+                    &mut coder_up,
+                    &mut x_up,
+                    &mut y_up,
+                    n,
+                    b,
+                    blocks,
+                    lowband_vec.as_deref(),
+                    lm as isize,
+                    lowband_up.as_deref_mut(),
+                    cm,
+                );
+                let dist_up =
+                    w0 * inner_prod(&x_save, &x_up, n) + w1 * inner_prod(&y_save, &y_up, n);
+
+                if dist_down >= dist_up {
+                    coder.restore_encoder(enc_down);
+                    ctx = ctx_down;
+                    x[band_start..band_end].copy_from_slice(&x_down);
+                    y[band_start..band_end].copy_from_slice(&y_down);
+                    lowband_out = lowband_down;
+                    x_cm = x_cm_down;
+                } else {
+                    coder.restore_encoder(enc_up);
+                    ctx = ctx_up;
+                    x[band_start..band_end].copy_from_slice(&x_up);
+                    y[band_start..band_end].copy_from_slice(&y_up);
+                    lowband_out = lowband_up;
+                    x_cm = x_cm_up;
+                }
+            } else {
+                ctx.theta_round = 0;
+                x_cm = quant_band_stereo(
+                    &mut ctx,
+                    coder,
+                    &mut x[band_start..band_end],
+                    &mut y[band_start..band_end],
+                    n,
+                    b,
+                    blocks,
+                    lowband_vec.as_deref(),
+                    lm as isize,
+                    lowband_out.as_deref_mut(),
+                    cm,
+                );
+            }
             y_cm = x_cm;
         }
 

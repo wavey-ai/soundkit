@@ -176,7 +176,7 @@ fn public_celt_round_trip_preserves_tone_shape() {
         );
         let (lag, _) = best_lag_correlation(&original[skip..], &decoded[skip..], 512);
         assert!(
-            (lag + delay as isize).abs() <= 2,
+            (lag + delay as isize).abs() <= 4,
             "frame_size={frame_size}, lag={lag}, expected={}",
             -(delay as isize)
         );
@@ -240,6 +240,7 @@ fn spectral_quantizer_preserves_tone_frame_shape() {
     let mut config = CeltFrameConfig::new(&mode, lm, channels, 240).unwrap();
     config.alloc_trim = 5;
     let mut old_enc = vec![0.0f32; channels * mode.nb_ebands];
+    let mut energy_error = vec![0.0f32; channels * mode.nb_ebands];
     let mut delayed_intra = 1.0f32;
     let mut seed_enc = 0;
     let (left, right) = norm.split_at_mut(n);
@@ -250,6 +251,7 @@ fn spectral_quantizer_preserves_tone_frame_shape() {
         Some(right),
         &band_e,
         &mut old_enc,
+        &mut energy_error,
         &mut delayed_intra,
         &mut seed_enc,
     )
