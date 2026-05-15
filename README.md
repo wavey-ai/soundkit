@@ -50,6 +50,16 @@ cargo run --release --example wav_celt -- roundtrip --frame-size 960 --frame-byt
 `output.lors` is a simple length-prefixed raw packet stream for testing this
 port. It is not Ogg Opus yet.
 
+To export side-by-side decoded WAVs for listening comparisons:
+
+```sh
+tools/export_roundtrip_wavs.sh --input input-audio --out-dir path/to/roundtrips --mode both
+```
+
+The helper normalizes the input to 48 kHz stereo PCM16 before running both
+implementations. Each case directory contains the Rust packet stream and
+decoded WAV plus the upstream `opus_demo` packet stream and decoded WAV.
+
 ## Raw CELT benchmark
 
 The raw benchmark compares this crate against libopus through direct in-process
