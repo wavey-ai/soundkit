@@ -16,13 +16,14 @@ Implemented:
 - safe repacketizer and packet padding/unpadding APIs
 - soft clipping
 - CELT entropy/range coder
-- CELT mathops, laplace, CWRS/PVQ, DFT, MDCT, rotation, and algebraic VQ
+- CELT mathops, laplace, CWRS/PVQ, DFT, MDCT, band helpers, rotation, and
+  algebraic VQ
 - encoder/decoder Rust types that currently report real encode/decode as
   unimplemented
 
 Still to port:
 
-- remaining CELT band/mode/rate logic and codec wiring
+- remaining CELT band quantization loop, mode/rate logic, and codec wiring
 - SILK signal path
 - real Opus encode/decode
 - multistream/projection codec internals

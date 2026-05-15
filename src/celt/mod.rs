@@ -1,3 +1,4 @@
+pub mod bands;
 pub mod cwrs;
 pub mod entropy;
 pub mod kiss_fft;
