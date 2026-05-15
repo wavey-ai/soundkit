@@ -17,8 +17,8 @@ Implemented in Rust:
   allocation, frame control symbols, spectral frame coding, quantized energy,
   band quantization, band helpers, synthesis/deemphasis, rotation, and
   algebraic VQ
-- encoder and decoder Rust types that currently return `Error::Unimplemented`
-  for actual audio encode/decode
+- experimental 48 kHz CELT-only raw packet encode/decode through the Rust
+  encoder and decoder types
 
 Real CELT/SILK encode/decode is not implemented yet.
 
@@ -56,7 +56,7 @@ cargo build --release
 ## Remaining Port Order
 
 1. Keep default crate builds under `#![forbid(unsafe_code)]`.
-2. Port remaining CELT pitch helpers and public codec wiring.
+2. Port remaining CELT pitch helpers and full public codec wiring.
 3. Port CELT decoder and validate with `tests/test_opus_decode.c`.
 4. Port SILK fixed/float common signal-processing primitives and unit tests.
 5. Port SILK decoder, then hybrid packet decode.

@@ -1,15 +1,21 @@
-use libopus_rs::{Application, Decoder, Encoder, Error};
+use libopus_rs::{Application, Decoder, Encoder};
 
 #[test]
-fn encode_and_decode_report_unimplemented_until_signal_path_is_ported() {
+fn encode_and_decode_48k_celt_only_smoke_path() {
     let mut encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
-    let pcm = vec![0i16; 960 * 2];
-    assert_eq!(encoder.encode_i16(&pcm, 960), Err(Error::Unimplemented));
+    let pcm = (0..960)
+        .flat_map(|i| {
+            let left = (i as f32 * 0.011).sin() * 0.2;
+            let right = (i as f32 * 0.017).cos() * 0.2;
+            [left, right]
+        })
+        .collect::<Vec<_>>();
+    let packet = encoder.encode_f32(&pcm, 960).unwrap();
+    assert!(!packet.is_empty());
 
     let mut decoder = Decoder::new(48_000, 2).unwrap();
-    let packet = [0x04u8];
-    assert_eq!(
-        decoder.decode_i16(&packet, false),
-        Err(Error::Unimplemented)
-    );
+    let decoded = decoder.decode_f32(&packet, false).unwrap();
+    assert_eq!(decoded.len(), pcm.len());
+    assert!(decoded.iter().all(|sample| sample.is_finite()));
+    assert!(decoded.iter().any(|sample| sample.abs() > 1e-5));
 }

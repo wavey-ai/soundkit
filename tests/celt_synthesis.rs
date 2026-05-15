@@ -66,7 +66,7 @@ fn official_celt_synthesis_outputs_interleaved_pcm() {
         decoded.is_transient,
         config.lm,
         1,
-        false,
+        decoded.silence,
     )
     .unwrap();
     let mut preemph_mem = vec![0.0f32; config.channels];

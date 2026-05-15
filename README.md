@@ -20,14 +20,14 @@ Implemented:
   allocation, frame control symbols, spectral frame coding, quantized energy,
   band quantization, band helpers, synthesis/deemphasis, rotation, and
   algebraic VQ
-- encoder/decoder Rust types that currently report real encode/decode as
-  unimplemented
+- experimental 48 kHz CELT-only raw packet encode/decode through the Rust
+  `Encoder`/`Decoder` types
 
 Still to port:
 
-- remaining CELT pitch helpers and public codec wiring
+- remaining CELT pitch helpers and full public codec wiring
 - SILK signal path
-- real Opus encode/decode
+- full Opus encode/decode
 - multistream/projection codec internals
 - DRED/deep PLC/OSCE extensions
 

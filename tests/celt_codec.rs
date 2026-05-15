@@ -179,6 +179,7 @@ fn official_celt_spectral_frame_round_trips_stereo_bands() {
     assert_eq!(decoded.allocation, encoded.allocation);
     assert_eq!(decoded.tf_res, encoded.tf_res);
     assert_eq!(decoded.collapse_masks, encoded.collapse_masks);
+    assert_eq!(decoded.silence, encoded.silence);
     assert_eq!(decoded.is_transient, encoded.is_transient);
     assert_eq!(decoded.spread, encoded.spread);
     assert_eq!(decoded.alloc_trim, encoded.alloc_trim);

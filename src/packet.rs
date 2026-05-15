@@ -114,6 +114,24 @@ pub(crate) fn packet_get_samples_per_frame_byte(toc: u8, fs: i32) -> i32 {
     }
 }
 
+pub(crate) fn make_celt_only_fullband_toc(lm: usize, channels: usize) -> Result<u8> {
+    if lm > 3 || !(1..=2).contains(&channels) {
+        return Err(Error::BadArg);
+    }
+    Ok(0xE0 | ((lm as u8) << 3) | if channels == 2 { 0x04 } else { 0x00 })
+}
+
+pub(crate) fn celt_only_lm(toc: u8) -> Result<usize> {
+    if toc & 0x80 == 0 {
+        return Err(Error::InvalidPacket);
+    }
+    Ok(((toc >> 3) & 0x03) as usize)
+}
+
+pub(crate) fn is_celt_only(toc: u8) -> bool {
+    toc & 0x80 != 0
+}
+
 pub(crate) fn parse_packet_slice(data: &[u8], self_delimited: bool) -> Result<ParsedPacket> {
     if data.is_empty() {
         return Err(Error::InvalidPacket);

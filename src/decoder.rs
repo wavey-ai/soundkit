@@ -1,4 +1,8 @@
-use crate::constants::{valid_channels, valid_sample_rate};
+use crate::celt::codec::{decode_spectral_frame, CeltFrameConfig};
+use crate::celt::mathops::celt_float2int16;
+use crate::celt::modes::CeltMode;
+use crate::celt::synthesis::{celt_synthesis, deemphasis_interleaved};
+use crate::constants::{valid_channels, valid_sample_rate, Bandwidth};
 use crate::packet;
 use crate::{Error, Result};
 
@@ -6,6 +10,10 @@ use crate::{Error, Result};
 pub struct Decoder {
     sample_rate: i32,
     channels: usize,
+    mode: CeltMode,
+    old_band_e: Vec<f32>,
+    preemph_mem: Vec<f32>,
+    seed: u32,
 }
 
 impl Decoder {
@@ -13,9 +21,14 @@ impl Decoder {
         if !valid_sample_rate(sample_rate) || !valid_channels(channels as i32) {
             return Err(Error::BadArg);
         }
+        let mode = CeltMode::standard_48k();
         Ok(Self {
             sample_rate,
             channels,
+            old_band_e: vec![0.0; channels * mode.nb_ebands],
+            preemph_mem: vec![0.0; channels],
+            seed: 0,
+            mode,
         })
     }
 
@@ -32,13 +45,56 @@ impl Decoder {
         Ok(samples as usize)
     }
 
-    pub fn decode_i16(&mut self, packet: &[u8], _decode_fec: bool) -> Result<Vec<i16>> {
-        self.validate_packet(packet)?;
-        Err(Error::Unimplemented)
+    pub fn decode_i16(&mut self, packet: &[u8], decode_fec: bool) -> Result<Vec<i16>> {
+        let pcm = self.decode_f32(packet, decode_fec)?;
+        let mut out = vec![0i16; pcm.len()];
+        celt_float2int16(&pcm, &mut out);
+        Ok(out)
     }
 
     pub fn decode_f32(&mut self, packet: &[u8], _decode_fec: bool) -> Result<Vec<f32>> {
         self.validate_packet(packet)?;
-        Err(Error::Unimplemented)
+        if self.sample_rate != 48_000 {
+            return Err(Error::Unimplemented);
+        }
+
+        let parsed = packet::parse_packet(packet)?;
+        if parsed.frame_count() != 1
+            || !packet::is_celt_only(parsed.toc)
+            || packet::bandwidth(packet)? != Bandwidth::Fullband
+            || packet::channels(packet)? != self.channels
+        {
+            return Err(Error::Unimplemented);
+        }
+
+        let lm = packet::celt_only_lm(parsed.toc)?;
+        let expected_frame_size = self.mode.short_mdct_size << lm;
+        if packet::samples_per_frame(packet, self.sample_rate)? as usize != expected_frame_size {
+            return Err(Error::InvalidPacket);
+        }
+
+        let frame = parsed.frames()[0].data;
+        let config = CeltFrameConfig::new(&self.mode, lm, self.channels, frame.len())?;
+        let decoded = decode_spectral_frame(
+            &self.mode,
+            &config,
+            frame,
+            &mut self.old_band_e,
+            &mut self.seed,
+        )?;
+        let channels = celt_synthesis(
+            &self.mode,
+            &decoded.x,
+            decoded.y.as_deref(),
+            &self.old_band_e,
+            config.start,
+            config.end.min(self.mode.eff_ebands),
+            config.channels,
+            decoded.is_transient,
+            config.lm,
+            1,
+            decoded.silence,
+        )?;
+        deemphasis_interleaved(&self.mode, &channels, &mut self.preemph_mem)
     }
 }

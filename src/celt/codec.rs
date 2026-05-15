@@ -329,6 +329,7 @@ pub struct CeltFrameEncodeResult {
     pub allocation: Allocation,
     pub tf_res: Vec<i32>,
     pub collapse_masks: Vec<u8>,
+    pub silence: bool,
     pub is_transient: bool,
     pub spread: i32,
     pub alloc_trim: i32,
@@ -341,6 +342,7 @@ pub struct CeltFrameDecodeResult {
     pub allocation: Allocation,
     pub tf_res: Vec<i32>,
     pub collapse_masks: Vec<u8>,
+    pub silence: bool,
     pub is_transient: bool,
     pub spread: i32,
     pub alloc_trim: i32,
@@ -407,6 +409,10 @@ pub fn encode_spectral_frame(
     let total_bits_frac = total_bits << BITRES;
     let eff_end = config.end.min(mode.eff_ebands);
     let mut enc = RangeEncoder::new(config.packet_bytes);
+    let silence = false;
+    if enc.tell() == 1 && enc.tell() < total_bits {
+        enc.encode_bit_logp(silence, 15);
+    }
     let is_transient = encode_transient_flag(config.lm, total_bits, config.is_transient, &mut enc);
 
     let mut band_log_e = vec![0.0f32; config.channels * mode.nb_ebands];
@@ -591,6 +597,7 @@ pub fn encode_spectral_frame(
         allocation,
         tf_res,
         collapse_masks,
+        silence,
         is_transient,
         spread,
         alloc_trim,
@@ -619,6 +626,13 @@ pub fn decode_spectral_frame(
     let total_bits = (data.len() * 8) as i32;
     let total_bits_frac = total_bits << BITRES;
     let mut dec = RangeDecoder::new(data);
+    let silence = if dec.tell() >= total_bits {
+        true
+    } else if dec.tell() == 1 {
+        dec.decode_bit_logp(15)
+    } else {
+        false
+    };
     let is_transient = decode_transient_flag(config.lm, total_bits, &mut dec);
     let intra = if dec.tell() + 3 <= total_bits {
         dec.decode_bit_logp(3)
@@ -777,6 +791,7 @@ pub fn decode_spectral_frame(
         allocation,
         tf_res,
         collapse_masks,
+        silence,
         is_transient,
         spread,
         alloc_trim,
