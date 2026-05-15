@@ -14,8 +14,8 @@ Implemented in Rust:
 - safe soft clipping
 - safe CELT entropy/range coder
 - safe CELT mathops, laplace, CWRS/PVQ, DFT, MDCT, mode construction, rate
-  allocation, quantized energy, band quantization, band helpers, rotation, and
-  algebraic VQ
+  allocation, frame control symbols, quantized energy, band quantization, band
+  helpers, rotation, and algebraic VQ
 - encoder and decoder Rust types that currently return `Error::Unimplemented`
   for actual audio encode/decode
 
