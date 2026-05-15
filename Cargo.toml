@@ -1,0 +1,16 @@
+[package]
+name = "libopus-rs"
+version = "0.0.1"
+edition = "2021"
+license = "BSD-3-Clause"
+description = "Pure Rust port of libopus 1.5.2"
+repository = "https://github.com/jbrough/libopus-rs"
+readme = "README.md"
+keywords = ["opus", "codec", "audio", "libopus"]
+categories = ["multimedia::audio"]
+
+[dependencies]
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
