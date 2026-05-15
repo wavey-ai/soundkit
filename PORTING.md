@@ -13,8 +13,8 @@ Implemented in Rust:
 - safe repacketizer with packet and multistream pad/unpad helpers
 - safe soft clipping
 - safe CELT entropy/range coder
-- safe CELT mathops, laplace, CWRS/PVQ, DFT, MDCT, band helpers, rotation,
-  and algebraic VQ
+- safe CELT mathops, laplace, CWRS/PVQ, DFT, MDCT, mode construction, rate
+  allocation, band helpers, rotation, and algebraic VQ
 - encoder and decoder Rust types that currently return `Error::Unimplemented`
   for actual audio encode/decode
 
@@ -34,6 +34,10 @@ The Rust tests in `tests/packet_api.rs` are derived from:
 - `celt/tests/test_unit_dft.c`
 - `celt/tests/test_unit_mdct.c`
 - `celt/tests/test_unit_rotation.c`
+- `celt/modes.c`, `celt/modes.h`, and `celt/static_modes_float.h`, for the
+  48 kHz CELT mode shape and pulse cache
+- `celt/rate.c` and `celt/rate.h`, for CELT rate allocation and
+  encode/decode allocation decisions
 - selected helper behavior from `celt/bands.c`
 
 Run:
@@ -46,8 +50,8 @@ cargo build --release
 ## Remaining Port Order
 
 1. Keep default crate builds under `#![forbid(unsafe_code)]`.
-2. Port remaining CELT band quantization loop, rate allocation, mode tables,
-   pitch helpers, and quantized energy logic.
+2. Port remaining CELT quantized energy logic, pitch helpers, and band
+   quantization loop.
 3. Port CELT decoder and validate with `tests/test_opus_decode.c`.
 4. Port SILK fixed/float common signal-processing primitives and unit tests.
 5. Port SILK decoder, then hybrid packet decode.
