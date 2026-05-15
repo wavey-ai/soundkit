@@ -1,7 +1,7 @@
 //! CELT pulse/fine-energy allocation, ported from official `celt/rate.c`.
 
 use crate::celt::entropy::{RangeDecoder, RangeEncoder};
-use crate::celt::modes::{bits2pulses, CeltMode};
+use crate::celt::modes::CeltMode;
 
 const BITRES: i32 = 3;
 const ALLOC_STEPS: usize = 6;
@@ -405,10 +405,6 @@ pub fn clt_compute_allocation(
         prev,
         signal_bandwidth,
     );
-
-    for j in start..coded_bands {
-        pulses[j] = bits2pulses(mode, j, lm, pulses[j]) as i32;
-    }
 
     Allocation {
         coded_bands,

@@ -19,11 +19,44 @@ pub fn celt_synthesis(
     downsample: usize,
     silence: bool,
 ) -> Result<Vec<Vec<f32>>> {
+    let mut overlap_mem = vec![vec![0.0f32; mode.overlap]; channels];
+    celt_synthesis_with_overlap(
+        mode,
+        x,
+        y,
+        band_log_e,
+        start,
+        eff_end,
+        channels,
+        is_transient,
+        lm,
+        downsample,
+        silence,
+        &mut overlap_mem,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn celt_synthesis_with_overlap(
+    mode: &CeltMode,
+    x: &[f32],
+    y: Option<&[f32]>,
+    band_log_e: &[f32],
+    start: usize,
+    eff_end: usize,
+    channels: usize,
+    is_transient: bool,
+    lm: usize,
+    downsample: usize,
+    silence: bool,
+    overlap_mem: &mut [Vec<f32>],
+) -> Result<Vec<Vec<f32>>> {
     if lm > mode.max_lm
         || start > eff_end
         || eff_end > mode.nb_ebands
         || !(1..=2).contains(&channels)
         || downsample == 0
+        || overlap_mem.len() < channels
     {
         return Err(Error::BadArg);
     }
@@ -32,6 +65,10 @@ pub fn celt_synthesis(
     if x.len() < n
         || (channels == 2 && y.map_or(true, |right| right.len() < n))
         || band_log_e.len() < channels * mode.nb_ebands
+        || overlap_mem
+            .iter()
+            .take(channels)
+            .any(|memory| memory.len() < mode.overlap)
     {
         return Err(Error::BadArg);
     }
@@ -57,6 +94,7 @@ pub fn celt_synthesis(
         );
 
         let mut channel = vec![0.0f32; n + mode.overlap];
+        channel[..mode.overlap].copy_from_slice(&overlap_mem[c][..mode.overlap]);
         for block in 0..blocks {
             clt_mdct_backward(
                 &mode.mdct,
@@ -68,6 +106,7 @@ pub fn celt_synthesis(
                 blocks,
             );
         }
+        overlap_mem[c][..mode.overlap].copy_from_slice(&channel[n..n + mode.overlap]);
         channel.truncate(n);
         out.push(channel);
     }

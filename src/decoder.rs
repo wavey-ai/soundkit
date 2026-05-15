@@ -1,7 +1,7 @@
 use crate::celt::codec::{decode_spectral_frame, CeltFrameConfig};
 use crate::celt::mathops::celt_float2int16;
 use crate::celt::modes::CeltMode;
-use crate::celt::synthesis::{celt_synthesis, deemphasis_interleaved};
+use crate::celt::synthesis::{celt_synthesis_with_overlap, deemphasis_interleaved};
 use crate::constants::{valid_channels, valid_sample_rate, Bandwidth};
 use crate::packet;
 use crate::{Error, Result};
@@ -13,6 +13,7 @@ pub struct Decoder {
     mode: CeltMode,
     old_band_e: Vec<f32>,
     preemph_mem: Vec<f32>,
+    overlap_mem: Vec<Vec<f32>>,
     seed: u32,
 }
 
@@ -27,6 +28,7 @@ impl Decoder {
             channels,
             old_band_e: vec![0.0; channels * mode.nb_ebands],
             preemph_mem: vec![0.0; channels],
+            overlap_mem: vec![vec![0.0; mode.overlap]; channels],
             seed: 0,
             mode,
         })
@@ -82,7 +84,7 @@ impl Decoder {
             &mut self.old_band_e,
             &mut self.seed,
         )?;
-        let channels = celt_synthesis(
+        let channels = celt_synthesis_with_overlap(
             &self.mode,
             &decoded.x,
             decoded.y.as_deref(),
@@ -94,6 +96,7 @@ impl Decoder {
             config.lm,
             1,
             decoded.silence,
+            &mut self.overlap_mem,
         )?;
         deemphasis_interleaved(&self.mode, &channels, &mut self.preemph_mem)
     }
