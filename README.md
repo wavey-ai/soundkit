@@ -17,13 +17,14 @@ Implemented:
 - soft clipping
 - CELT entropy/range coder
 - CELT mathops, laplace, CWRS/PVQ, DFT, MDCT, mode construction, rate
-  allocation, quantized energy, band helpers, rotation, and algebraic VQ
+  allocation, quantized energy, mono band quantization, band helpers,
+  rotation, and algebraic VQ
 - encoder/decoder Rust types that currently report real encode/decode as
   unimplemented
 
 Still to port:
 
-- remaining CELT pitch helpers, band quantization loop, and codec wiring
+- remaining CELT pitch helpers, stereo band quantization, and codec wiring
 - SILK signal path
 - real Opus encode/decode
 - multistream/projection codec internals

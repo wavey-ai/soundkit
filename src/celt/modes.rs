@@ -391,7 +391,11 @@ pub fn compute_pulse_cache(mode: &CeltMode, lm: usize) -> PulseCache {
 }
 
 pub fn bits2pulses(mode: &CeltMode, band: usize, lm: usize, bits: i32) -> usize {
-    let lm = lm + 1;
+    bits2pulses_signed(mode, band, lm as isize, bits)
+}
+
+pub fn bits2pulses_signed(mode: &CeltMode, band: usize, lm: isize, bits: i32) -> usize {
+    let lm = (lm + 1) as usize;
     let cache = &mode.cache.bits[mode.cache.index[lm * mode.nb_ebands + band] as usize..];
     let mut lo = 0usize;
     let mut hi = cache[0] as usize;
@@ -412,10 +416,14 @@ pub fn bits2pulses(mode: &CeltMode, band: usize, lm: usize, bits: i32) -> usize 
 }
 
 pub fn pulses2bits(mode: &CeltMode, band: usize, lm: usize, pulses: usize) -> i32 {
+    pulses2bits_signed(mode, band, lm as isize, pulses)
+}
+
+pub fn pulses2bits_signed(mode: &CeltMode, band: usize, lm: isize, pulses: usize) -> i32 {
     if pulses == 0 {
         return 0;
     }
-    let lm = lm + 1;
+    let lm = (lm + 1) as usize;
     let cache = &mode.cache.bits[mode.cache.index[lm * mode.nb_ebands + band] as usize..];
     cache[pulses] as i32 + 1
 }

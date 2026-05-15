@@ -1,6 +1,9 @@
 use libopus_rs::celt::bands::*;
+use libopus_rs::celt::entropy::{RangeDecoder, RangeEncoder};
 use libopus_rs::celt::modes::CeltMode;
 use libopus_rs::celt::quant_bands::{amp2_log2, E_MEANS};
+use libopus_rs::celt::rate::clt_compute_allocation;
+use libopus_rs::celt::vq::renormalise_vector;
 
 #[test]
 fn official_hysteresis_decision_edges() {
@@ -214,4 +217,115 @@ fn official_anti_collapse_fills_missing_short_blocks() {
     let end = (mode.ebands[12] as usize) << lm;
     assert_ne!(seed, 1);
     assert!(x[start..end].iter().any(|v| *v != 0.0));
+}
+
+#[test]
+fn official_mono_quant_all_bands_range_round_trip() {
+    let mode = CeltMode::standard_48k();
+    let start = 0;
+    let end = mode.nb_ebands;
+    let lm = 0;
+    let m = 1 << lm;
+    let n = mode.short_mdct_size << lm;
+    let total_bits = 3600;
+    let channels = 1;
+    let offsets = vec![0; mode.nb_ebands];
+    let cap = (0..mode.nb_ebands)
+        .map(|band| {
+            mode.cache.caps[lm * 2 * mode.nb_ebands + (channels - 1) * mode.nb_ebands + band] as i32
+        })
+        .collect::<Vec<_>>();
+    let allocation = clt_compute_allocation(
+        &mode,
+        start,
+        end,
+        &offsets,
+        &cap,
+        5,
+        0,
+        false,
+        total_bits,
+        channels,
+        lm,
+        None,
+        mode.nb_ebands,
+        mode.nb_ebands - 1,
+    );
+
+    let mut x_enc = (0..n)
+        .map(|i| ((i as f32 * 0.117).sin() + 0.25 * (i as f32 * 0.031).cos()).max(-0.95))
+        .collect::<Vec<_>>();
+    for band in start..end {
+        let band_start = m * mode.ebands[band] as usize;
+        let band_end = m * mode.ebands[band + 1] as usize;
+        renormalise_vector(&mut x_enc[band_start..band_end], band_end - band_start, 1.0);
+    }
+    let mut x_dec = vec![0.0f32; n];
+    let band_e = vec![1.0f32; mode.nb_ebands];
+    let tf_res = vec![0i32; mode.nb_ebands];
+
+    let mut enc = RangeEncoder::new(512);
+    let mut enc_coder = BandCoder::Encode(&mut enc);
+    let mut enc_masks = vec![0u8; mode.nb_ebands];
+    let mut seed_enc = 12_345u32;
+    quant_all_bands_mono(
+        &mode,
+        start,
+        end,
+        &mut x_enc,
+        &mut enc_masks,
+        &band_e,
+        &allocation.pulses,
+        false,
+        SPREAD_NORMAL,
+        mode.nb_ebands,
+        &tf_res,
+        total_bits,
+        allocation.balance,
+        &mut enc_coder,
+        lm,
+        allocation.coded_bands,
+        &mut seed_enc,
+        0,
+        true,
+    );
+    enc.shrink(((enc.tell() + 7) / 8) as usize);
+    enc.finish();
+    assert_eq!(enc.error(), 0);
+
+    let mut dec = RangeDecoder::new(enc.range_data());
+    let mut dec_coder = BandCoder::Decode(&mut dec);
+    let mut dec_masks = vec![0u8; mode.nb_ebands];
+    let mut seed_dec = 12_345u32;
+    quant_all_bands_mono(
+        &mode,
+        start,
+        end,
+        &mut x_dec,
+        &mut dec_masks,
+        &band_e,
+        &allocation.pulses,
+        false,
+        SPREAD_NORMAL,
+        mode.nb_ebands,
+        &tf_res,
+        total_bits,
+        allocation.balance,
+        &mut dec_coder,
+        lm,
+        allocation.coded_bands,
+        &mut seed_dec,
+        0,
+        false,
+    );
+
+    assert_eq!(dec_masks, enc_masks);
+    assert_eq!(seed_dec, seed_enc);
+    let coded_bound = m * mode.ebands[end] as usize;
+    for (i, (decoded, encoded)) in x_dec[..coded_bound].iter().zip(x_enc.iter()).enumerate() {
+        assert!(
+            (decoded - encoded).abs() < 2e-5,
+            "bin={i}, decoded={decoded}, encoded={encoded}"
+        );
+    }
 }
