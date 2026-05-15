@@ -54,6 +54,9 @@ pub struct Encoder {
     intensity: usize,
     delayed_intra: f32,
     stream_channels: usize,
+    vbr: bool,
+    vbr_reservoir: f32,
+    vbr_prev_energy: f32,
 }
 
 impl Encoder {
@@ -75,6 +78,9 @@ impl Encoder {
             intensity: 0,
             delayed_intra: 1.0,
             stream_channels: channels,
+            vbr: false,
+            vbr_reservoir: 0.0,
+            vbr_prev_energy: 0.0,
             mode,
         })
     }
@@ -95,11 +101,23 @@ impl Encoder {
         self.bitrate
     }
 
+    pub const fn vbr(&self) -> bool {
+        self.vbr
+    }
+
     pub fn set_bitrate(&mut self, bitrate: i32) -> Result<()> {
         if !(CELT_MIN_BITRATE..=CELT_MAX_BITRATE).contains(&bitrate) {
             return Err(Error::BadArg);
         }
         self.bitrate = bitrate;
+        self.vbr_reservoir = 0.0;
+        Ok(())
+    }
+
+    pub fn set_vbr(&mut self, enabled: bool) -> Result<()> {
+        self.vbr = enabled;
+        self.vbr_reservoir = 0.0;
+        self.vbr_prev_energy = 0.0;
         Ok(())
     }
 
@@ -119,6 +137,63 @@ impl Encoder {
         (total_packet_bytes as usize)
             .saturating_sub(1)
             .clamp(CELT_MIN_FRAME_BYTES, CELT_MAX_FRAME_BYTES)
+    }
+
+    fn vbr_frame_bytes(&mut self, pcm: &[f32], frame_size: usize) -> usize {
+        let target = self.frame_bytes_for_bitrate(frame_size) as f32;
+        let sample_count = frame_size * self.channels;
+        let mut energy = 0.0f32;
+        let mut derivative = 0.0f32;
+        let mut stereo_diff = 0.0f32;
+        let mut stereo_sum = 0.0f32;
+
+        for i in 0..frame_size {
+            for c in 0..self.channels {
+                let sample = pcm[i * self.channels + c];
+                energy += sample * sample;
+                if i > 0 {
+                    let previous = pcm[(i - 1) * self.channels + c];
+                    let delta = sample - previous;
+                    derivative += delta * delta;
+                }
+            }
+            if self.channels == 2 {
+                let left = pcm[i * 2];
+                let right = pcm[i * 2 + 1];
+                let sum = left + right;
+                let diff = left - right;
+                stereo_sum += sum * sum;
+                stereo_diff += diff * diff;
+            }
+        }
+
+        let rms = (energy / sample_count as f32).sqrt();
+        let derivative = (derivative / sample_count.max(1) as f32).sqrt();
+        let hf_score = (derivative / (rms + 1e-5) * 0.35).clamp(0.0, 1.0);
+        let energy_score = (rms * 3.0).clamp(0.0, 1.0);
+        let transient_score = if self.vbr_prev_energy > 0.0 {
+            ((rms / (self.vbr_prev_energy + 1e-5)) - 1.0).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let stereo_score = if self.channels == 2 {
+            (stereo_diff / (stereo_sum + stereo_diff + 1e-5)).sqrt()
+        } else {
+            0.0
+        };
+
+        let complexity =
+            (0.38 * energy_score + 0.28 * hf_score + 0.22 * transient_score + 0.12 * stereo_score)
+                .clamp(0.0, 1.0);
+        let min_bytes = (target * 0.45).round().max(CELT_MIN_FRAME_BYTES as f32);
+        let max_bytes = (target * 1.75).round().min(CELT_MAX_FRAME_BYTES as f32);
+        let desired = target * (0.70 + 0.75 * complexity) + self.vbr_reservoir * 0.10;
+        let chosen = desired.round().clamp(min_bytes, max_bytes) as usize;
+
+        self.vbr_reservoir =
+            (self.vbr_reservoir + target - chosen as f32).clamp(-target * 50.0, target * 50.0);
+        self.vbr_prev_energy = rms;
+        chosen
     }
 
     fn validate_frame_bytes(frame_bytes: usize) -> Result<()> {
@@ -202,8 +277,11 @@ impl Encoder {
     }
 
     pub fn encode_i16(&mut self, pcm: &[i16], frame_size: usize) -> Result<Vec<u8>> {
-        let frame_bytes = self.frame_bytes_for_bitrate(frame_size);
-        self.encode_i16_with_frame_bytes(pcm, frame_size, frame_bytes)
+        let pcm_f32 = pcm
+            .iter()
+            .map(|sample| *sample as f32 / 32768.0)
+            .collect::<Vec<_>>();
+        self.encode_f32(&pcm_f32, frame_size)
     }
 
     pub fn encode_i16_with_frame_bytes(
@@ -220,7 +298,14 @@ impl Encoder {
     }
 
     pub fn encode_f32(&mut self, pcm: &[f32], frame_size: usize) -> Result<Vec<u8>> {
-        let frame_bytes = self.frame_bytes_for_bitrate(frame_size);
+        if pcm.len() < frame_size * self.channels {
+            return Err(Error::BadArg);
+        }
+        let frame_bytes = if self.vbr {
+            self.vbr_frame_bytes(pcm, frame_size)
+        } else {
+            self.frame_bytes_for_bitrate(frame_size)
+        };
         self.encode_f32_with_frame_bytes(pcm, frame_size, frame_bytes)
     }
 

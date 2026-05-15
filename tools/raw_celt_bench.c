@@ -15,13 +15,20 @@
 static const int FRAME_SIZES[] = {120, 240, 480, 960};
 static const int BITRATES[] = {48000, 96000, 128000};
 
+typedef enum {
+    MODE_CBR = 0,
+    MODE_VBR = 1,
+    MODE_BOTH = 2
+} BenchMode;
+
 typedef struct {
     int repeats;
     int seconds;
+    BenchMode mode;
 } Options;
 
 static void usage(void) {
-    fprintf(stderr, "usage: raw_celt_bench_c [--repeats n] [--seconds n]\n");
+    fprintf(stderr, "usage: raw_celt_bench_c [--repeats n] [--seconds n] [--mode cbr|vbr|both]\n");
     exit(2);
 }
 
@@ -38,6 +45,7 @@ static Options parse_options(int argc, char **argv) {
     Options options;
     options.repeats = 21;
     options.seconds = 4;
+    options.mode = MODE_BOTH;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--repeats") == 0) {
             if (++i >= argc) usage();
@@ -45,6 +53,17 @@ static Options parse_options(int argc, char **argv) {
         } else if (strcmp(argv[i], "--seconds") == 0) {
             if (++i >= argc) usage();
             options.seconds = parse_positive_int(argv[i]);
+        } else if (strcmp(argv[i], "--mode") == 0) {
+            if (++i >= argc) usage();
+            if (strcmp(argv[i], "cbr") == 0) {
+                options.mode = MODE_CBR;
+            } else if (strcmp(argv[i], "vbr") == 0) {
+                options.mode = MODE_VBR;
+            } else if (strcmp(argv[i], "both") == 0) {
+                options.mode = MODE_BOTH;
+            } else {
+                usage();
+            }
         } else {
             usage();
         }
@@ -108,10 +127,16 @@ static float *generate_fixture(int seconds, int *total_frames) {
     return pcm;
 }
 
-static void configure_encoder(OpusEncoder *encoder, int bitrate) {
+static const char *mode_label(BenchMode mode) {
+    return mode == MODE_VBR ? "vbr" : "cbr";
+}
+
+static void configure_encoder(OpusEncoder *encoder, int bitrate, BenchMode mode) {
     int err = opus_encoder_ctl(encoder, OPUS_SET_BITRATE(bitrate));
     if (err != OPUS_OK) goto fail;
-    err = opus_encoder_ctl(encoder, OPUS_SET_VBR(0));
+    err = opus_encoder_ctl(encoder, OPUS_SET_VBR(mode == MODE_VBR));
+    if (err != OPUS_OK) goto fail;
+    err = opus_encoder_ctl(encoder, OPUS_SET_VBR_CONSTRAINT(mode == MODE_VBR));
     if (err != OPUS_OK) goto fail;
     err = opus_encoder_ctl(encoder, OPUS_SET_BANDWIDTH(OPUS_BANDWIDTH_FULLBAND));
     if (err != OPUS_OK) goto fail;
@@ -143,10 +168,14 @@ static int encode_packets_with_encoder(
     int frame_size,
     unsigned char *packets,
     int *packet_lens,
+    int *min_packet,
+    int *max_packet,
     uint64_t *checksum
 ) {
     int packet_count = total_frames / frame_size;
     int bytes = 0;
+    int min_len = MAX_PACKET_BYTES;
+    int max_len = 0;
     uint64_t sum = 0;
     for (int frame = 0; frame < packet_count; frame++) {
         unsigned char *packet = packets + (size_t)frame * MAX_PACKET_BYTES;
@@ -158,9 +187,13 @@ static int encode_packets_with_encoder(
         }
         packet_lens[frame] = len;
         bytes += len;
+        if (len < min_len) min_len = len;
+        if (len > max_len) max_len = len;
         sum += packet_checksum(packet, len);
     }
 
+    *min_packet = min_len;
+    *max_packet = max_len;
     *checksum = sum;
     return bytes;
 }
@@ -170,8 +203,11 @@ static int encode_packets(
     int total_frames,
     int frame_size,
     int bitrate,
+    BenchMode mode,
     unsigned char *packets,
     int *packet_lens,
+    int *min_packet,
+    int *max_packet,
     uint64_t *checksum
 ) {
     int err = OPUS_OK;
@@ -181,9 +217,9 @@ static int encode_packets(
         fprintf(stderr, "opus_encoder_create failed: %s\n", opus_strerror(err));
         exit(1);
     }
-    configure_encoder(encoder, bitrate);
+    configure_encoder(encoder, bitrate, mode);
     int bytes = encode_packets_with_encoder(
-        encoder, pcm, total_frames, frame_size, packets, packet_lens, checksum);
+        encoder, pcm, total_frames, frame_size, packets, packet_lens, min_packet, max_packet, checksum);
     opus_encoder_destroy(encoder);
     return bytes;
 }
@@ -193,10 +229,13 @@ static double time_encode(
     int total_frames,
     int frame_size,
     int bitrate,
+    BenchMode mode,
     int repeats,
     unsigned char *packets,
     int *packet_lens,
     int *bytes_out,
+    int *min_packet_out,
+    int *max_packet_out,
     uint64_t *checksum_out
 ) {
     double *times = (double *)malloc((size_t)repeats * sizeof(double));
@@ -212,10 +251,18 @@ static double time_encode(
             fprintf(stderr, "opus_encoder_create failed: %s\n", opus_strerror(err));
             exit(1);
         }
-        configure_encoder(encoder, bitrate);
+        configure_encoder(encoder, bitrate, mode);
         double start = now_ms();
         *bytes_out = encode_packets_with_encoder(
-            encoder, pcm, total_frames, frame_size, packets, packet_lens, checksum_out);
+            encoder,
+            pcm,
+            total_frames,
+            frame_size,
+            packets,
+            packet_lens,
+            min_packet_out,
+            max_packet_out,
+            checksum_out);
         times[repeat] = now_ms() - start;
         opus_encoder_destroy(encoder);
     }
@@ -283,38 +330,63 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    printf("impl\tframe_size\tframe_ms\tbitrate\tencode_ms\tdecode_ms\tbytes\tchecksum\n");
-    for (size_t i = 0; i < sizeof(FRAME_SIZES) / sizeof(FRAME_SIZES[0]); i++) {
-        int frame_size = FRAME_SIZES[i];
-        int packet_count = total_frames / frame_size;
-        for (size_t j = 0; j < sizeof(BITRATES) / sizeof(BITRATES[0]); j++) {
-            int bitrate = BITRATES[j];
-            int bytes = 0;
-            uint64_t encode_sum = 0;
-            double encode_ms = time_encode(
-                pcm,
-                total_frames,
-                frame_size,
-                bitrate,
-                options.repeats,
-                packets,
-                packet_lens,
-                &bytes,
-                &encode_sum);
-            encode_packets(pcm, total_frames, frame_size, bitrate, packets, packet_lens, &encode_sum);
-            float decode_sum = 0.0f;
-            double decode_ms =
-                time_decode(frame_size, packet_count, options.repeats, packets, packet_lens, &decode_sum);
-            uint64_t checksum = encode_sum ^ (uint64_t)decode_sum;
-            printf(
-                "c\t%d\t%.1f\t%d\t%.4f\t%.4f\t%d\t%llu\n",
-                frame_size,
-                (double)frame_size * 1000.0 / (double)SAMPLE_RATE,
-                bitrate,
-                encode_ms,
-                decode_ms,
-                bytes,
-                (unsigned long long)checksum);
+    printf("impl\tmode\tframe_size\tframe_ms\tbitrate\tencode_ms\tdecode_ms\tbytes\tmin_packet\tmax_packet\tchecksum\n");
+    for (BenchMode mode = MODE_CBR; mode <= MODE_VBR; mode++) {
+        if (options.mode != MODE_BOTH && options.mode != mode) {
+            continue;
+        }
+        for (size_t i = 0; i < sizeof(FRAME_SIZES) / sizeof(FRAME_SIZES[0]); i++) {
+            int frame_size = FRAME_SIZES[i];
+            int packet_count = total_frames / frame_size;
+            for (size_t j = 0; j < sizeof(BITRATES) / sizeof(BITRATES[0]); j++) {
+                int bitrate = BITRATES[j];
+                int bytes = 0;
+                int min_packet = 0;
+                int max_packet = 0;
+                uint64_t encode_sum = 0;
+                double encode_ms = time_encode(
+                    pcm,
+                    total_frames,
+                    frame_size,
+                    bitrate,
+                    mode,
+                    options.repeats,
+                    packets,
+                    packet_lens,
+                    &bytes,
+                    &min_packet,
+                    &max_packet,
+                    &encode_sum);
+                int packet_min_for_decode = 0;
+                int packet_max_for_decode = 0;
+                encode_packets(
+                    pcm,
+                    total_frames,
+                    frame_size,
+                    bitrate,
+                    mode,
+                    packets,
+                    packet_lens,
+                    &packet_min_for_decode,
+                    &packet_max_for_decode,
+                    &encode_sum);
+                float decode_sum = 0.0f;
+                double decode_ms =
+                    time_decode(frame_size, packet_count, options.repeats, packets, packet_lens, &decode_sum);
+                uint64_t checksum = encode_sum ^ (uint64_t)decode_sum;
+                printf(
+                    "c\t%s\t%d\t%.1f\t%d\t%.4f\t%.4f\t%d\t%d\t%d\t%llu\n",
+                    mode_label(mode),
+                    frame_size,
+                    (double)frame_size * 1000.0 / (double)SAMPLE_RATE,
+                    bitrate,
+                    encode_ms,
+                    decode_ms,
+                    bytes,
+                    min_packet,
+                    max_packet,
+                    (unsigned long long)checksum);
+            }
         }
     }
 

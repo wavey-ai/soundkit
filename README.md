@@ -18,7 +18,7 @@ used as behavioral reference material during the port.
   algebraic VQ
 - experimental 48 kHz CELT-only raw packet encode/decode through the Rust
   `Encoder`/`Decoder` types for 2.5, 5, 10, and 20 ms fullband frames
-  with bitrate or exact compressed-frame-byte controls
+  with CBR, constrained VBR, or exact compressed-frame-byte controls
 
 This is not a complete Opus codec yet. The usable audio path today is CELT-only
 raw frames, not Ogg Opus and not SILK/hybrid speech coding.
@@ -43,6 +43,7 @@ current pure-Rust CELT-only packet path:
 ```sh
 cargo run --release --example wav_celt -- roundtrip input.wav output.lors decoded.wav
 cargo run --release --example wav_celt -- roundtrip --frame-size 240 --bitrate 128000 input.wav output.lors decoded.wav
+cargo run --release --example wav_celt -- roundtrip --frame-size 240 --bitrate 128000 --vbr input.wav output.lors decoded.wav
 cargo run --release --example wav_celt -- roundtrip --frame-size 960 --frame-bytes 120 input.wav output.lors decoded.wav
 ```
 
@@ -56,29 +57,42 @@ encode/decode calls with no file I/O in the measured loops. The input is a
 deterministic in-memory 48 kHz stereo fixture.
 
 ```sh
-tools/run_raw_celt_bench.sh --repeats 21 --seconds 4
+tools/run_raw_celt_bench.sh --repeats 21 --seconds 4 --mode both
 ```
 
 Set `OPUS_DIR=path/to/opus-1.5.2` to compare against a built upstream source
 tree; otherwise the script uses `pkg-config opus`. The C reference is configured
-for restricted-lowdelay/fullband/CBR mode so the comparison stays on CELT-only
-frames. Negative speed deltas mean the Rust path was faster than C. Byte counts
-are raw Opus packet bytes, not wrapper/container bytes.
+for restricted-lowdelay/fullband mode with CBR or constrained VBR. Negative
+speed deltas mean the Rust path was faster than C. Byte counts are raw Opus
+packet bytes, not wrapper/container bytes. Packet ranges show per-frame
+compressed packet byte sizes.
 
-| Frame | Bitrate | Rust enc | Enc vs C | Rust dec | Dec vs C | C enc | C dec | Rust bytes | C bytes |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2.5 ms | 48 kb/s | 9.42 ms | -61.5% | 7.57 ms | +37.8% | 24.48 ms | 5.49 ms | 24000 | 24000 |
-| 2.5 ms | 96 kb/s | 13.67 ms | -56.7% | 10.97 ms | +43.7% | 31.58 ms | 7.63 ms | 48000 | 48000 |
-| 2.5 ms | 128 kb/s | 16.63 ms | -54.2% | 12.82 ms | +59.0% | 36.32 ms | 8.06 ms | 64000 | 64000 |
-| 5.0 ms | 48 kb/s | 9.10 ms | -57.8% | 7.61 ms | +43.6% | 21.55 ms | 5.30 ms | 24000 | 24000 |
-| 5.0 ms | 96 kb/s | 14.14 ms | -49.1% | 10.92 ms | +66.9% | 27.78 ms | 6.54 ms | 48000 | 48000 |
-| 5.0 ms | 128 kb/s | 15.89 ms | -49.5% | 12.29 ms | +73.4% | 31.43 ms | 7.09 ms | 64000 | 64000 |
-| 10.0 ms | 48 kb/s | 8.39 ms | -55.0% | 6.89 ms | +54.4% | 18.67 ms | 4.46 ms | 24000 | 24000 |
-| 10.0 ms | 96 kb/s | 14.62 ms | -40.2% | 10.59 ms | +77.8% | 24.43 ms | 5.96 ms | 48000 | 48000 |
-| 10.0 ms | 128 kb/s | 15.09 ms | -41.6% | 11.50 ms | +74.2% | 25.84 ms | 6.60 ms | 64000 | 64000 |
-| 20.0 ms | 48 kb/s | 8.06 ms | -54.4% | 6.51 ms | +61.8% | 17.66 ms | 4.03 ms | 24000 | 24000 |
-| 20.0 ms | 96 kb/s | 11.96 ms | -50.8% | 9.28 ms | +60.2% | 24.30 ms | 5.79 ms | 48000 | 48000 |
-| 20.0 ms | 128 kb/s | 12.81 ms | -49.9% | 10.42 ms | +65.2% | 25.59 ms | 6.31 ms | 64000 | 64000 |
+| Mode | Frame | Bitrate | Rust enc | Enc vs C | Rust dec | Dec vs C | C enc | C dec | Rust bytes | C bytes | Rust pkt | C pkt |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| cbr | 2.5 ms | 48 kb/s | 9.30 ms | -61.7% | 7.51 ms | +37.2% | 24.31 ms | 5.47 ms | 24000 | 24000 | 15-15 | 15-15 |
+| cbr | 2.5 ms | 96 kb/s | 13.57 ms | -56.8% | 10.84 ms | +43.7% | 31.41 ms | 7.54 ms | 48000 | 48000 | 30-30 | 30-30 |
+| cbr | 2.5 ms | 128 kb/s | 16.43 ms | -54.4% | 12.68 ms | +57.5% | 35.99 ms | 8.05 ms | 64000 | 64000 | 40-40 | 40-40 |
+| cbr | 5.0 ms | 48 kb/s | 9.02 ms | -58.0% | 7.54 ms | +43.9% | 21.47 ms | 5.24 ms | 24000 | 24000 | 30-30 | 30-30 |
+| cbr | 5.0 ms | 96 kb/s | 13.92 ms | -49.4% | 10.74 ms | +67.8% | 27.51 ms | 6.40 ms | 48000 | 48000 | 60-60 | 60-60 |
+| cbr | 5.0 ms | 128 kb/s | 15.69 ms | -49.8% | 12.07 ms | +72.0% | 31.24 ms | 7.02 ms | 64000 | 64000 | 80-80 | 80-80 |
+| cbr | 10.0 ms | 48 kb/s | 8.20 ms | -55.6% | 6.82 ms | +55.7% | 18.46 ms | 4.38 ms | 24000 | 24000 | 60-60 | 60-60 |
+| cbr | 10.0 ms | 96 kb/s | 14.41 ms | -40.3% | 10.50 ms | +77.7% | 24.15 ms | 5.91 ms | 48000 | 48000 | 120-120 | 120-120 |
+| cbr | 10.0 ms | 128 kb/s | 14.99 ms | -41.6% | 11.43 ms | +75.5% | 25.69 ms | 6.51 ms | 64000 | 64000 | 160-160 | 160-160 |
+| cbr | 20.0 ms | 48 kb/s | 7.96 ms | -54.6% | 6.46 ms | +63.9% | 17.55 ms | 3.94 ms | 24000 | 24000 | 120-120 | 120-120 |
+| cbr | 20.0 ms | 96 kb/s | 11.80 ms | -50.9% | 9.17 ms | +61.0% | 24.04 ms | 5.70 ms | 48000 | 48000 | 240-240 | 240-240 |
+| cbr | 20.0 ms | 128 kb/s | 12.63 ms | -50.1% | 10.31 ms | +65.3% | 25.30 ms | 6.24 ms | 64000 | 64000 | 320-320 | 320-320 |
+| vbr | 2.5 ms | 48 kb/s | 9.73 ms | -61.2% | 7.58 ms | +36.7% | 25.07 ms | 5.54 ms | 23995 | 25614 | 14-17 | 13-21 |
+| vbr | 2.5 ms | 96 kb/s | 14.08 ms | -55.7% | 10.90 ms | +52.6% | 31.79 ms | 7.14 ms | 47989 | 49629 | 27-34 | 26-41 |
+| vbr | 2.5 ms | 128 kb/s | 16.89 ms | -53.6% | 12.64 ms | +54.0% | 36.39 ms | 8.21 ms | 63985 | 65637 | 36-46 | 35-57 |
+| vbr | 5.0 ms | 48 kb/s | 9.46 ms | -57.3% | 7.57 ms | +43.6% | 22.13 ms | 5.27 ms | 23988 | 24800 | 28-33 | 27-41 |
+| vbr | 5.0 ms | 96 kb/s | 14.48 ms | -47.7% | 11.08 ms | +72.8% | 27.66 ms | 6.41 ms | 47976 | 48808 | 55-66 | 56-88 |
+| vbr | 5.0 ms | 128 kb/s | 16.17 ms | -48.3% | 12.09 ms | +71.1% | 31.27 ms | 7.07 ms | 63968 | 64865 | 74-88 | 75-116 |
+| vbr | 10.0 ms | 48 kb/s | 8.68 ms | -53.2% | 6.79 ms | +54.5% | 18.56 ms | 4.40 ms | 23977 | 24452 | 57-67 | 57-101 |
+| vbr | 10.0 ms | 96 kb/s | 14.54 ms | -39.9% | 10.29 ms | +73.9% | 24.19 ms | 5.92 ms | 47956 | 48520 | 113-135 | 119-181 |
+| vbr | 10.0 ms | 128 kb/s | 15.42 ms | -39.9% | 11.44 ms | +74.7% | 25.67 ms | 6.55 ms | 63940 | 64560 | 151-180 | 155-233 |
+| vbr | 20.0 ms | 48 kb/s | 8.34 ms | -52.8% | 6.46 ms | +61.8% | 17.67 ms | 3.99 ms | 23954 | 24319 | 115-136 | 118-177 |
+| vbr | 20.0 ms | 96 kb/s | 12.21 ms | -49.3% | 9.27 ms | +61.5% | 24.07 ms | 5.74 ms | 47909 | 48440 | 231-271 | 241-312 |
+| vbr | 20.0 ms | 128 kb/s | 13.08 ms | -48.4% | 10.42 ms | +66.3% | 25.36 ms | 6.26 ms | 63878 | 64520 | 307-362 | 321-407 |
 
 ## License
 

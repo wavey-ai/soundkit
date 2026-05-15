@@ -12,6 +12,7 @@ struct EncodeOptions {
     frame_size: usize,
     bitrate: Option<i32>,
     frame_bytes: Option<usize>,
+    vbr: bool,
 }
 
 impl Default for EncodeOptions {
@@ -20,6 +21,7 @@ impl Default for EncodeOptions {
             frame_size: FRAME_SIZE,
             bitrate: None,
             frame_bytes: None,
+            vbr: false,
         }
     }
 }
@@ -224,6 +226,7 @@ fn encode_wav(
     if let Some(bitrate) = options.bitrate {
         encoder.set_bitrate(bitrate)?;
     }
+    encoder.set_vbr(options.vbr)?;
     let mut packets = Vec::new();
     for frame in wav.samples.chunks(options.frame_size * wav.channels) {
         let mut padded = vec![0i16; options.frame_size * wav.channels];
@@ -294,12 +297,18 @@ fn parse_encode_options(args: &[String], path_count: usize) -> (EncodeOptions, V
                 };
                 options.frame_bytes = Some(value.parse().unwrap_or_else(|_| usage()));
             }
+            "--vbr" => {
+                options.vbr = true;
+            }
             value if value.starts_with("--") => usage(),
             value => paths.push(value),
         }
         i += 1;
     }
-    if paths.len() != path_count || (options.bitrate.is_some() && options.frame_bytes.is_some()) {
+    if paths.len() != path_count
+        || (options.bitrate.is_some() && options.frame_bytes.is_some())
+        || (options.vbr && options.frame_bytes.is_some())
+    {
         usage();
     }
     (options, paths)
@@ -308,7 +317,7 @@ fn parse_encode_options(args: &[String], path_count: usize) -> (EncodeOptions, V
 fn usage() -> ! {
     let _ = writeln!(
         io::stderr(),
-        "usage:\n  wav_celt encode [--frame-size 120|240|480|960] [--bitrate bps | --frame-bytes bytes] <input.wav> <output.lors>\n  wav_celt decode <input.lors> <output.wav>\n  wav_celt roundtrip [--frame-size 120|240|480|960] [--bitrate bps | --frame-bytes bytes] <input.wav> <output.lors> <output.wav>"
+        "usage:\n  wav_celt encode [--frame-size 120|240|480|960] [--bitrate bps] [--vbr] <input.wav> <output.lors>\n  wav_celt encode [--frame-size 120|240|480|960] --frame-bytes bytes <input.wav> <output.lors>\n  wav_celt decode <input.lors> <output.wav>\n  wav_celt roundtrip [--frame-size 120|240|480|960] [--bitrate bps] [--vbr] <input.wav> <output.lors> <output.wav>"
     );
     std::process::exit(2);
 }

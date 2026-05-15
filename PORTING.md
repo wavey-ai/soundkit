@@ -19,7 +19,7 @@ Implemented in Rust:
   algebraic VQ
 - experimental 48 kHz CELT-only raw packet encode/decode through the Rust
   encoder and decoder types for 2.5, 5, 10, and 20 ms fullband frames, with
-  bitrate and exact compressed-frame-byte controls
+  CBR, constrained VBR, and exact compressed-frame-byte controls
 
 Full Opus encode/decode is not implemented yet; the working audio path is the
 CELT-only fullband subset.

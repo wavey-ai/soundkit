@@ -7,14 +7,38 @@ const SAMPLE_RATE: usize = 48_000;
 const CHANNELS: usize = 2;
 const BITRATES: [i32; 3] = [48_000, 96_000, 128_000];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BenchMode {
+    Cbr,
+    Vbr,
+}
+
+impl BenchMode {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Cbr => "cbr",
+            Self::Vbr => "vbr",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Options {
     repeats: usize,
     seconds: usize,
+    mode: Option<BenchMode>,
+}
+
+struct EncodeResult {
+    packets: Vec<Vec<u8>>,
+    bytes: usize,
+    checksum: u64,
+    min_packet: usize,
+    max_packet: usize,
 }
 
 fn usage() -> ! {
-    eprintln!("usage: raw_celt_bench [--repeats n] [--seconds n]");
+    eprintln!("usage: raw_celt_bench [--repeats n] [--seconds n] [--mode cbr|vbr|both]");
     std::process::exit(2);
 }
 
@@ -22,6 +46,7 @@ fn parse_options() -> Options {
     let mut options = Options {
         repeats: 21,
         seconds: 4,
+        mode: None,
     };
     let args = env::args().collect::<Vec<_>>();
     let mut i = 1usize;
@@ -41,6 +66,15 @@ fn parse_options() -> Options {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_else(|| usage());
             }
+            "--mode" => {
+                i += 1;
+                options.mode = match args.get(i).map(String::as_str) {
+                    Some("cbr") => Some(BenchMode::Cbr),
+                    Some("vbr") => Some(BenchMode::Vbr),
+                    Some("both") => None,
+                    _ => usage(),
+                };
+            }
             _ => usage(),
         }
         i += 1;
@@ -49,6 +83,14 @@ fn parse_options() -> Options {
         usage();
     }
     options
+}
+
+fn modes(options: &Options) -> &'static [BenchMode] {
+    match options.mode {
+        Some(BenchMode::Cbr) => &[BenchMode::Cbr],
+        Some(BenchMode::Vbr) => &[BenchMode::Vbr],
+        None => &[BenchMode::Cbr, BenchMode::Vbr],
+    }
 }
 
 fn generate_fixture(seconds: usize) -> Vec<f32> {
@@ -98,34 +140,46 @@ fn encode_with_encoder(
     encoder: &mut Encoder,
     pcm: &[f32],
     frame_size: usize,
-) -> Result<(Vec<Vec<u8>>, usize, u64), Box<dyn std::error::Error>> {
+) -> Result<EncodeResult, Box<dyn std::error::Error>> {
     let frames = pcm.len() / (frame_size * CHANNELS);
     let mut packets = Vec::with_capacity(frames);
     let mut bytes = 0usize;
     let mut checksum = 0u64;
+    let mut min_packet = usize::MAX;
+    let mut max_packet = 0usize;
     for frame in 0..frames {
         let start = frame * frame_size * CHANNELS;
         let end = start + frame_size * CHANNELS;
         let packet = encoder.encode_f32(black_box(&pcm[start..end]), frame_size)?;
         bytes += packet.len();
+        min_packet = min_packet.min(packet.len());
+        max_packet = max_packet.max(packet.len());
         checksum = checksum.wrapping_add(packet_checksum(&packet));
         packets.push(packet);
     }
     black_box(checksum);
-    Ok((packets, bytes, checksum))
+    Ok(EncodeResult {
+        packets,
+        bytes,
+        checksum,
+        min_packet,
+        max_packet,
+    })
 }
 
 fn encode_packets(
     pcm: &[f32],
     frame_size: usize,
     bitrate: i32,
-) -> Result<(Vec<Vec<u8>>, usize, u64), Box<dyn std::error::Error>> {
+    mode: BenchMode,
+) -> Result<EncodeResult, Box<dyn std::error::Error>> {
     let mut encoder = Encoder::new(
         SAMPLE_RATE as i32,
         CHANNELS,
         Application::RestrictedLowDelay,
     )?;
     encoder.set_bitrate(bitrate)?;
+    encoder.set_vbr(mode == BenchMode::Vbr)?;
     encode_with_encoder(&mut encoder, pcm, frame_size)
 }
 
@@ -133,10 +187,13 @@ fn time_encode(
     pcm: &[f32],
     frame_size: usize,
     bitrate: i32,
+    mode: BenchMode,
     repeats: usize,
-) -> Result<(f64, usize, u64), Box<dyn std::error::Error>> {
+) -> Result<(f64, usize, usize, usize, u64), Box<dyn std::error::Error>> {
     let mut times = Vec::with_capacity(repeats);
     let mut last_bytes = 0usize;
+    let mut last_min_packet = 0usize;
+    let mut last_max_packet = 0usize;
     let mut last_checksum = 0u64;
     for _ in 0..repeats {
         let mut encoder = Encoder::new(
@@ -145,15 +202,24 @@ fn time_encode(
             Application::RestrictedLowDelay,
         )?;
         encoder.set_bitrate(bitrate)?;
+        encoder.set_vbr(mode == BenchMode::Vbr)?;
         let start = Instant::now();
-        let (packets, bytes, checksum) = encode_with_encoder(&mut encoder, pcm, frame_size)?;
+        let encoded = encode_with_encoder(&mut encoder, pcm, frame_size)?;
         let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-        black_box(&packets);
+        black_box(&encoded.packets);
         times.push(elapsed);
-        last_bytes = bytes;
-        last_checksum = checksum;
+        last_bytes = encoded.bytes;
+        last_min_packet = encoded.min_packet;
+        last_max_packet = encoded.max_packet;
+        last_checksum = encoded.checksum;
     }
-    Ok((median(&mut times), last_bytes, last_checksum))
+    Ok((
+        median(&mut times),
+        last_bytes,
+        last_min_packet,
+        last_max_packet,
+        last_checksum,
+    ))
 }
 
 fn time_decode(
@@ -185,24 +251,30 @@ fn time_decode(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = parse_options();
     let pcm = generate_fixture(options.seconds);
-    println!("impl\tframe_size\tframe_ms\tbitrate\tencode_ms\tdecode_ms\tbytes\tchecksum");
-    for &frame_size in &CELT_FRAME_SIZES_48K {
-        for &bitrate in &BITRATES {
-            let (encode_ms, bytes, encode_checksum) =
-                time_encode(&pcm, frame_size, bitrate, options.repeats)?;
-            let (packets, _, _) = encode_packets(&pcm, frame_size, bitrate)?;
-            let (decode_ms, decode_checksum) = time_decode(&packets, frame_size, options.repeats)?;
-            let checksum = encode_checksum ^ u64::from(decode_checksum.to_bits());
-            println!(
-                "rust\t{}\t{:.1}\t{}\t{:.4}\t{:.4}\t{}\t{}",
-                frame_size,
-                frame_size as f64 * 1000.0 / SAMPLE_RATE as f64,
-                bitrate,
-                encode_ms,
-                decode_ms,
-                bytes,
-                checksum
-            );
+    println!("impl\tmode\tframe_size\tframe_ms\tbitrate\tencode_ms\tdecode_ms\tbytes\tmin_packet\tmax_packet\tchecksum");
+    for &mode in modes(&options) {
+        for &frame_size in &CELT_FRAME_SIZES_48K {
+            for &bitrate in &BITRATES {
+                let (encode_ms, bytes, min_packet, max_packet, encode_checksum) =
+                    time_encode(&pcm, frame_size, bitrate, mode, options.repeats)?;
+                let encoded = encode_packets(&pcm, frame_size, bitrate, mode)?;
+                let (decode_ms, decode_checksum) =
+                    time_decode(&encoded.packets, frame_size, options.repeats)?;
+                let checksum = encode_checksum ^ u64::from(decode_checksum.to_bits());
+                println!(
+                    "rust\t{}\t{}\t{:.1}\t{}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}",
+                    mode.label(),
+                    frame_size,
+                    frame_size as f64 * 1000.0 / SAMPLE_RATE as f64,
+                    bitrate,
+                    encode_ms,
+                    decode_ms,
+                    bytes,
+                    min_packet,
+                    max_packet,
+                    checksum
+                );
+            }
         }
     }
     Ok(())

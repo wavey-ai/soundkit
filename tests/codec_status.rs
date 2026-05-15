@@ -100,3 +100,38 @@ fn low_rate_stereo_celt_can_emit_mono_packets() {
     assert_eq!(decoded.len(), 120 * 2);
     assert!(decoded.iter().all(|sample| sample.is_finite()));
 }
+
+#[test]
+fn vbr_packet_budget_varies_with_signal_shape() {
+    let mut encoder = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    encoder.set_bitrate(96_000).unwrap();
+    encoder.set_vbr(true).unwrap();
+
+    let quiet = (0..120)
+        .flat_map(|i| {
+            let t = i as f32;
+            [0.01 * (0.04 * t).sin(), 0.01 * (0.043 * t).cos()]
+        })
+        .collect::<Vec<_>>();
+    let transient = (0..120)
+        .flat_map(|i| {
+            let t = i as f32;
+            let hit = if i < 16 { 0.55 - i as f32 * 0.02 } else { 0.0 };
+            [
+                0.18 * (0.71 * t).sin() + hit,
+                0.16 * (0.67 * t + 0.3).cos() - hit * 0.7,
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    let quiet_packet = encoder.encode_f32(&quiet, 120).unwrap();
+    let transient_packet = encoder.encode_f32(&transient, 120).unwrap();
+    assert_ne!(quiet_packet.len(), transient_packet.len());
+
+    let mut decoder = Decoder::new(48_000, 2).unwrap();
+    assert_eq!(decoder.decode_f32(&quiet_packet, false).unwrap().len(), 240);
+    assert_eq!(
+        decoder.decode_f32(&transient_packet, false).unwrap().len(),
+        240
+    );
+}
