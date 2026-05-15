@@ -40,7 +40,8 @@ The Rust tests in `tests/packet_api.rs` are derived from:
   encode/decode allocation decisions
 - `celt/quant_bands.c` and `celt/quant_bands.h`, for CELT coarse/fine energy
   quantization and reconstruction
-- selected helper behavior from `celt/bands.c`
+- selected helper behavior from `celt/bands.c`, including band energy
+  normalization, denormalization, spreading, anti-collapse, and split helpers
 
 Run:
 
