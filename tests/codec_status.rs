@@ -1,5 +1,6 @@
 use libopus_rs::{
-    Application, Decoder, Encoder, CELT_FRAME_SIZES_48K, CELT_MAX_FRAME_BYTES, CELT_MIN_FRAME_BYTES,
+    channels as packet_channels, Application, Decoder, Encoder, CELT_FRAME_SIZES_48K,
+    CELT_MAX_FRAME_BYTES, CELT_MIN_FRAME_BYTES,
 };
 
 fn tone(frame_size: usize, channels: usize, frame_index: usize) -> Vec<f32> {
@@ -78,10 +79,24 @@ fn celt_bitrate_control_scales_raw_frame_size() {
         let packet = encoder
             .encode_f32(&tone(frame_size, 2, 0), frame_size)
             .unwrap();
-        assert_eq!(packet.len(), expected + 1);
+        assert_eq!(packet.len(), expected);
     }
 
     let mut encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
     assert!(encoder.set_bitrate(499).is_err());
     assert!(encoder.set_bitrate(512_001).is_err());
+}
+
+#[test]
+fn low_rate_stereo_celt_can_emit_mono_packets() {
+    let mut encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    encoder.set_bitrate(48_000).unwrap();
+    let packet = encoder.encode_f32(&tone(120, 2, 0), 120).unwrap();
+    assert_eq!(packet.len(), 15);
+    assert_eq!(packet_channels(&packet).unwrap(), 1);
+
+    let mut decoder = Decoder::new(48_000, 2).unwrap();
+    let decoded = decoder.decode_f32(&packet, false).unwrap();
+    assert_eq!(decoded.len(), 120 * 2);
+    assert!(decoded.iter().all(|sample| sample.is_finite()));
 }

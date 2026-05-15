@@ -236,6 +236,7 @@ fn spectral_quantizer_preserves_tone_frame_shape() {
     let mut config = CeltFrameConfig::new(&mode, lm, channels, 240).unwrap();
     config.alloc_trim = 5;
     let mut old_enc = vec![0.0f32; channels * mode.nb_ebands];
+    let mut delayed_intra = 1.0f32;
     let mut seed_enc = 0;
     let (left, right) = norm.split_at_mut(n);
     let encoded = encode_spectral_frame(
@@ -245,6 +246,7 @@ fn spectral_quantizer_preserves_tone_frame_shape() {
         Some(right),
         &band_e,
         &mut old_enc,
+        &mut delayed_intra,
         &mut seed_enc,
     )
     .unwrap();

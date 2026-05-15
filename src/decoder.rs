@@ -61,10 +61,11 @@ impl Decoder {
         }
 
         let parsed = packet::parse_packet(packet)?;
+        let stream_channels = packet::channels(packet)?;
         if parsed.frame_count() != 1
             || !packet::is_celt_only(parsed.toc)
             || packet::bandwidth(packet)? != Bandwidth::Fullband
-            || packet::channels(packet)? != self.channels
+            || stream_channels > self.channels
         {
             return Err(Error::Unimplemented);
         }
@@ -76,7 +77,14 @@ impl Decoder {
         }
 
         let frame = parsed.frames()[0].data;
-        let config = CeltFrameConfig::new(&self.mode, lm, self.channels, frame.len())?;
+        if stream_channels == 1 && self.channels == 2 {
+            for i in 0..self.mode.nb_ebands {
+                self.old_band_e[i] =
+                    self.old_band_e[i].max(self.old_band_e[self.mode.nb_ebands + i]);
+            }
+        }
+
+        let config = CeltFrameConfig::new(&self.mode, lm, stream_channels, frame.len())?;
         let decoded = decode_spectral_frame(
             &self.mode,
             &config,
@@ -96,8 +104,16 @@ impl Decoder {
             config.lm,
             1,
             decoded.silence,
-            &mut self.overlap_mem,
+            &mut self.overlap_mem[..stream_channels],
         )?;
+        let channels = if stream_channels == 1 && self.channels == 2 {
+            self.old_band_e
+                .copy_within(0..self.mode.nb_ebands, self.mode.nb_ebands);
+            self.overlap_mem[1] = self.overlap_mem[0].clone();
+            vec![channels[0].clone(), channels[0].clone()]
+        } else {
+            channels
+        };
         deemphasis_interleaved(&self.mode, &channels, &mut self.preemph_mem)
     }
 }

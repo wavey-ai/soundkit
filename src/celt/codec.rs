@@ -391,6 +391,7 @@ pub fn encode_spectral_frame(
     mut y: Option<&mut [f32]>,
     band_e: &[f32],
     old_band_e: &mut [f32],
+    delayed_intra: &mut f32,
     seed: &mut u32,
 ) -> Result<CeltFrameEncodeResult> {
     let n = validate_spectral_args(
@@ -425,7 +426,6 @@ pub fn encode_spectral_frame(
         config.channels,
     );
     let mut error = vec![0.0f32; config.channels * mode.nb_ebands];
-    let mut delayed_intra = 0.0f32;
     quant_coarse_energy(
         mode,
         config.start,
@@ -439,9 +439,9 @@ pub fn encode_spectral_frame(
         config.channels,
         config.lm,
         config.packet_bytes as i32,
-        true,
-        &mut delayed_intra,
         false,
+        delayed_intra,
+        true,
         0,
         false,
     );
