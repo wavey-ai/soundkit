@@ -17,8 +17,8 @@ Implemented:
 - soft clipping
 - CELT entropy/range coder
 - CELT mathops, laplace, CWRS/PVQ, DFT, MDCT, mode construction, rate
-  allocation, frame control symbols, quantized energy, band quantization, band
-  helpers, rotation, and algebraic VQ
+  allocation, frame control symbols, spectral frame coding, quantized energy,
+  band quantization, band helpers, rotation, and algebraic VQ
 - encoder/decoder Rust types that currently report real encode/decode as
   unimplemented
 

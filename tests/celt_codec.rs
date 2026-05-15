@@ -1,11 +1,13 @@
 use libopus_rs::celt::bands::{SPREAD_AGGRESSIVE, SPREAD_NORMAL};
 use libopus_rs::celt::codec::{
-    decode_alloc_trim, decode_dynalloc_offsets, decode_spread_decision, decode_transient_flag,
-    encode_alloc_trim, encode_dynalloc_offsets, encode_spread_decision, encode_transient_flag,
-    init_caps, tf_decode, tf_encode,
+    decode_alloc_trim, decode_dynalloc_offsets, decode_spectral_frame, decode_spread_decision,
+    decode_transient_flag, encode_alloc_trim, encode_dynalloc_offsets, encode_spectral_frame,
+    encode_spread_decision, encode_transient_flag, init_caps, tf_decode, tf_encode,
+    CeltFrameConfig,
 };
 use libopus_rs::celt::entropy::{RangeDecoder, RangeEncoder};
 use libopus_rs::celt::modes::CeltMode;
+use libopus_rs::celt::vq::renormalise_vector;
 
 #[test]
 fn official_init_caps_matches_celt_formula() {
@@ -122,4 +124,87 @@ fn official_celt_control_symbols_round_trip() {
     assert_eq!(decoded_offsets, encoded_offsets);
     assert_eq!(decoded_boost, encoded_boost);
     assert_eq!(decoded_trim, encoded_trim);
+}
+
+#[test]
+fn official_celt_spectral_frame_round_trips_stereo_bands() {
+    let mode = CeltMode::standard_48k();
+    let lm = 3;
+    let m = 1 << lm;
+    let n = mode.short_mdct_size << lm;
+    let mut config = CeltFrameConfig::new(&mode, lm, 2, 144).unwrap();
+    config.spread = SPREAD_NORMAL;
+    config.alloc_trim = 5;
+
+    let mut x_enc = (0..n)
+        .map(|i| (i as f32 * 0.019).sin() + 0.16 * (i as f32 * 0.071).cos())
+        .collect::<Vec<_>>();
+    let mut y_enc = (0..n)
+        .map(|i| 0.8 * (i as f32 * 0.027).cos() - 0.11 * (i as f32 * 0.053).sin())
+        .collect::<Vec<_>>();
+    for band in config.start..config.end {
+        let band_start = m * mode.ebands[band] as usize;
+        let band_end = m * mode.ebands[band + 1] as usize;
+        renormalise_vector(&mut x_enc[band_start..band_end], band_end - band_start, 1.0);
+        renormalise_vector(&mut y_enc[band_start..band_end], band_end - band_start, 1.0);
+    }
+
+    let mut band_e = vec![1.0f32; 2 * mode.nb_ebands];
+    for band in 0..mode.nb_ebands {
+        band_e[band] = 0.75 + 0.02 * band as f32;
+        band_e[mode.nb_ebands + band] = 0.92 + 0.015 * band as f32;
+    }
+
+    let mut old_enc = vec![0.0f32; 2 * mode.nb_ebands];
+    let mut seed_enc = 0x7654_3210;
+    let encoded = encode_spectral_frame(
+        &mode,
+        &config,
+        &mut x_enc,
+        Some(&mut y_enc),
+        &band_e,
+        &mut old_enc,
+        &mut seed_enc,
+    )
+    .unwrap();
+    assert_eq!(encoded.data.len(), config.packet_bytes);
+    assert_eq!(encoded.spread, config.spread);
+    assert!(encoded.allocation.coded_bands > 0);
+
+    let mut old_dec = vec![0.0f32; 2 * mode.nb_ebands];
+    let mut seed_dec = 0x7654_3210;
+    let decoded =
+        decode_spectral_frame(&mode, &config, &encoded.data, &mut old_dec, &mut seed_dec).unwrap();
+
+    assert_eq!(decoded.allocation, encoded.allocation);
+    assert_eq!(decoded.tf_res, encoded.tf_res);
+    assert_eq!(decoded.collapse_masks, encoded.collapse_masks);
+    assert_eq!(decoded.is_transient, encoded.is_transient);
+    assert_eq!(decoded.spread, encoded.spread);
+    assert_eq!(decoded.alloc_trim, encoded.alloc_trim);
+    assert_eq!(seed_dec, seed_enc);
+
+    for (i, (decoded, encoded)) in old_dec.iter().zip(old_enc.iter()).enumerate() {
+        assert!(
+            (decoded - encoded).abs() < 1e-6,
+            "energy band={i}, decoded={decoded}, encoded={encoded}"
+        );
+    }
+
+    let y_dec = decoded.y.as_ref().expect("stereo decode");
+    let coded_bound = m * mode.ebands[config.end] as usize;
+    for i in 0..coded_bound {
+        assert!(
+            (decoded.x[i] - x_enc[i]).abs() < 5e-5,
+            "left bin={i}, decoded={}, encoded={}",
+            decoded.x[i],
+            x_enc[i]
+        );
+        assert!(
+            (y_dec[i] - y_enc[i]).abs() < 5e-5,
+            "right bin={i}, decoded={}, encoded={}",
+            y_dec[i],
+            y_enc[i]
+        );
+    }
 }
