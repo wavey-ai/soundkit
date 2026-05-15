@@ -43,6 +43,18 @@ cargo build --release
 
 The crate is built with `#![forbid(unsafe_code)]`. It does not expose a C API.
 
+## WAV smoke test
+
+The `wav_celt` example can round-trip 48 kHz mono/stereo PCM16 WAV through the
+current pure-Rust CELT-only packet path:
+
+```sh
+cargo run --release --example wav_celt -- roundtrip input.wav output.lors decoded.wav
+```
+
+`output.lors` is a simple length-prefixed raw packet stream for testing this
+port. It is not Ogg Opus yet.
+
 ## License
 
 BSD-3-Clause, matching upstream libopus. See [LICENSE](LICENSE).

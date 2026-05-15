@@ -45,6 +45,8 @@ The Rust tests in `tests/packet_api.rs` are derived from:
 - selected helper behavior from `celt/bands.c`, including band energy
   normalization, denormalization, spreading, anti-collapse, split helpers, and
   mono/stereo `quant_all_bands` behavior
+- the `wav_celt` example round-trips 48 kHz PCM16 WAV through the current
+  CELT-only raw packet path
 
 Run:
 
