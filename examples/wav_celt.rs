@@ -8,6 +8,23 @@ const MAGIC: &[u8; 8] = b"LORSCELT";
 const FRAME_SIZE: usize = 960;
 
 #[derive(Clone, Debug)]
+struct EncodeOptions {
+    frame_size: usize,
+    bitrate: Option<i32>,
+    frame_bytes: Option<usize>,
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        Self {
+            frame_size: FRAME_SIZE,
+            bitrate: None,
+            frame_bytes: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct WavPcm {
     sample_rate: i32,
     channels: usize,
@@ -196,22 +213,34 @@ fn read_stream(path: &Path) -> io::Result<PacketStream> {
     })
 }
 
-fn encode_wav(input: &Path, output: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn encode_wav(
+    input: &Path,
+    output: &Path,
+    options: &EncodeOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
     let wav = read_wav(input)?;
     let total_samples = wav.samples.len() / wav.channels;
     let mut encoder = Encoder::new(wav.sample_rate, wav.channels, Application::Audio)?;
+    if let Some(bitrate) = options.bitrate {
+        encoder.set_bitrate(bitrate)?;
+    }
     let mut packets = Vec::new();
-    for frame in wav.samples.chunks(FRAME_SIZE * wav.channels) {
-        let mut padded = vec![0i16; FRAME_SIZE * wav.channels];
+    for frame in wav.samples.chunks(options.frame_size * wav.channels) {
+        let mut padded = vec![0i16; options.frame_size * wav.channels];
         padded[..frame.len()].copy_from_slice(frame);
-        packets.push(encoder.encode_i16(&padded, FRAME_SIZE)?);
+        let packet = if let Some(frame_bytes) = options.frame_bytes {
+            encoder.encode_i16_with_frame_bytes(&padded, options.frame_size, frame_bytes)?
+        } else {
+            encoder.encode_i16(&padded, options.frame_size)?
+        };
+        packets.push(packet);
     }
     write_stream(
         output,
         &PacketStream {
             sample_rate: wav.sample_rate,
             channels: wav.channels,
-            frame_size: FRAME_SIZE,
+            frame_size: options.frame_size,
             total_samples,
             packets,
         },
@@ -238,10 +267,48 @@ fn decode_stream(input: &Path, output: &Path) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+fn parse_encode_options(args: &[String], path_count: usize) -> (EncodeOptions, Vec<&str>) {
+    let mut options = EncodeOptions::default();
+    let mut paths = Vec::new();
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--frame-size" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    usage();
+                };
+                options.frame_size = value.parse().unwrap_or_else(|_| usage());
+            }
+            "--bitrate" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    usage();
+                };
+                options.bitrate = Some(value.parse().unwrap_or_else(|_| usage()));
+            }
+            "--frame-bytes" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    usage();
+                };
+                options.frame_bytes = Some(value.parse().unwrap_or_else(|_| usage()));
+            }
+            value if value.starts_with("--") => usage(),
+            value => paths.push(value),
+        }
+        i += 1;
+    }
+    if paths.len() != path_count || (options.bitrate.is_some() && options.frame_bytes.is_some()) {
+        usage();
+    }
+    (options, paths)
+}
+
 fn usage() -> ! {
     let _ = writeln!(
         io::stderr(),
-        "usage:\n  wav_celt encode <input.wav> <output.lors>\n  wav_celt decode <input.lors> <output.wav>\n  wav_celt roundtrip <input.wav> <output.lors> <output.wav>"
+        "usage:\n  wav_celt encode [--frame-size 120|240|480|960] [--bitrate bps | --frame-bytes bytes] <input.wav> <output.lors>\n  wav_celt decode <input.lors> <output.wav>\n  wav_celt roundtrip [--frame-size 120|240|480|960] [--bitrate bps | --frame-bytes bytes] <input.wav> <output.lors> <output.wav>"
     );
     std::process::exit(2);
 }
@@ -249,13 +316,17 @@ fn usage() -> ! {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args().collect::<Vec<_>>();
     match args.get(1).map(String::as_str) {
-        Some("encode") if args.len() == 4 => encode_wav(Path::new(&args[2]), Path::new(&args[3])),
+        Some("encode") => {
+            let (options, paths) = parse_encode_options(&args[2..], 2);
+            encode_wav(Path::new(paths[0]), Path::new(paths[1]), &options)
+        }
         Some("decode") if args.len() == 4 => {
             decode_stream(Path::new(&args[2]), Path::new(&args[3]))
         }
-        Some("roundtrip") if args.len() == 5 => {
-            encode_wav(Path::new(&args[2]), Path::new(&args[3]))?;
-            decode_stream(Path::new(&args[3]), Path::new(&args[4]))
+        Some("roundtrip") => {
+            let (options, paths) = parse_encode_options(&args[2..], 3);
+            encode_wav(Path::new(paths[0]), Path::new(paths[1]), &options)?;
+            decode_stream(Path::new(paths[1]), Path::new(paths[2]))
         }
         _ => usage(),
     }

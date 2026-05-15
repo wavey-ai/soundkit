@@ -10,7 +10,10 @@ mod repacketizer;
 mod soft_clip;
 
 pub use decoder::Decoder;
-pub use encoder::{Application, Encoder};
+pub use encoder::{
+    Application, Encoder, CELT_FRAME_SIZES_48K, CELT_MAX_BITRATE, CELT_MAX_FRAME_BYTES,
+    CELT_MIN_BITRATE, CELT_MIN_FRAME_BYTES,
+};
 pub use error::{Error, Result};
 pub use packet::*;
 pub use repacketizer::*;

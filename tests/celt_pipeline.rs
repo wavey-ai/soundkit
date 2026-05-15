@@ -4,7 +4,7 @@ use libopus_rs::celt::mdct::clt_mdct_forward;
 use libopus_rs::celt::modes::CeltMode;
 use libopus_rs::celt::quant_bands::amp2_log2;
 use libopus_rs::celt::synthesis::{celt_synthesis_with_overlap, deemphasis_interleaved};
-use libopus_rs::{Application, Decoder, Encoder};
+use libopus_rs::{Application, Decoder, Encoder, CELT_FRAME_SIZES_48K};
 
 fn correlation(a: &[f32], b: &[f32]) -> f32 {
     let mut aa = 0.0f64;
@@ -147,35 +147,37 @@ fn mdct_band_round_trip_preserves_audio_shape() {
 #[test]
 fn public_celt_round_trip_preserves_tone_shape() {
     let channels = 2;
-    let frame_size = 960;
-    let frames = 8;
-    let mut encoder = Encoder::new(48_000, channels, Application::Audio).unwrap();
-    let mut decoder = Decoder::new(48_000, channels).unwrap();
-    let mut original = Vec::with_capacity(frames * frame_size * channels);
-    let mut decoded = Vec::with_capacity(frames * frame_size * channels);
+    for &frame_size in &CELT_FRAME_SIZES_48K {
+        let frames = (3840 / frame_size).max(8);
+        let mut encoder = Encoder::new(48_000, channels, Application::Audio).unwrap();
+        encoder.set_bitrate(128_000).unwrap();
+        let mut decoder = Decoder::new(48_000, channels).unwrap();
+        let mut original = Vec::with_capacity(frames * frame_size * channels);
+        let mut decoded = Vec::with_capacity(frames * frame_size * channels);
 
-    for frame in 0..frames {
-        let mut pcm = vec![0.0f32; frame_size * channels];
-        for i in 0..frame_size {
-            let t = (frame * frame_size + i) as f32;
-            pcm[i * channels] = 0.18 * (0.017 * t).sin() + 0.04 * (0.071 * t).cos();
-            pcm[i * channels + 1] = 0.16 * (0.019 * t + 0.4).sin() - 0.03 * (0.059 * t).cos();
+        for frame in 0..frames {
+            let mut pcm = vec![0.0f32; frame_size * channels];
+            for i in 0..frame_size {
+                let t = (frame * frame_size + i) as f32;
+                pcm[i * channels] = 0.18 * (0.017 * t).sin() + 0.04 * (0.071 * t).cos();
+                pcm[i * channels + 1] = 0.16 * (0.019 * t + 0.4).sin() - 0.03 * (0.059 * t).cos();
+            }
+            let packet = encoder.encode_f32(&pcm, frame_size).unwrap();
+            let out = decoder.decode_f32(&packet, false).unwrap();
+            original.extend_from_slice(&pcm);
+            decoded.extend_from_slice(&out);
         }
-        let packet = encoder.encode_f32(&pcm, frame_size).unwrap();
-        let out = decoder.decode_f32(&packet, false).unwrap();
-        original.extend_from_slice(&pcm);
-        decoded.extend_from_slice(&out);
-    }
 
-    let skip = 2 * frame_size * channels;
-    let delay = CeltMode::standard_48k().overlap * channels;
-    let corr = correlation(
-        &original[skip..original.len() - delay],
-        &decoded[skip + delay..],
-    );
-    let (lag, _) = best_lag_correlation(&original[skip..], &decoded[skip..], 512);
-    assert_eq!(lag, -(delay as isize));
-    assert!(corr > 0.80);
+        let skip = 2 * frame_size * channels;
+        let delay = CeltMode::standard_48k().overlap * channels;
+        let corr = correlation(
+            &original[skip..original.len() - delay],
+            &decoded[skip + delay..],
+        );
+        let (lag, _) = best_lag_correlation(&original[skip..], &decoded[skip..], 512);
+        assert_eq!(lag, -(delay as isize), "frame_size={frame_size}");
+        assert!(corr > 0.80, "frame_size={frame_size}, corr={corr}");
+    }
 }
 
 #[test]

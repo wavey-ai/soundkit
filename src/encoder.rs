@@ -6,6 +6,12 @@ use crate::constants::{valid_channels, valid_sample_rate};
 use crate::packet;
 use crate::{Error, Result};
 
+pub const CELT_FRAME_SIZES_48K: [usize; 4] = [120, 240, 480, 960];
+pub const CELT_MIN_BITRATE: i32 = 500;
+pub const CELT_MAX_BITRATE: i32 = 512_000;
+pub const CELT_MIN_FRAME_BYTES: usize = 2;
+pub const CELT_MAX_FRAME_BYTES: usize = packet::MAX_FRAME_BYTES as usize;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Application {
     Voip,
@@ -29,6 +35,7 @@ pub struct Encoder {
     channels: usize,
     application: Application,
     mode: CeltMode,
+    bitrate: i32,
     old_band_e: Vec<f32>,
     preemph_mem: Vec<f32>,
     overlap_mem: Vec<Vec<f32>>,
@@ -41,10 +48,12 @@ impl Encoder {
             return Err(Error::BadArg);
         }
         let mode = CeltMode::standard_48k();
+        let bitrate = if channels == 1 { 64_000 } else { 96_000 };
         Ok(Self {
             sample_rate,
             channels,
             application,
+            bitrate,
             old_band_e: vec![0.0; channels * mode.nb_ebands],
             preemph_mem: vec![0.0; channels],
             overlap_mem: vec![vec![0.0; mode.overlap]; channels],
@@ -65,30 +74,69 @@ impl Encoder {
         self.application
     }
 
+    pub const fn bitrate(&self) -> i32 {
+        self.bitrate
+    }
+
+    pub fn set_bitrate(&mut self, bitrate: i32) -> Result<()> {
+        if !(CELT_MIN_BITRATE..=CELT_MAX_BITRATE).contains(&bitrate) {
+            return Err(Error::BadArg);
+        }
+        self.bitrate = bitrate;
+        Ok(())
+    }
+
     fn frame_lm(&self, frame_size: usize) -> Result<usize> {
-        for lm in 0..=self.mode.max_lm {
-            if self.mode.short_mdct_size << lm == frame_size {
+        for (lm, size) in CELT_FRAME_SIZES_48K.iter().copied().enumerate() {
+            if lm <= self.mode.max_lm && size == frame_size {
                 return Ok(lm);
             }
         }
         Err(Error::BadArg)
     }
 
-    fn default_packet_bytes(&self, frame_size: usize) -> usize {
-        let bitrate = if self.channels == 1 { 64_000 } else { 96_000 };
-        let bytes = (bitrate * frame_size as i32 + self.sample_rate * 4) / (self.sample_rate * 8);
-        (bytes as usize).clamp(2, 1275)
+    fn frame_bytes_for_bitrate(&self, frame_size: usize) -> usize {
+        let bytes = (self.bitrate as i64 * frame_size as i64 + self.sample_rate as i64 * 4)
+            / (self.sample_rate as i64 * 8);
+        (bytes as usize).clamp(CELT_MIN_FRAME_BYTES, CELT_MAX_FRAME_BYTES)
+    }
+
+    fn validate_frame_bytes(frame_bytes: usize) -> Result<()> {
+        if !(CELT_MIN_FRAME_BYTES..=CELT_MAX_FRAME_BYTES).contains(&frame_bytes) {
+            return Err(Error::BadArg);
+        }
+        Ok(())
     }
 
     pub fn encode_i16(&mut self, pcm: &[i16], frame_size: usize) -> Result<Vec<u8>> {
+        let frame_bytes = self.frame_bytes_for_bitrate(frame_size);
+        self.encode_i16_with_frame_bytes(pcm, frame_size, frame_bytes)
+    }
+
+    pub fn encode_i16_with_frame_bytes(
+        &mut self,
+        pcm: &[i16],
+        frame_size: usize,
+        frame_bytes: usize,
+    ) -> Result<Vec<u8>> {
         let pcm_f32 = pcm
             .iter()
             .map(|sample| *sample as f32 / 32768.0)
             .collect::<Vec<_>>();
-        self.encode_f32(&pcm_f32, frame_size)
+        self.encode_f32_with_frame_bytes(&pcm_f32, frame_size, frame_bytes)
     }
 
     pub fn encode_f32(&mut self, pcm: &[f32], frame_size: usize) -> Result<Vec<u8>> {
+        let frame_bytes = self.frame_bytes_for_bitrate(frame_size);
+        self.encode_f32_with_frame_bytes(pcm, frame_size, frame_bytes)
+    }
+
+    pub fn encode_f32_with_frame_bytes(
+        &mut self,
+        pcm: &[f32],
+        frame_size: usize,
+        frame_bytes: usize,
+    ) -> Result<Vec<u8>> {
         if self.sample_rate != 48_000 {
             return Err(Error::Unimplemented);
         }
@@ -96,6 +144,11 @@ impl Encoder {
             return Err(Error::BadArg);
         }
         let lm = self.frame_lm(frame_size)?;
+        Self::validate_frame_bytes(frame_bytes)?;
+        let mut config = CeltFrameConfig::new(&self.mode, lm, self.channels, frame_bytes)?;
+        config.spread = SPREAD_NORMAL;
+        config.alloc_trim = 5;
+
         let n = frame_size;
         let m = 1usize << lm;
         let shift = self.mode.max_lm - lm;
@@ -140,11 +193,6 @@ impl Encoder {
             self.channels,
             m,
         );
-
-        let packet_bytes = self.default_packet_bytes(frame_size);
-        let mut config = CeltFrameConfig::new(&self.mode, lm, self.channels, packet_bytes)?;
-        config.spread = SPREAD_NORMAL;
-        config.alloc_trim = 5;
 
         let encoded = if self.channels == 1 {
             encode_spectral_frame(

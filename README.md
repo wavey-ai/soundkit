@@ -21,7 +21,8 @@ Implemented:
   band quantization, band helpers, synthesis/deemphasis, rotation, and
   algebraic VQ
 - experimental 48 kHz CELT-only raw packet encode/decode through the Rust
-  `Encoder`/`Decoder` types
+  `Encoder`/`Decoder` types for 2.5, 5, 10, and 20 ms fullband frames
+  with bitrate or exact compressed-frame-byte controls
 
 Still to port:
 
@@ -50,6 +51,8 @@ current pure-Rust CELT-only packet path:
 
 ```sh
 cargo run --release --example wav_celt -- roundtrip input.wav output.lors decoded.wav
+cargo run --release --example wav_celt -- roundtrip --frame-size 240 --bitrate 128000 input.wav output.lors decoded.wav
+cargo run --release --example wav_celt -- roundtrip --frame-size 960 --frame-bytes 120 input.wav output.lors decoded.wav
 ```
 
 `output.lors` is a simple length-prefixed raw packet stream for testing this

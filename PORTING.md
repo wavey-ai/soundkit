@@ -18,9 +18,11 @@ Implemented in Rust:
   band quantization, band helpers, synthesis/deemphasis, rotation, and
   algebraic VQ
 - experimental 48 kHz CELT-only raw packet encode/decode through the Rust
-  encoder and decoder types
+  encoder and decoder types for 2.5, 5, 10, and 20 ms fullband frames, with
+  bitrate and exact compressed-frame-byte controls
 
-Real CELT/SILK encode/decode is not implemented yet.
+Full Opus encode/decode is not implemented yet; the working audio path is the
+CELT-only fullband subset.
 
 ## Upstream Tests Used
 
@@ -46,7 +48,8 @@ The Rust tests in `tests/packet_api.rs` are derived from:
   normalization, denormalization, spreading, anti-collapse, split helpers, and
   mono/stereo `quant_all_bands` behavior
 - the `wav_celt` example round-trips 48 kHz PCM16 WAV through the current
-  CELT-only raw packet path
+  CELT-only raw packet path, with selectable raw frame size and compression
+  budget
 
 Run:
 
@@ -58,8 +61,8 @@ cargo build --release
 ## Remaining Port Order
 
 1. Keep default crate builds under `#![forbid(unsafe_code)]`.
-2. Port remaining CELT pitch helpers and full public codec wiring.
-3. Port CELT decoder and validate with `tests/test_opus_decode.c`.
+2. Port remaining CELT pitch helpers and full public CELT codec wiring.
+3. Validate CELT-only decoder compatibility with `tests/test_opus_decode.c`.
 4. Port SILK fixed/float common signal-processing primitives and unit tests.
 5. Port SILK decoder, then hybrid packet decode.
 6. Port CELT and SILK encoders, then `tests/test_opus_encode.c`.
