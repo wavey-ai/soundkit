@@ -81,38 +81,22 @@ RUST_BENCH_RUSTFLAGS='-C target-cpu=native -C target-feature=+avx2' tools/run_ra
 Set `OPUS_DIR=path/to/opus-1.5.2` to compare against a built upstream source
 tree; otherwise the script uses `pkg-config opus`. The C reference is configured
 for restricted-lowdelay/fullband mode with CBR or constrained VBR. Reported
-speed columns are normalized as real-time factors:
-`RTFx = elapsed_ms / (seconds * 1000)`, where 1.0x is realtime. Negative
-deltas mean Rust was faster than C. Byte counts are raw Opus packet bytes, not
-wrapper/container bytes. Packet ranges show per-frame compressed packet byte
-sizes.
+speed columns are normalized as realtime speedup:
+`RTFx = (seconds * 1000) / elapsed_ms`, where 1.0x is realtime, and larger is
+faster. Negative deltas mean Rust was faster than C. Byte counts are raw Opus
+packet bytes, not wrapper/container bytes. Packet ranges show per-frame compressed
+packet byte sizes.
 
-| Mode | Frame | Bitrate | Rust enc (RTFx) | Enc vs C | Rust dec (RTFx) | Dec vs C | C enc (RTFx) | C dec (RTFx) | Rust bytes | C bytes | Rust pkt | C pkt |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| cbr | 2.5 ms | 48 kb/s | 0.0023x | -61.7% | 0.0019x | +37.2% | 0.0061x | 0.0014x | 24000 | 24000 | 15-15 | 15-15 |
-| cbr | 2.5 ms | 96 kb/s | 0.0034x | -56.8% | 0.0027x | +43.7% | 0.0079x | 0.0019x | 48000 | 48000 | 30-30 | 30-30 |
-| cbr | 2.5 ms | 128 kb/s | 0.0041x | -54.4% | 0.0032x | +57.5% | 0.0090x | 0.0020x | 64000 | 64000 | 40-40 | 40-40 |
-| cbr | 5.0 ms | 48 kb/s | 0.0023x | -58.0% | 0.0019x | +43.9% | 0.0054x | 0.0013x | 24000 | 24000 | 30-30 | 30-30 |
-| cbr | 5.0 ms | 96 kb/s | 0.0035x | -49.4% | 0.0027x | +67.8% | 0.0069x | 0.0016x | 48000 | 48000 | 60-60 | 60-60 |
-| cbr | 5.0 ms | 128 kb/s | 0.0039x | -49.8% | 0.0030x | +72.0% | 0.0078x | 0.0018x | 64000 | 64000 | 80-80 | 80-80 |
-| cbr | 10.0 ms | 48 kb/s | 0.0020x | -55.6% | 0.0017x | +55.7% | 0.0046x | 0.0011x | 24000 | 24000 | 60-60 | 60-60 |
-| cbr | 10.0 ms | 96 kb/s | 0.0036x | -40.3% | 0.0026x | +77.7% | 0.0060x | 0.0015x | 48000 | 48000 | 120-120 | 120-120 |
-| cbr | 10.0 ms | 128 kb/s | 0.0037x | -41.6% | 0.0029x | +75.5% | 0.0064x | 0.0016x | 64000 | 64000 | 160-160 | 160-160 |
-| cbr | 20.0 ms | 48 kb/s | 0.0020x | -54.6% | 0.0016x | +63.9% | 0.0044x | 0.0010x | 24000 | 24000 | 120-120 | 120-120 |
-| cbr | 20.0 ms | 96 kb/s | 0.0030x | -50.9% | 0.0023x | +61.0% | 0.0060x | 0.0014x | 48000 | 48000 | 240-240 | 240-240 |
-| cbr | 20.0 ms | 128 kb/s | 0.0032x | -50.1% | 0.0026x | +65.3% | 0.0063x | 0.0016x | 64000 | 64000 | 320-320 | 320-320 |
-| vbr | 2.5 ms | 48 kb/s | 0.0024x | -61.2% | 0.0019x | +36.7% | 0.0063x | 0.0014x | 23995 | 25614 | 14-17 | 13-21 |
-| vbr | 2.5 ms | 96 kb/s | 0.0035x | -55.7% | 0.0027x | +52.6% | 0.0080x | 0.0018x | 47989 | 49629 | 27-34 | 26-41 |
-| vbr | 2.5 ms | 128 kb/s | 0.0042x | -53.6% | 0.0032x | +54.0% | 0.0091x | 0.0021x | 63985 | 65637 | 36-46 | 35-57 |
-| vbr | 5.0 ms | 48 kb/s | 0.0024x | -57.3% | 0.0019x | +43.6% | 0.0055x | 0.0013x | 23988 | 24800 | 28-33 | 27-41 |
-| vbr | 5.0 ms | 96 kb/s | 0.0036x | -47.7% | 0.0028x | +72.8% | 0.0069x | 0.0016x | 47976 | 48808 | 55-66 | 56-88 |
-| vbr | 5.0 ms | 128 kb/s | 0.0040x | -48.3% | 0.0030x | +71.1% | 0.0078x | 0.0018x | 63968 | 64865 | 74-88 | 75-116 |
-| vbr | 10.0 ms | 48 kb/s | 0.0022x | -53.2% | 0.0017x | +54.5% | 0.0046x | 0.0011x | 23977 | 24452 | 57-67 | 57-101 |
-| vbr | 10.0 ms | 96 kb/s | 0.0036x | -39.9% | 0.0026x | +73.9% | 0.0060x | 0.0015x | 47956 | 48520 | 113-135 | 119-181 |
-| vbr | 10.0 ms | 128 kb/s | 0.0039x | -39.9% | 0.0029x | +74.7% | 0.0064x | 0.0016x | 63940 | 64560 | 151-180 | 155-233 |
-| vbr | 20.0 ms | 48 kb/s | 0.0021x | -52.8% | 0.0016x | +61.8% | 0.0044x | 0.0010x | 23954 | 24319 | 115-136 | 118-177 |
-| vbr | 20.0 ms | 96 kb/s | 0.0031x | -49.3% | 0.0023x | +61.5% | 0.0060x | 0.0014x | 47909 | 48440 | 231-271 | 241-312 |
-| vbr | 20.0 ms | 128 kb/s | 0.0033x | -48.4% | 0.0026x | +66.3% | 0.0063x | 0.0016x | 63878 | 64520 | 307-362 | 321-407 |
+Run `tools/run_raw_celt_bench.sh` to generate the current table on your machine.
+For one quick check, use:
+
+```sh
+AUDIO_SECONDS=1 REPEATS=1 MODE=both tools/run_raw_celt_bench.sh
+```
+
+The raw CELT benchmark output is generated dynamically and will vary slightly by
+host CPU and optimization flags, so it is intentionally not hardcoded in this
+README.
 
 ## Encoder Parity Next Steps
 

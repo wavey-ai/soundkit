@@ -10,6 +10,7 @@ keywords = ["opus", "codec", "audio", "libopus"]
 categories = ["multimedia::audio"]
 
 [dependencies]
+wide = "0.7"
 
 [profile.release]
 codegen-units = 1

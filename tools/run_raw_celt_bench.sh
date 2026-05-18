@@ -92,16 +92,16 @@ printf '%s\n%s\n' "$rust_out" "$c_out" | awk -F '\t' -v rt_factor="$rt_factor" '
     max_packet[$1, key] = $10
   }
   END {
-    print "| Mode | Frame | Bitrate | Rust enc (RTFx) | Enc vs C | Rust dec (RTFx) | Dec vs C | C enc (RTFx) | C dec (RTFx) | Rust bytes | C bytes | Rust pkt | C pkt |"
+    print "| Mode | Frame | Bitrate | Rust enc (xRTF) | Enc vs C | Rust dec (xRTF) | Dec vs C | C enc (xRTF) | C dec (xRTF) | Rust bytes | C bytes | Rust pkt | C pkt |"
     print "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
     for (i = 1; i <= count; i++) {
       key = order[i]
       if ((("rust" SUBSEP key) in encode) && (("c" SUBSEP key) in encode)) {
         enc_delta = 100.0 * (encode["rust", key] - encode["c", key]) / encode["c", key]
         dec_delta = 100.0 * (decode["rust", key] - decode["c", key]) / decode["c", key]
-        printf "| %s | %.1f ms | %d kb/s | %.4fx | %+.1f%% | %.4fx | %+.1f%% | %.4fx | %.4fx | %d | %d | %d-%d | %d-%d |\n", \
-          mode[key], frame_ms[key], bitrate[key] / 1000, encode["rust", key] / rt_factor, enc_delta, \
-          decode["rust", key] / rt_factor, dec_delta, encode["c", key] / rt_factor, decode["c", key] / rt_factor, \
+        printf "| %s | %.1f ms | %d kb/s | %.2fx | %+.1f%% | %.2fx | %+.1f%% | %.2fx | %.2fx | %d | %d | %d-%d | %d-%d |\n", \
+          mode[key], frame_ms[key], bitrate[key] / 1000, rt_factor / encode["rust", key], enc_delta, \
+          rt_factor / decode["rust", key], dec_delta, rt_factor / encode["c", key], rt_factor / decode["c", key], \
           bytes["rust", key], bytes["c", key], \
           min_packet["rust", key], max_packet["rust", key], min_packet["c", key], max_packet["c", key]
       }

@@ -2,6 +2,7 @@
 //! `celt/celt.c`, and `celt/celt_encoder.c` float paths.
 
 use crate::celt::modes::CeltMode;
+use wide::f32x4;
 
 pub const COMBFILTER_MAXPERIOD: usize = 1024;
 pub const COMBFILTER_MINPERIOD: usize = 15;
@@ -22,7 +23,21 @@ pub struct PrefilterDecision {
 }
 
 fn inner_prod(x: &[f32], y: &[f32], len: usize) -> f32 {
-    x.iter().zip(y.iter()).take(len).map(|(a, b)| a * b).sum()
+    let mut acc = f32x4::ZERO;
+    let mut i = 0usize;
+    while i + 4 <= len {
+        let lhs = f32x4::new([x[i], x[i + 1], x[i + 2], x[i + 3]]);
+        let rhs = f32x4::new([y[i], y[i + 1], y[i + 2], y[i + 3]]);
+        acc += lhs * rhs;
+        i += 4;
+    }
+
+    let mut sum = acc.reduce_add();
+    while i < len {
+        sum += x[i] * y[i];
+        i += 1;
+    }
+    sum
 }
 
 fn autocorr(x: &[f32], lag: usize, n: usize) -> Vec<f32> {
@@ -209,13 +224,26 @@ fn compute_pitch_gain(xy: f32, xx: f32, yy: f32) -> f32 {
 }
 
 fn dual_inner_prod(x: &[f32], y01: &[f32], y02: &[f32], n: usize) -> (f32, f32) {
-    let mut xy01 = 0.0f32;
-    let mut xy02 = 0.0f32;
-    for i in 0..n {
-        xy01 += x[i] * y01[i];
-        xy02 += x[i] * y02[i];
+    let mut xy01 = f32x4::ZERO;
+    let mut xy02 = f32x4::ZERO;
+    let mut i = 0usize;
+    while i + 4 <= n {
+        let lhs = f32x4::new([x[i], x[i + 1], x[i + 2], x[i + 3]]);
+        let rhs01 = f32x4::new([y01[i], y01[i + 1], y01[i + 2], y01[i + 3]]);
+        let rhs02 = f32x4::new([y02[i], y02[i + 1], y02[i + 2], y02[i + 3]]);
+        xy01 += lhs * rhs01;
+        xy02 += lhs * rhs02;
+        i += 4;
     }
-    (xy01, xy02)
+
+    let mut xy01_scalar = xy01.reduce_add();
+    let mut xy02_scalar = xy02.reduce_add();
+    while i < n {
+        xy01_scalar += x[i] * y01[i];
+        xy02_scalar += x[i] * y02[i];
+        i += 1;
+    }
+    (xy01_scalar, xy02_scalar)
 }
 
 fn remove_doubling(
