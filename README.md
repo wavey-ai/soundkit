@@ -72,6 +72,12 @@ deterministic in-memory 48 kHz stereo fixture.
 tools/run_raw_celt_bench.sh --repeats 21 --seconds 4 --mode both
 ```
 
+For local speed runs, benchmark the Rust side with host-native codegen:
+
+```sh
+RUST_BENCH_RUSTFLAGS='-C target-cpu=native -C target-feature=+avx2' tools/run_raw_celt_bench.sh --repeats 21 --seconds 4 --mode both
+```
+
 Set `OPUS_DIR=path/to/opus-1.5.2` to compare against a built upstream source
 tree; otherwise the script uses `pkg-config opus`. The C reference is configured
 for restricted-lowdelay/fullband mode with CBR or constrained VBR. Reported

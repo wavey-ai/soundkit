@@ -7,6 +7,9 @@ BENCH_DIR="${BENCH_DIR:-/tmp/libopus-rs-raw-bench}"
 REPEATS="${REPEATS:-21}"
 AUDIO_SECONDS="${AUDIO_SECONDS:-4}"
 MODE="${MODE:-both}"
+C_BENCH_CFLAGS="${C_BENCH_CFLAGS--O3 -DNDEBUG}"
+RUST_BENCH_RUSTFLAGS="${RUST_BENCH_RUSTFLAGS--C target-cpu=native}"
+BUILD_RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }${RUST_BENCH_RUSTFLAGS}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,7 +50,8 @@ if [[ -n "${OPUS_DIR:-}" ]]; then
     echo "OPUS_DIR must point at a built libopus tree containing .libs/libopus.a" >&2
     exit 1
   fi
-  cc -O3 -DNDEBUG -I"$OPUS_DIR/include" \
+  # shellcheck disable=SC2086
+  cc $C_BENCH_CFLAGS -I"$OPUS_DIR/include" \
     "$ROOT/tools/raw_celt_bench.c" "$OPUS_DIR/.libs/libopus.a" -lm -o "$c_bin"
 else
   if ! pkg-config --exists opus; then
@@ -55,11 +59,12 @@ else
     exit 1
   fi
   # shellcheck disable=SC2046
-  cc -O3 -DNDEBUG $(pkg-config --cflags opus) \
+  # shellcheck disable=SC2086
+  cc $C_BENCH_CFLAGS $(pkg-config --cflags opus) \
     "$ROOT/tools/raw_celt_bench.c" $(pkg-config --libs opus) -lm -o "$c_bin"
 fi
 
-cargo build --release --target-dir "$TARGET_DIR" --example raw_celt_bench >/dev/null
+RUSTFLAGS="$BUILD_RUSTFLAGS" cargo build --release --target-dir "$TARGET_DIR" --example raw_celt_bench >/dev/null
 
 echo "Raw in-memory CELT benchmark: generated 48 kHz stereo fixture, no file I/O in measured loops." >&2
 echo "Repeats: $REPEATS, seconds: $AUDIO_SECONDS, mode: $MODE" >&2
