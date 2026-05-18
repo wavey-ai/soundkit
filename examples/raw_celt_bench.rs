@@ -5,7 +5,9 @@ use std::time::Instant;
 
 const SAMPLE_RATE: usize = 48_000;
 const CHANNELS: usize = 2;
-const BITRATES: [i32; 3] = [48_000, 96_000, 128_000];
+const BITRATES: [i32; 9] = [
+    48_000, 96_000, 128_000, 160_000, 192_000, 256_000, 320_000, 384_000, 512_000,
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BenchMode {

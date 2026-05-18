@@ -181,7 +181,7 @@ impl Encoder {
     }
 
     fn vbr_frame_bytes(&mut self, pcm: &[f32], frame_size: usize) -> usize {
-        let target = self.frame_bytes_for_bitrate(frame_size) as f32;
+        let target = self.frame_bytes_for_bitrate(frame_size) as f32 + 1.0;
         let sample_count = frame_size * self.channels;
         let mut energy = 0.0f32;
         let mut derivative = 0.0f32;
@@ -228,7 +228,10 @@ impl Encoder {
                 .clamp(0.0, 1.0);
         let min_bytes = (target * 0.45).round().max(CELT_MIN_FRAME_BYTES as f32);
         let max_bytes = (target * 1.75).round().min(CELT_MAX_FRAME_BYTES as f32);
-        let desired = target * (0.70 + 0.75 * complexity) + self.vbr_reservoir * 0.10;
+        // Bias toward Opus constrained-VBR behavior: slightly higher base than the legacy
+        // scalar plus a mild reservoir feedback term to stabilize long-term bitrate.
+        let reservoir_correction = (self.vbr_reservoir / target).clamp(-0.25, 0.25);
+        let desired = target * (0.86 + 0.60 * complexity) * (1.0 + 0.2 * reservoir_correction);
         let chosen = desired.round().clamp(min_bytes, max_bytes) as usize;
 
         self.vbr_reservoir =
@@ -244,10 +247,23 @@ impl Encoder {
         Ok(())
     }
 
-    fn equiv_rate(&self, frame_bytes: usize, lm: usize) -> i32 {
-        let overhead = (40 * self.channels as i32 + 20) * ((400 >> lm) - 50);
+    fn equiv_rate(&self, frame_bytes: usize, lm: usize, stream_channels: usize) -> i32 {
+        let overhead = (40 * stream_channels as i32 + 20) * ((400 >> lm) - 50);
         let rate = ((frame_bytes as i32 * 8 * 50) << (3 - lm)) - overhead;
         rate.min(self.bitrate - overhead)
+    }
+
+    fn compute_equiv_rate_for_channels(&self, frame_size: usize, stream_channels: usize) -> i32 {
+        let frame_rate = self.sample_rate / frame_size as i32;
+        let mut equiv = self.bitrate;
+        if frame_rate > 50 {
+            equiv -= (40 * stream_channels as i32 + 20) * (frame_rate - 50);
+        }
+        if !self.vbr {
+            equiv -= equiv / 12;
+        }
+        // Equivalent-rate approximation of upstream CELT complexity path.
+        equiv * 95 / 100
     }
 
     fn transient_analysis(inputs: &[Vec<f32>], channels: usize, len: usize) -> TransientAnalysis {
@@ -484,13 +500,13 @@ impl Encoder {
     ) -> Result<Vec<u8>> {
         let lm = self.frame_lm(frame_size)?;
         Self::validate_frame_bytes(frame_bytes)?;
-        let stream_channels = self.choose_stream_channels(frame_size, frame_bytes);
+        let stream_channels = self.choose_stream_channels(frame_size);
         let mut config = CeltFrameConfig::new(&self.mode, lm, stream_channels, frame_bytes)?;
         config.spread = SPREAD_NORMAL;
         config.last_coded_bands = self.last_coded_bands;
         config.vbr = self.vbr;
         config.constrained_vbr = self.vbr;
-        let equiv_rate = self.equiv_rate(frame_bytes, lm);
+        let equiv_rate = self.equiv_rate(frame_bytes, lm, stream_channels);
 
         let n = frame_size;
         let m = 1usize << lm;
@@ -688,19 +704,11 @@ impl Encoder {
         Ok(packet)
     }
 
-    fn opus_equiv_rate_for_packet(&self, frame_size: usize, frame_bytes: usize) -> i32 {
-        let packet_bitrate =
-            (((frame_bytes + 1) as i64 * 8 * self.sample_rate as i64) / frame_size as i64) as i32;
-        let frame_rate = self.sample_rate / frame_size as i32;
-        let mut equiv = packet_bitrate;
-        if frame_rate > 50 {
-            equiv -= (40 * self.channels as i32 + 20) * (frame_rate - 50);
-        }
-        equiv -= equiv / 12;
-        equiv * 95 / 100
+    fn opus_equiv_rate_for_packet(&self, frame_size: usize, stream_channels: usize) -> i32 {
+        self.compute_equiv_rate_for_channels(frame_size, stream_channels)
     }
 
-    fn choose_stream_channels(&mut self, frame_size: usize, frame_bytes: usize) -> usize {
+    fn choose_stream_channels(&mut self, frame_size: usize) -> usize {
         if self.channels != 2 {
             self.stream_channels = self.channels;
             return self.stream_channels;
@@ -716,12 +724,8 @@ impl Encoder {
         } else {
             threshold += 1_000;
         }
-        self.stream_channels =
-            if self.opus_equiv_rate_for_packet(frame_size, frame_bytes) > threshold {
-                2
-            } else {
-                1
-            };
+        let equiv_rate = self.opus_equiv_rate_for_packet(frame_size, self.channels);
+        self.stream_channels = if equiv_rate > threshold { 2 } else { 1 };
         self.stream_channels
     }
 

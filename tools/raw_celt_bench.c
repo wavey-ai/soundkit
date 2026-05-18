@@ -10,7 +10,7 @@
 #define CHANNELS 2
 #define MAX_PACKET_BYTES 1275
 static const int FRAME_SIZES[] = {120, 240, 480, 960};
-static const int BITRATES[] = {48000, 96000, 128000};
+static const int BITRATES[] = {48000, 96000, 128000, 160000, 192000, 256000, 320000, 384000, 512000};
 
 typedef enum {
     MODE_CBR = 0,
