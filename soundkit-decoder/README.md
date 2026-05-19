@@ -25,7 +25,7 @@ containers and exposes explicit spawn paths for headerless telephony codecs.
 | FLAC | `spawn()` | Auto | Yes | `soundkit-flac` / `claxon` |
 | Raw Opus stream | `spawn()` | Auto | Yes | `soundkit-opus` / `libopus` |
 | Ogg Opus | `spawn()` | Auto | Yes | `soundkit-ogg-opus` + `libopus` |
-| WebM Opus | `spawn()` | Auto | Yes | `soundkit-webm` + `libopus` |
+| WebM Opus / Vorbis | `spawn()` | Auto | Yes | `soundkit-webm` + `libopus` / `lewton` |
 | Ogg Speex | `spawn_speex()` | Explicit | Yes | `soundkit-speex` / `oxideav-speex` |
 | Ogg Vorbis | `spawn()` or `spawn_vorbis()` | Auto or explicit | Yes | `soundkit-vorbis` / `lewton` |
 | ALAC in M4A/MP4 or CAF | `spawn()` or `spawn_alac()` | Auto or explicit | EOF | `soundkit-alac` / `alac` |
@@ -87,10 +87,22 @@ let pipeline = DecodePipeline::spawn_with_options(DecodeOptions {
 | MP3, AAC ADTS, M4A/MP4 AAC, FLAC, Opus, Ogg Opus, Ogg Vorbis, Ogg Speex, WebM, WAV, ALAC, AIFF/AIFF-C, AC-3 | `access-unit` detection. |
 | Headerless PCM and telephony codecs | Explicit spawn APIs because metadata is not present in the byte stream. |
 
+## YouTube Audio Itags
+
+`DecodePipeline::spawn()` does not route by numeric itag. It routes by the downloaded
+container and audio codec, which covers the common YouTube audio itag families:
+
+| YouTube audio family | Example itags | Decode path |
+| --- | --- | --- |
+| MP4 AAC-LC / HE-AAC | `139`, `140`, `141`, `256`, `258`, `599` | `mp4` demux + FDK-AAC |
+| WebM Opus | `249`, `250`, `251`, `600`, `774` | WebM demux + `libopus` |
+| WebM Vorbis | `171`, `172` | WebM demux + pure-Rust `lewton` |
+
 ## Current Gaps
 
 | Format | Gap |
 | --- | --- |
 | ALAC and AIFF/AIFF-C | Seek-based readers make current wrappers EOF-buffered. |
 | AAC in M4A/MP4 | MP4 sample tables make live chunking layout-dependent; use ADTS for live AAC. |
+| MP4 AC-3 / E-AC-3 YouTube surround itags | Raw AC-3 syncframes decode, but MP4-contained AC-3/E-AC-3 is not wired yet. |
 | APE | Deferred until fixtures can be generated with FFmpeg in this repo's test pattern. |

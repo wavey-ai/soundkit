@@ -144,6 +144,5 @@ impl AacDecoderMp4 {
 | Option 1 (mp4 crate) | mp4 | - | FDK raw | Fast |
 | Option 2 (Add ADTS) | mp4 | +ADTS headers | FDK ADTS | Medium |
 | Option 3 (FDK raw) | mp4 | - | FDK raw | **Fastest** |
-| Symphonia | Symphonia | - | Symphonia | Fails ("aac too complex") |
 
 **Winner: Option 3** - Direct path, no intermediate processing

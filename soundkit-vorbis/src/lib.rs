@@ -184,6 +184,103 @@ enum VorbisDecodeState {
     },
 }
 
+#[derive(Clone, Copy)]
+struct VorbisPacketStreamInfo {
+    sample_rate: u32,
+    channels: u8,
+}
+
+/// Streaming raw Vorbis packet decoder.
+///
+/// This accepts the three Vorbis header packets followed by raw Vorbis audio
+/// packets, as used by Matroska/WebM `A_VORBIS`. Ogg page parsing stays in
+/// `VorbisDecoder`.
+pub struct VorbisPacketDecoder {
+    state: VorbisDecodeState,
+    info: Option<VorbisPacketStreamInfo>,
+}
+
+impl VorbisPacketDecoder {
+    pub fn new() -> Self {
+        Self {
+            state: VorbisDecodeState::HeaderIdent,
+            info: None,
+        }
+    }
+
+    pub fn init(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.info.map(|info| info.sample_rate)
+    }
+
+    pub fn channels(&self) -> Option<u8> {
+        self.info.map(|info| info.channels)
+    }
+
+    pub fn decode_packet(&mut self, packet: &[u8]) -> Result<Option<Vec<i16>>, String> {
+        let state = std::mem::replace(&mut self.state, VorbisDecodeState::HeaderIdent);
+        match state {
+            VorbisDecodeState::HeaderIdent => {
+                let ident = read_header_ident(packet).map_err(|error| format!("{error:?}"))?;
+                self.info = Some(VorbisPacketStreamInfo {
+                    sample_rate: ident.audio_sample_rate,
+                    channels: ident.audio_channels,
+                });
+                self.state = VorbisDecodeState::HeaderComment { ident };
+                Ok(None)
+            }
+            VorbisDecodeState::HeaderComment { ident } => {
+                read_header_comment(packet).map_err(|error| format!("{error:?}"))?;
+                self.state = VorbisDecodeState::HeaderSetup { ident };
+                Ok(None)
+            }
+            VorbisDecodeState::HeaderSetup { ident } => {
+                let setup = read_header_setup(
+                    packet,
+                    ident.audio_channels,
+                    (ident.blocksize_0, ident.blocksize_1),
+                )
+                .map_err(|error| format!("{error:?}"))?;
+                self.state = VorbisDecodeState::Audio {
+                    ident,
+                    setup,
+                    pwr: PreviousWindowRight::new(),
+                    cur_absgp: None,
+                };
+                Ok(None)
+            }
+            VorbisDecodeState::Audio {
+                ident,
+                setup,
+                mut pwr,
+                ..
+            } => {
+                let decoded: InterleavedSamples<i16> =
+                    read_audio_packet_generic(&ident, &setup, packet, &mut pwr)
+                        .map_err(|error| format!("{error:?}"))?;
+
+                self.state = VorbisDecodeState::Audio {
+                    ident,
+                    setup,
+                    pwr,
+                    cur_absgp: None,
+                };
+
+                Ok(Some(decoded.samples))
+            }
+        }
+    }
+}
+
+impl Default for VorbisPacketDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Streaming Ogg Vorbis decoder.
 ///
 /// Vorbis is carried in Ogg for normal `.ogg` files. This decoder parses Ogg

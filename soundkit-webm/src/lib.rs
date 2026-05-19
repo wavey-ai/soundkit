@@ -2,6 +2,7 @@ use frame_header::{EncodingFlag, Endianness};
 use soundkit::audio_packet::Decoder;
 use soundkit::audio_types::AudioData;
 use soundkit_opus::OpusDecoder;
+use soundkit_vorbis::VorbisPacketDecoder;
 use std::collections::VecDeque;
 use tracing::{debug, trace};
 
@@ -105,6 +106,170 @@ fn read_float(data: &[u8], size: usize) -> f64 {
     }
 }
 
+fn read_signed_vint(data: &[u8]) -> Option<(i64, usize)> {
+    let (value, len) = read_vint(data)?;
+    let bias = (1i64 << (7 * len - 1)) - 1;
+    Some((value as i64 - bias, len))
+}
+
+fn read_xiph_lace_size(data: &[u8], pos: &mut usize) -> Result<usize, String> {
+    let mut size = 0usize;
+    loop {
+        let byte = *data
+            .get(*pos)
+            .ok_or_else(|| "Truncated Xiph lacing size".to_string())?;
+        *pos += 1;
+        size = size
+            .checked_add(byte as usize)
+            .ok_or_else(|| "Xiph lacing size overflow".to_string())?;
+        if byte != 255 {
+            return Ok(size);
+        }
+    }
+}
+
+fn split_laced_frames(
+    payload: &[u8],
+    data_start: usize,
+    sizes: &[usize],
+) -> Result<Vec<Vec<u8>>, String> {
+    let mut frames = Vec::with_capacity(sizes.len());
+    let mut pos = data_start;
+    for size in sizes {
+        let end = pos
+            .checked_add(*size)
+            .ok_or_else(|| "Laced frame size overflow".to_string())?;
+        if end > payload.len() {
+            return Err("Laced frame extends past block payload".to_string());
+        }
+        frames.push(payload[pos..end].to_vec());
+        pos = end;
+    }
+    if pos != payload.len() {
+        return Err("Laced frame sizes do not consume block payload".to_string());
+    }
+    Ok(frames)
+}
+
+fn parse_block_frames(flags: u8, payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    match flags & 0x06 {
+        0x00 => Ok(vec![payload.to_vec()]),
+        0x02 => parse_xiph_laced_frames(payload),
+        0x04 => parse_fixed_laced_frames(payload),
+        0x06 => parse_ebml_laced_frames(payload),
+        _ => unreachable!(),
+    }
+}
+
+fn parse_xiph_laced_frames(payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let frame_count = payload
+        .first()
+        .map(|count| *count as usize + 1)
+        .ok_or_else(|| "Truncated Xiph-laced block".to_string())?;
+    let mut pos = 1usize;
+    let mut sizes = Vec::with_capacity(frame_count);
+    let mut known_size = 0usize;
+
+    for _ in 0..frame_count.saturating_sub(1) {
+        let size = read_xiph_lace_size(payload, &mut pos)?;
+        known_size = known_size
+            .checked_add(size)
+            .ok_or_else(|| "Xiph-laced block size overflow".to_string())?;
+        sizes.push(size);
+    }
+
+    let remaining = payload
+        .len()
+        .checked_sub(pos)
+        .ok_or_else(|| "Invalid Xiph-laced block".to_string())?;
+    if known_size > remaining {
+        return Err("Xiph-laced frame sizes exceed block payload".to_string());
+    }
+    sizes.push(remaining - known_size);
+    split_laced_frames(payload, pos, &sizes)
+}
+
+fn parse_fixed_laced_frames(payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let frame_count = payload
+        .first()
+        .map(|count| *count as usize + 1)
+        .ok_or_else(|| "Truncated fixed-laced block".to_string())?;
+    let data_start = 1usize;
+    let remaining = payload.len() - data_start;
+    if frame_count == 0 || remaining % frame_count != 0 {
+        return Err("Invalid fixed-laced block size".to_string());
+    }
+    let frame_size = remaining / frame_count;
+    let sizes = vec![frame_size; frame_count];
+    split_laced_frames(payload, data_start, &sizes)
+}
+
+fn parse_ebml_laced_frames(payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let frame_count = payload
+        .first()
+        .map(|count| *count as usize + 1)
+        .ok_or_else(|| "Truncated EBML-laced block".to_string())?;
+    let mut pos = 1usize;
+    let (first_size, first_len) = read_vint(&payload[pos..])
+        .ok_or_else(|| "Truncated EBML-laced first frame size".to_string())?;
+    pos += first_len;
+
+    let mut sizes = Vec::with_capacity(frame_count);
+    let mut previous = first_size as i64;
+    sizes.push(first_size as usize);
+
+    for _ in 1..frame_count.saturating_sub(1) {
+        let (delta, delta_len) = read_signed_vint(&payload[pos..])
+            .ok_or_else(|| "Truncated EBML-laced frame size delta".to_string())?;
+        pos += delta_len;
+        previous = previous
+            .checked_add(delta)
+            .ok_or_else(|| "EBML-laced frame size overflow".to_string())?;
+        if previous < 0 {
+            return Err("Negative EBML-laced frame size".to_string());
+        }
+        sizes.push(previous as usize);
+    }
+
+    let remaining = payload
+        .len()
+        .checked_sub(pos)
+        .ok_or_else(|| "Invalid EBML-laced block".to_string())?;
+    let known_size = sizes.iter().try_fold(0usize, |total, size| {
+        total
+            .checked_add(*size)
+            .ok_or_else(|| "EBML-laced block size overflow".to_string())
+    })?;
+    if known_size > remaining {
+        return Err("EBML-laced frame sizes exceed block payload".to_string());
+    }
+    sizes.push(remaining - known_size);
+    split_laced_frames(payload, pos, &sizes)
+}
+
+fn parse_vorbis_codec_private(codec_private: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let header_count = codec_private
+        .first()
+        .map(|count| *count as usize + 1)
+        .ok_or_else(|| "Missing Vorbis CodecPrivate".to_string())?;
+    if header_count != 3 {
+        return Err(format!(
+            "Expected 3 Vorbis headers in CodecPrivate, got {}",
+            header_count
+        ));
+    }
+
+    let mut pos = 1usize;
+    let ident_size = read_xiph_lace_size(codec_private, &mut pos)?;
+    let comment_size = read_xiph_lace_size(codec_private, &mut pos)?;
+    let setup_size = codec_private
+        .len()
+        .checked_sub(pos + ident_size + comment_size)
+        .ok_or_else(|| "Vorbis CodecPrivate header sizes exceed payload".to_string())?;
+
+    split_laced_frames(codec_private, pos, &[ident_size, comment_size, setup_size])
+}
+
 /// Audio track information extracted from WebM
 #[derive(Clone, Debug)]
 struct AudioTrackInfo {
@@ -113,6 +278,11 @@ struct AudioTrackInfo {
     sample_rate: u32,
     channels: u8,
     codec_private: Vec<u8>,
+}
+
+enum WebmAudioDecoder {
+    Opus(OpusDecoder),
+    Vorbis(VorbisPacketDecoder),
 }
 
 /// Parser state
@@ -128,7 +298,7 @@ pub struct WebmDecoder {
     buffer: Vec<u8>,
     state: ParserState,
     audio_track: Option<AudioTrackInfo>,
-    opus_decoder: Option<OpusDecoder>,
+    audio_decoder: Option<WebmAudioDecoder>,
     pending_audio: VecDeque<Vec<u8>>,
     scratch_buffer: Vec<i16>,
     pre_skip_remaining: usize,
@@ -142,7 +312,7 @@ impl WebmDecoder {
             buffer: Vec::with_capacity(65536),
             state: ParserState::Header,
             audio_track: None,
-            opus_decoder: None,
+            audio_decoder: None,
             pending_audio: VecDeque::new(),
             scratch_buffer: Vec::with_capacity(MAX_OPUS_FRAME_SAMPLES * 2),
             pre_skip_remaining: 0,
@@ -409,8 +579,7 @@ impl WebmDecoder {
                 "found audio track"
             );
 
-            // Only support Opus for now
-            if codec_id == "A_OPUS" {
+            if matches!(codec_id.as_str(), "A_OPUS" | "A_VORBIS") {
                 self.audio_track = Some(AudioTrackInfo {
                     track_number,
                     codec_id,
@@ -425,29 +594,62 @@ impl WebmDecoder {
     }
 
     fn init_decoder(&mut self) -> Result<(), String> {
-        let track = self.audio_track.as_ref().ok_or("No audio track found")?;
+        let (codec_id, sample_rate, channels, codec_private) = {
+            let track = self.audio_track.as_ref().ok_or("No audio track found")?;
+            (
+                track.codec_id.clone(),
+                track.sample_rate,
+                track.channels,
+                track.codec_private.clone(),
+            )
+        };
 
-        if track.codec_id != "A_OPUS" {
-            return Err(format!("Unsupported codec: {}", track.codec_id));
+        match codec_id.as_str() {
+            "A_OPUS" => {
+                if codec_private.len() >= 12 && codec_private.starts_with(b"OpusHead") {
+                    let pre_skip = u16::from_le_bytes([codec_private[10], codec_private[11]]);
+                    self.pre_skip_remaining = pre_skip as usize;
+                    debug!(pre_skip = pre_skip, "parsed OpusHead pre-skip");
+                }
+
+                let mut decoder = OpusDecoder::new(sample_rate as usize, channels as usize);
+                decoder.init()?;
+
+                debug!(
+                    sample_rate = sample_rate,
+                    channels = channels,
+                    "initialized Opus decoder for WebM"
+                );
+
+                self.audio_decoder = Some(WebmAudioDecoder::Opus(decoder));
+            }
+            "A_VORBIS" => {
+                let headers = parse_vorbis_codec_private(&codec_private)?;
+                let mut decoder = VorbisPacketDecoder::new();
+                decoder.init()?;
+                for header in headers {
+                    decoder.decode_packet(&header)?;
+                }
+
+                if let Some(track) = self.audio_track.as_mut() {
+                    if let Some(sample_rate) = decoder.sample_rate() {
+                        track.sample_rate = sample_rate;
+                    }
+                    if let Some(channels) = decoder.channels() {
+                        track.channels = channels;
+                    }
+                }
+
+                debug!(
+                    sample_rate = decoder.sample_rate().unwrap_or(sample_rate),
+                    channels = decoder.channels().unwrap_or(channels),
+                    "initialized Vorbis decoder for WebM"
+                );
+
+                self.audio_decoder = Some(WebmAudioDecoder::Vorbis(decoder));
+            }
+            _ => return Err(format!("Unsupported codec: {}", codec_id)),
         }
-
-        // Parse codec private data for pre-skip if available (OpusHead format)
-        if track.codec_private.len() >= 10 && track.codec_private.starts_with(b"OpusHead") {
-            let pre_skip = u16::from_le_bytes([track.codec_private[10], track.codec_private[11]]);
-            self.pre_skip_remaining = pre_skip as usize;
-            debug!(pre_skip = pre_skip, "parsed OpusHead pre-skip");
-        }
-
-        let mut decoder = OpusDecoder::new(track.sample_rate as usize, track.channels as usize);
-        decoder.init()?;
-
-        debug!(
-            sample_rate = track.sample_rate,
-            channels = track.channels,
-            "initialized Opus decoder for WebM"
-        );
-
-        self.opus_decoder = Some(decoder);
         Ok(())
     }
 
@@ -532,23 +734,39 @@ impl WebmDecoder {
             return Ok(());
         }
 
+        let flags = data[track_len + 2];
         let frame_data = &data[frame_start..];
 
-        if !frame_data.is_empty() {
-            self.pending_audio.push_back(frame_data.to_vec());
+        for frame in parse_block_frames(flags, frame_data)? {
+            if !frame.is_empty() {
+                self.pending_audio.push_back(frame);
+            }
         }
 
         Ok(())
     }
 
     fn decode_pending_audio(&mut self) -> Result<Option<AudioData>, String> {
-        let decoder = match self.opus_decoder.as_mut() {
-            Some(d) => d,
+        let mut decoder = match self.audio_decoder.take() {
+            Some(decoder) => decoder,
             None => return Ok(None),
         };
 
-        let track = match self.audio_track.as_ref() {
-            Some(t) => t,
+        let result = match &mut decoder {
+            WebmAudioDecoder::Opus(opus_decoder) => self.decode_pending_opus(opus_decoder),
+            WebmAudioDecoder::Vorbis(vorbis_decoder) => self.decode_pending_vorbis(vorbis_decoder),
+        };
+
+        self.audio_decoder = Some(decoder);
+        result
+    }
+
+    fn decode_pending_opus(
+        &mut self,
+        decoder: &mut OpusDecoder,
+    ) -> Result<Option<AudioData>, String> {
+        let (sample_rate, channels) = match self.audio_track.as_ref() {
+            Some(track) => (track.sample_rate, track.channels),
             None => return Ok(None),
         };
 
@@ -556,7 +774,7 @@ impl WebmDecoder {
 
         while let Some(packet) = self.pending_audio.pop_front() {
             // Reuse scratch buffer
-            let required_size = MAX_OPUS_FRAME_SAMPLES * track.channels as usize;
+            let required_size = MAX_OPUS_FRAME_SAMPLES * channels as usize;
             if self.scratch_buffer.len() < required_size {
                 self.scratch_buffer.resize(required_size, 0);
             }
@@ -593,10 +811,10 @@ impl WebmDecoder {
             if self.pre_skip_remaining > 0 {
                 let skip = self.pre_skip_remaining.min(samples);
                 self.pre_skip_remaining -= skip;
-                start = skip * track.channels as usize;
+                start = skip * channels as usize;
             }
 
-            let end = samples * track.channels as usize;
+            let end = samples * channels as usize;
             for sample in &self.scratch_buffer[start..end] {
                 pcm_bytes.extend_from_slice(&sample.to_le_bytes());
             }
@@ -608,8 +826,70 @@ impl WebmDecoder {
 
         let audio = AudioData::new(
             16,
-            track.channels,
-            track.sample_rate,
+            channels,
+            sample_rate,
+            pcm_bytes,
+            EncodingFlag::PCMSigned,
+            Endianness::LittleEndian,
+        );
+
+        Ok(Some(audio))
+    }
+
+    fn decode_pending_vorbis(
+        &mut self,
+        decoder: &mut VorbisPacketDecoder,
+    ) -> Result<Option<AudioData>, String> {
+        let (fallback_sample_rate, fallback_channels) = match self.audio_track.as_ref() {
+            Some(track) => (track.sample_rate, track.channels),
+            None => return Ok(None),
+        };
+        let sample_rate = decoder.sample_rate().unwrap_or(fallback_sample_rate);
+        let channels = decoder.channels().unwrap_or(fallback_channels);
+        let mut pcm_bytes = Vec::new();
+
+        while let Some(packet) = self.pending_audio.pop_front() {
+            let samples = match decoder.decode_packet(&packet) {
+                Ok(Some(samples)) => samples,
+                Ok(None) => continue,
+                Err(error) => {
+                    trace!(error = %error, "Vorbis decode error, skipping packet");
+                    continue;
+                }
+            };
+
+            if samples.is_empty() {
+                continue;
+            }
+
+            if !self.logged_first_audio {
+                debug!(
+                    packet_len = packet.len(),
+                    pcm_samples_written = samples.len(),
+                    "decoded WebM Vorbis packet"
+                );
+                self.logged_first_audio = true;
+            } else {
+                trace!(
+                    packet_len = packet.len(),
+                    pcm_samples_written = samples.len(),
+                    "decoded WebM Vorbis packet"
+                );
+            }
+
+            for sample in samples {
+                pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+
+        if pcm_bytes.is_empty() {
+            return Ok(None);
+        }
+
+        let audio = AudioData::new(
+            16,
+            channels,
+            sample_rate,
             pcm_bytes,
             EncodingFlag::PCMSigned,
             Endianness::LittleEndian,
@@ -739,5 +1019,42 @@ mod tests {
             fs::write(&output_path, &decoded).unwrap();
             println!("Decoded {} bytes from WebM", decoded.len());
         }
+    }
+
+    #[test]
+    fn test_webm_vorbis_itag_171_decode() {
+        let test_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("testdata")
+            .join("itag171/yt_itag_171_vorbis.webm");
+        let data = fs::read(&test_file).unwrap();
+        let mut decoder = WebmDecoder::new();
+        decoder.init().unwrap();
+
+        let mut decoded = Vec::new();
+        for chunk in data.chunks(997) {
+            if let Some(audio) = decoder.add(chunk).unwrap() {
+                assert_eq!(audio.bits_per_sample(), 16);
+                assert_eq!(audio.channel_count(), 2);
+                assert_eq!(audio.sampling_rate(), 44_100);
+                decoded.extend_from_slice(audio.data());
+            }
+        }
+
+        loop {
+            match decoder.add(&[]) {
+                Ok(Some(audio)) => decoded.extend_from_slice(audio.data()),
+                Ok(None) => break,
+                Err(error) => panic!("drain WebM Vorbis fixture: {}", error),
+            }
+        }
+
+        assert_eq!(decoder.sample_rate(), Some(44_100));
+        assert_eq!(decoder.channels(), Some(2));
+        assert!(!decoded.is_empty(), "WebM Vorbis fixture decoded no PCM");
+        assert!(decoded
+            .chunks_exact(2)
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .any(|sample| sample != 0));
     }
 }

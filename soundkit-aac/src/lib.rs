@@ -242,474 +242,6 @@ impl Drop for AacDecoder {
     }
 }
 
-#[cfg(feature = "symphonia-decoder")]
-mod symphonia_decoder {
-    use access_unit::is_mp4;
-    use soundkit::audio_packet::Decoder;
-    use std::io::{self, Cursor, Read};
-    use symphonia::core::audio::{AudioBufferRef, Signal};
-    use symphonia::core::codecs::{Decoder as SymphoniaDecoder, DecoderOptions};
-    use symphonia::core::errors::Error as SymphoniaError;
-    use symphonia::core::formats::{FormatOptions, FormatReader};
-    use symphonia::core::io::{MediaSourceStream, ReadOnlySource};
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-    use tracing::{debug, trace};
-
-    /// A Read adapter that wraps a Cursor for streaming bytes
-    struct ByteStreamReader {
-        cursor: Cursor<Vec<u8>>,
-    }
-
-    impl ByteStreamReader {
-        fn new() -> Self {
-            Self {
-                cursor: Cursor::new(Vec::new()),
-            }
-        }
-
-        fn append(&mut self, data: &[u8]) {
-            let pos = self.cursor.position();
-            let inner = self.cursor.get_mut();
-            inner.extend_from_slice(data);
-            self.cursor.set_position(pos);
-        }
-
-        fn has_data(&self) -> bool {
-            let pos = self.cursor.position();
-            pos < self.cursor.get_ref().len() as u64
-        }
-
-        fn buffer(&self) -> &[u8] {
-            self.cursor.get_ref()
-        }
-    }
-
-    impl Read for ByteStreamReader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            self.cursor.read(buf)
-        }
-    }
-
-    pub struct AacDecoderSymphonia {
-        stream_reader: ByteStreamReader,
-        format_reader: Option<Box<dyn FormatReader>>,
-        decoder: Option<Box<dyn SymphoniaDecoder>>,
-        track_id: Option<u32>,
-        sample_rate: Option<u32>,
-        channels: Option<u8>,
-        pending_samples_i16: Vec<i16>,
-        pending_samples_f32: Vec<f32>,
-    }
-
-    impl AacDecoderSymphonia {
-        pub fn new() -> Self {
-            Self {
-                stream_reader: ByteStreamReader::new(),
-                format_reader: None,
-                decoder: None,
-                track_id: None,
-                sample_rate: None,
-                channels: None,
-                pending_samples_i16: Vec::new(),
-                pending_samples_f32: Vec::new(),
-            }
-        }
-
-        pub fn init(&mut self) -> Result<(), String> {
-            Ok(())
-        }
-
-        pub fn sample_rate(&self) -> Option<u32> {
-            self.sample_rate
-        }
-
-        pub fn channels(&self) -> Option<u8> {
-            self.channels
-        }
-
-        fn initialize_symphonia(&mut self) -> Result<(), String> {
-            // Create hint based on container type for better probing.
-            let mut hint = Hint::new();
-            if is_mp4(self.stream_reader.buffer()) {
-                hint.with_extension("mp4");
-                hint.with_extension("m4a");
-            } else {
-                hint.with_extension("aac");
-            }
-
-            // Wrap the reader
-            let mss = MediaSourceStream::new(
-                Box::new(ReadOnlySource::new(std::mem::replace(
-                    &mut self.stream_reader,
-                    ByteStreamReader::new(),
-                ))),
-                Default::default(),
-            );
-
-            // Probe the format
-            let probed = symphonia::default::get_probe()
-                .format(
-                    &hint,
-                    mss,
-                    &FormatOptions::default(),
-                    &MetadataOptions::default(),
-                )
-                .map_err(|e| format!("Failed to probe format: {}", e))?;
-
-            let format = probed.format;
-
-            // Find the first audio track
-            let track = format
-                .tracks()
-                .iter()
-                .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
-                .ok_or_else(|| "No audio track found".to_string())?;
-
-            let track_id = track.id;
-
-            // Extract metadata
-            if let Some(sr) = track.codec_params.sample_rate {
-                self.sample_rate = Some(sr);
-            }
-            if let Some(ch) = track.codec_params.channels {
-                self.channels = Some(ch.count() as u8);
-            }
-
-            // Create decoder
-            let decoder = symphonia::default::get_codecs()
-                .make(&track.codec_params, &DecoderOptions::default())
-                .map_err(|e| format!("Failed to create decoder: {}", e))?;
-
-            self.format_reader = Some(format);
-            self.decoder = Some(decoder);
-            self.track_id = Some(track_id);
-
-            debug!(
-                sample_rate_hz = self.sample_rate,
-                channels = self.channels,
-                "initialized Symphonia AAC decoder"
-            );
-
-            Ok(())
-        }
-    }
-
-    fn convert_audio_buffer_to_f32(audio_buf: &AudioBufferRef) -> Vec<f32> {
-        let num_channels = audio_buf.spec().channels.count();
-        let num_frames = audio_buf.frames();
-        let mut output = Vec::with_capacity(num_frames * num_channels);
-
-        // Convert planar to interleaved f32
-        for frame_idx in 0..num_frames {
-            for ch_idx in 0..num_channels {
-                let sample = match audio_buf {
-                    AudioBufferRef::F32(buf) => buf.chan(ch_idx)[frame_idx],
-                    AudioBufferRef::F64(buf) => buf.chan(ch_idx)[frame_idx] as f32,
-                    AudioBufferRef::S32(buf) => {
-                        (buf.chan(ch_idx)[frame_idx] as f32) / (i32::MAX as f32)
-                    }
-                    AudioBufferRef::S16(buf) => {
-                        (buf.chan(ch_idx)[frame_idx] as f32) / (i16::MAX as f32)
-                    }
-                    AudioBufferRef::S8(buf) => {
-                        (buf.chan(ch_idx)[frame_idx] as f32) / (i8::MAX as f32)
-                    }
-                    AudioBufferRef::U32(buf) => {
-                        let s = buf.chan(ch_idx)[frame_idx] as i64 - (u32::MAX as i64 / 2);
-                        (s as f32) / ((u32::MAX as i64 / 2) as f32)
-                    }
-                    AudioBufferRef::U24(buf) => {
-                        let val = buf.chan(ch_idx)[frame_idx].inner();
-                        let s = val as i64 - (1i64 << 23);
-                        (s as f32) / ((1i64 << 23) as f32)
-                    }
-                    AudioBufferRef::U16(buf) => {
-                        let s = buf.chan(ch_idx)[frame_idx] as i32 - (u16::MAX as i32 / 2);
-                        (s as f32) / ((u16::MAX as i32 / 2) as f32)
-                    }
-                    AudioBufferRef::U8(buf) => {
-                        let s = buf.chan(ch_idx)[frame_idx] as i16 - (u8::MAX as i16 / 2);
-                        (s as f32) / ((u8::MAX as i16 / 2) as f32)
-                    }
-                    AudioBufferRef::S24(buf) => {
-                        let val = buf.chan(ch_idx)[frame_idx].inner();
-                        (val as f32) / ((1i32 << 23) as f32)
-                    }
-                };
-
-                output.push(sample);
-            }
-        }
-
-        output
-    }
-
-    fn convert_audio_buffer_to_i16(audio_buf: &AudioBufferRef) -> Vec<i16> {
-        let num_channels = audio_buf.spec().channels.count();
-        let num_frames = audio_buf.frames();
-        let mut output = Vec::with_capacity(num_frames * num_channels);
-
-        // Convert planar to interleaved i16
-        for frame_idx in 0..num_frames {
-            for ch_idx in 0..num_channels {
-                let sample = match audio_buf {
-                    AudioBufferRef::F32(buf) => buf.chan(ch_idx)[frame_idx],
-                    AudioBufferRef::F64(buf) => buf.chan(ch_idx)[frame_idx] as f32,
-                    AudioBufferRef::S32(buf) => {
-                        (buf.chan(ch_idx)[frame_idx] as f32) / (i32::MAX as f32)
-                    }
-                    AudioBufferRef::S16(buf) => {
-                        (buf.chan(ch_idx)[frame_idx] as f32) / (i16::MAX as f32)
-                    }
-                    AudioBufferRef::S8(buf) => {
-                        (buf.chan(ch_idx)[frame_idx] as f32) / (i8::MAX as f32)
-                    }
-                    AudioBufferRef::U32(buf) => {
-                        let s = buf.chan(ch_idx)[frame_idx] as i64 - (u32::MAX as i64 / 2);
-                        (s as f32) / ((u32::MAX as i64 / 2) as f32)
-                    }
-                    AudioBufferRef::U24(buf) => {
-                        let val = buf.chan(ch_idx)[frame_idx].inner();
-                        let s = val as i64 - (1i64 << 23);
-                        (s as f32) / ((1i64 << 23) as f32)
-                    }
-                    AudioBufferRef::U16(buf) => {
-                        let s = buf.chan(ch_idx)[frame_idx] as i32 - (u16::MAX as i32 / 2);
-                        (s as f32) / ((u16::MAX as i32 / 2) as f32)
-                    }
-                    AudioBufferRef::U8(buf) => {
-                        let s = buf.chan(ch_idx)[frame_idx] as i16 - (u8::MAX as i16 / 2);
-                        (s as f32) / ((u8::MAX as i16 / 2) as f32)
-                    }
-                    AudioBufferRef::S24(buf) => {
-                        let val = buf.chan(ch_idx)[frame_idx].inner();
-                        (val as f32) / ((1i32 << 23) as f32)
-                    }
-                };
-
-                // Clamp and convert to i16
-                let i16_sample = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                output.push(i16_sample);
-            }
-        }
-
-        output
-    }
-
-    impl Decoder for AacDecoderSymphonia {
-        fn decode_i16(
-            &mut self,
-            input: &[u8],
-            output: &mut [i16],
-            _fec: bool,
-        ) -> Result<usize, String> {
-            // Append new input data
-            if !input.is_empty() {
-                self.stream_reader.append(input);
-            }
-
-            // Initialize on first decode
-            if self.format_reader.is_none() && self.stream_reader.has_data() {
-                self.initialize_symphonia()?;
-            }
-
-            let mut written = 0;
-
-            // First, drain any pending samples
-            if !self.pending_samples_i16.is_empty() {
-                let to_copy = self.pending_samples_i16.len().min(output.len());
-                output[..to_copy].copy_from_slice(&self.pending_samples_i16[..to_copy]);
-                self.pending_samples_i16.drain(..to_copy);
-                written += to_copy;
-            }
-
-            // If we still have room, decode more frames
-            while written < output.len() {
-                let format_reader = match &mut self.format_reader {
-                    Some(f) => f,
-                    None => return Ok(written),
-                };
-
-                let decoder = match &mut self.decoder {
-                    Some(d) => d,
-                    None => return Ok(written),
-                };
-
-                let track_id = match self.track_id {
-                    Some(id) => id,
-                    None => return Ok(written),
-                };
-
-                // Get next packet
-                let packet = match format_reader.next_packet() {
-                    Ok(pkt) => pkt,
-                    Err(SymphoniaError::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                        // Need more data
-                        break;
-                    }
-                    Err(SymphoniaError::ResetRequired) => {
-                        return Err("Decoder reset required".to_string());
-                    }
-                    Err(e) => {
-                        trace!("Error getting packet: {}", e);
-                        break;
-                    }
-                };
-
-                // Skip packets from other tracks
-                if packet.track_id() != track_id {
-                    continue;
-                }
-
-                // Decode the packet
-                match decoder.decode(&packet) {
-                    Ok(decoded) => {
-                        // Convert to i16
-                        let samples = convert_audio_buffer_to_i16(&decoded);
-
-                        // Copy what we can to output
-                        let remaining = output.len() - written;
-                        let to_copy = samples.len().min(remaining);
-
-                        output[written..written + to_copy].copy_from_slice(&samples[..to_copy]);
-                        written += to_copy;
-
-                        // Store any overflow
-                        if to_copy < samples.len() {
-                            self.pending_samples_i16
-                                .extend_from_slice(&samples[to_copy..]);
-                        }
-                    }
-                    Err(SymphoniaError::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                        break;
-                    }
-                    Err(SymphoniaError::DecodeError(e)) => {
-                        trace!("Decode error: {}", e);
-                        continue;
-                    }
-                    Err(e) => {
-                        return Err(format!("Decoding error: {}", e));
-                    }
-                }
-            }
-
-            Ok(written)
-        }
-
-        fn decode_i32(
-            &mut self,
-            _input: &[u8],
-            _output: &mut [i32],
-            _fec: bool,
-        ) -> Result<usize, String> {
-            Err("Not implemented.".to_string())
-        }
-
-        fn decode_f32(
-            &mut self,
-            input: &[u8],
-            output: &mut [f32],
-            _fec: bool,
-        ) -> Result<usize, String> {
-            // Append new input data
-            if !input.is_empty() {
-                self.stream_reader.append(input);
-            }
-
-            // Initialize on first decode
-            if self.format_reader.is_none() && self.stream_reader.has_data() {
-                self.initialize_symphonia()?;
-            }
-
-            let mut written = 0;
-
-            // First, drain any pending samples
-            if !self.pending_samples_f32.is_empty() {
-                let to_copy = self.pending_samples_f32.len().min(output.len());
-                output[..to_copy].copy_from_slice(&self.pending_samples_f32[..to_copy]);
-                self.pending_samples_f32.drain(..to_copy);
-                written += to_copy;
-            }
-
-            // If we still have room, decode more frames
-            while written < output.len() {
-                let format_reader = match &mut self.format_reader {
-                    Some(f) => f,
-                    None => return Ok(written),
-                };
-
-                let decoder = match &mut self.decoder {
-                    Some(d) => d,
-                    None => return Ok(written),
-                };
-
-                let track_id = match self.track_id {
-                    Some(id) => id,
-                    None => return Ok(written),
-                };
-
-                // Get next packet
-                let packet = match format_reader.next_packet() {
-                    Ok(pkt) => pkt,
-                    Err(SymphoniaError::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                        // Need more data
-                        break;
-                    }
-                    Err(SymphoniaError::ResetRequired) => {
-                        return Err("Decoder reset required".to_string());
-                    }
-                    Err(e) => {
-                        trace!("Error getting packet: {}", e);
-                        break;
-                    }
-                };
-
-                // Skip packets from other tracks
-                if packet.track_id() != track_id {
-                    continue;
-                }
-
-                // Decode the packet
-                match decoder.decode(&packet) {
-                    Ok(decoded) => {
-                        // Convert to f32 (zero-copy for F32 format!)
-                        let samples = convert_audio_buffer_to_f32(&decoded);
-
-                        // Copy what we can to output
-                        let remaining = output.len() - written;
-                        let to_copy = samples.len().min(remaining);
-
-                        output[written..written + to_copy].copy_from_slice(&samples[..to_copy]);
-                        written += to_copy;
-
-                        // Store any overflow
-                        if to_copy < samples.len() {
-                            self.pending_samples_f32
-                                .extend_from_slice(&samples[to_copy..]);
-                        }
-                    }
-                    Err(SymphoniaError::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                        break;
-                    }
-                    Err(SymphoniaError::DecodeError(e)) => {
-                        trace!("Decode error: {}", e);
-                        continue;
-                    }
-                    Err(e) => {
-                        return Err(format!("Decoding error: {}", e));
-                    }
-                }
-            }
-
-            Ok(written)
-        }
-    }
-}
-
-#[cfg(feature = "symphonia-decoder")]
-pub use symphonia_decoder::AacDecoderSymphonia;
-
 #[cfg(feature = "mp4-decoder")]
 mod mp4_decoder {
     use access_unit::aac::create_adts_header;
@@ -972,9 +504,9 @@ mod mp4_decoder {
                             ));
                         }
 
-                        let first_frame = self.sample_rate.is_none() || self.channels.is_none();
-                        self.sample_rate.get_or_insert(info.sampleRate as u32);
-                        self.channels.get_or_insert(info.numChannels as u8);
+                        let first_frame = written == 0;
+                        self.sample_rate = Some(info.sampleRate as u32);
+                        self.channels = Some(info.numChannels as u8);
                         written += frame_samples;
 
                         if first_frame {
@@ -1308,31 +840,49 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "symphonia-decoder")]
-    fn test_symphonia_aac_decoder_streaming_decode() {
-        use crate::AacDecoderSymphonia;
+    #[cfg(feature = "mp4-decoder")]
+    fn test_mp4_he_aac_itag_139_decoder() {
+        use crate::AacDecoderMp4;
+        use mp4::{AudioObjectType, ChannelConfig, MediaType, Mp4Reader};
+        use std::io::Cursor;
 
-        // use the real fixture AAC, not one we just encoded
-        let input_path = golden_path("aac/A_Tusk_is_used_to_make_costly_gifts_encoded.aac");
-        let aac_bytes = fs::read(&input_path).unwrap();
-        assert!(!aac_bytes.is_empty(), "fixture aac missing or empty");
+        let input_path = testdata_path("itag139/yt_itag_139_he_aac.mp4");
+        let mp4_bytes = fs::read(&input_path).unwrap();
+        assert!(!mp4_bytes.is_empty(), "fixture MP4 missing or empty");
+
+        let reader = Mp4Reader::read_header(Cursor::new(mp4_bytes.clone()), mp4_bytes.len() as u64)
+            .expect("parse itag 139 MP4 header");
+        let (_track_id, track) = reader
+            .tracks()
+            .iter()
+            .find(|(_, track)| track.media_type().ok() == Some(MediaType::AAC))
+            .expect("fixture should contain an AAC track");
+        // This is the mp4-demux + FDK-AAC C-binding path. The HE-AAC fixture carries an AAC-LC core at
+        // 11.025 kHz; SBR doubles the decoded output rate to 22.05 kHz.
+        assert_eq!(
+            track.audio_profile().unwrap(),
+            AudioObjectType::AacLowComplexity
+        );
+        assert_eq!(track.sample_freq_index().unwrap().freq(), 11_025);
+        assert_eq!(track.channel_config().unwrap(), ChannelConfig::Stereo);
 
         init_tracing();
 
-        let mut decoder = AacDecoderSymphonia::new();
+        let mut decoder = AacDecoderMp4::new();
         decoder.init().expect("Decoder initialization failed");
 
         let mut decoded = Vec::new();
-        let mut scratch = vec![0i16; 4096];
+        let mut scratch = vec![0i16; 16384];
 
-        for chunk in aac_bytes.chunks(2048) {
-            let written = decoder.decode_i16(chunk, &mut scratch, false).unwrap();
-            decoded.extend_from_slice(&scratch[..written]);
-        }
+        let written = decoder
+            .decode_i16(&mp4_bytes, &mut scratch, false)
+            .expect("decode itag 139 HE-AAC MP4");
+        decoded.extend_from_slice(&scratch[..written]);
 
-        // final drain if anything buffered
         loop {
-            let written = decoder.decode_i16(&[], &mut scratch, false).unwrap();
+            let written = decoder
+                .decode_i16(&[], &mut scratch, false)
+                .expect("drain itag 139 HE-AAC MP4");
             if written == 0 {
                 break;
             }
@@ -1340,12 +890,11 @@ mod tests {
         }
 
         assert!(!decoded.is_empty(), "decoder produced no PCM samples");
-        assert_eq!(decoder.sample_rate(), Some(16_000), "fixture sample rate");
-        assert_eq!(decoder.channels(), Some(2), "fixture channel count");
-
-        let output_path = outputs_path("A_Tusk_is_used_to_make_costly_gifts_encoded.s16le");
-        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
-        let pcm_bytes: Vec<u8> = decoded.iter().flat_map(|s| s.to_le_bytes()).collect();
-        fs::write(&output_path, pcm_bytes).unwrap();
+        assert_eq!(decoder.sample_rate(), Some(22_050));
+        assert_eq!(decoder.channels(), Some(2));
+        assert!(
+            decoded.iter().any(|sample| *sample != 0),
+            "decoded PCM should contain non-zero samples"
+        );
     }
 }

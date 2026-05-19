@@ -74,6 +74,12 @@ testdata/flac/*
 !testdata/mac_aac/
 testdata/mac_aac/*
 !testdata/mac_aac/A_Tusk_is_used_to_make_costly_gifts.m4a
+!testdata/itag139/
+testdata/itag139/*
+!testdata/itag139/yt_itag_139_he_aac.mp4
+!testdata/itag171/
+testdata/itag171/*
+!testdata/itag171/yt_itag_171_vorbis.webm
 !testdata/opus/
 testdata/opus/*
 !testdata/opus/A_Tusk_is_used_to_make_costly_gifts.opus

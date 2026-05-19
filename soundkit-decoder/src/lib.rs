@@ -243,7 +243,7 @@ enum FormatDecoder {
     Opus(Box<OpusStreamDecoder>),
     /// Ogg-wrapped Opus decoder
     OggOpus(Box<OggOpusDecoder>),
-    /// WebM container decoder (typically Opus audio)
+    /// WebM container decoder (Opus or Vorbis audio)
     WebM(Box<WebmDecoder>),
     /// WAV decoder (raw PCM in RIFF container)
     Wav(Box<WavStreamProcessor>),
@@ -2124,6 +2124,74 @@ mod tests {
         assert_eq!(frames.len(), 1, "No autodetected ALAC frame decoded");
         assert_eq!(frames[0].channel_count(), 1);
         assert_eq!(frames[0].sampling_rate(), 8_000);
+    }
+
+    #[test]
+    fn test_decode_mp4_he_aac_itag_139_autodetect() {
+        // This exercises the default soundkit-decoder AAC-in-MP4 route:
+        // pure-Rust container detection/demuxing plus FDK-AAC C bindings.
+        let data = Bytes::from(
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("testdata")
+                    .join("itag139/yt_itag_139_he_aac.mp4"),
+            )
+            .unwrap(),
+        );
+
+        let mut pipeline = DecodePipeline::spawn();
+        pipeline.send(data).unwrap();
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert!(
+            !frames.is_empty(),
+            "No autodetected itag 139 HE-AAC frames decoded"
+        );
+        assert!(frames.iter().all(|frame| frame.bits_per_sample() == 16));
+        assert!(frames.iter().all(|frame| frame.channel_count() == 2));
+        assert!(frames.iter().all(|frame| frame.sampling_rate() == 22_050));
+        assert!(frames
+            .iter()
+            .flat_map(|frame| frame.data().chunks_exact(2))
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .any(|sample| sample != 0));
+    }
+
+    #[test]
+    fn test_decode_webm_vorbis_itag_171_autodetect() {
+        // This covers legacy YouTube WebM Vorbis audio itags 171/172.
+        let data = Bytes::from(
+            fs::read(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("testdata")
+                    .join("itag171/yt_itag_171_vorbis.webm"),
+            )
+            .unwrap(),
+        );
+
+        let mut pipeline = DecodePipeline::spawn();
+        for start in (0..data.len()).step_by(997) {
+            let end = (start + 997).min(data.len());
+            pipeline.send(data.slice(start..end)).unwrap();
+        }
+        pipeline.send(Bytes::new()).unwrap();
+
+        let frames = recv_until_done(&mut pipeline);
+        assert!(
+            !frames.is_empty(),
+            "No autodetected itag 171 WebM Vorbis frames decoded"
+        );
+        assert!(frames.iter().all(|frame| frame.bits_per_sample() == 16));
+        assert!(frames.iter().all(|frame| frame.channel_count() == 2));
+        assert!(frames.iter().all(|frame| frame.sampling_rate() == 44_100));
+        assert!(frames
+            .iter()
+            .flat_map(|frame| frame.data().chunks_exact(2))
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .any(|sample| sample != 0));
     }
 
     #[test]
