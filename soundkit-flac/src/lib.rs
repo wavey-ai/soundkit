@@ -1,11 +1,19 @@
+#[cfg(feature = "libflac")]
 use core::slice;
+#[cfg(feature = "libflac")]
 use libflac_sys as ffi;
+#[cfg(feature = "libflac")]
 use libflac_sys::*;
+#[cfg(feature = "libflac")]
 use soundkit::audio_packet::{Decoder, Encoder};
+#[cfg(feature = "libflac")]
 use std::cell::RefCell;
+#[cfg(feature = "libflac")]
 use std::rc::Rc;
+#[cfg(feature = "libflac")]
 use tracing::{debug, error, trace};
 
+#[cfg(feature = "libflac")]
 pub struct FlacEncoder {
     encoder: *mut ffi::FLAC__StreamEncoder,
     sample_rate: u32,
@@ -16,6 +24,7 @@ pub struct FlacEncoder {
     compression_level: u32,
 }
 
+#[cfg(feature = "libflac")]
 extern "C" fn write_callback(
     _encoder: *const ffi::FLAC__StreamEncoder,
     buffer: *const ffi::FLAC__byte,
@@ -32,6 +41,7 @@ extern "C" fn write_callback(
     ffi::FLAC__STREAM_ENCODER_WRITE_STATUS_OK
 }
 
+#[cfg(feature = "libflac")]
 impl Encoder for FlacEncoder {
     fn new(
         sample_rate: u32,
@@ -134,6 +144,7 @@ impl Encoder for FlacEncoder {
     }
 }
 
+#[cfg(feature = "libflac")]
 impl Drop for FlacEncoder {
     fn drop(&mut self) {
         unsafe {
@@ -143,6 +154,7 @@ impl Drop for FlacEncoder {
     }
 }
 
+#[cfg(feature = "libflac")]
 pub struct FlacDecoder {
     decoder: *mut ffi::FLAC__StreamDecoder,
     output_buffer: Vec<i32>,
@@ -153,6 +165,7 @@ pub struct FlacDecoder {
     bits_per_sample: Option<u8>,
 }
 
+#[cfg(feature = "libflac")]
 impl FlacDecoder {
     pub fn new() -> Self {
         let decoder = unsafe { ffi::FLAC__stream_decoder_new() };
@@ -206,11 +219,13 @@ impl FlacDecoder {
     }
 }
 
+#[cfg(feature = "libflac")]
 impl Default for FlacDecoder {
     fn default() -> Self {
         Self::new()
     }
 }
+#[cfg(feature = "libflac")]
 impl Decoder for FlacDecoder {
     fn decode_i16(
         &mut self,
@@ -308,6 +323,7 @@ impl Decoder for FlacDecoder {
     }
 }
 
+#[cfg(feature = "libflac")]
 impl Drop for FlacDecoder {
     fn drop(&mut self) {
         unsafe {
@@ -317,6 +333,7 @@ impl Drop for FlacDecoder {
     }
 }
 
+#[cfg(feature = "libflac")]
 unsafe extern "C" fn read_callback_decode(
     _decoder: *const ffi::FLAC__StreamDecoder,
     buffer: *mut ffi::FLAC__byte,
@@ -345,6 +362,7 @@ unsafe extern "C" fn read_callback_decode(
     ffi::FLAC__STREAM_DECODER_READ_STATUS_CONTINUE
 }
 
+#[cfg(feature = "libflac")]
 unsafe extern "C" fn write_callback_decode(
     _decoder: *const FLAC__StreamDecoder,
     frame: *const FLAC__Frame,
@@ -400,6 +418,7 @@ unsafe extern "C" fn write_callback_decode(
     FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE
 }
 
+#[cfg(feature = "libflac")]
 unsafe extern "C" fn error_callback_decode(
     _decoder: *const ffi::FLAC__StreamDecoder,
     status: ffi::FLAC__StreamDecoderErrorStatus,
@@ -617,15 +636,25 @@ pub use claxon_decoder::FlacDecoderClaxon;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "libflac")]
     use super::*;
+    #[cfg(feature = "libflac")]
     use soundkit::audio_bytes::{f32le_to_s24, s16le_to_i32, s24le_to_i32};
     use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
+    #[cfg(feature = "libflac")]
     use soundkit::wav::WavStreamProcessor;
-    use std::fs::{self, File};
+    use std::fs;
+    #[cfg(feature = "libflac")]
+    use std::fs::File;
+    #[cfg(feature = "libflac")]
     use std::io::Read;
+    #[cfg(feature = "libflac")]
     use std::io::Write;
-    use std::path::{Path, PathBuf};
+    #[cfg(feature = "libflac")]
+    use std::path::Path;
+    use std::path::PathBuf;
     use std::sync::Once;
+    #[cfg(feature = "libflac")]
     use tracing::trace;
 
     fn init_tracing() {
@@ -647,6 +676,7 @@ mod tests {
             .join(file)
     }
 
+    #[cfg(feature = "libflac")]
     fn golden_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -654,12 +684,14 @@ mod tests {
             .join(file)
     }
 
+    #[cfg(feature = "libflac")]
     fn outputs_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("outputs")
             .join(file)
     }
 
+    #[cfg(feature = "libflac")]
     #[test]
     fn test_flac_decode_waveform() {
         let input_path = testdata_path(&format!("flac/{}.flac", TEST_FILE));
@@ -700,6 +732,7 @@ mod tests {
         print_waveform_with_header("FLAC", &result);
     }
 
+    #[cfg(feature = "libflac")]
     #[test]
     fn test_flac_decoder_streaming_decode() {
         // decode the real fixture FLAC, not a freshly encoded one
@@ -738,6 +771,7 @@ mod tests {
         fs::write(&output_path, pcm_bytes).unwrap();
     }
 
+    #[cfg(feature = "libflac")]
     fn run_flac_encoder_with_wav_file(file_path: &Path, output_path: &Path) {
         init_tracing();
 
@@ -818,6 +852,7 @@ mod tests {
         encoder.reset().expect("Failed to reset encoder");
     }
 
+    #[cfg(feature = "libflac")]
     #[test]
     fn test_flac_encoder_with_wave_16bit() {
         run_flac_encoder_with_wav_file(
@@ -826,6 +861,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "libflac")]
     #[test]
     fn test_flac_encoder_with_wave_24bit() {
         run_flac_encoder_with_wav_file(
@@ -834,6 +870,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "libflac")]
     #[test]
     fn test_flac_encoder_with_wave_32bit() {
         run_flac_encoder_with_wav_file(
@@ -882,6 +919,7 @@ mod tests {
         }
 
         /// Decode FLAC using libflac decoder
+        #[cfg(feature = "libflac")]
         fn decode_with_libflac(
             flac_bytes: &[u8],
         ) -> (Vec<i32>, Option<u32>, Option<u8>, Option<u8>) {
@@ -942,6 +980,7 @@ mod tests {
             print_waveform_with_header("FLAC (claxon)", &result);
         }
 
+        #[cfg(feature = "libflac")]
         #[test]
         fn test_compare_libflac_vs_claxon() {
             let input_path = testdata_path(&format!("flac/{}.flac", TEST_FILE));

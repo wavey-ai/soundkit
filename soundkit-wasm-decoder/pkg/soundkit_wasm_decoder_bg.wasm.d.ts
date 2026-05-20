@@ -1,0 +1,36 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_wasmmusicdecoder_free: (a: number, b: number) => void;
+export const __wbg_wasmopusdeboxer_free: (a: number, b: number) => void;
+export const __wbg_wasmaacdeboxer_free: (a: number, b: number) => void;
+export const __wbg_wasmaudiotrackdemuxer_free: (a: number, b: number) => void;
+export const wasmmusicdecoder_new: () => number;
+export const wasmmusicdecoder_newWithFormat: (a: number, b: number) => [number, number, number];
+export const wasmmusicdecoder_newRawLinear16: (a: number, b: number) => [number, number, number];
+export const wasmmusicdecoder_newRawLinear32: (a: number, b: number) => [number, number, number];
+export const wasmmusicdecoder_push: (a: number, b: number, c: number) => [number, number, number];
+export const wasmmusicdecoder_flush: (a: number) => [number, number, number];
+export const wasmopusdeboxer_new: () => number;
+export const wasmopusdeboxer_newWithFormat: (a: number, b: number) => [number, number, number];
+export const wasmopusdeboxer_push: (a: number, b: number, c: number) => [number, number, number];
+export const wasmopusdeboxer_flush: (a: number) => [number, number, number];
+export const wasmaacdeboxer_new: () => number;
+export const wasmaacdeboxer_newWithFormat: (a: number, b: number) => [number, number, number];
+export const wasmaacdeboxer_push: (a: number, b: number, c: number) => [number, number, number];
+export const wasmaacdeboxer_flush: (a: number) => [number, number, number];
+export const wasmaudiotrackdemuxer_new: () => number;
+export const wasmaudiotrackdemuxer_newWithFormat: (a: number, b: number) => [number, number, number];
+export const wasmaudiotrackdemuxer_push: (a: number, b: number, c: number) => [number, number, number];
+export const wasmaudiotrackdemuxer_flush: (a: number) => [number, number, number];
+export const wasmopusdeboxer_newAuto: () => number;
+export const wasmaacdeboxer_newAuto: () => number;
+export const wasmaudiotrackdemuxer_newAuto: () => number;
+export const wasmmusicdecoder_newAuto: () => number;
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_start: () => void;

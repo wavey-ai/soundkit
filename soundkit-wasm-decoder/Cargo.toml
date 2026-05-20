@@ -1,0 +1,48 @@
+[package]
+name = "soundkit-wasm-decoder"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Browser WASM streaming music decoder facade for SoundKit codecs."
+repository = "https://github.com/wavey-ai/soundkit"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["detect", "raw-pcm", "wav", "mp3", "vorbis", "aiff", "alac", "flac", "webm", "opus-debox", "aac-debox", "audio-demux"]
+detect = ["dep:access-unit"]
+audio-demux = ["dep:soundkit-audio-demux"]
+raw-pcm = []
+wav = []
+mp3 = ["dep:soundkit-mp3"]
+vorbis = ["dep:soundkit-vorbis"]
+flac = ["dep:soundkit-flac"]
+aac = ["dep:soundkit-aac", "soundkit-aac/fdk"]
+m4a = ["aac", "soundkit-aac/mp4-decoder"]
+aac-debox = ["dep:soundkit-aac", "soundkit-aac/mp4-demux"]
+alac = ["dep:soundkit-alac"]
+aiff = ["dep:soundkit-aiff"]
+opus = ["dep:soundkit-opus"]
+ogg-opus = ["opus", "dep:soundkit-ogg-opus", "soundkit-ogg-opus/decode"]
+opus-debox = ["dep:soundkit-ogg-opus", "dep:soundkit-webm"]
+webm = ["dep:soundkit-webm", "soundkit-webm/vorbis"]
+webm-opus = ["webm", "soundkit-webm/opus"]
+
+[dependencies]
+soundkit = { path = "../soundkit" }
+access-unit = { git = "https://github.com/wavey-ai/access-unit.git", optional = true }
+frame-header = "0.2.0"
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+
+soundkit-audio-demux = { path = "../soundkit-audio-demux", optional = true }
+soundkit-aac = { path = "../soundkit-aac", default-features = false, optional = true }
+soundkit-aiff = { path = "../soundkit-aiff", optional = true }
+soundkit-alac = { path = "../soundkit-alac", optional = true }
+soundkit-flac = { path = "../soundkit-flac", default-features = false, features = ["claxon-decoder"], optional = true }
+soundkit-mp3 = { path = "../soundkit-mp3", default-features = false, optional = true }
+soundkit-ogg-opus = { path = "../soundkit-ogg-opus", default-features = false, optional = true }
+soundkit-opus = { path = "../soundkit-opus", optional = true }
+soundkit-vorbis = { path = "../soundkit-vorbis", optional = true }
+soundkit-webm = { path = "../soundkit-webm", default-features = false, optional = true }

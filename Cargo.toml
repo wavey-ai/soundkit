@@ -19,6 +19,8 @@ members = [
   "soundkit-mp3",
   "soundkit-ogg-opus",
   "soundkit-webm",
+  "soundkit-audio-demux",
+  "soundkit-wasm-decoder",
   "soundkit-decoder",
   "soundkit-rubberband-sys",
   "soundkit-rubberband",

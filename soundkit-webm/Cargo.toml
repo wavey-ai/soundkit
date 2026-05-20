@@ -9,9 +9,15 @@ repository = "https://github.com/wavey-ai/soundkit"
 [dependencies]
 frame-header = "0.2.0"
 soundkit = { version = "0.12.2", path = "../soundkit" }
-soundkit-opus = { version = "0.0.1", path = "../soundkit-opus" }
-soundkit-vorbis = { version = "0.1.0", path = "../soundkit-vorbis" }
+soundkit-opus = { version = "0.0.1", path = "../soundkit-opus", optional = true }
+soundkit-vorbis = { version = "0.1.0", path = "../soundkit-vorbis", optional = true }
 tracing = "0.1.40"
+
+[features]
+default = ["opus", "vorbis"]
+opus = ["dep:soundkit-opus"]
+vorbis = ["dep:soundkit-vorbis"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+doctest = false

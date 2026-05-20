@@ -14,7 +14,8 @@ tracing = "0.1.40"
 [features]
 default = ["fdk"]
 fdk = ["fdk-aac"]
-mp4-decoder = ["fdk-aac", "mp4"]
+mp4-demux = ["mp4"]
+mp4-decoder = ["fdk-aac", "mp4-demux"]
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

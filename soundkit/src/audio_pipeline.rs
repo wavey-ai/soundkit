@@ -76,7 +76,8 @@ pub fn audio_to_f32_channels(audio: &AudioData) -> Result<Vec<Vec<f32>>, String>
 
     if audio.bits_per_sample() == 32 && audio.audio_format() != EncodingFlag::PCMFloat {
         let interleaved = s32le_to_i32(audio.data());
-        let mut channels = vec![Vec::with_capacity(interleaved.len() / channel_count); channel_count];
+        let mut channels =
+            vec![Vec::with_capacity(interleaved.len() / channel_count); channel_count];
         for (index, sample) in interleaved.into_iter().enumerate() {
             channels[index % channel_count].push(sample);
         }
@@ -335,8 +336,8 @@ impl<E: Encoder> AudioEncoder<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frame_header::{EncodingFlag, Endianness};
     use crate::wav::generate_wav_buffer;
+    use frame_header::{EncodingFlag, Endianness};
     use std::fs::File;
     use std::io::Read;
     use std::io::Write;

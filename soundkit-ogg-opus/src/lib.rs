@@ -1,11 +1,17 @@
+#[cfg(feature = "decode")]
 use frame_header::{EncodingFlag, Endianness};
 use memchr::memmem;
+#[cfg(feature = "decode")]
 use soundkit::audio_packet::Decoder;
+#[cfg(feature = "decode")]
 use soundkit::audio_types::AudioData;
+#[cfg(feature = "decode")]
 use soundkit_opus::OpusDecoder;
 use std::collections::VecDeque;
+#[cfg(feature = "decode")]
 use tracing::{debug, trace};
 
+#[cfg(feature = "decode")]
 const MAX_OPUS_FRAME_SAMPLES: usize = 5760; // 120 ms @ 48 kHz
 
 // Zero-copy Ogg page header
@@ -162,9 +168,110 @@ struct OpusStreamInfo {
     sample_rate: u32,
     channels: u8,
     pre_skip: u16,
+    output_gain: i16,
+    mapping_family: u8,
     serial: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OggOpusConfig {
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub pre_skip: u16,
+    pub output_gain: i16,
+    pub mapping_family: u8,
+    pub head: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OggOpusDemuxEvent {
+    Config(OggOpusConfig),
+    Tags(Vec<u8>),
+    Packet(Vec<u8>),
+}
+
+pub struct OggOpusDemuxer {
+    parser: FastOggParser,
+    info: Option<OpusStreamInfo>,
+    seen_tags: bool,
+}
+
+impl OggOpusDemuxer {
+    pub fn new() -> Self {
+        Self {
+            parser: FastOggParser::new(),
+            info: None,
+            seen_tags: false,
+        }
+    }
+
+    pub fn init(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn add(&mut self, data: &[u8]) -> Result<Vec<OggOpusDemuxEvent>, String> {
+        let packets = self.parser.push(data);
+        let mut events = Vec::new();
+
+        for packet in packets {
+            if packet.data.is_empty() {
+                continue;
+            }
+
+            if self.info.is_none() {
+                if !packet.first_in_stream {
+                    return Err("Expected OpusHead as first packet".to_string());
+                }
+                let info = parse_head(&packet)?;
+                events.push(OggOpusDemuxEvent::Config(OggOpusConfig {
+                    sample_rate: info.sample_rate,
+                    channels: info.channels,
+                    pre_skip: info.pre_skip,
+                    output_gain: info.output_gain,
+                    mapping_family: info.mapping_family,
+                    head: packet.data,
+                }));
+                self.info = Some(info);
+                continue;
+            }
+
+            let info = self.info.expect("info set after head");
+            if packet.serial != info.serial {
+                return Err("Unexpected second logical bitstream".to_string());
+            }
+
+            if !self.seen_tags {
+                if packet.data.starts_with(b"OpusTags") {
+                    self.seen_tags = true;
+                    events.push(OggOpusDemuxEvent::Tags(packet.data));
+                    continue;
+                } else {
+                    return Err("Expected OpusTags packet after OpusHead".to_string());
+                }
+            }
+
+            events.push(OggOpusDemuxEvent::Packet(packet.data));
+        }
+
+        Ok(events)
+    }
+
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.info.map(|info| info.sample_rate)
+    }
+
+    pub fn channels(&self) -> Option<u8> {
+        self.info.map(|info| info.channels)
+    }
+}
+
+impl Default for OggOpusDemuxer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "decode")]
 pub struct OggOpusDecoder {
     parser: FastOggParser,
     opus: Option<OpusDecoder>,
@@ -175,6 +282,7 @@ pub struct OggOpusDecoder {
     scratch_buffer: Vec<i16>,
 }
 
+#[cfg(feature = "decode")]
 impl OggOpusDecoder {
     pub fn new() -> Self {
         Self {
@@ -206,7 +314,7 @@ impl OggOpusDecoder {
                 if !packet.first_in_stream {
                     return Err("Expected OpusHead as first packet".to_string());
                 }
-                let info = Self::parse_head(&packet)?;
+                let info = parse_head(&packet)?;
                 let mut opus = OpusDecoder::new(info.sample_rate as usize, info.channels as usize);
                 opus.init()?;
                 let scaled_skip =
@@ -308,29 +416,32 @@ impl OggOpusDecoder {
 
         Ok(Some(audio))
     }
-
-    fn parse_head(packet: &Packet) -> Result<OpusStreamInfo, String> {
-        let data = packet.data.as_slice();
-        if data.len() < 19 || !data.starts_with(b"OpusHead") {
-            return Err("Invalid OpusHead packet".to_string());
-        }
-
-        let channels = data[9];
-        let pre_skip = u16::from_le_bytes([data[10], data[11]]);
-        let mut sample_rate = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
-        if sample_rate == 0 {
-            sample_rate = 48_000;
-        }
-
-        Ok(OpusStreamInfo {
-            sample_rate,
-            channels,
-            pre_skip,
-            serial: packet.serial,
-        })
-    }
 }
 
+fn parse_head(packet: &Packet) -> Result<OpusStreamInfo, String> {
+    let data = packet.data.as_slice();
+    if data.len() < 19 || !data.starts_with(b"OpusHead") {
+        return Err("Invalid OpusHead packet".to_string());
+    }
+
+    let channels = data[9];
+    let pre_skip = u16::from_le_bytes([data[10], data[11]]);
+    let mut sample_rate = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
+    if sample_rate == 0 {
+        sample_rate = 48_000;
+    }
+
+    Ok(OpusStreamInfo {
+        sample_rate,
+        channels,
+        pre_skip,
+        output_gain: i16::from_le_bytes([data[16], data[17]]),
+        mapping_family: data[18],
+        serial: packet.serial,
+    })
+}
+
+#[cfg(feature = "decode")]
 impl Default for OggOpusDecoder {
     fn default() -> Self {
         Self::new()
@@ -340,14 +451,20 @@ impl Default for OggOpusDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "decode")]
     use soundkit::audio_bytes::{deinterleave_vecs_i16, s16le_to_i16};
+    #[cfg(feature = "decode")]
     use soundkit::audio_types::PcmData;
+    #[cfg(feature = "decode")]
     use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
+    #[cfg(feature = "decode")]
     use soundkit::wav::generate_wav_buffer;
     use std::fs;
     use std::path::PathBuf;
+    #[cfg(feature = "decode")]
     use std::sync::Once;
 
+    #[cfg(feature = "decode")]
     fn init_tracing() {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
@@ -358,6 +475,7 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "decode")]
     const TEST_FILE: &str = "A_Tusk_is_used_to_make_costly_gifts";
 
     fn testdata_path(file: &str) -> PathBuf {
@@ -367,12 +485,14 @@ mod tests {
             .join(file)
     }
 
+    #[cfg(feature = "decode")]
     fn outputs_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("outputs")
             .join(file)
     }
 
+    #[cfg(feature = "decode")]
     fn golden_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -380,6 +500,36 @@ mod tests {
             .join(file)
     }
 
+    #[test]
+    fn demux_ogg_opus_packets() {
+        let data = fs::read(testdata_path(
+            "ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg",
+        ))
+        .unwrap();
+        let mut demuxer = OggOpusDemuxer::new();
+        let mut config = None;
+        let mut packets = 0usize;
+
+        for chunk in data.chunks(333) {
+            for event in demuxer.add(chunk).unwrap() {
+                match event {
+                    OggOpusDemuxEvent::Config(next) => config = Some(next),
+                    OggOpusDemuxEvent::Tags(tags) => assert!(tags.starts_with(b"OpusTags")),
+                    OggOpusDemuxEvent::Packet(packet) => {
+                        assert!(!packet.is_empty());
+                        packets += 1;
+                    }
+                }
+            }
+        }
+
+        let config = config.expect("OpusHead event");
+        assert_eq!(config.channels, 1);
+        assert_eq!(config.sample_rate, 16_000);
+        assert!(packets > 0);
+    }
+
+    #[cfg(feature = "decode")]
     #[test]
     fn test_ogg_opus_decode_waveform() {
         let input_path = testdata_path(&format!("ogg_opus/{}.ogg", TEST_FILE));
@@ -421,6 +571,7 @@ mod tests {
         print_waveform_with_header("Ogg Opus", &result);
     }
 
+    #[cfg(feature = "decode")]
     #[test]
     fn decode_ogg_opus_stream() {
         let data = fs::read(testdata_path(
@@ -464,6 +615,7 @@ mod tests {
         fs::write(&output_path, decoded).unwrap();
     }
 
+    #[cfg(feature = "decode")]
     #[test]
     fn decode_ogg_opus_and_write_wav() {
         let input_path = testdata_path("ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg");

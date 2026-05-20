@@ -1,0 +1,17 @@
+[package]
+name = "soundkit-audio-demux"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Streaming audio track demuxer for browser-safe SoundKit container extraction."
+repository = "https://github.com/wavey-ai/soundkit"
+
+[features]
+default = ["mp4", "webm", "mpeg-ts"]
+mp4 = ["dep:soundkit-aac"]
+webm = ["dep:soundkit-webm"]
+mpeg-ts = []
+
+[dependencies]
+soundkit-aac = { path = "../soundkit-aac", default-features = false, features = ["mp4-demux"], optional = true }
+soundkit-webm = { path = "../soundkit-webm", default-features = false, features = ["vorbis"], optional = true }

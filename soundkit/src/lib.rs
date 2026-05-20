@@ -4,6 +4,6 @@ pub mod audio_pipeline;
 pub mod audio_types;
 pub mod raw_pcm;
 pub mod test_utils;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod wasm;
 pub mod wav;

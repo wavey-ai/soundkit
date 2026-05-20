@@ -1,11 +1,11 @@
-use nanomp3::{Decoder as NanoDecoder, FrameInfo, MAX_SAMPLES_PER_FRAME};
-use soundkit::audio_packet::Decoder;
-#[cfg(feature = "encode")]
-use soundkit::audio_packet::Encoder;
 #[cfg(feature = "encode")]
 use mp3lame_encoder::{
     max_required_buffer_size, Bitrate, Builder, FlushNoGap, InterleavedPcm, MonoPcm,
 };
+use nanomp3::{Decoder as NanoDecoder, FrameInfo, MAX_SAMPLES_PER_FRAME};
+use soundkit::audio_packet::Decoder;
+#[cfg(feature = "encode")]
+use soundkit::audio_packet::Encoder;
 #[cfg(feature = "encode")]
 use std::mem::MaybeUninit;
 #[cfg(feature = "encode")]
@@ -386,14 +386,14 @@ fn f32_to_i32(sample: f32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "encode")]
+    use mp3lame_encoder::max_required_buffer_size;
     use soundkit::audio_bytes::s16le_to_i16;
     use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
     use soundkit::wav::WavStreamProcessor;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Once;
-    #[cfg(feature = "encode")]
-    use mp3lame_encoder::max_required_buffer_size;
 
     fn init_tracing() {
         static INIT: Once = Once::new();

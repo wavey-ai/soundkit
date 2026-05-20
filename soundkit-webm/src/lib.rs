@@ -1,11 +1,15 @@
 use frame_header::{EncodingFlag, Endianness};
+#[cfg(feature = "opus")]
 use soundkit::audio_packet::Decoder;
 use soundkit::audio_types::AudioData;
+#[cfg(feature = "opus")]
 use soundkit_opus::OpusDecoder;
+#[cfg(feature = "vorbis")]
 use soundkit_vorbis::VorbisPacketDecoder;
 use std::collections::VecDeque;
 use tracing::{debug, trace};
 
+#[cfg(feature = "opus")]
 const MAX_OPUS_FRAME_SAMPLES: usize = 5760; // 120 ms @ 48 kHz
 
 // EBML Element IDs (variable length encoded in files)
@@ -247,6 +251,7 @@ fn parse_ebml_laced_frames(payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     split_laced_frames(payload, pos, &sizes)
 }
 
+#[cfg(feature = "vorbis")]
 fn parse_vorbis_codec_private(codec_private: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     let header_count = codec_private
         .first()
@@ -270,6 +275,18 @@ fn parse_vorbis_codec_private(codec_private: &[u8]) -> Result<Vec<Vec<u8>>, Stri
     split_laced_frames(codec_private, pos, &[ident_size, comment_size, setup_size])
 }
 
+fn parse_opus_head_metadata(codec_private: &[u8]) -> Option<(u16, i16, u8)> {
+    if codec_private.len() < 19 || !codec_private.starts_with(b"OpusHead") {
+        return None;
+    }
+
+    Some((
+        u16::from_le_bytes([codec_private[10], codec_private[11]]),
+        i16::from_le_bytes([codec_private[16], codec_private[17]]),
+        codec_private[18],
+    ))
+}
+
 /// Audio track information extracted from WebM
 #[derive(Clone, Debug)]
 struct AudioTrackInfo {
@@ -280,8 +297,49 @@ struct AudioTrackInfo {
     codec_private: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebmOpusConfig {
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub pre_skip: u16,
+    pub output_gain: i16,
+    pub mapping_family: u8,
+    pub codec_private: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WebmOpusDemuxEvent {
+    Config(WebmOpusConfig),
+    Packet { data: Vec<u8>, timecode: i16 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebmAudioConfig {
+    pub track_number: u64,
+    pub codec_id: String,
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub codec_private: Vec<u8>,
+    pub pre_skip: Option<u16>,
+    pub output_gain: Option<i16>,
+    pub mapping_family: Option<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WebmAudioDemuxEvent {
+    Config(WebmAudioConfig),
+    Packet {
+        track_number: u64,
+        codec_id: String,
+        data: Vec<u8>,
+        timecode: i16,
+    },
+}
+
 enum WebmAudioDecoder {
+    #[cfg(feature = "opus")]
     Opus(OpusDecoder),
+    #[cfg(feature = "vorbis")]
     Vorbis(VorbisPacketDecoder),
 }
 
@@ -293,6 +351,776 @@ enum ParserState {
     Clusters,
 }
 
+pub struct WebmOpusDemuxer {
+    buffer: Vec<u8>,
+    state: ParserState,
+    audio_track: Option<AudioTrackInfo>,
+    pending_events: VecDeque<WebmOpusDemuxEvent>,
+    emitted_config: bool,
+}
+
+impl WebmOpusDemuxer {
+    pub fn new() -> Self {
+        Self {
+            buffer: Vec::with_capacity(65536),
+            state: ParserState::Header,
+            audio_track: None,
+            pending_events: VecDeque::new(),
+            emitted_config: false,
+        }
+    }
+
+    pub fn init(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn add(&mut self, data: &[u8]) -> Result<Vec<WebmOpusDemuxEvent>, String> {
+        self.buffer.extend_from_slice(data);
+
+        loop {
+            let previous_state = self.state;
+            let consumed = match self.state {
+                ParserState::Header => self.parse_header()?,
+                ParserState::Tracks => self.parse_tracks()?,
+                ParserState::Clusters => self.parse_clusters()?,
+            };
+
+            if consumed > 0 {
+                self.buffer.drain(..consumed);
+            } else if self.state == previous_state {
+                break;
+            }
+        }
+
+        Ok(self.pending_events.drain(..).collect())
+    }
+
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.audio_track.as_ref().map(|track| track.sample_rate)
+    }
+
+    pub fn channels(&self) -> Option<u8> {
+        self.audio_track.as_ref().map(|track| track.channels)
+    }
+
+    fn parse_header(&mut self) -> Result<usize, String> {
+        if self.buffer.len() < 4 {
+            return Ok(0);
+        }
+
+        let (id, id_len) = match read_element_id(&self.buffer) {
+            Some(x) => x,
+            None => return Ok(0),
+        };
+
+        if id != EBML_ID {
+            return Err(format!(
+                "Invalid WebM: expected EBML header, got 0x{:X}",
+                id
+            ));
+        }
+
+        let (size, size_len) = match read_vint(&self.buffer[id_len..]) {
+            Some(x) => x,
+            None => return Ok(0),
+        };
+
+        let header_len = id_len + size_len;
+        let total_len = header_len + size as usize;
+
+        if self.buffer.len() < total_len {
+            return Ok(0);
+        }
+
+        let after_ebml = &self.buffer[total_len..];
+        if after_ebml.len() < 8 {
+            return Ok(total_len);
+        }
+
+        let (seg_id, seg_id_len) = match read_element_id(after_ebml) {
+            Some(x) => x,
+            None => return Ok(total_len),
+        };
+
+        if seg_id == SEGMENT_ID {
+            let (_, seg_size_len) = match read_vint(&after_ebml[seg_id_len..]) {
+                Some(x) => x,
+                None => return Ok(total_len),
+            };
+
+            self.state = ParserState::Tracks;
+            return Ok(total_len + seg_id_len + seg_size_len);
+        }
+
+        Ok(total_len)
+    }
+
+    fn parse_tracks(&mut self) -> Result<usize, String> {
+        let mut pos = 0;
+
+        while pos + 4 <= self.buffer.len() {
+            let (id, id_len) = match read_element_id(&self.buffer[pos..]) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let (size, size_len) = match read_vint(&self.buffer[pos + id_len..]) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let header_len = id_len + size_len;
+            let data_start = pos + header_len;
+            let data_end = data_start + size as usize;
+
+            let is_master = matches!(
+                id,
+                TRACKS_ID | TRACK_ENTRY_ID | AUDIO_ID | SEGMENT_ID | CLUSTER_ID
+            );
+            if size == 0x00FFFFFFFFFFFFFF && is_master {
+                pos += header_len;
+                continue;
+            }
+
+            if data_end > self.buffer.len() {
+                break;
+            }
+
+            match id {
+                TRACKS_ID => {
+                    pos += header_len;
+                    continue;
+                }
+                TRACK_ENTRY_ID => {
+                    let element_data = self.buffer[data_start..data_end].to_vec();
+                    self.parse_track_entry(&element_data)?;
+                    pos = data_end;
+                    continue;
+                }
+                CLUSTER_ID => {
+                    self.emit_config()?;
+                    self.state = ParserState::Clusters;
+                    return Ok(pos);
+                }
+                _ => {
+                    pos = data_end;
+                    continue;
+                }
+            }
+        }
+
+        Ok(pos)
+    }
+
+    fn parse_track_entry(&mut self, data: &[u8]) -> Result<(), String> {
+        let mut pos = 0;
+        let mut track_number = 0u64;
+        let mut track_type = 0u64;
+        let mut codec_id = String::new();
+        let mut codec_private = Vec::new();
+        let mut sample_rate = 48000u32;
+        let mut channels = 2u8;
+
+        while pos + 2 <= data.len() {
+            let (id, id_len) = match read_element_id(&data[pos..]) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let (size, size_len) = match read_vint(&data[pos + id_len..]) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let header_len = id_len + size_len;
+            let elem_start = pos + header_len;
+            let elem_end = elem_start + size as usize;
+
+            if elem_end > data.len() {
+                break;
+            }
+
+            let elem_data = &data[elem_start..elem_end];
+
+            match id {
+                TRACK_NUMBER_ID => track_number = read_uint(elem_data, size as usize),
+                TRACK_TYPE_ID => track_type = read_uint(elem_data, size as usize),
+                CODEC_ID_ID => codec_id = String::from_utf8_lossy(elem_data).to_string(),
+                CODEC_PRIVATE_ID => codec_private = elem_data.to_vec(),
+                AUDIO_ID => {
+                    let mut audio_pos = 0;
+                    while audio_pos + 2 <= elem_data.len() {
+                        let (audio_id, audio_id_len) =
+                            match read_element_id(&elem_data[audio_pos..]) {
+                                Some(x) => x,
+                                None => break,
+                            };
+
+                        let (audio_size, audio_size_len) =
+                            match read_vint(&elem_data[audio_pos + audio_id_len..]) {
+                                Some(x) => x,
+                                None => break,
+                            };
+
+                        let audio_header_len = audio_id_len + audio_size_len;
+                        let audio_elem_start = audio_pos + audio_header_len;
+                        let audio_elem_end = audio_elem_start + audio_size as usize;
+
+                        if audio_elem_end > elem_data.len() {
+                            break;
+                        }
+
+                        let audio_elem_data = &elem_data[audio_elem_start..audio_elem_end];
+                        match audio_id {
+                            SAMPLING_FREQUENCY_ID => {
+                                sample_rate =
+                                    read_float(audio_elem_data, audio_size as usize) as u32;
+                                if sample_rate == 0 {
+                                    sample_rate = 48000;
+                                }
+                            }
+                            CHANNELS_ID => {
+                                channels = read_uint(audio_elem_data, audio_size as usize) as u8;
+                                if channels == 0 {
+                                    channels = 2;
+                                }
+                            }
+                            _ => {}
+                        }
+
+                        audio_pos = audio_elem_end;
+                    }
+                }
+                _ => {}
+            }
+
+            pos = elem_end;
+        }
+
+        if track_type == TRACK_TYPE_AUDIO && codec_id == "A_OPUS" {
+            self.audio_track = Some(AudioTrackInfo {
+                track_number,
+                codec_id,
+                sample_rate,
+                channels,
+                codec_private,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn emit_config(&mut self) -> Result<(), String> {
+        if self.emitted_config {
+            return Ok(());
+        }
+
+        let track = self
+            .audio_track
+            .as_ref()
+            .ok_or_else(|| "No WebM Opus audio track found".to_string())?;
+        if track.codec_id != "A_OPUS" {
+            return Err(format!(
+                "Unsupported WebM codec for Opus debox: {}",
+                track.codec_id
+            ));
+        }
+
+        let (pre_skip, output_gain, mapping_family) =
+            parse_opus_head_metadata(&track.codec_private).unwrap_or((0, 0, 0));
+        self.pending_events
+            .push_back(WebmOpusDemuxEvent::Config(WebmOpusConfig {
+                sample_rate: track.sample_rate,
+                channels: track.channels,
+                pre_skip,
+                output_gain,
+                mapping_family,
+                codec_private: track.codec_private.clone(),
+            }));
+        self.emitted_config = true;
+        Ok(())
+    }
+
+    fn parse_clusters(&mut self) -> Result<usize, String> {
+        let mut pos = 0;
+
+        while pos + 4 <= self.buffer.len() {
+            let (id, id_len) = match read_element_id(&self.buffer[pos..]) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let (size, size_len) = match read_vint(&self.buffer[pos + id_len..]) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let header_len = id_len + size_len;
+            let data_start = pos + header_len;
+
+            if size == 0x00FFFFFFFFFFFFFF {
+                pos += header_len;
+                continue;
+            }
+
+            let data_end = data_start + size as usize;
+            if data_end > self.buffer.len() {
+                break;
+            }
+
+            match id {
+                CLUSTER_ID => {
+                    pos += header_len;
+                    continue;
+                }
+                SIMPLE_BLOCK_ID | BLOCK_ID => {
+                    let block_data = self.buffer[data_start..data_end].to_vec();
+                    self.parse_block(&block_data)?;
+                    pos = data_end;
+                    continue;
+                }
+                _ => {
+                    pos = data_end;
+                    continue;
+                }
+            }
+        }
+
+        Ok(pos)
+    }
+
+    fn parse_block(&mut self, data: &[u8]) -> Result<(), String> {
+        if data.len() < 4 {
+            return Ok(());
+        }
+
+        let (track_num, track_len) = match read_vint(data) {
+            Some(x) => x,
+            None => return Ok(()),
+        };
+
+        let is_audio_track = self
+            .audio_track
+            .as_ref()
+            .map(|track| track.track_number == track_num)
+            .unwrap_or(false);
+        if !is_audio_track {
+            return Ok(());
+        }
+
+        let frame_start = track_len + 3;
+        if data.len() <= frame_start {
+            return Ok(());
+        }
+
+        let timecode = i16::from_be_bytes([data[track_len], data[track_len + 1]]);
+        let flags = data[track_len + 2];
+        let frame_data = &data[frame_start..];
+
+        for frame in parse_block_frames(flags, frame_data)? {
+            if !frame.is_empty() {
+                self.pending_events.push_back(WebmOpusDemuxEvent::Packet {
+                    data: frame,
+                    timecode,
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for WebmOpusDemuxer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct WebmAudioDemuxer {
+    buffer: Vec<u8>,
+    state: ParserState,
+    audio_track: Option<AudioTrackInfo>,
+    pending_events: VecDeque<WebmAudioDemuxEvent>,
+    emitted_config: bool,
+}
+
+impl WebmAudioDemuxer {
+    pub fn new() -> Self {
+        Self {
+            buffer: Vec::with_capacity(65536),
+            state: ParserState::Header,
+            audio_track: None,
+            pending_events: VecDeque::new(),
+            emitted_config: false,
+        }
+    }
+
+    pub fn init(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn add(&mut self, data: &[u8]) -> Result<Vec<WebmAudioDemuxEvent>, String> {
+        self.buffer.extend_from_slice(data);
+
+        loop {
+            let previous_state = self.state;
+            let consumed = match self.state {
+                ParserState::Header => self.parse_header()?,
+                ParserState::Tracks => self.parse_tracks()?,
+                ParserState::Clusters => self.parse_clusters()?,
+            };
+
+            if consumed > 0 {
+                self.buffer.drain(..consumed);
+            } else if self.state == previous_state {
+                break;
+            }
+        }
+
+        Ok(self.pending_events.drain(..).collect())
+    }
+
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.audio_track.as_ref().map(|track| track.sample_rate)
+    }
+
+    pub fn channels(&self) -> Option<u8> {
+        self.audio_track.as_ref().map(|track| track.channels)
+    }
+
+    fn parse_header(&mut self) -> Result<usize, String> {
+        if self.buffer.len() < 4 {
+            return Ok(0);
+        }
+
+        let (id, id_len) = match read_element_id(&self.buffer) {
+            Some(x) => x,
+            None => return Ok(0),
+        };
+
+        if id != EBML_ID {
+            return Err(format!(
+                "Invalid WebM/Matroska: expected EBML header, got 0x{:X}",
+                id
+            ));
+        }
+
+        let (size, size_len) = match read_vint(&self.buffer[id_len..]) {
+            Some(x) => x,
+            None => return Ok(0),
+        };
+
+        let header_len = id_len + size_len;
+        let total_len = header_len + size as usize;
+
+        if self.buffer.len() < total_len {
+            return Ok(0);
+        }
+
+        let after_ebml = &self.buffer[total_len..];
+        if after_ebml.len() < 8 {
+            return Ok(total_len);
+        }
+
+        let (seg_id, seg_id_len) = match read_element_id(after_ebml) {
+            Some(x) => x,
+            None => return Ok(total_len),
+        };
+
+        if seg_id == SEGMENT_ID {
+            let (_, seg_size_len) = match read_vint(&after_ebml[seg_id_len..]) {
+                Some(x) => x,
+                None => return Ok(total_len),
+            };
+
+            self.state = ParserState::Tracks;
+            return Ok(total_len + seg_id_len + seg_size_len);
+        }
+
+        Ok(total_len)
+    }
+
+    fn parse_tracks(&mut self) -> Result<usize, String> {
+        let mut pos = 0;
+
+        while pos + 4 <= self.buffer.len() {
+            let (id, id_len) = match read_element_id(&self.buffer[pos..]) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let (size, size_len) = match read_vint(&self.buffer[pos + id_len..]) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let header_len = id_len + size_len;
+            let data_start = pos + header_len;
+            let data_end = data_start + size as usize;
+
+            let is_master = matches!(
+                id,
+                TRACKS_ID | TRACK_ENTRY_ID | AUDIO_ID | SEGMENT_ID | CLUSTER_ID
+            );
+            if size == 0x00FFFFFFFFFFFFFF && is_master {
+                pos += header_len;
+                continue;
+            }
+
+            if data_end > self.buffer.len() {
+                break;
+            }
+
+            match id {
+                TRACKS_ID => {
+                    pos += header_len;
+                    continue;
+                }
+                TRACK_ENTRY_ID => {
+                    let element_data = self.buffer[data_start..data_end].to_vec();
+                    self.parse_track_entry(&element_data)?;
+                    pos = data_end;
+                    continue;
+                }
+                CLUSTER_ID => {
+                    self.emit_config()?;
+                    self.state = ParserState::Clusters;
+                    return Ok(pos);
+                }
+                _ => {
+                    pos = data_end;
+                    continue;
+                }
+            }
+        }
+
+        Ok(pos)
+    }
+
+    fn parse_track_entry(&mut self, data: &[u8]) -> Result<(), String> {
+        let mut pos = 0;
+        let mut track_number = 0u64;
+        let mut track_type = 0u64;
+        let mut codec_id = String::new();
+        let mut codec_private = Vec::new();
+        let mut sample_rate = 48000u32;
+        let mut channels = 2u8;
+
+        while pos + 2 <= data.len() {
+            let (id, id_len) = match read_element_id(&data[pos..]) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let (size, size_len) = match read_vint(&data[pos + id_len..]) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let header_len = id_len + size_len;
+            let elem_start = pos + header_len;
+            let elem_end = elem_start + size as usize;
+
+            if elem_end > data.len() {
+                break;
+            }
+
+            let elem_data = &data[elem_start..elem_end];
+
+            match id {
+                TRACK_NUMBER_ID => track_number = read_uint(elem_data, size as usize),
+                TRACK_TYPE_ID => track_type = read_uint(elem_data, size as usize),
+                CODEC_ID_ID => codec_id = String::from_utf8_lossy(elem_data).to_string(),
+                CODEC_PRIVATE_ID => codec_private = elem_data.to_vec(),
+                AUDIO_ID => {
+                    let mut audio_pos = 0;
+                    while audio_pos + 2 <= elem_data.len() {
+                        let (audio_id, audio_id_len) =
+                            match read_element_id(&elem_data[audio_pos..]) {
+                                Some(x) => x,
+                                None => break,
+                            };
+
+                        let (audio_size, audio_size_len) =
+                            match read_vint(&elem_data[audio_pos + audio_id_len..]) {
+                                Some(x) => x,
+                                None => break,
+                            };
+
+                        let audio_header_len = audio_id_len + audio_size_len;
+                        let audio_elem_start = audio_pos + audio_header_len;
+                        let audio_elem_end = audio_elem_start + audio_size as usize;
+
+                        if audio_elem_end > elem_data.len() {
+                            break;
+                        }
+
+                        let audio_elem_data = &elem_data[audio_elem_start..audio_elem_end];
+                        match audio_id {
+                            SAMPLING_FREQUENCY_ID => {
+                                sample_rate =
+                                    read_float(audio_elem_data, audio_size as usize) as u32;
+                                if sample_rate == 0 {
+                                    sample_rate = 48000;
+                                }
+                            }
+                            CHANNELS_ID => {
+                                channels = read_uint(audio_elem_data, audio_size as usize) as u8;
+                                if channels == 0 {
+                                    channels = 2;
+                                }
+                            }
+                            _ => {}
+                        }
+
+                        audio_pos = audio_elem_end;
+                    }
+                }
+                _ => {}
+            }
+
+            pos = elem_end;
+        }
+
+        if track_type == TRACK_TYPE_AUDIO && !codec_id.is_empty() && self.audio_track.is_none() {
+            self.audio_track = Some(AudioTrackInfo {
+                track_number,
+                codec_id,
+                sample_rate,
+                channels,
+                codec_private,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn emit_config(&mut self) -> Result<(), String> {
+        if self.emitted_config {
+            return Ok(());
+        }
+
+        let track = self
+            .audio_track
+            .as_ref()
+            .ok_or_else(|| "No WebM/Matroska audio track found".to_string())?;
+        let (pre_skip, output_gain, mapping_family) =
+            parse_opus_head_metadata(&track.codec_private)
+                .map(|(skip, gain, family)| (Some(skip), Some(gain), Some(family)))
+                .unwrap_or((None, None, None));
+
+        self.pending_events
+            .push_back(WebmAudioDemuxEvent::Config(WebmAudioConfig {
+                track_number: track.track_number,
+                codec_id: track.codec_id.clone(),
+                sample_rate: track.sample_rate,
+                channels: track.channels,
+                codec_private: track.codec_private.clone(),
+                pre_skip,
+                output_gain,
+                mapping_family,
+            }));
+        self.emitted_config = true;
+        Ok(())
+    }
+
+    fn parse_clusters(&mut self) -> Result<usize, String> {
+        let mut pos = 0;
+
+        while pos + 4 <= self.buffer.len() {
+            let (id, id_len) = match read_element_id(&self.buffer[pos..]) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let (size, size_len) = match read_vint(&self.buffer[pos + id_len..]) {
+                Some(x) => x,
+                None => break,
+            };
+
+            let header_len = id_len + size_len;
+            let data_start = pos + header_len;
+
+            if size == 0x00FFFFFFFFFFFFFF {
+                pos += header_len;
+                continue;
+            }
+
+            let data_end = data_start + size as usize;
+            if data_end > self.buffer.len() {
+                break;
+            }
+
+            match id {
+                CLUSTER_ID => {
+                    pos += header_len;
+                    continue;
+                }
+                SIMPLE_BLOCK_ID | BLOCK_ID => {
+                    let block_data = self.buffer[data_start..data_end].to_vec();
+                    self.parse_block(&block_data)?;
+                    pos = data_end;
+                    continue;
+                }
+                _ => {
+                    pos = data_end;
+                    continue;
+                }
+            }
+        }
+
+        Ok(pos)
+    }
+
+    fn parse_block(&mut self, data: &[u8]) -> Result<(), String> {
+        if data.len() < 4 {
+            return Ok(());
+        }
+
+        let (track_num, track_len) = match read_vint(data) {
+            Some(x) => x,
+            None => return Ok(()),
+        };
+
+        let audio_track = self
+            .audio_track
+            .as_ref()
+            .filter(|track| track.track_number == track_num);
+        let Some(audio_track) = audio_track else {
+            return Ok(());
+        };
+        let codec_id = audio_track.codec_id.clone();
+
+        let frame_start = track_len + 3;
+        if data.len() <= frame_start {
+            return Ok(());
+        }
+
+        let timecode = i16::from_be_bytes([data[track_len], data[track_len + 1]]);
+        let flags = data[track_len + 2];
+        let frame_data = &data[frame_start..];
+
+        for frame in parse_block_frames(flags, frame_data)? {
+            if !frame.is_empty() {
+                self.pending_events.push_back(WebmAudioDemuxEvent::Packet {
+                    track_number: track_num,
+                    codec_id: codec_id.clone(),
+                    data: frame,
+                    timecode,
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for WebmAudioDemuxer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Streaming WebM audio decoder
 pub struct WebmDecoder {
     buffer: Vec<u8>,
@@ -300,7 +1128,9 @@ pub struct WebmDecoder {
     audio_track: Option<AudioTrackInfo>,
     audio_decoder: Option<WebmAudioDecoder>,
     pending_audio: VecDeque<Vec<u8>>,
+    #[cfg(feature = "opus")]
     scratch_buffer: Vec<i16>,
+    #[cfg(feature = "opus")]
     pre_skip_remaining: usize,
     logged_first_audio: bool,
     header_complete: bool,
@@ -314,7 +1144,9 @@ impl WebmDecoder {
             audio_track: None,
             audio_decoder: None,
             pending_audio: VecDeque::new(),
+            #[cfg(feature = "opus")]
             scratch_buffer: Vec::with_capacity(MAX_OPUS_FRAME_SAMPLES * 2),
+            #[cfg(feature = "opus")]
             pre_skip_remaining: 0,
             logged_first_audio: false,
             header_complete: false,
@@ -579,7 +1411,10 @@ impl WebmDecoder {
                 "found audio track"
             );
 
-            if matches!(codec_id.as_str(), "A_OPUS" | "A_VORBIS") {
+            let supported_codec = (cfg!(feature = "opus") && codec_id == "A_OPUS")
+                || (cfg!(feature = "vorbis") && codec_id == "A_VORBIS");
+
+            if supported_codec {
                 self.audio_track = Some(AudioTrackInfo {
                     track_number,
                     codec_id,
@@ -605,6 +1440,7 @@ impl WebmDecoder {
         };
 
         match codec_id.as_str() {
+            #[cfg(feature = "opus")]
             "A_OPUS" => {
                 if codec_private.len() >= 12 && codec_private.starts_with(b"OpusHead") {
                     let pre_skip = u16::from_le_bytes([codec_private[10], codec_private[11]]);
@@ -623,6 +1459,7 @@ impl WebmDecoder {
 
                 self.audio_decoder = Some(WebmAudioDecoder::Opus(decoder));
             }
+            #[cfg(feature = "vorbis")]
             "A_VORBIS" => {
                 let headers = parse_vorbis_codec_private(&codec_private)?;
                 let mut decoder = VorbisPacketDecoder::new();
@@ -648,7 +1485,7 @@ impl WebmDecoder {
 
                 self.audio_decoder = Some(WebmAudioDecoder::Vorbis(decoder));
             }
-            _ => return Err(format!("Unsupported codec: {}", codec_id)),
+            _ => return Err(format!("Unsupported or disabled WebM codec: {}", codec_id)),
         }
         Ok(())
     }
@@ -753,7 +1590,9 @@ impl WebmDecoder {
         };
 
         let result = match &mut decoder {
+            #[cfg(feature = "opus")]
             WebmAudioDecoder::Opus(opus_decoder) => self.decode_pending_opus(opus_decoder),
+            #[cfg(feature = "vorbis")]
             WebmAudioDecoder::Vorbis(vorbis_decoder) => self.decode_pending_vorbis(vorbis_decoder),
         };
 
@@ -761,6 +1600,7 @@ impl WebmDecoder {
         result
     }
 
+    #[cfg(feature = "opus")]
     fn decode_pending_opus(
         &mut self,
         decoder: &mut OpusDecoder,
@@ -836,6 +1676,7 @@ impl WebmDecoder {
         Ok(Some(audio))
     }
 
+    #[cfg(feature = "vorbis")]
     fn decode_pending_vorbis(
         &mut self,
         decoder: &mut VorbisPacketDecoder,
@@ -916,13 +1757,17 @@ impl Default for WebmDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "opus")]
     use soundkit::audio_bytes::s16le_to_i16;
+    #[cfg(feature = "opus")]
     use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
     use std::fs;
     use std::path::PathBuf;
 
+    #[cfg(feature = "opus")]
     const TEST_FILE: &str = "A_Tusk_is_used_to_make_costly_gifts";
 
+    #[cfg(feature = "opus")]
     fn testdata_path(file: &str) -> PathBuf {
         // First try local testdata, then parent testdata
         let local = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -938,12 +1783,103 @@ mod tests {
             .join(file)
     }
 
+    #[cfg(feature = "opus")]
     fn outputs_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("outputs")
             .join(file)
     }
 
+    #[test]
+    fn test_webm_opus_demux() {
+        let test_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata")
+            .join("test.webm");
+        if !test_file.exists() {
+            println!("Skipping test: no test.webm file found");
+            return;
+        }
+
+        let data = fs::read(&test_file).unwrap();
+        let mut demuxer = WebmOpusDemuxer::new();
+        let mut config = None;
+        let mut packets = 0usize;
+
+        for chunk in data.chunks(997) {
+            for event in demuxer.add(chunk).unwrap() {
+                match event {
+                    WebmOpusDemuxEvent::Config(next) => config = Some(next),
+                    WebmOpusDemuxEvent::Packet { data, .. } => {
+                        assert!(!data.is_empty());
+                        packets += 1;
+                    }
+                }
+            }
+        }
+
+        for event in demuxer.add(&[]).unwrap() {
+            match event {
+                WebmOpusDemuxEvent::Config(next) => config = Some(next),
+                WebmOpusDemuxEvent::Packet { data, .. } => {
+                    assert!(!data.is_empty());
+                    packets += 1;
+                }
+            }
+        }
+
+        let config = config.expect("WebM Opus config event");
+        assert_eq!(config.channels, 1);
+        assert_eq!(config.sample_rate, 48_000);
+        assert!(config.codec_private.starts_with(b"OpusHead"));
+        assert!(packets > 0);
+    }
+
+    #[test]
+    fn test_webm_audio_demux() {
+        let test_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata")
+            .join("test.webm");
+        if !test_file.exists() {
+            println!("Skipping test: no test.webm file found");
+            return;
+        }
+
+        let data = fs::read(&test_file).unwrap();
+        let mut demuxer = WebmAudioDemuxer::new();
+        let mut config = None;
+        let mut packets = 0usize;
+
+        for chunk in data.chunks(997) {
+            for event in demuxer.add(chunk).unwrap() {
+                match event {
+                    WebmAudioDemuxEvent::Config(next) => config = Some(next),
+                    WebmAudioDemuxEvent::Packet { data, .. } => {
+                        assert!(!data.is_empty());
+                        packets += 1;
+                    }
+                }
+            }
+        }
+
+        for event in demuxer.add(&[]).unwrap() {
+            match event {
+                WebmAudioDemuxEvent::Config(next) => config = Some(next),
+                WebmAudioDemuxEvent::Packet { data, .. } => {
+                    assert!(!data.is_empty());
+                    packets += 1;
+                }
+            }
+        }
+
+        let config = config.expect("WebM audio config event");
+        assert_eq!(config.codec_id, "A_OPUS");
+        assert_eq!(config.channels, 1);
+        assert_eq!(config.sample_rate, 48_000);
+        assert!(config.codec_private.starts_with(b"OpusHead"));
+        assert!(packets > 0);
+    }
+
+    #[cfg(feature = "opus")]
     #[test]
     fn test_webm_decode_waveform() {
         let test_file = testdata_path(&format!("webm/{}.webm", TEST_FILE));
@@ -984,6 +1920,7 @@ mod tests {
         print_waveform_with_header("WebM", &result);
     }
 
+    #[cfg(feature = "opus")]
     #[test]
     fn test_webm_opus_decode() {
         let test_file = testdata_path("test.webm");
