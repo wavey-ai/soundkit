@@ -9,7 +9,15 @@ readme = "README.md"
 keywords = ["opus", "codec", "audio", "libopus"]
 categories = ["multimedia::audio"]
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen"]
+
 [dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
 wide = "0.7"
 
 [profile.release]

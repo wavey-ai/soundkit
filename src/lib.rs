@@ -8,6 +8,8 @@ pub mod error;
 mod packet;
 mod repacketizer;
 mod soft_clip;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+mod wasm;
 
 pub use decoder::Decoder;
 pub use encoder::{

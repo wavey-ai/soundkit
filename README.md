@@ -94,6 +94,57 @@ For one quick check, use:
 AUDIO_SECONDS=1 REPEATS=1 MODE=both tools/run_raw_celt_bench.sh
 ```
 
+## Wasm CELT benchmark
+
+The wasm benchmark builds scalar and `simd128` versions of a small exported CELT
+encode kernel, then times both from Node.js:
+
+```sh
+tools/run_wasm_celt_bench.sh
+```
+
+Use `AUDIO_SECONDS`, `REPEATS`, `BITRATE`, or `SIMD_RUSTFLAGS` to adjust the
+run. `tools/build_wasm_simd.sh --example wasm_celt_bench` builds only the
+`simd128` artifact when you just need the wasm output.
+
+Current local measurements do not justify enabling wasm SIMD by default. The
+`simd128` build produced matching checksums, but it was generally slower than
+the scalar wasm build in Node on Apple Silicon, with the 5 ms frame case showing
+the clearest regression. Treat the scalar wasm build as the baseline for now and
+use this benchmark only to validate future targeted SIMD work.
+
+## Full-track wasm comparison
+
+A full-track browser-shape comparison was run on:
+
+```text
+/Users/jamie/Downloads/Lori Asha - Lori Asha Album Premix/02 - Lori Asha - Westside.mp3
+```
+
+The source was decoded and resampled once with `ffmpeg` to identical `48 kHz`
+stereo `s16` PCM, then encoded and decoded in Node.js with 20 ms frames through
+`libopusjs` C wasm and pure Rust `libopus-rs` wasm. Quality metrics below are
+delay-aligned against the source PCM; unaligned RMSE/SNR numbers are misleading
+because the two paths have different codec delay. The current `libopusjs`
+wrapper does not expose a CBR/VBR toggle and uses libopus' default VBR behavior.
+Rust wasm defaults to CBR for Bitneedle, and also exposes constrained VBR via
+`encoder.set_vbr(true)`.
+
+| Target | Codec/mode | Encoded bytes | Effective kb/s | Packet bytes | Encode xRTF | Decode xRTF | Delay | Aligned SNR |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 48 kb/s | C `libopusjs` default VBR | 1,260,065 | 48.35 | 3-206 (avg 120.86) | 147.4x | 332.5x | 6.5 ms | 15.33 dB |
+| 48 kb/s | Rust `libopus-rs` CBR | 1,251,120 | 48.00 | 120-120 | 127.2x | 377.3x | 2.5 ms | 14.34 dB |
+| 48 kb/s | Rust `libopus-rs` VBR | 1,260,198 | 48.35 | 109-157 (avg 120.87) | 128.0x | 380.1x | 2.5 ms | 14.41 dB |
+| 128 kb/s | C `libopusjs` default VBR | 3,346,824 | 128.41 | 3-543 (avg 321.01) | 110.9x | 279.7x | 6.5 ms | 22.14 dB |
+| 128 kb/s | Rust `libopus-rs` CBR | 3,336,320 | 128.01 | 320-320 | 81.4x | 263.6x | 2.5 ms | 19.01 dB |
+| 128 kb/s | Rust `libopus-rs` VBR | 3,343,132 | 128.27 | 290-416 (avg 320.65) | 82.4x | 268.2x | 2.5 ms | 19.11 dB |
+
+All wasm paths encoded and decoded the full track without failures. Rust VBR
+tracks the target byte budget and varies packet sizes, but on this workload it
+does not close the quality gap to C. Rust decode is competitive and faster at
+48 kb/s; Rust encode is still slower, especially at 128 kb/s, and needs targeted
+profiling before claiming parity with the C encoder.
+
 A snapshot of a local run (`AUDIO_SECONDS=1 REPEATS=1 MODE=both`) is included below:
 
 | Mode | Frame | Bitrate | Rust enc (xRTF) | Enc vs C | Rust dec (xRTF) | Dec vs C | C enc (xRTF) | C dec (xRTF) | Rust bytes | C bytes | Rust pkt | C pkt |

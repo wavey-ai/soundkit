@@ -15,7 +15,7 @@ pub const CELT_FRAME_SIZES_48K: [usize; 4] = [120, 240, 480, 960];
 pub const CELT_MIN_BITRATE: i32 = 500;
 pub const CELT_MAX_BITRATE: i32 = 512_000;
 pub const CELT_MIN_FRAME_BYTES: usize = 2;
-pub const CELT_MAX_FRAME_BYTES: usize = packet::MAX_FRAME_BYTES as usize;
+pub const CELT_MAX_FRAME_BYTES: usize = packet::MAX_FRAME_BYTES as usize - 1;
 
 const INTENSITY_THRESHOLDS: [f32; 21] = [
     1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 16.0, 24.0, 36.0, 44.0, 50.0, 56.0, 62.0, 67.0, 72.0,

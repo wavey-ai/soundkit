@@ -88,6 +88,16 @@ fn celt_bitrate_control_scales_raw_frame_size() {
 }
 
 #[test]
+fn celt_cbr_packet_size_is_capped_to_opus_packet_limit() {
+    let mut encoder = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    encoder.set_bitrate(512_000).unwrap();
+    let packet = encoder.encode_f32(&tone(960, 2, 0), 960).unwrap();
+
+    assert_eq!(packet.len(), CELT_MAX_FRAME_BYTES + 1);
+    assert_eq!(packet.len(), 1275);
+}
+
+#[test]
 fn low_rate_stereo_celt_can_emit_mono_packets() {
     let mut encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
     encoder.set_bitrate(48_000).unwrap();
