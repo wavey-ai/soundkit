@@ -1,9 +1,11 @@
 //! CELT frame-control helpers ported from the official `celt/celt.c`,
 //! `celt/celt_encoder.c`, and `celt/celt_decoder.c` control path.
 
-use crate::celt::bands::{quant_all_bands_mono, quant_all_bands_stereo, BandCoder, SPREAD_NORMAL};
+use crate::celt::bands::{
+    haar1, quant_all_bands_mono, quant_all_bands_stereo, BandCoder, SPREAD_NORMAL,
+};
 use crate::celt::entropy::{RangeDecoder, RangeEncoder};
-use crate::celt::mathops::ec_ilog;
+use crate::celt::mathops::{celt_exp2, ec_ilog};
 use crate::celt::modes::CeltMode;
 use crate::celt::pitch::PrefilterDecision;
 use crate::celt::quant_bands::{
@@ -373,6 +375,140 @@ fn median_of_5(x: &[f32]) -> f32 {
     }
 }
 
+fn l1_metric(tmp: &[f32], n: usize, lm: usize, bias: f32) -> f32 {
+    let l1 = tmp.iter().take(n).map(|value| value.abs()).sum::<f32>();
+    l1 + lm as f32 * bias * l1
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tf_analysis(
+    mode: &CeltMode,
+    len: usize,
+    is_transient: bool,
+    tf_res: &mut [i32],
+    lambda: i32,
+    x: &[f32],
+    lm: usize,
+    tf_estimate: f32,
+    importance: &[i32],
+) -> i32 {
+    let transient_idx = usize::from(is_transient);
+    let bias = 0.04 * (-0.25f32).max(0.5 - tf_estimate);
+    let mut metric = vec![0i32; len];
+    let mut path0 = vec![0i32; len];
+    let mut path1 = vec![0i32; len];
+
+    for i in 0..len {
+        let band_width = mode.ebands[i + 1] as usize - mode.ebands[i] as usize;
+        let n = band_width << lm;
+        let narrow = band_width == 1;
+        let offset = (mode.ebands[i] as usize) << lm;
+        let mut tmp = x[offset..offset + n].to_vec();
+        let mut best_l1 = l1_metric(&tmp, n, if is_transient { lm } else { 0 }, bias);
+        let mut best_level = 0i32;
+
+        if is_transient && !narrow {
+            let mut tmp_1 = tmp.clone();
+            haar1(&mut tmp_1, n >> lm, 1 << lm);
+            let l1 = l1_metric(&tmp_1, n, lm + 1, bias);
+            if l1 < best_l1 {
+                best_l1 = l1;
+                best_level = -1;
+            }
+        }
+
+        let extra_split = usize::from(!(is_transient || narrow));
+        for k in 0..lm + extra_split {
+            let b = if is_transient { lm - k - 1 } else { k + 1 };
+            haar1(&mut tmp, n >> k, 1 << k);
+            let l1 = l1_metric(&tmp, n, b, bias);
+            if l1 < best_l1 {
+                best_l1 = l1;
+                best_level = k as i32 + 1;
+            }
+        }
+
+        metric[i] = if is_transient {
+            2 * best_level
+        } else {
+            -2 * best_level
+        };
+        if narrow && (metric[i] == 0 || metric[i] == -2 * lm as i32) {
+            metric[i] -= 1;
+        }
+    }
+
+    let mut selcost = [0i32; 2];
+    for sel in 0..2 {
+        let mut cost0 = importance[0]
+            * (metric[0] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * sel]).abs();
+        let mut cost1 = importance[0]
+            * (metric[0] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * sel + 1]).abs()
+            + if is_transient { 0 } else { lambda };
+        for i in 1..len {
+            let curr0 = cost0.min(cost1 + lambda);
+            let curr1 = (cost0 + lambda).min(cost1);
+            cost0 = curr0
+                + importance[i]
+                    * (metric[i] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * sel]).abs();
+            cost1 = curr1
+                + importance[i]
+                    * (metric[i] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * sel + 1]).abs();
+        }
+        selcost[sel] = cost0.min(cost1);
+    }
+
+    let tf_select = i32::from(selcost[1] < selcost[0] && is_transient);
+    let select_idx = tf_select as usize;
+    let mut cost0 = importance[0]
+        * (metric[0] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * select_idx]).abs();
+    let mut cost1 = importance[0]
+        * (metric[0] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * select_idx + 1]).abs()
+        + if is_transient { 0 } else { lambda };
+
+    for i in 1..len {
+        let from0 = cost0;
+        let from1 = cost1 + lambda;
+        let curr0;
+        if from0 < from1 {
+            curr0 = from0;
+            path0[i] = 0;
+        } else {
+            curr0 = from1;
+            path0[i] = 1;
+        }
+
+        let from0 = cost0 + lambda;
+        let from1 = cost1;
+        let curr1;
+        if from0 < from1 {
+            curr1 = from0;
+            path1[i] = 0;
+        } else {
+            curr1 = from1;
+            path1[i] = 1;
+        }
+
+        cost0 = curr0
+            + importance[i]
+                * (metric[i] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * select_idx]).abs();
+        cost1 = curr1
+            + importance[i]
+                * (metric[i] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * select_idx + 1])
+                    .abs();
+    }
+
+    tf_res[len - 1] = if cost0 < cost1 { 0 } else { 1 };
+    for i in (0..len - 1).rev() {
+        tf_res[i] = if tf_res[i + 1] == 1 {
+            path1[i + 1]
+        } else {
+            path0[i + 1]
+        };
+    }
+    tf_select
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dynalloc_analysis(
     mode: &CeltMode,
@@ -388,10 +524,12 @@ fn dynalloc_analysis(
     vbr: bool,
     constrained_vbr: bool,
     offsets: &mut [i32],
+    importance: &mut [i32],
 ) {
     const LSB_DEPTH: i32 = 24;
 
     offsets[..mode.nb_ebands].fill(0);
+    importance[..mode.nb_ebands].fill(13);
     if packet_bytes < 30 + 5 * lm {
         return;
     }
@@ -466,6 +604,9 @@ fn dynalloc_analysis(
             follower[i] = (band_log_e[i] - follower[i]).max(0.0);
         }
     }
+    for i in start..end {
+        importance[i] = (0.5 + 13.0 * celt_exp2(follower[i].min(4.0))).floor() as i32;
+    }
 
     if (!vbr || constrained_vbr) && !is_transient {
         for value in follower.iter_mut().take(end).skip(start) {
@@ -531,7 +672,7 @@ pub fn decode_alloc_trim(total_bits_frac: i32, dec: &mut RangeDecoder) -> i32 {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CeltFrameConfig {
     pub start: usize,
     pub end: usize,
@@ -548,6 +689,10 @@ pub struct CeltFrameConfig {
     pub vbr: bool,
     pub constrained_vbr: bool,
     pub prefilter: Option<PrefilterDecision>,
+    pub band_log_e2: Option<Vec<f32>>,
+    pub tf_estimate: f32,
+    pub tf_chan: usize,
+    pub signal_bandwidth: usize,
 }
 
 impl CeltFrameConfig {
@@ -571,6 +716,10 @@ impl CeltFrameConfig {
             vbr: false,
             constrained_vbr: false,
             prefilter: None,
+            band_log_e2: None,
+            tf_estimate: 0.0,
+            tf_chan: 0,
+            signal_bandwidth: mode.nb_ebands - 1,
         })
     }
 }
@@ -616,6 +765,7 @@ fn validate_spectral_args(
         || config.end > mode.nb_ebands
         || !(1..=2).contains(&config.channels)
         || !(2..=1275).contains(&config.packet_bytes)
+        || config.signal_bandwidth >= mode.nb_ebands
     {
         return Err(Error::BadArg);
     }
@@ -684,8 +834,12 @@ pub fn encode_spectral_frame(
         &mut band_log_e,
         config.channels,
     );
-    let band_log_e2 = band_log_e.clone();
+    let band_log_e2 = config.band_log_e2.as_deref().unwrap_or(&band_log_e);
+    if band_log_e2.len() < config.channels * mode.nb_ebands {
+        return Err(Error::BadArg);
+    }
     let mut offsets = vec![0i32; mode.nb_ebands];
+    let mut importance = vec![13i32; mode.nb_ebands];
     dynalloc_analysis(
         mode,
         &band_log_e,
@@ -700,6 +854,7 @@ pub fn encode_spectral_frame(
         config.vbr,
         config.constrained_vbr,
         &mut offsets,
+        &mut importance,
     );
     for c in 0..config.channels {
         for i in config.start..config.end {
@@ -730,13 +885,41 @@ pub fn encode_spectral_frame(
         false,
     );
     let mut tf_res = vec![0i32; mode.nb_ebands];
+    let tf_select = if config.packet_bytes >= 15 * config.channels {
+        let tf_x = if config.tf_chan == 1 {
+            y.as_ref().map(|right| &right[..]).unwrap_or(&x[..])
+        } else {
+            &x[..]
+        };
+        let lambda = 80.max(20480 / config.packet_bytes as i32 + 2);
+        let tf_select = tf_analysis(
+            mode,
+            eff_end,
+            is_transient,
+            &mut tf_res,
+            lambda,
+            tf_x,
+            config.lm,
+            config.tf_estimate,
+            &importance,
+        );
+        for i in eff_end..config.end {
+            tf_res[i] = tf_res[eff_end - 1];
+        }
+        tf_select
+    } else {
+        for value in tf_res.iter_mut().take(config.end) {
+            *value = i32::from(is_transient);
+        }
+        0
+    };
     tf_encode(
         config.start,
         config.end,
         is_transient,
         &mut tf_res,
         config.lm,
-        i32::from(is_transient),
+        tf_select,
         &mut enc,
     );
     let spread = encode_spread_decision(config.spread, total_bits, &mut enc);
@@ -774,7 +957,7 @@ pub fn encode_spectral_frame(
             config.lm,
             Some(&mut allocation_coder),
             config.last_coded_bands,
-            config.end.saturating_sub(1),
+            config.signal_bandwidth.min(config.end.saturating_sub(1)),
         )
     };
 

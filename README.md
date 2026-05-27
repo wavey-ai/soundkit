@@ -227,18 +227,25 @@ Run `tools/run_raw_celt_bench.sh` to generate your machine's current table.
 ## Encoder Parity Next Steps
 
 CBR byte parity remains the active target before VBR parity. On the
-deterministic raw CELT fixture, the first six 2.5 ms CBR packets at 48, 96, and
-128 kb/s are byte-identical with libopus. Across a 40-packet run, the first
-divergence is frame 8 at 48 and 96 kb/s, and frame 7 at 128 kb/s.
+deterministic raw CELT fixture at 128 kb/s, the `AnalysisInfo.tonality_slope`
+port moves the 2.5 ms first mismatch from frame 7 to frame 15, and the 5 ms
+first mismatch from frame 6 to frame 7.
 
-The 2.5 ms / 128 kb/s frame-7 mismatch is narrowed to allocation trim:
-prefilter signaling, coarse energy, TF/spread decisions, dynalloc signaling,
-and total boost match libopus before Rust writes trim 5 where C writes trim 4.
+The 2.5 ms / 128 kb/s frame-15 mismatch is now past allocation trim:
+transient, spread, trim, and TF controls match libopus, but decoded allocation
+shows libopus coded bands = 18 while Rust coded bands = 20. A minimal
+`AnalysisInfo.bandwidth` port is wired into encoder allocation, but it does not
+move that mismatch yet.
 
-The 5, 10, and 20 ms CBR paths still diverge from frame 0. The first traced
-5 ms / 128 kb/s mismatch happens after matching coarse energy: Rust currently
-encodes all TF flags as 1 with 192 dynalloc boost, while libopus encodes all TF
-flags as 0 with 288 boost.
+The 5 ms / 128 kb/s frame-7 mismatch is past the high-level controls:
+transient, spread, trim, TF, and coded-band decisions all match libopus, so the
+next divergence is in energy quantization, allocation bookkeeping, or PVQ band
+coding.
+
+The 10 and 20 ms CBR paths still diverge from frame 0. A control-symbol trace
+for 128 kb/s shows frame-0 transient, TF, spread, trim, and coded-band decisions
+matching libopus, so the next mismatch is past the high-level CELT control
+symbols, in the energy/PVQ payload path.
 
 Ported in this checkpoint:
 
@@ -248,16 +255,22 @@ Ported in this checkpoint:
 - CELT pitch prefilter signaling and input filtering
 - CELT decoder postfilter state and filtering
 - spread decision state
+- LM>0 TF analysis and transient patch decision
+- transient second-MDCT `bandLogE2` dynalloc input
+- dynalloc TF-importance ordering and spread-weight masking
+- minimal `AnalysisInfo` tonality-slope and bandwidth analysis
 
 Resume from this checkpoint:
 
-1. Fix `alloc_trim_analysis` or its encoder state inputs for the 2.5 ms
-   frame-7 trim 5 vs 4 mismatch.
-2. Extend 2.5 ms CBR byte parity past the 40-packet fixture at 48, 96, and
+1. Trace `clt_compute_allocation` inputs and range decisions for the 2.5 ms /
+   128 kb/s frame-15 coded-band mismatch.
+2. Trace the 5 ms / 128 kb/s frame-7 mismatch through energy quantization,
+   allocation bookkeeping, and PVQ band coding.
+3. Extend 2.5 ms CBR byte parity past the 40-packet fixture at 48, 96, and
    128 kb/s.
-3. Port the remaining official TF analysis and transient-path details for
-   `LM > 0`, then repeat 5, 10, and 20 ms CBR packet dumps.
-4. After CBR is bit-identical for the raw CELT matrix, port libopus'
+4. Trace 10 and 20 ms frame-0 parity after the matching control symbols through
+   coarse/fine energy, allocation, and PVQ band quantization.
+5. After CBR is bit-identical for the raw CELT matrix, port libopus'
    constrained VBR target/reservoir logic and repeat VBR packet dumps.
 
 ## License

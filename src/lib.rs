@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod analysis;
 pub mod celt;
 pub mod constants;
 pub mod decoder;
