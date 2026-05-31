@@ -504,6 +504,25 @@ impl Encoder {
         weights
     }
 
+    fn apply_energy_error_feedback(
+        mode: &CeltMode,
+        band_log_e: &mut [f32],
+        old_band_e: &[f32],
+        energy_error: &[f32],
+        start: usize,
+        end: usize,
+        channels: usize,
+    ) {
+        for c in 0..channels {
+            for i in start..end {
+                let idx = i + c * mode.nb_ebands;
+                if (band_log_e[idx] - old_band_e[idx]).abs() < 2.0 {
+                    band_log_e[idx] -= 0.25 * energy_error[idx];
+                }
+            }
+        }
+    }
+
     fn alloc_trim_analysis(
         mode: &CeltMode,
         norm: &[f32],
@@ -832,6 +851,18 @@ impl Encoder {
             config.spread = SPREAD_NORMAL;
             self.spread_decision = config.spread;
         }
+
+        // libopus applies this feedback to bandLogE before trim analysis. The
+        // spectral encoder recomputes its own copy, so mirror it here too.
+        Self::apply_energy_error_feedback(
+            &self.mode,
+            &mut band_log_e,
+            &self.old_band_e,
+            &self.energy_error,
+            config.start,
+            config.end,
+            stream_channels,
+        );
 
         if stream_channels == 1 {
             config.alloc_trim = Self::alloc_trim_analysis(

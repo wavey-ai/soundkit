@@ -233,8 +233,10 @@ leak-boost port moved the 2.5 ms mismatch to frame 22 and the 5 ms mismatch to
 frame 9. Porting CELT's `FLOAT_APPROX` `celt_log2`/`celt_exp2` helpers fixed
 the 2.5 ms frame-22 fine-energy bit flip. Matching C's scaled-energy
 `band_log2` path for analysis leak boost fixed the 2.5 ms frame-25 dynalloc
-split; the current one-second CBR dump first differs at 2.5 ms frame 29 and
-5 ms frame 139 at 128 kb/s.
+split. Mirroring libopus' energy-error feedback on the local `bandLogE` copy
+before trim analysis fixed the 2.5 ms frame-29 trim split; the current
+one-second CBR dump first differs at 2.5 ms frame 91, while 5 ms / 128 kb/s
+matches all 200 frames in the one-second dump.
 
 The 2.5 ms / 128 kb/s frame-15 allocation mismatch was caused by missing
 `AnalysisInfo.leak_boost` dynalloc input. The previous frame-22 payload mismatch
@@ -243,14 +245,18 @@ uses `FLOAT_APPROX`, which changed fine-energy quantization by one raw bit.
 The previous frame-25 allocation mismatch was caused by Rust adding C's
 `1e-10f` analysis-log epsilon before applying the same energy scale C uses.
 That rounded `leak_boost[3]` from 63 to 64, crossing the dynalloc threshold for
-band 3.
+band 3. The previous frame-29 trim/coded-band split was caused by Rust computing
+allocation trim from the uncorrected local `band_log_e`; libopus applies the
+prior `energyError` feedback to `bandLogE` before `alloc_trim_analysis`.
 
-The 2.5 ms / 128 kb/s first mismatch now starts at frame 29. Decoded controls
-show the next divergence is allocation trim/coded-band selection: C encodes
-trim 5 and 18 coded bands while Rust encodes trim 4 and 19 coded bands.
+The 2.5 ms / 128 kb/s first mismatch now starts at frame 91. Decoded controls
+match C through transient, spread, trim, coded bands, intensity, dual-stereo,
+balance, fine-energy bit counts, pulses, and collapse masks, so the next
+divergence is in the energy/allocation/PVQ payload path.
 
-The 5 ms / 128 kb/s first mismatch now starts at frame 139. Packet sizes match
-across the CBR matrix; remaining byte mismatches still need first-symbol traces.
+The 5 ms / 128 kb/s one-second CBR dump is now byte-identical for all 200
+frames. Packet sizes match across the CBR matrix; remaining byte mismatches
+still need first-symbol traces.
 
 The 10 and 20 ms CBR paths still diverge from frame 0. A control-symbol trace
 for 128 kb/s shows frame-0 transient, TF, spread, trim, and coded-band decisions
@@ -271,15 +277,16 @@ Ported in this checkpoint:
 - minimal `AnalysisInfo` tonality-slope, bandwidth, and C-scaled leak-boost
   analysis
 - CELT `FLOAT_APPROX` log2/exp2 helpers
+- pre-trim energy-error feedback on `bandLogE`
 
 Resume from this checkpoint:
 
-1. Trace the 2.5 ms / 128 kb/s frame-29 trim mismatch through
-   `alloc_trim_analysis`, especially the analysis tonality-slope contribution.
-2. Trace the 5 ms / 128 kb/s frame-139 mismatch from the first divergent entropy
-   symbol.
-3. Extend 2.5 ms CBR byte parity past the 40-packet fixture at 48, 96, and
-   128 kb/s.
+1. Trace the 2.5 ms / 128 kb/s frame-91 mismatch from the first divergent
+   post-control entropy symbol.
+2. Extend the now-matching 5 ms / 128 kb/s one-second CBR fixture before treating
+   that path as done.
+3. After the frame-91 fix, extend 2.5 ms CBR byte parity past the one-second
+   fixture at 48, 96, and 128 kb/s.
 4. Trace 10 and 20 ms frame-0 parity after the matching control symbols through
    coarse/fine energy, allocation, and PVQ band quantization.
 5. After CBR is bit-identical for the raw CELT matrix, port libopus'

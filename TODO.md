@@ -24,18 +24,22 @@ v1.5.2:...` or a pinned worktree when validating behavior.
   port moved it to frame 22. Porting CELT's `FLOAT_APPROX` log2/exp2 helpers
   fixed the frame-22 fine-energy bit flip. Matching C's scaled-energy
   `band_log2` path for analysis leak boost fixed the frame-25 dynalloc split;
-  the current one-second dump first differs at frame 29.
-- Trace that 2.5 ms frame-29 mismatch through `alloc_trim_analysis`. Decoded
-  controls show C writes trim 5 / 18 coded bands while Rust writes trim 4 / 19
-  coded bands, so the next divergence is likely in trim inputs, especially
-  analysis tonality slope.
+  mirroring libopus' energy-error feedback before trim analysis fixed the
+  frame-29 trim split. The current 128 kb/s one-second dump first differs at
+  frame 91.
+- Trace that 2.5 ms frame-91 mismatch from the first divergent post-control
+  entropy symbol. Decoded controls match C through trim, coded bands, intensity,
+  balance, fine-energy bit counts, pulses, and collapse masks, so the next
+  divergence is in the energy/allocation/PVQ payload path.
 - Trace the next 5 ms / 128 kb/s CBR mismatch. The `tonality_slope` fix moved
   the first mismatch from frame 6 to frame 7, and the `leak_boost` dynalloc port
   moved it to frame 9. Porting CELT's `FLOAT_APPROX` log2/exp2 helpers moved the
   first mismatch to frame 24, and matching C's analysis leak log scaling moved
-  it to frame 139.
-- Extend 2.5 ms CBR byte parity beyond the current 40-packet fixture at 48, 96,
-  and 128 kb/s.
+  it to frame 139. Mirroring energy-error feedback before trim analysis makes
+  the full one-second, 200-frame 128 kb/s CBR dump byte-identical; extend that
+  fixture before treating 5 ms CBR as done.
+- After the current first mismatches are fixed, extend 2.5 ms CBR byte parity
+  beyond one-second fixtures at 48, 96, and 128 kb/s.
 - Trace 10 and 20 ms / 128 kb/s CBR frame-0 parity after the matching
   high-level CELT controls. Transient, TF, spread, trim, and coded-band symbols
   now match libopus on that first frame, so the remaining divergence is in
