@@ -16,7 +16,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "wasm-pack build --target web --release --features wasm",
+    "build": "wasm-pack build --target web --release --features wasm && rm -f pkg/.gitignore",
     "prepare": "npm run build"
   },
   "keywords": [
