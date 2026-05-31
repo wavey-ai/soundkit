@@ -523,6 +523,7 @@ fn dynalloc_analysis(
     is_transient: bool,
     vbr: bool,
     constrained_vbr: bool,
+    analysis_leak_boost: Option<&[u8; 19]>,
     offsets: &mut [i32],
     importance: &mut [i32],
 ) {
@@ -621,6 +622,11 @@ fn dynalloc_analysis(
             *value *= 0.5;
         }
     }
+    if let Some(leak_boost) = analysis_leak_boost {
+        for i in start..end.min(19) {
+            follower[i] += leak_boost[i] as f32 * (1.0 / 64.0);
+        }
+    }
 
     let mut total_boost = 0;
     for i in start..end {
@@ -693,6 +699,7 @@ pub struct CeltFrameConfig {
     pub tf_estimate: f32,
     pub tf_chan: usize,
     pub signal_bandwidth: usize,
+    pub analysis_leak_boost: Option<[u8; 19]>,
 }
 
 impl CeltFrameConfig {
@@ -720,6 +727,7 @@ impl CeltFrameConfig {
             tf_estimate: 0.0,
             tf_chan: 0,
             signal_bandwidth: mode.nb_ebands - 1,
+            analysis_leak_boost: None,
         })
     }
 }
@@ -853,6 +861,7 @@ pub fn encode_spectral_frame(
         is_transient,
         config.vbr,
         config.constrained_vbr,
+        config.analysis_leak_boost.as_ref(),
         &mut offsets,
         &mut importance,
     );

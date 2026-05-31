@@ -20,21 +20,20 @@ v1.5.2:...` or a pinned worktree when validating behavior.
 ## P0: Finish Raw CELT Byte Parity
 
 - Trace the next 2.5 ms / 128 kb/s CBR mismatch. The `tonality_slope` fix moved
-  the first mismatch from frame 7 to frame 15. At frame 15, transient, spread,
-  trim, and TF controls match libopus, but decoded allocation shows libopus
-  coded bands = 18 while Rust coded bands = 20.
-- Trace `clt_compute_allocation` inputs and loop state for that 2.5 ms frame-15
-  mismatch: offsets, caps, trim, intensity, dual stereo, available bits,
-  `lastCodedBands`, `signalBandwidth`, `band_bits`, `thresh`, and the skip
-  flags written to the range coder.
-- Verify the minimal Rust `AnalysisInfo.bandwidth` port against libopus. The
-  bandwidth value is now computed and wired into encoder allocation, but it did
-  not move the 2.5 ms coded-band mismatch, so either the analyzer bandwidth, the
-  derived `signalBandwidth`, or allocation inputs still differ.
+  the first mismatch from frame 7 to frame 15, and the `leak_boost` dynalloc
+  port moved it to frame 22. Porting CELT's `FLOAT_APPROX` log2/exp2 helpers
+  fixed the frame-22 fine-energy bit flip. Matching C's scaled-energy
+  `band_log2` path for analysis leak boost fixed the frame-25 dynalloc split;
+  the current one-second dump first differs at frame 29.
+- Trace that 2.5 ms frame-29 mismatch through `alloc_trim_analysis`. Decoded
+  controls show C writes trim 5 / 18 coded bands while Rust writes trim 4 / 19
+  coded bands, so the next divergence is likely in trim inputs, especially
+  analysis tonality slope.
 - Trace the next 5 ms / 128 kb/s CBR mismatch. The `tonality_slope` fix moved
-  the first mismatch from frame 6 to frame 7. On frame 7, transient, spread,
-  trim, TF, and coded-band controls match libopus, so the divergence is deeper
-  in energy quantization, allocation bookkeeping, or PVQ band coding.
+  the first mismatch from frame 6 to frame 7, and the `leak_boost` dynalloc port
+  moved it to frame 9. Porting CELT's `FLOAT_APPROX` log2/exp2 helpers moved the
+  first mismatch to frame 24, and matching C's analysis leak log scaling moved
+  it to frame 139.
 - Extend 2.5 ms CBR byte parity beyond the current 40-packet fixture at 48, 96,
   and 128 kb/s.
 - Trace 10 and 20 ms / 128 kb/s CBR frame-0 parity after the matching
@@ -43,8 +42,8 @@ v1.5.2:...` or a pinned worktree when validating behavior.
   coarse/fine energy, allocation, or PVQ band quantization.
 - Continue porting analysis-driven encoder inputs used by CELT quality
   decisions. The current Rust analyzer only covers the subset needed for
-  `tonality_slope` and bandwidth; it still omits the full activity/music
-  probability path, tone detection, leak boost, and any non-zero surround
+  `tonality_slope`, bandwidth, and leak boost; it still omits the full
+  activity/music probability path, tone detection, and any non-zero surround
   dynalloc plumbing needed by the public Opus encoder path.
 - Replace the current Rust heuristic VBR sizing with libopus' constrained VBR
   target and reservoir logic after CBR is byte-identical.

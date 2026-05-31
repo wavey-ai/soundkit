@@ -645,6 +645,9 @@ impl Encoder {
             .then_some(self.analysis_info.tonality_slope);
         let equiv_rate = self.equiv_rate(frame_bytes, lm, stream_channels);
         config.signal_bandwidth = self.analysis_signal_bandwidth(equiv_rate, stream_channels);
+        if self.analysis_info.valid {
+            config.analysis_leak_boost = Some(self.analysis_info.leak_boost);
+        }
 
         let n = frame_size;
         let m = 1usize << lm;

@@ -184,7 +184,7 @@ A snapshot of a local run (`AUDIO_SECONDS=1 REPEATS=1 MODE=both`) is included be
 | cbr | 20.0 ms | 256 kb/s | 134.13x | +16.5% | 222.86x | +86.5% | 156.27x | 415.63x | 32000 | 32000 | 640-640 | 640-640 |
 | cbr | 20.0 ms | 320 kb/s | 123.68x | +23.0% | 189.76x | +91.4% | 152.14x | 363.24x | 40000 | 40000 | 800-800 | 800-800 |
 | cbr | 20.0 ms | 384 kb/s | 113.10x | +28.0% | 161.38x | +118.3% | 144.80x | 352.36x | 48000 | 48000 | 960-960 | 960-960 |
-| cbr | 20.0 ms | 512 kb/s | 86.86x | +51.8% | 110.00x | +157.5% | 131.86x | 283.21x | 63800 | 63750 | 1276-1276 | 1275-1275 |
+| cbr | 20.0 ms | 512 kb/s | 86.86x | +51.8% | 110.00x | +157.5% | 131.86x | 283.21x | 63750 | 63750 | 1275-1275 | 1275-1275 |
 | vbr | 2.5 ms | 48 kb/s | 122.81x | +18.0% | 416.86x | +62.0% | 144.93x | 675.22x | 6402 | 6402 | 15-17 | 13-20 |
 | vbr | 2.5 ms | 96 kb/s | 86.17x | +34.6% | 296.32x | +73.2% | 115.96x | 513.08x | 12404 | 12427 | 30-32 | 25-42 |
 | vbr | 2.5 ms | 128 kb/s | 67.67x | +27.1% | 242.98x | +47.2% | 86.01x | 357.65x | 16404 | 16439 | 40-43 | 34-54 |
@@ -228,19 +228,29 @@ Run `tools/run_raw_celt_bench.sh` to generate your machine's current table.
 
 CBR byte parity remains the active target before VBR parity. On the
 deterministic raw CELT fixture at 128 kb/s, the `AnalysisInfo.tonality_slope`
-port moves the 2.5 ms first mismatch from frame 7 to frame 15, and the 5 ms
-first mismatch from frame 6 to frame 7.
+port moved the 2.5 ms first mismatch from frame 7 to frame 15. The analysis
+leak-boost port moved the 2.5 ms mismatch to frame 22 and the 5 ms mismatch to
+frame 9. Porting CELT's `FLOAT_APPROX` `celt_log2`/`celt_exp2` helpers fixed
+the 2.5 ms frame-22 fine-energy bit flip. Matching C's scaled-energy
+`band_log2` path for analysis leak boost fixed the 2.5 ms frame-25 dynalloc
+split; the current one-second CBR dump first differs at 2.5 ms frame 29 and
+5 ms frame 139 at 128 kb/s.
 
-The 2.5 ms / 128 kb/s frame-15 mismatch is now past allocation trim:
-transient, spread, trim, and TF controls match libopus, but decoded allocation
-shows libopus coded bands = 18 while Rust coded bands = 20. A minimal
-`AnalysisInfo.bandwidth` port is wired into encoder allocation, but it does not
-move that mismatch yet.
+The 2.5 ms / 128 kb/s frame-15 allocation mismatch was caused by missing
+`AnalysisInfo.leak_boost` dynalloc input. The previous frame-22 payload mismatch
+was caused by Rust using exact `f32::log2`/`exp2` while this pinned libopus build
+uses `FLOAT_APPROX`, which changed fine-energy quantization by one raw bit.
+The previous frame-25 allocation mismatch was caused by Rust adding C's
+`1e-10f` analysis-log epsilon before applying the same energy scale C uses.
+That rounded `leak_boost[3]` from 63 to 64, crossing the dynalloc threshold for
+band 3.
 
-The 5 ms / 128 kb/s frame-7 mismatch is past the high-level controls:
-transient, spread, trim, TF, and coded-band decisions all match libopus, so the
-next divergence is in energy quantization, allocation bookkeeping, or PVQ band
-coding.
+The 2.5 ms / 128 kb/s first mismatch now starts at frame 29. Decoded controls
+show the next divergence is allocation trim/coded-band selection: C encodes
+trim 5 and 18 coded bands while Rust encodes trim 4 and 19 coded bands.
+
+The 5 ms / 128 kb/s first mismatch now starts at frame 139. Packet sizes match
+across the CBR matrix; remaining byte mismatches still need first-symbol traces.
 
 The 10 and 20 ms CBR paths still diverge from frame 0. A control-symbol trace
 for 128 kb/s shows frame-0 transient, TF, spread, trim, and coded-band decisions
@@ -258,14 +268,16 @@ Ported in this checkpoint:
 - LM>0 TF analysis and transient patch decision
 - transient second-MDCT `bandLogE2` dynalloc input
 - dynalloc TF-importance ordering and spread-weight masking
-- minimal `AnalysisInfo` tonality-slope and bandwidth analysis
+- minimal `AnalysisInfo` tonality-slope, bandwidth, and C-scaled leak-boost
+  analysis
+- CELT `FLOAT_APPROX` log2/exp2 helpers
 
 Resume from this checkpoint:
 
-1. Trace `clt_compute_allocation` inputs and range decisions for the 2.5 ms /
-   128 kb/s frame-15 coded-band mismatch.
-2. Trace the 5 ms / 128 kb/s frame-7 mismatch through energy quantization,
-   allocation bookkeeping, and PVQ band coding.
+1. Trace the 2.5 ms / 128 kb/s frame-29 trim mismatch through
+   `alloc_trim_analysis`, especially the analysis tonality-slope contribution.
+2. Trace the 5 ms / 128 kb/s frame-139 mismatch from the first divergent entropy
+   symbol.
 3. Extend 2.5 ms CBR byte parity past the 40-packet fixture at 48, 96, and
    128 kb/s.
 4. Trace 10 and 20 ms frame-0 parity after the matching control symbols through

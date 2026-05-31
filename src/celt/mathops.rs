@@ -97,11 +97,22 @@ pub fn frac_div32_q29(a: f32, b: f32) -> f32 {
 }
 
 pub fn celt_log2(x: f32) -> f32 {
-    x.log2()
+    let mut bits = x.to_bits();
+    let integer = ((bits >> 23) as i32) - 127;
+    bits = bits.wrapping_sub((integer as u32) << 23);
+    let frac = f32::from_bits(bits) - 1.5;
+    1.0 + integer as f32
+        + (-0.41445418 + frac * (0.95909232 + frac * (-0.33951290 + frac * 0.16541097)))
 }
 
 pub fn celt_exp2(x: f32) -> f32 {
-    x.exp2()
+    let integer = x.floor() as i32;
+    if integer < -50 {
+        return 0.0;
+    }
+    let frac = x - integer as f32;
+    let res = 0.99992522 + frac * (0.69583354 + frac * (0.22606716 + 0.078024523 * frac));
+    f32::from_bits((res.to_bits().wrapping_add((integer as u32) << 23)) & 0x7fff_ffff)
 }
 
 pub fn celt_exp2_db(x: f32) -> f32 {

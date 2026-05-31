@@ -3,10 +3,18 @@ use crate::celt::mathops::fast_atan2f;
 
 const NB_FRAMES: usize = 8;
 const NB_TBANDS: usize = 18;
+const LEAK_BANDS: usize = 19;
 const ANALYSIS_BUF_SIZE: usize = 720;
 const DETECT_SIZE: usize = 100;
 const CELT_SIG_SCALE: f32 = 32768.0;
+const INV_CELT_SIG_SCALE_SQUARED: f32 = 1.0 / (CELT_SIG_SCALE * CELT_SIG_SCALE);
 const ANALYSIS_COUNT_MAX: usize = 10_000;
+const ANALYSIS_LOG2_E: f32 = 1.442_695;
+const ANALYSIS_PI: f64 = 3.141_592_653;
+const ANALYSIS_INV_2PI: f32 = (0.5 / ANALYSIS_PI) as f32;
+const ANALYSIS_PI4: f32 = (ANALYSIS_PI * ANALYSIS_PI * ANALYSIS_PI * ANALYSIS_PI) as f32;
+const LEAKAGE_OFFSET: f32 = 2.5;
+const LEAKAGE_SLOPE: f32 = 2.0;
 const TBANDS: [usize; NB_TBANDS + 1] = [
     4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 136, 160, 192, 240,
 ];
@@ -16,6 +24,7 @@ pub(crate) struct AnalysisInfo {
     pub valid: bool,
     pub tonality_slope: f32,
     pub bandwidth: usize,
+    pub leak_boost: [u8; LEAK_BANDS],
 }
 
 #[derive(Clone, Debug)]
@@ -91,6 +100,14 @@ impl TonalityAnalysisState {
         s * s
     }
 
+    fn half_log2_energy(energy: f32) -> f32 {
+        0.5 * ANALYSIS_LOG2_E * ((energy + 1e-10_f32) as f64).ln() as f32
+    }
+
+    fn float2int(value: f32) -> f32 {
+        value.round_ties_even()
+    }
+
     fn downmix_and_resample(
         &mut self,
         pcm: &[f32],
@@ -142,7 +159,7 @@ impl TonalityAnalysisState {
             out[k] = 0.5 * out32;
         }
 
-        hp_ener * (1.0 / (CELT_SIG_SCALE * CELT_SIG_SCALE))
+        hp_ener * INV_CELT_SIG_SCALE_SQUARED
     }
 
     fn tonality_analysis(
@@ -202,34 +219,33 @@ impl TonalityAnalysisState {
 
         let mut tonality = vec![0.0f32; 240];
         let mut tonality2 = vec![0.0f32; 240];
-        let pi4 = core::f32::consts::PI.powi(4);
         for i in 1..240 {
             let x1r = output[i].r + output[480 - i].r;
             let x1i = output[i].i - output[480 - i].i;
             let x2r = output[i].i + output[480 - i].i;
             let x2i = output[480 - i].r - output[i].r;
 
-            let angle = (0.5 / core::f32::consts::PI) * fast_atan2f(x1i, x1r);
+            let angle = ANALYSIS_INV_2PI * fast_atan2f(x1i, x1r);
             let d_angle = angle - self.angle[i];
             let d2_angle = d_angle - self.d_angle[i];
 
-            let angle2 = (0.5 / core::f32::consts::PI) * fast_atan2f(x2i, x2r);
+            let angle2 = ANALYSIS_INV_2PI * fast_atan2f(x2i, x2r);
             let d_angle2 = angle2 - angle;
             let d2_angle2 = d_angle2 - d_angle;
 
-            let mut mod1 = d2_angle - d2_angle.round();
+            let mut mod1 = d2_angle - Self::float2int(d2_angle);
             let noisiness1 = mod1.abs();
             mod1 *= mod1;
             mod1 *= mod1;
 
-            let mut mod2 = d2_angle2 - d2_angle2.round();
+            let mut mod2 = d2_angle2 - Self::float2int(d2_angle2);
             let _noisiness = noisiness1 + mod2.abs();
             mod2 *= mod2;
             mod2 *= mod2;
 
             let avg_mod = 0.25 * (self.d2_angle[i] + mod1 + 2.0 * mod2);
-            tonality[i] = 1.0 / (1.0 + 40.0 * 16.0 * pi4 * avg_mod) - 0.015;
-            tonality2[i] = 1.0 / (1.0 + 40.0 * 16.0 * pi4 * mod2) - 0.015;
+            tonality[i] = 1.0 / (1.0 + 40.0 * 16.0 * ANALYSIS_PI4 * avg_mod) - 0.015;
+            tonality2[i] = 1.0 / (1.0 + 40.0 * 16.0 * ANALYSIS_PI4 * mod2) - 0.015;
 
             self.angle[i] = angle2;
             self.d_angle[i] = d_angle2;
@@ -252,20 +268,32 @@ impl TonalityAnalysisState {
         let mut is_masked = [false; NB_TBANDS + 1];
         let mut noise_floor = 5.7e-4f32 / ((1u32 << 16) as f32);
         noise_floor *= noise_floor;
+        let mut band_log2 = [0.0f32; NB_TBANDS + 1];
+        let mut leakage_from = [0.0f32; NB_TBANDS + 1];
+        let mut leakage_to = [0.0f32; NB_TBANDS + 1];
+        let mut first_band_energy = (2.0 * output[0].r).powi(2) + (2.0 * output[0].i).powi(2);
+        for i in 1..4 {
+            first_band_energy += output[i].r * output[i].r
+                + output[480 - i].r * output[480 - i].r
+                + output[i].i * output[i].i
+                + output[480 - i].i * output[480 - i].i;
+        }
+        band_log2[0] = Self::half_log2_energy(first_band_energy * INV_CELT_SIG_SCALE_SQUARED);
 
         let mut slope = 0.0f32;
         for b in 0..NB_TBANDS {
             let mut energy = 0.0f32;
             let mut tonal_energy = 0.0f32;
             for i in TBANDS[b]..TBANDS[b + 1] {
-                let bin_energy = output[i].r * output[i].r
+                let raw_bin_energy = output[i].r * output[i].r
                     + output[480 - i].r * output[480 - i].r
                     + output[i].i * output[i].i
                     + output[480 - i].i * output[480 - i].i;
-                let bin_energy = bin_energy * (1.0 / (CELT_SIG_SCALE * CELT_SIG_SCALE));
+                let bin_energy = raw_bin_energy * INV_CELT_SIG_SCALE_SQUARED;
                 energy += bin_energy;
                 tonal_energy += bin_energy * tonality[i].max(0.0);
             }
+            band_log2[b + 1] = Self::half_log2_energy(energy);
 
             self.energy[self.energy_count][b] = energy;
             let mut l1 = 0.0f32;
@@ -298,6 +326,25 @@ impl TonalityAnalysisState {
             };
             is_masked[b] = energy < mask_threshold * bandwidth_mask;
             bandwidth_mask = (0.05 * bandwidth_mask).max(energy);
+        }
+
+        leakage_from[0] = band_log2[0];
+        leakage_to[0] = band_log2[0] - LEAKAGE_OFFSET;
+        for b in 1..=NB_TBANDS {
+            let leak_slope = LEAKAGE_SLOPE * (TBANDS[b] - TBANDS[b - 1]) as f32 / 4.0;
+            leakage_from[b] = (leakage_from[b - 1] + leak_slope).min(band_log2[b]);
+            leakage_to[b] = (leakage_to[b - 1] - leak_slope).max(band_log2[b] - LEAKAGE_OFFSET);
+        }
+        for b in (0..NB_TBANDS - 1).rev() {
+            let leak_slope = LEAKAGE_SLOPE * (TBANDS[b + 1] - TBANDS[b]) as f32 / 4.0;
+            leakage_from[b] = (leakage_from[b + 1] + leak_slope).min(leakage_from[b]);
+            leakage_to[b] = (leakage_to[b + 1] - leak_slope).max(leakage_to[b]);
+        }
+        let mut leak_boost = [0u8; LEAK_BANDS];
+        for b in 0..=NB_TBANDS {
+            let boost = (leakage_to[b] - band_log2[b]).max(0.0)
+                + (band_log2[b] - (leakage_from[b] + LEAKAGE_OFFSET)).max(0.0);
+            leak_boost[b] = (0.5 + 64.0 * boost).floor().min(255.0) as u8;
         }
 
         let hp_band_energy = hp_ener * (1.0 / (60.0 * 60.0));
@@ -336,6 +383,7 @@ impl TonalityAnalysisState {
             valid: true,
             tonality_slope: slope,
             bandwidth,
+            leak_boost,
         };
         self.prev_bandwidth = bandwidth;
     }
