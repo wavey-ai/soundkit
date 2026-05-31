@@ -1,0 +1,28 @@
+{
+  "name": "@wavey-ai/libopus-rs",
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Pure Rust port of libopus 1.5.2 for WebAssembly",
+  "license": "BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wavey-ai/libopus-rs.git"
+  },
+  "main": "./pkg/libopus_rs.js",
+  "types": "./pkg/libopus_rs.d.ts",
+  "files": [
+    "pkg",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "wasm-pack build --target web --release --features wasm",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "opus",
+    "codec",
+    "audio",
+    "wasm"
+  ]
+}
