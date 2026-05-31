@@ -30,7 +30,18 @@ v1.5.2:...` or a pinned worktree when validating behavior.
 - Trace that 2.5 ms frame-91 mismatch from the first divergent post-control
   entropy symbol. Decoded controls match C through trim, coded bands, intensity,
   balance, fine-energy bit counts, pulses, and collapse masks, so the next
-  divergence is in the energy/allocation/PVQ payload path.
+  divergence is in the energy/allocation/PVQ payload path. A temporary
+  primitive range-coder trace showed the committed stream matches through coarse
+  energy, fine energy, and into theta/PVQ RDO when scratch-encoder candidate
+  calls are accounted for. The first meaningful decision split found so far is
+  theta RDO at band 14 on frame 91: C has `dist_down=112.171409607`,
+  `dist_up=87.302574158`, and chooses the down-rounded candidate, while Rust has
+  `dist_down=112.171386719`, `dist_up=128.589492798`, and chooses the
+  up-rounded candidate. The next trace should compare band-14 stereo RDO
+  resynthesis inputs/outputs, especially `quant_band_stereo`, `quant_band_mono`,
+  `alg_quant`, `lowband_out`, and `stereo_merge`. A speculative Rust
+  `stereo_merge` `mid2` change was tested and made the trace diverge earlier, so
+  do not reapply it without a narrower proof.
 - Trace the next 5 ms / 128 kb/s CBR mismatch. The `tonality_slope` fix moved
   the first mismatch from frame 6 to frame 7, and the `leak_boost` dynalloc port
   moved it to frame 9. Porting CELT's `FLOAT_APPROX` log2/exp2 helpers moved the
