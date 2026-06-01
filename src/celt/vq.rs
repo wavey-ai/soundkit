@@ -103,11 +103,30 @@ fn extract_collapse_mask(iy: &[i32], n: usize, b: usize) -> u32 {
 }
 
 pub fn op_pvq_search(x: &mut [f32], iy: &mut [i32], k: usize, n: usize) -> f32 {
+    let mut y = Vec::new();
+    let mut signx = Vec::new();
+    op_pvq_search_with_scratch(x, iy, k, n, &mut y, &mut signx)
+}
+
+pub fn op_pvq_search_with_scratch(
+    x: &mut [f32],
+    iy: &mut [i32],
+    k: usize,
+    n: usize,
+    y_scratch: &mut Vec<f32>,
+    signx_scratch: &mut Vec<bool>,
+) -> f32 {
     assert!(x.len() >= n);
     assert!(iy.len() >= n);
 
-    let mut y = vec![0.0f32; n];
-    let mut signx = vec![false; n];
+    if y_scratch.len() < n {
+        y_scratch.resize(n, 0.0);
+    }
+    if signx_scratch.len() < n {
+        signx_scratch.resize(n, false);
+    }
+    let y = &mut y_scratch[..n];
+    let signx = &mut signx_scratch[..n];
 
     for j in 0..n {
         signx[j] = x[j] < 0.0;
@@ -205,16 +224,45 @@ pub fn alg_quant(
     assert!(x.len() >= n);
 
     let mut iy = vec![0i32; n + 3];
+    let mut y = Vec::new();
+    let mut signx = Vec::new();
+    alg_quant_with_scratch(
+        x, n, k, spread, b, enc, gain, resynth, &mut iy, &mut y, &mut signx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn alg_quant_with_scratch(
+    x: &mut [f32],
+    n: usize,
+    k: usize,
+    spread: i32,
+    b: usize,
+    enc: &mut RangeEncoder,
+    gain: f32,
+    resynth: bool,
+    iy_scratch: &mut Vec<i32>,
+    y_scratch: &mut Vec<f32>,
+    signx_scratch: &mut Vec<bool>,
+) -> u32 {
+    assert!(k > 0);
+    assert!(n > 1);
+    assert!(x.len() >= n);
+
+    if iy_scratch.len() < n + 3 {
+        iy_scratch.resize(n + 3, 0);
+    }
+    let iy = &mut iy_scratch[..n + 3];
     exp_rotation(x, n, 1, b, k, spread);
-    let yy = op_pvq_search(x, &mut iy, k, n);
-    encode_pulses(&iy, n, k, enc);
+    let yy = op_pvq_search_with_scratch(x, iy, k, n, y_scratch, signx_scratch);
+    encode_pulses(iy, n, k, enc);
 
     if resynth {
-        normalise_residual(&iy, x, n, yy, gain);
+        normalise_residual(iy, x, n, yy, gain);
         exp_rotation(x, n, -1, b, k, spread);
     }
 
-    extract_collapse_mask(&iy, n, b)
+    extract_collapse_mask(iy, n, b)
 }
 
 pub fn alg_unquant(

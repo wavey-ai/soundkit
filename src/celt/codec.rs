@@ -2,8 +2,8 @@
 //! `celt/celt_encoder.c`, and `celt/celt_decoder.c` control path.
 
 use crate::celt::bands::{
-    haar1, quant_all_bands_mono, quant_all_bands_mono_with_scratch, quant_all_bands_stereo,
-    quant_all_bands_stereo_with_scratch, BandCoder, BandScratch, SPREAD_NORMAL,
+    haar1, quant_all_bands_mono_with_scratch, quant_all_bands_stereo_with_scratch, BandCoder,
+    BandScratch, SPREAD_NORMAL,
 };
 use crate::celt::entropy::{RangeDecoder, RangeEncoder};
 use crate::celt::mathops::{celt_exp2, ec_ilog};
@@ -14,8 +14,8 @@ use crate::celt::quant_bands::{
     unquant_coarse_energy, unquant_energy_finalise, unquant_fine_energy, E_MEANS,
 };
 use crate::celt::rate::{
-    clt_compute_allocation, clt_compute_allocation_with_scratch, Allocation, AllocationCoder,
-    AllocationInfo, AllocationScratch,
+    clt_compute_allocation_with_scratch, Allocation, AllocationCoder, AllocationInfo,
+    AllocationScratch,
 };
 use crate::{Error, Result};
 
@@ -391,6 +391,15 @@ fn l1_metric(tmp: &[f32], n: usize, lm: usize, bias: f32) -> f32 {
     l1 + lm as f32 * bias * l1
 }
 
+#[derive(Clone, Debug, Default)]
+struct TfAnalysisScratch {
+    metric: Vec<i32>,
+    path0: Vec<i32>,
+    path1: Vec<i32>,
+    tmp: Vec<f32>,
+    tmp_1: Vec<f32>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tf_analysis(
     mode: &CeltMode,
@@ -402,26 +411,34 @@ fn tf_analysis(
     lm: usize,
     tf_estimate: f32,
     importance: &[i32],
+    scratch: &mut TfAnalysisScratch,
 ) -> i32 {
     let transient_idx = usize::from(is_transient);
     let bias = 0.04 * (-0.25f32).max(0.5 - tf_estimate);
-    let mut metric = vec![0i32; len];
-    let mut path0 = vec![0i32; len];
-    let mut path1 = vec![0i32; len];
+    scratch.metric.resize(len, 0);
+    scratch.path0.resize(len, 0);
+    scratch.path1.resize(len, 0);
+    let metric = &mut scratch.metric[..len];
+    let path0 = &mut scratch.path0[..len];
+    let path1 = &mut scratch.path1[..len];
 
     for i in 0..len {
         let band_width = mode.ebands[i + 1] as usize - mode.ebands[i] as usize;
         let n = band_width << lm;
         let narrow = band_width == 1;
         let offset = (mode.ebands[i] as usize) << lm;
-        let mut tmp = x[offset..offset + n].to_vec();
-        let mut best_l1 = l1_metric(&tmp, n, if is_transient { lm } else { 0 }, bias);
+        scratch.tmp.resize(n, 0.0);
+        scratch.tmp[..n].copy_from_slice(&x[offset..offset + n]);
+        let tmp = &mut scratch.tmp[..n];
+        let mut best_l1 = l1_metric(tmp, n, if is_transient { lm } else { 0 }, bias);
         let mut best_level = 0i32;
 
         if is_transient && !narrow {
-            let mut tmp_1 = tmp.clone();
-            haar1(&mut tmp_1, n >> lm, 1 << lm);
-            let l1 = l1_metric(&tmp_1, n, lm + 1, bias);
+            scratch.tmp_1.resize(n, 0.0);
+            scratch.tmp_1[..n].copy_from_slice(tmp);
+            let tmp_1 = &mut scratch.tmp_1[..n];
+            haar1(tmp_1, n >> lm, 1 << lm);
+            let l1 = l1_metric(tmp_1, n, lm + 1, bias);
             if l1 < best_l1 {
                 best_l1 = l1;
                 best_level = -1;
@@ -431,8 +448,8 @@ fn tf_analysis(
         let extra_split = usize::from(!(is_transient || narrow));
         for k in 0..lm + extra_split {
             let b = if is_transient { lm - k - 1 } else { k + 1 };
-            haar1(&mut tmp, n >> k, 1 << k);
-            let l1 = l1_metric(&tmp, n, b, bias);
+            haar1(tmp, n >> k, 1 << k);
+            let l1 = l1_metric(tmp, n, b, bias);
             if l1 < best_l1 {
                 best_l1 = l1;
                 best_level = k as i32 + 1;
@@ -520,8 +537,15 @@ fn tf_analysis(
     tf_select
 }
 
+#[derive(Clone, Debug, Default)]
+struct DynallocAnalysisScratch {
+    noise_floor: Vec<f32>,
+    follower: Vec<f32>,
+    band_log_e3: Vec<f32>,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn dynalloc_analysis(
+fn dynalloc_analysis_with_scratch(
     mode: &CeltMode,
     band_log_e: &[f32],
     band_log_e2: &[f32],
@@ -537,6 +561,7 @@ fn dynalloc_analysis(
     analysis_leak_boost: Option<&[u8; 19]>,
     offsets: &mut [i32],
     importance: &mut [i32],
+    scratch: &mut DynallocAnalysisScratch,
 ) {
     const LSB_DEPTH: i32 = 24;
 
@@ -546,14 +571,21 @@ fn dynalloc_analysis(
         return;
     }
 
-    let mut noise_floor = vec![0.0f32; mode.nb_ebands];
+    scratch.noise_floor.resize(mode.nb_ebands, 0.0);
+    scratch.noise_floor[..mode.nb_ebands].fill(0.0);
+    let noise_floor = &mut scratch.noise_floor[..mode.nb_ebands];
     for i in 0..end {
         noise_floor[i] = 0.0625 * mode.log_n[i] as f32 + 0.5 + (9 - LSB_DEPTH) as f32 - E_MEANS[i]
             + 0.0062 * (i as f32 + 5.0) * (i as f32 + 5.0);
     }
 
-    let mut follower = vec![0.0f32; channels * mode.nb_ebands];
-    let mut band_log_e3 = vec![0.0f32; mode.nb_ebands];
+    let follower_len = channels * mode.nb_ebands;
+    scratch.follower.resize(follower_len, 0.0);
+    scratch.follower[..follower_len].fill(0.0);
+    let follower = &mut scratch.follower[..follower_len];
+    scratch.band_log_e3.resize(mode.nb_ebands, 0.0);
+    scratch.band_log_e3[..mode.nb_ebands].fill(0.0);
+    let band_log_e3 = &mut scratch.band_log_e3[..mode.nb_ebands];
     for c in 0..channels {
         let channel = c * mode.nb_ebands;
         band_log_e3[..end].copy_from_slice(&band_log_e2[channel..channel + end]);
@@ -794,6 +826,21 @@ pub struct CeltFrameDecodeScratch {
     bands: BandScratch,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct CeltFrameEncodeScratch {
+    band_log_e: Vec<f32>,
+    offsets: Vec<i32>,
+    importance: Vec<i32>,
+    cap: Vec<i32>,
+    error: Vec<f32>,
+    tf_res: Vec<i32>,
+    collapse_masks: Vec<u8>,
+    allocation: AllocationScratch,
+    bands: BandScratch,
+    dynalloc: DynallocAnalysisScratch,
+    tf_analysis: TfAnalysisScratch,
+}
+
 fn validate_spectral_args(
     mode: &CeltMode,
     config: &CeltFrameConfig,
@@ -837,12 +884,40 @@ pub fn encode_spectral_frame(
     mode: &CeltMode,
     config: &CeltFrameConfig,
     x: &mut [f32],
+    y: Option<&mut [f32]>,
+    band_e: &[f32],
+    old_band_e: &mut [f32],
+    energy_error: &mut [f32],
+    delayed_intra: &mut f32,
+    seed: &mut u32,
+) -> Result<CeltFrameEncodeResult> {
+    let mut scratch = CeltFrameEncodeScratch::default();
+    encode_spectral_frame_with_scratch(
+        mode,
+        config,
+        x,
+        y,
+        band_e,
+        old_band_e,
+        energy_error,
+        delayed_intra,
+        seed,
+        &mut scratch,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn encode_spectral_frame_with_scratch(
+    mode: &CeltMode,
+    config: &CeltFrameConfig,
+    x: &mut [f32],
     mut y: Option<&mut [f32]>,
     band_e: &[f32],
     old_band_e: &mut [f32],
     energy_error: &mut [f32],
     delayed_intra: &mut f32,
     seed: &mut u32,
+    scratch: &mut CeltFrameEncodeScratch,
 ) -> Result<CeltFrameEncodeResult> {
     let n = validate_spectral_args(
         mode,
@@ -868,38 +943,45 @@ pub fn encode_spectral_frame(
     let prefilter_symbol = encode_prefilter(config.start, total_bits, config.prefilter, &mut enc);
     let is_transient = encode_transient_flag(config.lm, total_bits, config.is_transient, &mut enc);
 
-    let mut band_log_e = vec![0.0f32; config.channels * mode.nb_ebands];
+    let band_count = config.channels * mode.nb_ebands;
+    scratch.band_log_e.resize(band_count, 0.0);
+    scratch.band_log_e[..band_count].fill(0.0);
+    let band_log_e = &mut scratch.band_log_e[..band_count];
     amp2_log2(
         mode,
         eff_end,
         config.end,
         band_e,
-        &mut band_log_e,
+        band_log_e,
         config.channels,
     );
-    let band_log_e2 = config.band_log_e2.as_deref().unwrap_or(&band_log_e);
-    if band_log_e2.len() < config.channels * mode.nb_ebands {
-        return Err(Error::BadArg);
+    scratch.offsets.resize(mode.nb_ebands, 0);
+    scratch.importance.resize(mode.nb_ebands, 13);
+    {
+        let band_log_e_read = &*band_log_e;
+        let band_log_e2 = config.band_log_e2.as_deref().unwrap_or(band_log_e_read);
+        if band_log_e2.len() < config.channels * mode.nb_ebands {
+            return Err(Error::BadArg);
+        }
+        dynalloc_analysis_with_scratch(
+            mode,
+            band_log_e_read,
+            band_log_e2,
+            old_band_e,
+            config.start,
+            config.end,
+            config.channels,
+            config.lm,
+            config.packet_bytes,
+            is_transient,
+            config.vbr,
+            config.constrained_vbr,
+            config.analysis_leak_boost.as_ref(),
+            &mut scratch.offsets,
+            &mut scratch.importance,
+            &mut scratch.dynalloc,
+        );
     }
-    let mut offsets = vec![0i32; mode.nb_ebands];
-    let mut importance = vec![13i32; mode.nb_ebands];
-    dynalloc_analysis(
-        mode,
-        &band_log_e,
-        &band_log_e2,
-        old_band_e,
-        config.start,
-        config.end,
-        config.channels,
-        config.lm,
-        config.packet_bytes,
-        is_transient,
-        config.vbr,
-        config.constrained_vbr,
-        config.analysis_leak_boost.as_ref(),
-        &mut offsets,
-        &mut importance,
-    );
     for c in 0..config.channels {
         for i in config.start..config.end {
             let idx = i + c * mode.nb_ebands;
@@ -908,16 +990,17 @@ pub fn encode_spectral_frame(
             }
         }
     }
-    let mut error = vec![0.0f32; config.channels * mode.nb_ebands];
+    scratch.error.resize(band_count, 0.0);
+    scratch.error[..band_count].fill(0.0);
     quant_coarse_energy(
         mode,
         config.start,
         config.end,
         eff_end,
-        &band_log_e,
+        band_log_e,
         old_band_e,
         total_bits as u32,
-        &mut error,
+        &mut scratch.error,
         &mut enc,
         config.channels,
         config.lm,
@@ -928,7 +1011,8 @@ pub fn encode_spectral_frame(
         0,
         false,
     );
-    let mut tf_res = vec![0i32; mode.nb_ebands];
+    scratch.tf_res.resize(mode.nb_ebands, 0);
+    scratch.tf_res[..mode.nb_ebands].fill(0);
     let tf_select = if config.packet_bytes >= 15 * config.channels {
         let tf_x = if config.tf_chan == 1 {
             y.as_ref().map(|right| &right[..]).unwrap_or(&x[..])
@@ -940,19 +1024,20 @@ pub fn encode_spectral_frame(
             mode,
             eff_end,
             is_transient,
-            &mut tf_res,
+            &mut scratch.tf_res,
             lambda,
             tf_x,
             config.lm,
             config.tf_estimate,
-            &importance,
+            &scratch.importance,
+            &mut scratch.tf_analysis,
         );
         for i in eff_end..config.end {
-            tf_res[i] = tf_res[eff_end - 1];
+            scratch.tf_res[i] = scratch.tf_res[eff_end - 1];
         }
         tf_select
     } else {
-        for value in tf_res.iter_mut().take(config.end) {
+        for value in scratch.tf_res.iter_mut().take(config.end) {
             *value = i32::from(is_transient);
         }
         0
@@ -961,20 +1046,20 @@ pub fn encode_spectral_frame(
         config.start,
         config.end,
         is_transient,
-        &mut tf_res,
+        &mut scratch.tf_res,
         config.lm,
         tf_select,
         &mut enc,
     );
     let spread = encode_spread_decision(config.spread, total_bits, &mut enc);
 
-    let cap = init_caps(mode, config.lm, config.channels);
+    init_caps_into(mode, config.lm, config.channels, &mut scratch.cap);
     let total_boost = encode_dynalloc_offsets(
         mode,
         config.start,
         config.end,
-        &mut offsets,
-        &cap,
+        &mut scratch.offsets,
+        &scratch.cap,
         total_bits_frac,
         config.channels,
         config.lm,
@@ -987,12 +1072,12 @@ pub fn encode_spectral_frame(
     bits -= anti_collapse_rsv;
     let allocation = {
         let mut allocation_coder = AllocationCoder::Encode(&mut enc);
-        clt_compute_allocation(
+        let info = clt_compute_allocation_with_scratch(
             mode,
             config.start,
             config.end,
-            &offsets,
-            &cap,
+            &scratch.offsets,
+            &scratch.cap,
             alloc_trim,
             config.intensity,
             config.dual_stereo,
@@ -1002,7 +1087,9 @@ pub fn encode_spectral_frame(
             Some(&mut allocation_coder),
             config.last_coded_bands,
             config.signal_bandwidth.min(config.end.saturating_sub(1)),
-        )
+            &mut scratch.allocation,
+        );
+        scratch.allocation.to_allocation(info)
     };
 
     quant_fine_energy(
@@ -1010,29 +1097,30 @@ pub fn encode_spectral_frame(
         config.start,
         config.end,
         old_band_e,
-        &mut error,
+        &mut scratch.error,
         &allocation.ebits,
         &mut enc,
         config.channels,
     );
 
     let short_blocks = is_transient;
-    let mut collapse_masks = vec![0u8; config.channels * mode.nb_ebands];
+    scratch.collapse_masks.resize(band_count, 0);
+    scratch.collapse_masks[..band_count].fill(0);
     {
         let mut band_coder = BandCoder::Encode(&mut enc);
         if config.channels == 1 {
-            quant_all_bands_mono(
+            quant_all_bands_mono_with_scratch(
                 mode,
                 config.start,
                 config.end,
                 x,
-                &mut collapse_masks,
+                &mut scratch.collapse_masks,
                 band_e,
                 &allocation.pulses,
                 short_blocks,
                 spread,
                 allocation.intensity,
-                &tf_res,
+                &scratch.tf_res,
                 total_bits_frac - anti_collapse_rsv,
                 allocation.balance,
                 &mut band_coder,
@@ -1041,23 +1129,24 @@ pub fn encode_spectral_frame(
                 seed,
                 0,
                 false,
+                &mut scratch.bands,
             );
         } else {
             let y = y.as_deref_mut().ok_or(Error::BadArg)?;
-            quant_all_bands_stereo(
+            quant_all_bands_stereo_with_scratch(
                 mode,
                 config.start,
                 config.end,
                 x,
                 y,
-                &mut collapse_masks,
+                &mut scratch.collapse_masks,
                 band_e,
                 &allocation.pulses,
                 short_blocks,
                 spread,
                 allocation.dual_stereo,
                 allocation.intensity,
-                &tf_res,
+                &scratch.tf_res,
                 total_bits_frac - anti_collapse_rsv,
                 allocation.balance,
                 &mut band_coder,
@@ -1067,6 +1156,7 @@ pub fn encode_spectral_frame(
                 9,
                 config.disable_inv,
                 false,
+                &mut scratch.bands,
             );
         }
     }
@@ -1079,7 +1169,7 @@ pub fn encode_spectral_frame(
         config.start,
         config.end,
         old_band_e,
-        &mut error,
+        &mut scratch.error,
         &allocation.ebits,
         &allocation.fine_priority,
         total_bits - enc.tell(),
@@ -1090,7 +1180,7 @@ pub fn encode_spectral_frame(
     for c in 0..config.channels {
         for i in config.start..config.end {
             let idx = i + c * mode.nb_ebands;
-            energy_error[idx] = error[idx].clamp(-0.5, 0.5);
+            energy_error[idx] = scratch.error[idx].clamp(-0.5, 0.5);
         }
     }
     enc.finish();
@@ -1111,8 +1201,8 @@ pub fn encode_spectral_frame(
     Ok(CeltFrameEncodeResult {
         data: enc.range_data().to_vec(),
         allocation,
-        tf_res,
-        collapse_masks,
+        tf_res: scratch.tf_res.clone(),
+        collapse_masks: scratch.collapse_masks.clone(),
         silence,
         prefilter_symbol,
         is_transient,

@@ -2,9 +2,11 @@ use crate::analysis::{AnalysisInfo, TonalityAnalysisState};
 use crate::celt::bands::{
     compute_band_energies, hysteresis_decision, normalise_bands, spreading_decision, SPREAD_NORMAL,
 };
-use crate::celt::codec::{encode_spectral_frame, CeltFrameConfig};
+use crate::celt::codec::{
+    encode_spectral_frame_with_scratch, CeltFrameConfig, CeltFrameEncodeScratch,
+};
 use crate::celt::mathops::{celt_log2, celt_sqrt};
-use crate::celt::mdct::clt_mdct_forward;
+use crate::celt::mdct::{clt_mdct_forward_with_scratch, MdctScratch};
 use crate::celt::modes::CeltMode;
 use crate::celt::pitch::{run_prefilter, COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD};
 use crate::celt::quant_bands::{amp2_log2, E_MEANS};
@@ -90,6 +92,9 @@ pub struct Encoder {
     vbr_prev_energy: f32,
     analysis: TonalityAnalysisState,
     analysis_info: AnalysisInfo,
+    mdct_scratch: MdctScratch,
+    spectral_scratch: CeltFrameEncodeScratch,
+    pcm_f32_scratch: Vec<f32>,
 }
 
 impl Encoder {
@@ -128,6 +133,9 @@ impl Encoder {
             vbr_prev_energy: 0.0,
             analysis: TonalityAnalysisState::new(),
             analysis_info: AnalysisInfo::default(),
+            mdct_scratch: MdctScratch::default(),
+            spectral_scratch: CeltFrameEncodeScratch::default(),
+            pcm_f32_scratch: Vec::new(),
             mode,
         })
     }
@@ -366,6 +374,7 @@ impl Encoder {
         stream_channels: usize,
         lm: usize,
         short_blocks: usize,
+        scratch: &mut MdctScratch,
     ) {
         let frame_size = mode.short_mdct_size << lm;
         if short_blocks > 0 {
@@ -374,7 +383,7 @@ impl Encoder {
                 for b in 0..short_blocks {
                     let input_offset = b * mode.short_mdct_size;
                     let output_offset = c * frame_size + b;
-                    clt_mdct_forward(
+                    clt_mdct_forward_with_scratch(
                         &mode.mdct,
                         &input[input_offset..],
                         &mut freq[output_offset..],
@@ -382,13 +391,14 @@ impl Encoder {
                         mode.overlap,
                         shift,
                         short_blocks,
+                        scratch,
                     );
                 }
             }
         } else {
             let shift = mode.max_lm - lm;
             for (c, input) in inputs.iter().take(channels).enumerate() {
-                clt_mdct_forward(
+                clt_mdct_forward_with_scratch(
                     &mode.mdct,
                     input,
                     &mut freq[c * frame_size..(c + 1) * frame_size],
@@ -396,6 +406,7 @@ impl Encoder {
                     mode.overlap,
                     shift,
                     1,
+                    scratch,
                 );
             }
         }
@@ -731,6 +742,7 @@ impl Encoder {
             stream_channels,
             lm,
             short_blocks,
+            &mut self.mdct_scratch,
         );
 
         let eff_end = self.mode.eff_ebands;
@@ -756,6 +768,7 @@ impl Encoder {
                 stream_channels,
                 lm,
                 0,
+                &mut self.mdct_scratch,
             );
             let mut band_e2 = vec![0.0f32; stream_channels * self.mode.nb_ebands];
             compute_band_energies(
@@ -808,6 +821,7 @@ impl Encoder {
                 stream_channels,
                 lm,
                 m,
+                &mut self.mdct_scratch,
             );
             compute_band_energies(&self.mode, &freq, &mut band_e, eff_end, stream_channels, lm);
             amp2_log2(
@@ -910,7 +924,7 @@ impl Encoder {
         }
 
         let encoded = if stream_channels == 1 {
-            encode_spectral_frame(
+            encode_spectral_frame_with_scratch(
                 &self.mode,
                 &config,
                 &mut norm,
@@ -920,10 +934,11 @@ impl Encoder {
                 &mut self.energy_error[..self.mode.nb_ebands],
                 &mut self.delayed_intra,
                 &mut self.seed,
+                &mut self.spectral_scratch,
             )?
         } else {
             let (left, right) = norm.split_at_mut(n);
-            encode_spectral_frame(
+            encode_spectral_frame_with_scratch(
                 &self.mode,
                 &config,
                 left,
@@ -933,6 +948,7 @@ impl Encoder {
                 &mut self.energy_error,
                 &mut self.delayed_intra,
                 &mut self.seed,
+                &mut self.spectral_scratch,
             )?
         };
         if stream_channels == 2 {
@@ -986,11 +1002,18 @@ impl Encoder {
     }
 
     pub fn encode_i16(&mut self, pcm: &[i16], frame_size: usize) -> Result<Vec<u8>> {
-        let pcm_f32 = pcm
-            .iter()
-            .map(|sample| *sample as f32 / 32768.0)
-            .collect::<Vec<_>>();
-        self.encode_f32(&pcm_f32, frame_size)
+        let required = frame_size * self.channels;
+        if pcm.len() < required {
+            return Err(Error::BadArg);
+        }
+        let mut pcm_f32 = std::mem::take(&mut self.pcm_f32_scratch);
+        pcm_f32.resize(required, 0.0);
+        for (dst, src) in pcm_f32.iter_mut().zip(pcm.iter().take(required)) {
+            *dst = *src as f32 / 32768.0;
+        }
+        let result = self.encode_f32(&pcm_f32, frame_size);
+        self.pcm_f32_scratch = pcm_f32;
+        result
     }
 
     pub fn encode_i16_with_frame_bytes(
@@ -999,11 +1022,18 @@ impl Encoder {
         frame_size: usize,
         frame_bytes: usize,
     ) -> Result<Vec<u8>> {
-        let pcm_f32 = pcm
-            .iter()
-            .map(|sample| *sample as f32 / 32768.0)
-            .collect::<Vec<_>>();
-        self.encode_f32_with_frame_bytes(&pcm_f32, frame_size, frame_bytes)
+        let required = frame_size * self.channels;
+        if pcm.len() < required {
+            return Err(Error::BadArg);
+        }
+        let mut pcm_f32 = std::mem::take(&mut self.pcm_f32_scratch);
+        pcm_f32.resize(required, 0.0);
+        for (dst, src) in pcm_f32.iter_mut().zip(pcm.iter().take(required)) {
+            *dst = *src as f32 / 32768.0;
+        }
+        let result = self.encode_f32_with_frame_bytes(&pcm_f32, frame_size, frame_bytes);
+        self.pcm_f32_scratch = pcm_f32;
+        result
     }
 
     pub fn encode_f32(&mut self, pcm: &[f32], frame_size: usize) -> Result<Vec<u8>> {

@@ -9,7 +9,7 @@ use crate::celt::mathops::{
 };
 use crate::celt::modes::{bits2pulses_signed, pulses2bits_signed, CeltMode};
 use crate::celt::quant_bands::E_MEANS;
-use crate::celt::vq::{alg_quant, alg_unquant_with_scratch, renormalise_vector};
+use crate::celt::vq::{alg_quant_with_scratch, alg_unquant_with_scratch, renormalise_vector};
 
 pub const SPREAD_NONE: i32 = 0;
 pub const SPREAD_LIGHT: i32 = 1;
@@ -33,6 +33,8 @@ pub struct BandScratch {
     pulse_y: Vec<i32>,
     pulse_u: Vec<u32>,
     pulse_cache: CwrsDecodeCache,
+    pvq_y: Vec<f32>,
+    pvq_signx: Vec<bool>,
 }
 
 pub fn hysteresis_decision(
@@ -580,9 +582,13 @@ impl BandCoder<'_> {
         pulse_y: &mut Vec<i32>,
         pulse_u: &mut Vec<u32>,
         pulse_cache: &mut CwrsDecodeCache,
+        pvq_y: &mut Vec<f32>,
+        pvq_signx: &mut Vec<bool>,
     ) -> u32 {
         match self {
-            Self::Encode(enc) => alg_quant(x, n, k, spread, b, enc, gain, resynth),
+            Self::Encode(enc) => alg_quant_with_scratch(
+                x, n, k, spread, b, enc, gain, resynth, pulse_y, pvq_y, pvq_signx,
+            ),
             Self::Decode(dec) => alg_unquant_with_scratch(
                 x,
                 n,
@@ -900,6 +906,8 @@ fn quant_partition(
     pulse_y: &mut Vec<i32>,
     pulse_u: &mut Vec<u32>,
     pulse_cache: &mut CwrsDecodeCache,
+    pvq_y: &mut Vec<f32>,
+    pvq_signx: &mut Vec<bool>,
 ) -> u32 {
     let mode = ctx.mode;
     let cache_offset = mode.cache.index[(lm + 1) as usize * mode.nb_ebands + ctx.band] as usize;
@@ -960,6 +968,8 @@ fn quant_partition(
                 pulse_y,
                 pulse_u,
                 pulse_cache,
+                pvq_y,
+                pvq_signx,
             );
             let rebalance = mbits - (rebalance - ctx.remaining_bits);
             if rebalance > 3 << BITRES && sctx.itheta != 0 {
@@ -979,6 +989,8 @@ fn quant_partition(
                 pulse_y,
                 pulse_u,
                 pulse_cache,
+                pvq_y,
+                pvq_signx,
             ) << (blocks0 >> 1);
             cm
         } else {
@@ -996,6 +1008,8 @@ fn quant_partition(
                 pulse_y,
                 pulse_u,
                 pulse_cache,
+                pvq_y,
+                pvq_signx,
             ) << (blocks0 >> 1);
             let rebalance = sbits - (rebalance - ctx.remaining_bits);
             if rebalance > 3 << BITRES && sctx.itheta != 16384 {
@@ -1015,6 +1029,8 @@ fn quant_partition(
                 pulse_y,
                 pulse_u,
                 pulse_cache,
+                pvq_y,
+                pvq_signx,
             );
             cm
         }
@@ -1042,6 +1058,8 @@ fn quant_partition(
                 pulse_y,
                 pulse_u,
                 pulse_cache,
+                pvq_y,
+                pvq_signx,
             )
         } else if ctx.resynth {
             let cm_mask = (1u32 << blocks) - 1;
@@ -1090,6 +1108,8 @@ fn quant_band_mono(
     pulse_y: &mut Vec<i32>,
     pulse_u: &mut Vec<u32>,
     pulse_cache: &mut CwrsDecodeCache,
+    pvq_y: &mut Vec<f32>,
+    pvq_signx: &mut Vec<bool>,
     gain: f32,
     fill: u32,
 ) -> u32 {
@@ -1185,6 +1205,8 @@ fn quant_band_mono(
         pulse_y,
         pulse_u,
         pulse_cache,
+        pvq_y,
+        pvq_signx,
     );
 
     if ctx.resynth {
@@ -1264,6 +1286,8 @@ fn quant_band_stereo(
     pulse_y: &mut Vec<i32>,
     pulse_u: &mut Vec<u32>,
     pulse_cache: &mut CwrsDecodeCache,
+    pvq_y: &mut Vec<f32>,
+    pvq_signx: &mut Vec<bool>,
     fill: u32,
 ) -> u32 {
     if n == 1 {
@@ -1309,6 +1333,8 @@ fn quant_band_stereo(
                 pulse_y,
                 pulse_u,
                 pulse_cache,
+                pvq_y,
+                pvq_signx,
                 1.0,
                 orig_fill,
             );
@@ -1334,6 +1360,8 @@ fn quant_band_stereo(
                 pulse_y,
                 pulse_u,
                 pulse_cache,
+                pvq_y,
+                pvq_signx,
                 1.0,
                 orig_fill,
             );
@@ -1375,6 +1403,8 @@ fn quant_band_stereo(
                 pulse_y,
                 pulse_u,
                 pulse_cache,
+                pvq_y,
+                pvq_signx,
                 1.0,
                 fill,
             );
@@ -1396,6 +1426,8 @@ fn quant_band_stereo(
                 pulse_y,
                 pulse_u,
                 pulse_cache,
+                pvq_y,
+                pvq_signx,
                 side,
                 fill >> blocks,
             );
@@ -1415,6 +1447,8 @@ fn quant_band_stereo(
                 pulse_y,
                 pulse_u,
                 pulse_cache,
+                pvq_y,
+                pvq_signx,
                 side,
                 fill >> blocks,
             );
@@ -1436,6 +1470,8 @@ fn quant_band_stereo(
                 pulse_y,
                 pulse_u,
                 pulse_cache,
+                pvq_y,
+                pvq_signx,
                 1.0,
                 fill,
             );
@@ -1666,6 +1702,8 @@ pub fn quant_all_bands_mono_with_scratch(
             &mut scratch.pulse_y,
             &mut scratch.pulse_u,
             &mut scratch.pulse_cache,
+            &mut scratch.pvq_y,
+            &mut scratch.pvq_signx,
             1.0,
             x_cm,
         );
@@ -1919,6 +1957,8 @@ pub fn quant_all_bands_stereo_with_scratch(
                 &mut scratch.pulse_y,
                 &mut scratch.pulse_u,
                 &mut scratch.pulse_cache,
+                &mut scratch.pvq_y,
+                &mut scratch.pvq_signx,
                 1.0,
                 x_cm,
             );
@@ -1941,6 +1981,8 @@ pub fn quant_all_bands_stereo_with_scratch(
                 &mut scratch.pulse_y,
                 &mut scratch.pulse_u,
                 &mut scratch.pulse_cache,
+                &mut scratch.pvq_y,
+                &mut scratch.pvq_signx,
                 1.0,
                 y_cm,
             );
@@ -1981,6 +2023,8 @@ pub fn quant_all_bands_stereo_with_scratch(
                     &mut scratch.pulse_y,
                     &mut scratch.pulse_u,
                     &mut scratch.pulse_cache,
+                    &mut scratch.pvq_y,
+                    &mut scratch.pvq_signx,
                     cm,
                 );
                 let dist_down =
@@ -2012,6 +2056,8 @@ pub fn quant_all_bands_stereo_with_scratch(
                     &mut scratch.pulse_y,
                     &mut scratch.pulse_u,
                     &mut scratch.pulse_cache,
+                    &mut scratch.pvq_y,
+                    &mut scratch.pvq_signx,
                     cm,
                 );
                 let dist_up =
@@ -2054,6 +2100,8 @@ pub fn quant_all_bands_stereo_with_scratch(
                     &mut scratch.pulse_y,
                     &mut scratch.pulse_u,
                     &mut scratch.pulse_cache,
+                    &mut scratch.pvq_y,
+                    &mut scratch.pvq_signx,
                     cm,
                 );
             }

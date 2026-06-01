@@ -178,6 +178,18 @@ v1.5.2:...` or a pinned worktree when validating behavior.
   identical entropy decisions, MDCT/postfilter math, and decoded samples for the
   same packet. Treat any difference as a correctness bug, not as a quality
   tradeoff.
+- Safe encode perf pass from 2026-06-01: keep encode optimization limited to
+  storage reuse. The encoder now reuses wasm `i16` -> `f32` conversion storage,
+  forward-MDCT scratch, CELT spectral encode scratch, TF/dynalloc/allocation
+  scratch, and encode-side PVQ/band scratch. This intentionally does not change
+  PVQ search, RDO thresholds, bitrate allocation policy, entropy symbols, or
+  quality decisions; packet differences from equivalent input should be treated
+  as correctness bugs.
+- Browser smoke after the safe encode pass
+  (`/tmp/libopus-browser-wasm-safe-encode-smoke.json`) used a 3-second,
+  one-repeat 128 kb/s run. Rust CBR encode was around `-12%` versus the
+  `libopusjs` default-VBR path in that noisy spot check, while decode stayed
+  around `+2%`; use the longer repeated grid before drawing conclusions.
 - Browser-loaded synthetic grids after the CWRS cache are still load-sensitive.
   The focused 30-second 196 kb/s run
   (`/tmp/libopus-browser-wasm-after-cwrs-4way-cache-196.json`) showed Rust CBR

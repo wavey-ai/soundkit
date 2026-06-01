@@ -95,6 +95,30 @@ pub fn clt_mdct_forward(
     shift: usize,
     stride: usize,
 ) {
+    let mut scratch = MdctScratch::default();
+    clt_mdct_forward_with_scratch(
+        lookup,
+        input,
+        output,
+        window,
+        overlap,
+        shift,
+        stride,
+        &mut scratch,
+    );
+}
+
+/// Compute a forward MDCT and scale by `4/N` using caller-owned scratch buffers.
+pub fn clt_mdct_forward_with_scratch(
+    lookup: &MdctLookup,
+    input: &[f32],
+    output: &mut [f32],
+    window: &[f32],
+    overlap: usize,
+    shift: usize,
+    stride: usize,
+    scratch: &mut MdctScratch,
+) {
     let st = &lookup.kfft[shift];
     let trig = lookup.trig_for_shift(shift);
     let n = lookup.n_for_shift(shift);
@@ -105,8 +129,14 @@ pub fn clt_mdct_forward(
     assert!(window.len() >= overlap);
     assert!(output.len() > stride * (n2 - 1));
 
-    let mut f = vec![0.0f32; n2];
-    let mut f2 = vec![KissFftCpx::default(); n4];
+    if scratch.buf.len() < n2 {
+        scratch.buf.resize(n2, 0.0);
+    }
+    let f = &mut scratch.buf[..n2];
+    if scratch.f2.len() < n4 {
+        scratch.f2.resize(n4, KissFftCpx::default());
+    }
+    let f2 = &mut scratch.f2[..n4];
 
     let mut xp1 = overlap >> 1;
     let mut xp2 = n2 - 1 + (overlap >> 1);
@@ -159,7 +189,7 @@ pub fn clt_mdct_forward(
         f2[st.bitrev()[i]] = KissFftCpx::new(yr * scale, yi * scale);
     }
 
-    opus_fft_impl(st, &mut f2);
+    opus_fft_impl(st, f2);
 
     let mut yp1 = 0usize;
     let mut yp2 = stride * (n2 - 1);

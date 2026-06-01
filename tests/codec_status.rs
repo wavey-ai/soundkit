@@ -46,6 +46,33 @@ fn encode_and_decode_48k_celt_only_smoke_path() {
 }
 
 #[test]
+fn encode_i16_matches_equivalent_f32_input() {
+    let pcm_i16 = (0..960)
+        .flat_map(|i| {
+            let t = i as f32;
+            [
+                (0.18 * (0.017 * t).sin() * 32767.0).round() as i16,
+                (0.16 * (0.019 * t + 0.4).sin() * 32767.0).round() as i16,
+            ]
+        })
+        .collect::<Vec<_>>();
+    let pcm_f32 = pcm_i16
+        .iter()
+        .map(|sample| *sample as f32 / 32768.0)
+        .collect::<Vec<_>>();
+
+    let mut i16_encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut f32_encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    i16_encoder.set_bitrate(128_000).unwrap();
+    f32_encoder.set_bitrate(128_000).unwrap();
+
+    assert_eq!(
+        i16_encoder.encode_i16(&pcm_i16, 960).unwrap(),
+        f32_encoder.encode_f32(&pcm_f32, 960).unwrap()
+    );
+}
+
+#[test]
 fn celt_raw_frames_cover_supported_sizes_and_payload_budgets() {
     for channels in [1usize, 2] {
         for &frame_size in &CELT_FRAME_SIZES_48K {
