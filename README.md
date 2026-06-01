@@ -115,6 +115,28 @@ use this benchmark only to validate future targeted SIMD work.
 
 ## Full-track wasm comparison
 
+For a repeatable browser-loaded comparison against the sibling `libopusjs`
+Emscripten build, run:
+
+```sh
+npm run bench:browser-wasm -- --seconds 10 --repeats 3 \
+  --cases c,rust-cbr,rust-vbr,rust-cbr-reuse,rust-vbr-reuse
+```
+
+The benchmark serves the local `pkg/libopus_rs_bg.wasm` wasm-pack output and
+`../libopusjs/release/libopus.wasm` over localhost, launches a fresh headless
+Chrome for each codec/bitrate case, and measures the public browser JS API path
+for 20 ms stereo CELT frames. The default bitrate set is 48, 128, and
+196 kb/s. Use `--json /tmp/wasm-browser-bench.json` to keep the raw samples.
+The fixture is deterministic synthetic 48 kHz stereo audio so the run can be
+repeated when system load is lower.
+
+The Rust cases also support `rust-cbr-reuse` and `rust-vbr-reuse`, which decode
+into the wasm decoder's owned output buffer and expose `outputPtr`/`outputLen`
+for JS callers that want to avoid cloning the result. To capture a Chrome CPU
+profile around a Rust decode loop, run a single Rust case with
+`--profile-rust-decode /tmp/rust-decode.cpuprofile.json`.
+
 A full-track browser-shape comparison was run on:
 
 ```text

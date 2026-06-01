@@ -6,6 +6,66 @@ use crate::celt::mathops::ec_ilog;
 pub const MAX_PSEUDO: usize = 40;
 pub const LOG_MAX_PSEUDO: usize = 6;
 pub const CELT_MAX_PULSES: usize = 128;
+const CWRS_ROW_CACHE_WAYS: usize = 4;
+const CWRS_ROW_CACHE_SETS: usize = 32;
+const CWRS_ROW_CACHE_LIMIT: usize = CWRS_ROW_CACHE_WAYS * CWRS_ROW_CACHE_SETS;
+
+#[derive(Clone, Debug, Default)]
+pub struct CwrsDecodeCache {
+    entries: Vec<CwrsRowCacheEntry>,
+    replace_mask: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CwrsRowCacheEntry {
+    n: usize,
+    k: usize,
+    nc: u32,
+    row: Vec<u32>,
+}
+
+impl CwrsDecodeCache {
+    fn fill_row(&mut self, n: usize, k: usize, u: &mut Vec<u32>) -> u32 {
+        debug_assert!(n >= 2);
+        debug_assert!(k > 0);
+        if u.len() < k + 2 {
+            u.resize(k + 2, 0);
+        }
+        if self.entries.is_empty() {
+            self.entries
+                .resize_with(CWRS_ROW_CACHE_LIMIT, CwrsRowCacheEntry::default);
+        }
+
+        let set = cwrs_row_cache_set(n, k);
+        let first = set * CWRS_ROW_CACHE_WAYS;
+        for way in 0..CWRS_ROW_CACHE_WAYS {
+            let entry = &self.entries[first + way];
+            if entry.n == n && entry.k == k {
+                u[..k + 2].copy_from_slice(&entry.row);
+                return entry.nc;
+            }
+        }
+
+        let nc = ncwrs_urow(n, k, &mut u[..k + 2]);
+        let shift = set * 2;
+        let way = ((self.replace_mask >> shift) & 3) as usize;
+        let next_way = (way + 1) & (CWRS_ROW_CACHE_WAYS - 1);
+        self.replace_mask = (self.replace_mask & !(3u64 << shift)) | ((next_way as u64) << shift);
+        let entry = &mut self.entries[first + way];
+        entry.n = n;
+        entry.k = k;
+        entry.nc = nc;
+        entry.row.resize(k + 2, 0);
+        entry.row.copy_from_slice(&u[..k + 2]);
+        nc
+    }
+}
+
+#[inline]
+fn cwrs_row_cache_set(n: usize, k: usize) -> usize {
+    let hash = n.wrapping_mul(31) ^ k.wrapping_mul(17);
+    hash & (CWRS_ROW_CACHE_SETS - 1)
+}
 
 #[inline]
 fn abs_i32_to_usize(x: i32) -> usize {
@@ -153,7 +213,8 @@ pub fn decode_index(n: usize, k: usize, mut i: u32, y: &mut [i32], u: &mut [u32]
 
     let mut k = k;
     let mut yy = 0i32;
-    for yj_out in y.iter_mut().take(n) {
+    for pos in 0..n {
+        let yj_out = &mut y[pos];
         let mut p = u[k + 1];
         let s = if i >= p { -1 } else { 0 };
         if s != 0 {
@@ -172,6 +233,13 @@ pub fn decode_index(n: usize, k: usize, mut i: u32, y: &mut [i32], u: &mut [u32]
         let val = (yj + s) ^ s;
         *yj_out = val;
         yy += val * val;
+        if pos + 1 == n {
+            break;
+        }
+        if k == 0 {
+            y[pos + 1..n].fill(0);
+            break;
+        }
         uprev(u, k + 2, 0);
     }
     yy
@@ -247,8 +315,39 @@ pub fn decode_pulses(y: &mut [i32], n: usize, k: usize, dec: &mut RangeDecoder) 
         y[0] = if i != 0 { -(k as i32) } else { k as i32 };
         return (k * k) as i32;
     }
-    let mut u = vec![0u32; k + 2];
-    let nc = ncwrs_urow(n, k, &mut u);
+    let mut u_stack = [0u32; CELT_MAX_PULSES + 2];
+    let mut u_heap = Vec::new();
+    let u = if k <= CELT_MAX_PULSES {
+        &mut u_stack[..k + 2]
+    } else {
+        u_heap.resize(k + 2, 0);
+        &mut u_heap[..]
+    };
+    let nc = ncwrs_urow(n, k, u);
     let i = dec.decode_uint(nc);
-    decode_index(n, k, i, y, &mut u)
+    decode_index(n, k, i, y, u)
+}
+
+/// Decode a pulse vector using caller-owned row scratch and a small `U(n,k)` row cache.
+pub fn decode_pulses_with_cache(
+    y: &mut [i32],
+    n: usize,
+    k: usize,
+    dec: &mut RangeDecoder,
+    u_scratch: &mut Vec<u32>,
+    row_cache: &mut CwrsDecodeCache,
+) -> i32 {
+    debug_assert!(y.len() >= n);
+    if k == 0 {
+        y[..n].fill(0);
+        return 0;
+    }
+    if n == 1 {
+        let i = dec.decode_uint(2);
+        y[0] = if i != 0 { -(k as i32) } else { k as i32 };
+        return (k * k) as i32;
+    }
+    let nc = row_cache.fill_row(n, k, u_scratch);
+    let i = dec.decode_uint(nc);
+    decode_index(n, k, i, y, &mut u_scratch[..k + 2])
 }

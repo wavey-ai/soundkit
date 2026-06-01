@@ -27,6 +27,54 @@ pub struct Allocation {
     pub dual_stereo: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllocationInfo {
+    pub coded_bands: usize,
+    pub balance: i32,
+    pub intensity: usize,
+    pub dual_stereo: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AllocationScratch {
+    bits1: Vec<i32>,
+    bits2: Vec<i32>,
+    thresh: Vec<i32>,
+    trim_offset: Vec<i32>,
+    pub pulses: Vec<i32>,
+    pub ebits: Vec<i32>,
+    pub fine_priority: Vec<i32>,
+}
+
+impl AllocationScratch {
+    fn ensure_len(&mut self, len: usize) {
+        resize_and_zero(&mut self.bits1, len);
+        resize_and_zero(&mut self.bits2, len);
+        resize_and_zero(&mut self.thresh, len);
+        resize_and_zero(&mut self.trim_offset, len);
+        resize_and_zero(&mut self.pulses, len);
+        resize_and_zero(&mut self.ebits, len);
+        resize_and_zero(&mut self.fine_priority, len);
+    }
+
+    pub fn to_allocation(&self, info: AllocationInfo) -> Allocation {
+        Allocation {
+            coded_bands: info.coded_bands,
+            balance: info.balance,
+            pulses: self.pulses.clone(),
+            ebits: self.ebits.clone(),
+            fine_priority: self.fine_priority.clone(),
+            intensity: info.intensity,
+            dual_stereo: info.dual_stereo,
+        }
+    }
+}
+
+fn resize_and_zero<T: Default + Copy>(buffer: &mut Vec<T>, len: usize) {
+    buffer.resize(len, T::default());
+    buffer[..len].fill(T::default());
+}
+
 #[allow(clippy::too_many_arguments)]
 fn interp_bits2pulses(
     mode: &CeltMode,
@@ -276,6 +324,45 @@ pub fn clt_compute_allocation(
     prev: usize,
     signal_bandwidth: usize,
 ) -> Allocation {
+    let mut scratch = AllocationScratch::default();
+    let info = clt_compute_allocation_with_scratch(
+        mode,
+        start,
+        end,
+        offsets,
+        cap,
+        alloc_trim,
+        intensity,
+        dual_stereo,
+        total,
+        channels,
+        lm,
+        coder,
+        prev,
+        signal_bandwidth,
+        &mut scratch,
+    );
+    scratch.to_allocation(info)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn clt_compute_allocation_with_scratch(
+    mode: &CeltMode,
+    start: usize,
+    end: usize,
+    offsets: &[i32],
+    cap: &[i32],
+    alloc_trim: i32,
+    intensity: usize,
+    dual_stereo: bool,
+    total: i32,
+    channels: usize,
+    lm: usize,
+    coder: Option<&mut AllocationCoder<'_>>,
+    prev: usize,
+    signal_bandwidth: usize,
+    scratch: &mut AllocationScratch,
+) -> AllocationInfo {
     let len = mode.nb_ebands;
     assert!(end <= len);
     assert!(offsets.len() >= len);
@@ -299,13 +386,14 @@ pub fn clt_compute_allocation(
         }
     }
 
-    let mut bits1 = vec![0i32; len];
-    let mut bits2 = vec![0i32; len];
-    let mut thresh = vec![0i32; len];
-    let mut trim_offset = vec![0i32; len];
-    let mut pulses = vec![0i32; len];
-    let mut ebits = vec![0i32; len];
-    let mut fine_priority = vec![0i32; len];
+    scratch.ensure_len(len);
+    let bits1 = &mut scratch.bits1[..len];
+    let bits2 = &mut scratch.bits2[..len];
+    let thresh = &mut scratch.thresh[..len];
+    let trim_offset = &mut scratch.trim_offset[..len];
+    let pulses = &mut scratch.pulses[..len];
+    let ebits = &mut scratch.ebits[..len];
+    let fine_priority = &mut scratch.fine_priority[..len];
 
     for j in start..end {
         let width = mode.ebands[j + 1] as i32 - mode.ebands[j] as i32;
@@ -396,9 +484,9 @@ pub fn clt_compute_allocation(
         intensity_rsv,
         &mut dual_stereo,
         dual_stereo_rsv,
-        &mut pulses,
-        &mut ebits,
-        &mut fine_priority,
+        pulses,
+        ebits,
+        fine_priority,
         channels,
         lm,
         coder,
@@ -406,12 +494,9 @@ pub fn clt_compute_allocation(
         signal_bandwidth,
     );
 
-    Allocation {
+    AllocationInfo {
         coded_bands,
         balance,
-        pulses,
-        ebits,
-        fine_priority,
         intensity,
         dual_stereo,
     }

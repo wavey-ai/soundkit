@@ -86,7 +86,8 @@ impl EncodeResult {
 #[wasm_bindgen]
 pub struct Decoder {
     inner: RustDecoder,
-    channels: usize,
+    output: Vec<i16>,
+    decoded_size: usize,
 }
 
 #[wasm_bindgen]
@@ -99,20 +100,51 @@ impl Decoder {
             ));
         }
         let inner = RustDecoder::new(sample_rate, channels).map_err(opus_error)?;
-        Ok(Self { inner, channels })
+        Ok(Self {
+            inner,
+            output: Vec::new(),
+            decoded_size: 0,
+        })
     }
 
     #[wasm_bindgen(js_name = dec_frame)]
     pub fn dec_frame(&mut self, packet: &[u8]) -> Result<DecodeResult, JsValue> {
-        let output = self.inner.decode_i16(packet, false).map_err(opus_error)?;
-        let decoded_size = output.len() / self.channels.max(1);
+        self.decode_reuse(packet)?;
         Ok(DecodeResult {
-            output,
-            decoded_size,
+            output: self.output.clone(),
+            decoded_size: self.decoded_size,
         })
     }
 
+    #[wasm_bindgen(js_name = dec_frame_reuse)]
+    pub fn dec_frame_reuse(&mut self, packet: &[u8]) -> Result<usize, JsValue> {
+        self.decode_reuse(packet)
+    }
+
+    #[wasm_bindgen(getter, js_name = decodedSize)]
+    pub fn decoded_size(&self) -> usize {
+        self.decoded_size
+    }
+
+    #[wasm_bindgen(getter, js_name = outputPtr)]
+    pub fn output_ptr(&self) -> usize {
+        self.output.as_ptr() as usize
+    }
+
+    #[wasm_bindgen(getter, js_name = outputLen)]
+    pub fn output_len(&self) -> usize {
+        self.output.len()
+    }
+
     pub fn destroy(self) {}
+
+    fn decode_reuse(&mut self, packet: &[u8]) -> Result<usize, JsValue> {
+        self.decoded_size = self
+            .inner
+            .decode_i16_into(packet, false, &mut self.output)
+            .map_err(opus_error)?;
+        Ok(self.decoded_size)
+    }
 }
 
 #[wasm_bindgen]

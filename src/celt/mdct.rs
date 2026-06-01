@@ -13,6 +13,12 @@ pub struct MdctLookup {
     trig_offset: Vec<usize>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct MdctScratch {
+    f2: Vec<KissFftCpx>,
+    buf: Vec<f32>,
+}
+
 impl MdctLookup {
     pub fn new(n: usize, maxshift: usize) -> Option<Self> {
         if n < 4 || n % 4 != 0 {
@@ -181,6 +187,30 @@ pub fn clt_mdct_backward(
     shift: usize,
     stride: usize,
 ) {
+    let mut scratch = MdctScratch::default();
+    clt_mdct_backward_with_scratch(
+        lookup,
+        input,
+        output,
+        window,
+        overlap,
+        shift,
+        stride,
+        &mut scratch,
+    );
+}
+
+/// Compute a backward MDCT using caller-owned scratch buffers.
+pub fn clt_mdct_backward_with_scratch(
+    lookup: &MdctLookup,
+    input: &[f32],
+    output: &mut [f32],
+    window: &[f32],
+    overlap: usize,
+    shift: usize,
+    stride: usize,
+    scratch: &mut MdctScratch,
+) {
     let st = &lookup.kfft[shift];
     let trig = lookup.trig_for_shift(shift);
     let n = lookup.n_for_shift(shift);
@@ -191,7 +221,10 @@ pub fn clt_mdct_backward(
     assert!(output.len() >= (overlap >> 1) + n2);
     assert!(window.len() >= overlap);
 
-    let mut f2 = vec![KissFftCpx::default(); n4];
+    if scratch.f2.len() < n4 {
+        scratch.f2.resize(n4, KissFftCpx::default());
+    }
+    let f2 = &mut scratch.f2[..n4];
     let mut xp1 = 0usize;
     let mut xp2 = stride * (n2 - 1);
     for i in 0..n4 {
@@ -207,9 +240,12 @@ pub fn clt_mdct_backward(
         }
     }
 
-    opus_fft_impl(st, &mut f2);
+    opus_fft_impl(st, f2);
 
-    let mut buf = vec![0.0f32; n2];
+    if scratch.buf.len() < n2 {
+        scratch.buf.resize(n2, 0.0);
+    }
+    let buf = &mut scratch.buf[..n2];
     for i in 0..n4 {
         buf[2 * i] = f2[i].r;
         buf[2 * i + 1] = f2[i].i;

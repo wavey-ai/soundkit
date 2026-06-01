@@ -1,6 +1,7 @@
 //! CELT band helper routines, ported from official `celt/bands.c`.
 
 use crate::celt::cwrs::get_pulses;
+use crate::celt::cwrs::CwrsDecodeCache;
 use crate::celt::entropy::{RangeDecoder, RangeEncoder};
 use crate::celt::mathops::{
     bitexact_cos, bitexact_log2tan, celt_exp2, celt_exp2_db, celt_rsqrt_norm, celt_sqrt,
@@ -8,7 +9,7 @@ use crate::celt::mathops::{
 };
 use crate::celt::modes::{bits2pulses_signed, pulses2bits_signed, CeltMode};
 use crate::celt::quant_bands::E_MEANS;
-use crate::celt::vq::{alg_quant, alg_unquant, renormalise_vector};
+use crate::celt::vq::{alg_quant, alg_unquant_with_scratch, renormalise_vector};
 
 pub const SPREAD_NONE: i32 = 0;
 pub const SPREAD_LIGHT: i32 = 1;
@@ -21,6 +22,18 @@ const QTHETA_OFFSET_TWOPHASE: i32 = 16;
 const ORDERY_TABLE: [usize; 30] = [
     1, 0, 3, 0, 2, 1, 7, 0, 4, 3, 6, 1, 5, 2, 15, 0, 8, 7, 12, 3, 11, 4, 14, 1, 9, 6, 13, 2, 10, 5,
 ];
+
+#[derive(Clone, Debug, Default)]
+pub struct BandScratch {
+    norm: Vec<f32>,
+    norm2: Vec<f32>,
+    lowband_tmp: Vec<f32>,
+    lowband_out: Vec<f32>,
+    lowband_out2: Vec<f32>,
+    pulse_y: Vec<i32>,
+    pulse_u: Vec<u32>,
+    pulse_cache: CwrsDecodeCache,
+}
 
 pub fn hysteresis_decision(
     val: f32,
@@ -564,10 +577,24 @@ impl BandCoder<'_> {
         b: usize,
         gain: f32,
         resynth: bool,
+        pulse_y: &mut Vec<i32>,
+        pulse_u: &mut Vec<u32>,
+        pulse_cache: &mut CwrsDecodeCache,
     ) -> u32 {
         match self {
             Self::Encode(enc) => alg_quant(x, n, k, spread, b, enc, gain, resynth),
-            Self::Decode(dec) => alg_unquant(x, n, k, spread, b, dec, gain),
+            Self::Decode(dec) => alg_unquant_with_scratch(
+                x,
+                n,
+                k,
+                spread,
+                b,
+                dec,
+                gain,
+                pulse_y,
+                pulse_u,
+                pulse_cache,
+            ),
         }
     }
 
@@ -870,6 +897,9 @@ fn quant_partition(
     lm: isize,
     gain: f32,
     mut fill: u32,
+    pulse_y: &mut Vec<i32>,
+    pulse_u: &mut Vec<u32>,
+    pulse_cache: &mut CwrsDecodeCache,
 ) -> u32 {
     let mode = ctx.mode;
     let cache_offset = mode.cache.index[(lm + 1) as usize * mode.nb_ebands + ctx.band] as usize;
@@ -927,6 +957,9 @@ fn quant_partition(
                 lm2,
                 gain * mid,
                 fill,
+                pulse_y,
+                pulse_u,
+                pulse_cache,
             );
             let rebalance = mbits - (rebalance - ctx.remaining_bits);
             if rebalance > 3 << BITRES && sctx.itheta != 0 {
@@ -943,6 +976,9 @@ fn quant_partition(
                 lm2,
                 gain * side,
                 fill >> blocks,
+                pulse_y,
+                pulse_u,
+                pulse_cache,
             ) << (blocks0 >> 1);
             cm
         } else {
@@ -957,6 +993,9 @@ fn quant_partition(
                 lm2,
                 gain * side,
                 fill >> blocks,
+                pulse_y,
+                pulse_u,
+                pulse_cache,
             ) << (blocks0 >> 1);
             let rebalance = sbits - (rebalance - ctx.remaining_bits);
             if rebalance > 3 << BITRES && sctx.itheta != 16384 {
@@ -973,6 +1012,9 @@ fn quant_partition(
                 lm2,
                 gain * mid,
                 fill,
+                pulse_y,
+                pulse_u,
+                pulse_cache,
             );
             cm
         }
@@ -989,7 +1031,18 @@ fn quant_partition(
 
         if q != 0 {
             let k = get_pulses(q);
-            coder.alg_quant_or_unquant(x, n, k, ctx.spread, blocks, gain, ctx.resynth)
+            coder.alg_quant_or_unquant(
+                x,
+                n,
+                k,
+                ctx.spread,
+                blocks,
+                gain,
+                ctx.resynth,
+                pulse_y,
+                pulse_u,
+                pulse_cache,
+            )
         } else if ctx.resynth {
             let cm_mask = (1u32 << blocks) - 1;
             fill &= cm_mask;
@@ -1033,6 +1086,10 @@ fn quant_band_mono(
     lowband: Option<&[f32]>,
     lm: isize,
     lowband_out: Option<&mut [f32]>,
+    lowband_tmp: &mut Vec<f32>,
+    pulse_y: &mut Vec<i32>,
+    pulse_u: &mut Vec<u32>,
+    pulse_cache: &mut CwrsDecodeCache,
     gain: f32,
     fill: u32,
 ) -> u32 {
@@ -1049,16 +1106,19 @@ fn quant_band_mono(
     let long_blocks = blocks0 == 1;
     let mut fill = fill;
 
-    let mut lowband_storage = lowband.map(|lowband| lowband[..n].to_vec());
-    let mut lowband = lowband_storage.as_deref_mut();
-
+    let mut lowband_copied = false;
     const BIT_INTERLEAVE_TABLE: [u32; 16] = [0, 1, 1, 1, 2, 3, 3, 3, 2, 3, 3, 3, 2, 3, 3, 3];
     for k in 0..recombine {
         if coder.is_encode() {
             haar1(x, n >> k, 1 << k);
         }
-        if let Some(low) = lowband.as_deref_mut() {
-            haar1(low, n >> k, 1 << k);
+        if let Some(low) = lowband {
+            if !lowband_copied {
+                lowband_tmp.resize(n, 0.0);
+                lowband_tmp[..n].copy_from_slice(&low[..n]);
+                lowband_copied = true;
+            }
+            haar1(&mut lowband_tmp[..n], n >> k, 1 << k);
         }
         fill = BIT_INTERLEAVE_TABLE[(fill & 0xF) as usize]
             | (BIT_INTERLEAVE_TABLE[(fill >> 4) as usize] << 2);
@@ -1070,8 +1130,13 @@ fn quant_band_mono(
         if coder.is_encode() {
             haar1(x, n_b, blocks);
         }
-        if let Some(low) = lowband.as_deref_mut() {
-            haar1(low, n_b, blocks);
+        if let Some(low) = lowband {
+            if !lowband_copied {
+                lowband_tmp.resize(n, 0.0);
+                lowband_tmp[..n].copy_from_slice(&low[..n]);
+                lowband_copied = true;
+            }
+            haar1(&mut lowband_tmp[..n], n_b, blocks);
         }
         fill |= fill << blocks;
         blocks <<= 1;
@@ -1086,11 +1151,26 @@ fn quant_band_mono(
         if coder.is_encode() {
             deinterleave_hadamard(x, n_b >> recombine, blocks0 << recombine, long_blocks);
         }
-        if let Some(low) = lowband.as_deref_mut() {
-            deinterleave_hadamard(low, n_b >> recombine, blocks0 << recombine, long_blocks);
+        if let Some(low) = lowband {
+            if !lowband_copied {
+                lowband_tmp.resize(n, 0.0);
+                lowband_tmp[..n].copy_from_slice(&low[..n]);
+                lowband_copied = true;
+            }
+            deinterleave_hadamard(
+                &mut lowband_tmp[..n],
+                n_b >> recombine,
+                blocks0 << recombine,
+                long_blocks,
+            );
         }
     }
 
+    let lowband = if lowband_copied {
+        Some(&lowband_tmp[..n])
+    } else {
+        lowband
+    };
     let mut cm = quant_partition(
         ctx,
         coder,
@@ -1098,10 +1178,13 @@ fn quant_band_mono(
         n,
         b,
         blocks,
-        lowband.as_deref(),
+        lowband,
         lm,
         gain,
         fill,
+        pulse_y,
+        pulse_u,
+        pulse_cache,
     );
 
     if ctx.resynth {
@@ -1177,6 +1260,10 @@ fn quant_band_stereo(
     lowband: Option<&[f32]>,
     lm: isize,
     lowband_out: Option<&mut [f32]>,
+    lowband_tmp: &mut Vec<f32>,
+    pulse_y: &mut Vec<i32>,
+    pulse_u: &mut Vec<u32>,
+    pulse_cache: &mut CwrsDecodeCache,
     fill: u32,
 ) -> u32 {
     if n == 1 {
@@ -1218,6 +1305,10 @@ fn quant_band_stereo(
                 lowband,
                 lm,
                 lowband_out,
+                lowband_tmp,
+                pulse_y,
+                pulse_u,
+                pulse_cache,
                 1.0,
                 orig_fill,
             );
@@ -1239,6 +1330,10 @@ fn quant_band_stereo(
                 lowband,
                 lm,
                 lowband_out,
+                lowband_tmp,
+                pulse_y,
+                pulse_u,
+                pulse_cache,
                 1.0,
                 orig_fill,
             );
@@ -1276,6 +1371,10 @@ fn quant_band_stereo(
                 lowband,
                 lm,
                 lowband_out,
+                lowband_tmp,
+                pulse_y,
+                pulse_u,
+                pulse_cache,
                 1.0,
                 fill,
             );
@@ -1293,6 +1392,10 @@ fn quant_band_stereo(
                 None,
                 lm,
                 None,
+                lowband_tmp,
+                pulse_y,
+                pulse_u,
+                pulse_cache,
                 side,
                 fill >> blocks,
             );
@@ -1308,6 +1411,10 @@ fn quant_band_stereo(
                 None,
                 lm,
                 None,
+                lowband_tmp,
+                pulse_y,
+                pulse_u,
+                pulse_cache,
                 side,
                 fill >> blocks,
             );
@@ -1325,6 +1432,10 @@ fn quant_band_stereo(
                 lowband,
                 lm,
                 lowband_out,
+                lowband_tmp,
+                pulse_y,
+                pulse_u,
+                pulse_cache,
                 1.0,
                 fill,
             );
@@ -1372,6 +1483,53 @@ pub fn quant_all_bands_mono(
     _intensity: usize,
     tf_res: &[i32],
     total_bits: i32,
+    balance: i32,
+    coder: &mut BandCoder<'_>,
+    lm: usize,
+    coded_bands: usize,
+    seed: &mut u32,
+    _complexity: i32,
+    encode_resynth: bool,
+) {
+    let mut scratch = BandScratch::default();
+    quant_all_bands_mono_with_scratch(
+        mode,
+        start,
+        end,
+        x,
+        collapse_masks,
+        band_e,
+        pulses,
+        short_blocks,
+        spread,
+        _intensity,
+        tf_res,
+        total_bits,
+        balance,
+        coder,
+        lm,
+        coded_bands,
+        seed,
+        _complexity,
+        encode_resynth,
+        &mut scratch,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn quant_all_bands_mono_with_scratch(
+    mode: &CeltMode,
+    start: usize,
+    end: usize,
+    x: &mut [f32],
+    collapse_masks: &mut [u8],
+    band_e: &[f32],
+    pulses: &[i32],
+    short_blocks: bool,
+    spread: i32,
+    _intensity: usize,
+    tf_res: &[i32],
+    total_bits: i32,
     mut balance: i32,
     coder: &mut BandCoder<'_>,
     lm: usize,
@@ -1379,6 +1537,7 @@ pub fn quant_all_bands_mono(
     seed: &mut u32,
     _complexity: i32,
     encode_resynth: bool,
+    scratch: &mut BandScratch,
 ) {
     assert!(start < end);
     assert!(end <= mode.nb_ebands);
@@ -1393,7 +1552,10 @@ pub fn quant_all_bands_mono(
 
     let norm_offset = m * mode.ebands[start] as usize;
     let norm_limit = m * mode.ebands[mode.nb_ebands - 1] as usize;
-    let mut norm = vec![0.0f32; norm_limit.saturating_sub(norm_offset)];
+    let norm_len = norm_limit.saturating_sub(norm_offset);
+    scratch.norm.resize(norm_len, 0.0);
+    scratch.norm[..norm_len].fill(0.0);
+    let norm = &mut scratch.norm[..norm_len];
 
     let encode = coder.is_encode();
     let theta_rdo = false;
@@ -1440,7 +1602,7 @@ pub fn quant_all_bands_mono(
             lowband_offset = i;
         }
         if resynth && i == start + 1 {
-            special_hybrid_folding_mono(mode, &mut norm, start, m);
+            special_hybrid_folding_mono(mode, norm, start, m);
         }
 
         let tf_change = tf_res[i];
@@ -1480,10 +1642,13 @@ pub fn quant_all_bands_mono(
 
         let band_start = m * mode.ebands[i] as usize;
         let band_end = band_start + n;
-        let lowband_vec =
-            effective_lowband.map(|effective| norm[effective..effective + n].to_vec());
-        let mut lowband_out = if !last && resynth {
-            Some(vec![0.0f32; n])
+        let lowband = effective_lowband.map(|effective| &norm[effective..effective + n]);
+        let write_lowband_out = !last && resynth;
+        if write_lowband_out {
+            scratch.lowband_out.resize(n, 0.0);
+        }
+        let lowband_out = if write_lowband_out {
+            Some(&mut scratch.lowband_out[..n])
         } else {
             None
         };
@@ -1494,16 +1659,20 @@ pub fn quant_all_bands_mono(
             n,
             b,
             blocks,
-            lowband_vec.as_deref(),
+            lowband,
             lm as isize,
-            lowband_out.as_deref_mut(),
+            lowband_out,
+            &mut scratch.lowband_tmp,
+            &mut scratch.pulse_y,
+            &mut scratch.pulse_u,
+            &mut scratch.pulse_cache,
             1.0,
             x_cm,
         );
-        if let Some(out) = lowband_out {
+        if write_lowband_out {
             let norm_pos = band_start - norm_offset;
             if norm_pos + n <= norm.len() {
-                norm[norm_pos..norm_pos + n].copy_from_slice(&out);
+                norm[norm_pos..norm_pos + n].copy_from_slice(&scratch.lowband_out[..n]);
             }
         }
 
@@ -1528,6 +1697,59 @@ pub fn quant_all_bands_stereo(
     pulses: &[i32],
     short_blocks: bool,
     spread: i32,
+    dual_stereo: bool,
+    intensity: usize,
+    tf_res: &[i32],
+    total_bits: i32,
+    balance: i32,
+    coder: &mut BandCoder<'_>,
+    lm: usize,
+    coded_bands: usize,
+    seed: &mut u32,
+    complexity: i32,
+    disable_inv: bool,
+    encode_resynth: bool,
+) {
+    let mut scratch = BandScratch::default();
+    quant_all_bands_stereo_with_scratch(
+        mode,
+        start,
+        end,
+        x,
+        y,
+        collapse_masks,
+        band_e,
+        pulses,
+        short_blocks,
+        spread,
+        dual_stereo,
+        intensity,
+        tf_res,
+        total_bits,
+        balance,
+        coder,
+        lm,
+        coded_bands,
+        seed,
+        complexity,
+        disable_inv,
+        encode_resynth,
+        &mut scratch,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn quant_all_bands_stereo_with_scratch(
+    mode: &CeltMode,
+    start: usize,
+    end: usize,
+    x: &mut [f32],
+    y: &mut [f32],
+    collapse_masks: &mut [u8],
+    band_e: &[f32],
+    pulses: &[i32],
+    short_blocks: bool,
+    spread: i32,
     mut dual_stereo: bool,
     intensity: usize,
     tf_res: &[i32],
@@ -1540,6 +1762,7 @@ pub fn quant_all_bands_stereo(
     complexity: i32,
     disable_inv: bool,
     encode_resynth: bool,
+    scratch: &mut BandScratch,
 ) {
     assert!(start < end);
     assert!(end <= mode.nb_ebands);
@@ -1556,8 +1779,12 @@ pub fn quant_all_bands_stereo(
     let norm_offset = m * mode.ebands[start] as usize;
     let norm_limit = m * mode.ebands[mode.nb_ebands - 1] as usize;
     let norm_len = norm_limit.saturating_sub(norm_offset);
-    let mut norm = vec![0.0f32; norm_len];
-    let mut norm2 = vec![0.0f32; norm_len];
+    scratch.norm.resize(norm_len, 0.0);
+    scratch.norm[..norm_len].fill(0.0);
+    scratch.norm2.resize(norm_len, 0.0);
+    scratch.norm2[..norm_len].fill(0.0);
+    let norm = &mut scratch.norm[..norm_len];
+    let norm2 = &mut scratch.norm2[..norm_len];
 
     let encode = coder.is_encode();
     let theta_rdo = encode && !dual_stereo && complexity >= 8;
@@ -1604,9 +1831,9 @@ pub fn quant_all_bands_stereo(
             lowband_offset = i;
         }
         if resynth && i == start + 1 {
-            special_hybrid_folding_mono(mode, &mut norm, start, m);
+            special_hybrid_folding_mono(mode, norm, start, m);
             if dual_stereo {
-                special_hybrid_folding_mono(mode, &mut norm2, start, m);
+                special_hybrid_folding_mono(mode, norm2, start, m);
             }
         }
 
@@ -1660,22 +1887,24 @@ pub fn quant_all_bands_stereo(
 
         let band_start = m * mode.ebands[i] as usize;
         let band_end = band_start + n;
-        let lowband_vec =
-            effective_lowband.map(|effective| norm[effective..effective + n].to_vec());
-        let lowband_vec2 =
-            effective_lowband.map(|effective| norm2[effective..effective + n].to_vec());
-        let mut lowband_out = if !last && resynth {
-            Some(vec![0.0f32; n])
-        } else {
-            None
-        };
-        let mut lowband_out2 = if !last && resynth && dual_stereo {
-            Some(vec![0.0f32; n])
-        } else {
-            None
-        };
+        let lowband = effective_lowband.map(|effective| &norm[effective..effective + n]);
+        let lowband2 = effective_lowband.map(|effective| &norm2[effective..effective + n]);
+        let write_lowband_out = !last && resynth;
+        if write_lowband_out {
+            scratch.lowband_out.resize(n, 0.0);
+        }
+        let write_lowband_out2 = !last && resynth && dual_stereo;
+        if write_lowband_out2 {
+            scratch.lowband_out2.resize(n, 0.0);
+        }
+        let mut selected_lowband_out = None;
 
         if dual_stereo {
+            let lowband_out = if write_lowband_out {
+                Some(&mut scratch.lowband_out[..n])
+            } else {
+                None
+            };
             x_cm = quant_band_mono(
                 &mut ctx,
                 coder,
@@ -1683,12 +1912,21 @@ pub fn quant_all_bands_stereo(
                 n,
                 b / 2,
                 blocks,
-                lowband_vec.as_deref(),
+                lowband,
                 lm as isize,
-                lowband_out.as_deref_mut(),
+                lowband_out,
+                &mut scratch.lowband_tmp,
+                &mut scratch.pulse_y,
+                &mut scratch.pulse_u,
+                &mut scratch.pulse_cache,
                 1.0,
                 x_cm,
             );
+            let lowband_out2 = if write_lowband_out2 {
+                Some(&mut scratch.lowband_out2[..n])
+            } else {
+                None
+            };
             y_cm = quant_band_mono(
                 &mut ctx,
                 coder,
@@ -1696,9 +1934,13 @@ pub fn quant_all_bands_stereo(
                 n,
                 b / 2,
                 blocks,
-                lowband_vec2.as_deref(),
+                lowband2,
                 lm as isize,
-                lowband_out2.as_deref_mut(),
+                lowband_out2,
+                &mut scratch.lowband_tmp,
+                &mut scratch.pulse_y,
+                &mut scratch.pulse_u,
+                &mut scratch.pulse_cache,
                 1.0,
                 y_cm,
             );
@@ -1732,9 +1974,13 @@ pub fn quant_all_bands_stereo(
                     n,
                     b,
                     blocks,
-                    lowband_vec.as_deref(),
+                    lowband,
                     lm as isize,
                     lowband_down.as_deref_mut(),
+                    &mut scratch.lowband_tmp,
+                    &mut scratch.pulse_y,
+                    &mut scratch.pulse_u,
+                    &mut scratch.pulse_cache,
                     cm,
                 );
                 let dist_down =
@@ -1759,9 +2005,13 @@ pub fn quant_all_bands_stereo(
                     n,
                     b,
                     blocks,
-                    lowband_vec.as_deref(),
+                    lowband,
                     lm as isize,
                     lowband_up.as_deref_mut(),
+                    &mut scratch.lowband_tmp,
+                    &mut scratch.pulse_y,
+                    &mut scratch.pulse_u,
+                    &mut scratch.pulse_cache,
                     cm,
                 );
                 let dist_up =
@@ -1772,18 +2022,23 @@ pub fn quant_all_bands_stereo(
                     ctx = ctx_down;
                     x[band_start..band_end].copy_from_slice(&x_down);
                     y[band_start..band_end].copy_from_slice(&y_down);
-                    lowband_out = lowband_down;
+                    selected_lowband_out = lowband_down;
                     x_cm = x_cm_down;
                 } else {
                     coder.restore_encoder(enc_up);
                     ctx = ctx_up;
                     x[band_start..band_end].copy_from_slice(&x_up);
                     y[band_start..band_end].copy_from_slice(&y_up);
-                    lowband_out = lowband_up;
+                    selected_lowband_out = lowband_up;
                     x_cm = x_cm_up;
                 }
             } else {
                 ctx.theta_round = 0;
+                let lowband_out = if write_lowband_out {
+                    Some(&mut scratch.lowband_out[..n])
+                } else {
+                    None
+                };
                 x_cm = quant_band_stereo(
                     &mut ctx,
                     coder,
@@ -1792,25 +2047,34 @@ pub fn quant_all_bands_stereo(
                     n,
                     b,
                     blocks,
-                    lowband_vec.as_deref(),
+                    lowband,
                     lm as isize,
-                    lowband_out.as_deref_mut(),
+                    lowband_out,
+                    &mut scratch.lowband_tmp,
+                    &mut scratch.pulse_y,
+                    &mut scratch.pulse_u,
+                    &mut scratch.pulse_cache,
                     cm,
                 );
             }
             y_cm = x_cm;
         }
 
-        if let Some(out) = lowband_out {
+        if let Some(out) = selected_lowband_out.as_deref() {
             let norm_pos = band_start - norm_offset;
             if norm_pos + n <= norm.len() {
                 norm[norm_pos..norm_pos + n].copy_from_slice(&out);
             }
+        } else if write_lowband_out {
+            let norm_pos = band_start - norm_offset;
+            if norm_pos + n <= norm.len() {
+                norm[norm_pos..norm_pos + n].copy_from_slice(&scratch.lowband_out[..n]);
+            }
         }
-        if let Some(out) = lowband_out2 {
+        if write_lowband_out2 {
             let norm_pos = band_start - norm_offset;
             if norm_pos + n <= norm2.len() {
-                norm2[norm_pos..norm_pos + n].copy_from_slice(&out);
+                norm2[norm_pos..norm_pos + n].copy_from_slice(&scratch.lowband_out2[..n]);
             }
         }
 

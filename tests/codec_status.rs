@@ -33,6 +33,16 @@ fn encode_and_decode_48k_celt_only_smoke_path() {
     assert_eq!(decoded.len(), pcm.len());
     assert!(decoded.iter().all(|sample| sample.is_finite()));
     assert!(decoded.iter().any(|sample| sample.abs() > 1e-5));
+
+    let mut decoder = Decoder::new(48_000, 2).unwrap();
+    let decoded_i16 = decoder.decode_i16(&packet, false).unwrap();
+    let mut decoder = Decoder::new(48_000, 2).unwrap();
+    let mut decoded_into = Vec::new();
+    let decoded_samples = decoder
+        .decode_i16_into(&packet, false, &mut decoded_into)
+        .unwrap();
+    assert_eq!(decoded_samples, 960);
+    assert_eq!(decoded_into, decoded_i16);
 }
 
 #[test]

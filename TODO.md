@@ -145,6 +145,60 @@ v1.5.2:...` or a pinned worktree when validating behavior.
   stable.
 - Measure allocation hot spots in encode/decode and remove avoidable `Vec`
   churn in inner loops.
-- Compare wasm encode/decode throughput against the C/libopusjs path using the
-  existing benchmark scripts.
+- Compare wasm encode/decode throughput against the C/libopusjs path with
+  `tools/run_browser_wasm_compare.mjs` when system load is low.
+- Decode perf finding: browser output transfer is not the main loss; a
+  2026-06-01 microbench showed `DecodeResult.output` was only about 1-3% of a
+  Rust decode pass. Native allocation probing showed hundreds of heap
+  allocations per 20 ms stereo frame, mostly from recursive band/PVQ and
+  synthesis scratch buffers. Prioritise reusable decoder scratch storage before
+  JS API copy work.
+- Decode perf progress from 2026-06-01: `decode_i16` now bypasses the
+  intermediate f32 PCM allocation, decoder synthesis reuses channel/MDCT
+  scratch, `alg_unquant`/`decode_pulses` use stack scratch for normal decode
+  sizes, band folding avoids most per-band `lowband`/`lowband_out` `Vec` churn,
+  and `decode_spectral_frame_into` reuses decode/allocation/band scratch across
+  frames. The native allocation probe dropped from about 227/375 allocs per
+  48/128 kb/s frame before the first pass to about 28/36 allocs per frame with
+  `decode_i16`, or about 27/35 allocs per frame with `decode_i16_into`.
+- Follow-up decode perf pass from 2026-06-01: the decoder now uses
+  `parse_packet_slice` directly to avoid the public packet frame `Vec`, reuses
+  CWRS/PVQ row scratch for decode-side `alg_unquant`, and reuses decoder-owned
+  postfilter work/source buffers instead of allocating/cloning them when the
+  CELT postfilter is active.
+- CWRS follow-up from 2026-06-01: high-rate decode now caches computed
+  `U(n,k)` rows in a decoder-owned four-way cache and `decode_index` exits as
+  soon as all pulses are consumed. The symbolized 196 kb/s VBR reuse profile had
+  `ncwrs_urow` at about 13.6% before this cache and about 3.6% after the first
+  row-cache pass; the release browser spot checks are noisy but show the 196
+  kb/s reuse decode path around parity or ahead of `libopusjs`.
+- Settled direction from 2026-06-01: keep the scratch/cache decode path as the
+  main path rather than carrying a feature-gated alternative. These changes are
+  decode-side storage and lookup optimizations only; they are intended to keep
+  identical entropy decisions, MDCT/postfilter math, and decoded samples for the
+  same packet. Treat any difference as a correctness bug, not as a quality
+  tradeoff.
+- Browser-loaded synthetic grids after the CWRS cache are still load-sensitive.
+  The focused 30-second 196 kb/s run
+  (`/tmp/libopus-browser-wasm-after-cwrs-4way-cache-196.json`) showed Rust CBR
+  reuse at `+10.6%` and VBR reuse at `+14.0%` decode versus `libopusjs`; a later
+  VBR-only rerun
+  (`/tmp/libopus-browser-wasm-after-cwrs-4way-cache-196-vbr-rerun.json`) showed
+  `+2.6%`. The broader 10-second grid
+  (`/tmp/libopus-browser-wasm-after-cwrs-4way-cache-full.json`) confirmed 48 and
+  128 kb/s decode stayed ahead of `libopusjs`, but its late 196 kb/s rows were
+  noisy. Prefer focused 30-second runs for high-rate comparisons.
+- Chrome decode CPU profile support now lives in
+  `tools/run_browser_wasm_compare.mjs --profile-rust-decode`. A 30-second
+  128 kb/s CBR reuse profile was saved at
+  `/tmp/libopus-rust-decode-128k.cpuprofile.json`; optimized wasm symbols are
+  stripped, but the sampled hot area is in wasm, with visible GC now low.
+- Build tuning check: one-run `wasm-opt` comparisons for 128 kb/s CBR reuse
+  produced noisy but similar decode results for default wasm-pack output,
+  no-opt, `-O3`, and `-O4`; do not change default wasm build flags without a
+  lower-load repeated run.
+- Decode perf next targets: profile the four-way CWRS cache under lower system
+  load, then focus on the remaining high-rate hotspots: `decode_index`,
+  `quant_partition`, `exp_rotation1`, range decoder division/update cost, and
+  MDCT synthesis.
 - Add SIMD only behind feature gates and checksum/parity tests.

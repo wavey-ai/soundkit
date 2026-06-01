@@ -1,8 +1,10 @@
 //! CELT vector-quantization helpers, ported from official `celt/vq.c`.
 
-use crate::celt::cwrs::{decode_pulses, encode_pulses};
+use crate::celt::cwrs::{decode_pulses, decode_pulses_with_cache, encode_pulses, CwrsDecodeCache};
 use crate::celt::entropy::{RangeDecoder, RangeEncoder};
 use crate::celt::mathops::{celt_cos_norm, celt_div, celt_rsqrt_norm};
+
+const MAX_STACK_DECODE_N: usize = 256;
 
 pub const SPREAD_NONE: i32 = 0;
 pub const SPREAD_LIGHT: i32 = 1;
@@ -228,11 +230,45 @@ pub fn alg_unquant(
     assert!(n > 1);
     assert!(x.len() >= n);
 
-    let mut iy = vec![0i32; n];
-    let ryy = decode_pulses(&mut iy, n, k, dec) as f32;
-    normalise_residual(&iy, x, n, ryy, gain);
+    let mut iy_stack = [0i32; MAX_STACK_DECODE_N];
+    let mut iy_heap = Vec::new();
+    let iy = if n <= MAX_STACK_DECODE_N {
+        &mut iy_stack[..n]
+    } else {
+        iy_heap.resize(n, 0);
+        &mut iy_heap[..]
+    };
+    let ryy = decode_pulses(iy, n, k, dec) as f32;
+    normalise_residual(iy, x, n, ryy, gain);
     exp_rotation(x, n, -1, b, k, spread);
-    extract_collapse_mask(&iy, n, b)
+    extract_collapse_mask(iy, n, b)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn alg_unquant_with_scratch(
+    x: &mut [f32],
+    n: usize,
+    k: usize,
+    spread: i32,
+    b: usize,
+    dec: &mut RangeDecoder,
+    gain: f32,
+    iy_scratch: &mut Vec<i32>,
+    u_scratch: &mut Vec<u32>,
+    row_cache: &mut CwrsDecodeCache,
+) -> u32 {
+    assert!(k > 0);
+    assert!(n > 1);
+    assert!(x.len() >= n);
+
+    if iy_scratch.len() < n {
+        iy_scratch.resize(n, 0);
+    }
+    let iy = &mut iy_scratch[..n];
+    let ryy = decode_pulses_with_cache(iy, n, k, dec, u_scratch, row_cache) as f32;
+    normalise_residual(iy, x, n, ryy, gain);
+    exp_rotation(x, n, -1, b, k, spread);
+    extract_collapse_mask(iy, n, b)
 }
 
 pub fn renormalise_vector(x: &mut [f32], n: usize, gain: f32) {

@@ -17,6 +17,7 @@
   ],
   "scripts": {
     "build": "wasm-pack build --target web --release --features wasm && rm -f pkg/.gitignore",
+    "bench:browser-wasm": "node tools/run_browser_wasm_compare.mjs",
     "prepare": "npm run build"
   },
   "keywords": [

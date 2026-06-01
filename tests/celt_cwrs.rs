@@ -93,6 +93,42 @@ fn official_cwrs_range_encoder_round_trip() {
     }
 }
 
+#[test]
+fn official_cwrs_cached_decode_matches_uncached_decode() {
+    let vectors: [(&[i32], usize); 5] = [
+        (&[0, 0, 7, -2, 0, 0, 1, 0], 10),
+        (&[0, 0, 0, 0, 0, 0, 0, 10], 10),
+        (&[2, -2, 0, 0, 0, 3, -1, 2], 10),
+        (&[0, 5, 0, -3, 0, 2, 0, 0], 10),
+        (&[-4, 0, 0, 0, 3, 0, 2, -1], 10),
+    ];
+
+    let mut enc = RangeEncoder::new(1024);
+    for (y, k) in vectors {
+        encode_pulses(y, y.len(), k, &mut enc);
+    }
+    enc.shrink(((enc.tell() + 7) / 8) as usize);
+    enc.finish();
+    assert_eq!(enc.error(), 0);
+
+    let mut dec = RangeDecoder::new(enc.range_data());
+    let mut cache = CwrsDecodeCache::default();
+    let mut u_scratch = Vec::new();
+    for (expected, k) in vectors {
+        let mut decoded = vec![0i32; expected.len()];
+        let yy = decode_pulses_with_cache(
+            &mut decoded,
+            expected.len(),
+            k,
+            &mut dec,
+            &mut u_scratch,
+            &mut cache,
+        );
+        assert_eq!(decoded, expected);
+        assert_eq!(yy, expected.iter().map(|v| v * v).sum::<i32>());
+    }
+}
+
 #[derive(Clone)]
 struct CRand(u32);
 

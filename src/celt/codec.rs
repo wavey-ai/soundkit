@@ -2,7 +2,8 @@
 //! `celt/celt_encoder.c`, and `celt/celt_decoder.c` control path.
 
 use crate::celt::bands::{
-    haar1, quant_all_bands_mono, quant_all_bands_stereo, BandCoder, SPREAD_NORMAL,
+    haar1, quant_all_bands_mono, quant_all_bands_mono_with_scratch, quant_all_bands_stereo,
+    quant_all_bands_stereo_with_scratch, BandCoder, BandScratch, SPREAD_NORMAL,
 };
 use crate::celt::entropy::{RangeDecoder, RangeEncoder};
 use crate::celt::mathops::{celt_exp2, ec_ilog};
@@ -12,7 +13,10 @@ use crate::celt::quant_bands::{
     amp2_log2, quant_coarse_energy, quant_energy_finalise, quant_fine_energy,
     unquant_coarse_energy, unquant_energy_finalise, unquant_fine_energy, E_MEANS,
 };
-use crate::celt::rate::{clt_compute_allocation, Allocation, AllocationCoder};
+use crate::celt::rate::{
+    clt_compute_allocation, clt_compute_allocation_with_scratch, Allocation, AllocationCoder,
+    AllocationInfo, AllocationScratch,
+};
 use crate::{Error, Result};
 
 const BITRES: i32 = 3;
@@ -32,13 +36,20 @@ pub fn init_caps(mode: &CeltMode, lm: usize, channels: usize) -> Vec<i32> {
     assert!(lm <= mode.max_lm);
     assert!((1..=2).contains(&channels));
 
-    (0..mode.nb_ebands)
-        .map(|i| {
-            let n = (mode.ebands[i + 1] as i32 - mode.ebands[i] as i32) << lm;
-            let idx = mode.nb_ebands * (2 * lm + channels - 1) + i;
-            ((mode.cache.caps[idx] as i32 + 64) * channels as i32 * n) >> 2
-        })
-        .collect()
+    let mut cap = vec![0i32; mode.nb_ebands];
+    init_caps_into(mode, lm, channels, &mut cap);
+    cap
+}
+
+pub fn init_caps_into(mode: &CeltMode, lm: usize, channels: usize, cap: &mut Vec<i32>) {
+    assert!(lm <= mode.max_lm);
+    assert!((1..=2).contains(&channels));
+    cap.resize(mode.nb_ebands, 0);
+    for (i, value) in cap.iter_mut().enumerate().take(mode.nb_ebands) {
+        let n = (mode.ebands[i + 1] as i32 - mode.ebands[i] as i32) << lm;
+        let idx = mode.nb_ebands * (2 * lm + channels - 1) + i;
+        *value = ((mode.cache.caps[idx] as i32 + 64) * channels as i32 * n) >> 2;
+    }
 }
 
 pub fn encode_transient_flag(
@@ -759,6 +770,30 @@ pub struct CeltFrameDecodeResult {
     pub alloc_trim: i32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CeltFrameDecodeInfo {
+    pub allocation: AllocationInfo,
+    pub silence: bool,
+    pub prefilter: Option<DecodedPrefilter>,
+    pub is_transient: bool,
+    pub spread: i32,
+    pub alloc_trim: i32,
+    pub samples: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CeltFrameDecodeScratch {
+    pub x: Vec<f32>,
+    pub y: Vec<f32>,
+    pub tf_res: Vec<i32>,
+    pub collapse_masks: Vec<u8>,
+    pub band_e: Vec<f32>,
+    offsets: Vec<i32>,
+    cap: Vec<i32>,
+    pub allocation: AllocationScratch,
+    bands: BandScratch,
+}
+
 fn validate_spectral_args(
     mode: &CeltMode,
     config: &CeltFrameConfig,
@@ -1093,6 +1128,30 @@ pub fn decode_spectral_frame(
     old_band_e: &mut [f32],
     seed: &mut u32,
 ) -> Result<CeltFrameDecodeResult> {
+    let mut scratch = CeltFrameDecodeScratch::default();
+    let info = decode_spectral_frame_into(mode, config, data, old_band_e, seed, &mut scratch)?;
+    Ok(CeltFrameDecodeResult {
+        x: scratch.x[..info.samples].to_vec(),
+        y: (config.channels == 2).then(|| scratch.y[..info.samples].to_vec()),
+        allocation: scratch.allocation.to_allocation(info.allocation),
+        tf_res: scratch.tf_res.clone(),
+        collapse_masks: scratch.collapse_masks.clone(),
+        silence: info.silence,
+        prefilter: info.prefilter,
+        is_transient: info.is_transient,
+        spread: info.spread,
+        alloc_trim: info.alloc_trim,
+    })
+}
+
+pub fn decode_spectral_frame_into(
+    mode: &CeltMode,
+    config: &CeltFrameConfig,
+    data: &[u8],
+    old_band_e: &mut [f32],
+    seed: &mut u32,
+    scratch: &mut CeltFrameDecodeScratch,
+) -> Result<CeltFrameDecodeInfo> {
     if data.len() != config.packet_bytes {
         return Err(Error::InvalidPacket);
     }
@@ -1134,25 +1193,27 @@ pub fn decode_spectral_frame(
         config.lm,
     );
 
-    let mut tf_res = vec![0i32; mode.nb_ebands];
+    scratch.tf_res.resize(mode.nb_ebands, 0);
+    scratch.tf_res[..mode.nb_ebands].fill(0);
     tf_decode(
         config.start,
         config.end,
         is_transient,
-        &mut tf_res,
+        &mut scratch.tf_res,
         config.lm,
         &mut dec,
     );
     let spread = decode_spread_decision(total_bits, &mut dec);
 
-    let cap = init_caps(mode, config.lm, config.channels);
-    let mut offsets = vec![0i32; mode.nb_ebands];
+    init_caps_into(mode, config.lm, config.channels, &mut scratch.cap);
+    scratch.offsets.resize(mode.nb_ebands, 0);
+    scratch.offsets[..mode.nb_ebands].fill(0);
     let total_boost = decode_dynalloc_offsets(
         mode,
         config.start,
         config.end,
-        &mut offsets,
-        &cap,
+        &mut scratch.offsets,
+        &scratch.cap,
         total_bits_frac,
         config.channels,
         config.lm,
@@ -1165,12 +1226,12 @@ pub fn decode_spectral_frame(
     bits -= anti_collapse_rsv;
     let allocation = {
         let mut allocation_coder = AllocationCoder::Decode(&mut dec);
-        clt_compute_allocation(
+        clt_compute_allocation_with_scratch(
             mode,
             config.start,
             config.end,
-            &offsets,
-            &cap,
+            &scratch.offsets,
+            &scratch.cap,
             alloc_trim,
             config.intensity,
             config.dual_stereo,
@@ -1180,6 +1241,7 @@ pub fn decode_spectral_frame(
             Some(&mut allocation_coder),
             mode.nb_ebands,
             config.end.saturating_sub(1),
+            &mut scratch.allocation,
         )
     };
 
@@ -1188,31 +1250,40 @@ pub fn decode_spectral_frame(
         config.start,
         config.end,
         old_band_e,
-        &allocation.ebits,
+        &scratch.allocation.ebits,
         &mut dec,
         config.channels,
     );
 
     let short_blocks = is_transient;
-    let mut collapse_masks = vec![0u8; config.channels * mode.nb_ebands];
-    let mut x = vec![0.0f32; n];
-    let mut y = (config.channels == 2).then(|| vec![0.0f32; n]);
-    let band_e = vec![0.0f32; config.channels * mode.nb_ebands];
+    let mask_len = config.channels * mode.nb_ebands;
+    scratch.collapse_masks.resize(mask_len, 0);
+    scratch.collapse_masks[..mask_len].fill(0);
+    scratch.x.resize(n, 0.0);
+    scratch.x[..n].fill(0.0);
+    if config.channels == 2 {
+        scratch.y.resize(n, 0.0);
+        scratch.y[..n].fill(0.0);
+    } else {
+        scratch.y.clear();
+    }
+    scratch.band_e.resize(mask_len, 0.0);
+    scratch.band_e[..mask_len].fill(0.0);
     {
         let mut band_coder = BandCoder::Decode(&mut dec);
         if config.channels == 1 {
-            quant_all_bands_mono(
+            quant_all_bands_mono_with_scratch(
                 mode,
                 config.start,
                 config.end,
-                &mut x,
-                &mut collapse_masks,
-                &band_e,
-                &allocation.pulses,
+                &mut scratch.x,
+                &mut scratch.collapse_masks,
+                &scratch.band_e,
+                &scratch.allocation.pulses,
                 short_blocks,
                 spread,
                 allocation.intensity,
-                &tf_res,
+                &scratch.tf_res,
                 total_bits_frac - anti_collapse_rsv,
                 allocation.balance,
                 &mut band_coder,
@@ -1221,23 +1292,23 @@ pub fn decode_spectral_frame(
                 seed,
                 0,
                 false,
+                &mut scratch.bands,
             );
         } else {
-            let y_ref = y.as_mut().expect("stereo y buffer");
-            quant_all_bands_stereo(
+            quant_all_bands_stereo_with_scratch(
                 mode,
                 config.start,
                 config.end,
-                &mut x,
-                y_ref,
-                &mut collapse_masks,
-                &band_e,
-                &allocation.pulses,
+                &mut scratch.x,
+                &mut scratch.y,
+                &mut scratch.collapse_masks,
+                &scratch.band_e,
+                &scratch.allocation.pulses,
                 short_blocks,
                 spread,
                 allocation.dual_stereo,
                 allocation.intensity,
-                &tf_res,
+                &scratch.tf_res,
                 total_bits_frac - anti_collapse_rsv,
                 allocation.balance,
                 &mut band_coder,
@@ -1247,6 +1318,7 @@ pub fn decode_spectral_frame(
                 0,
                 config.disable_inv,
                 false,
+                &mut scratch.bands,
             );
         }
     }
@@ -1259,8 +1331,8 @@ pub fn decode_spectral_frame(
         config.start,
         config.end,
         old_band_e,
-        &allocation.ebits,
-        &allocation.fine_priority,
+        &scratch.allocation.ebits,
+        &scratch.allocation.fine_priority,
         total_bits - dec.tell(),
         &mut dec,
         config.channels,
@@ -1269,16 +1341,13 @@ pub fn decode_spectral_frame(
         return Err(Error::InvalidPacket);
     }
 
-    Ok(CeltFrameDecodeResult {
-        x,
-        y,
+    Ok(CeltFrameDecodeInfo {
         allocation,
-        tf_res,
-        collapse_masks,
         silence,
         prefilter,
         is_transient,
         spread,
         alloc_trim,
+        samples: n,
     })
 }
