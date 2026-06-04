@@ -316,6 +316,119 @@ export class WasmOpusDeboxer {
     }
 }
 if (Symbol.dispose) WasmOpusDeboxer.prototype[Symbol.dispose] = WasmOpusDeboxer.prototype.free;
+
+export class WasmSoundKitFrameDecoder {
+    static __wrap(ptr) {
+        const obj = Object.create(WasmSoundKitFrameDecoder.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmSoundKitFrameDecoderFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmSoundKitFrameDecoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmsoundkitframedecoder_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    bufferedBytes() {
+        const ret = wasm.wasmsoundkitframedecoder_bufferedBytes(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    clearKey() {
+        wasm.wasmsoundkitframedecoder_clearKey(this.__wbg_ptr);
+    }
+    finish() {
+        const ret = wasm.wasmsoundkitframedecoder_finish(this.__wbg_ptr);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    constructor() {
+        const ret = wasm.wasmsoundkitframedecoder_new();
+        this.__wbg_ptr = ret;
+        WasmSoundKitFrameDecoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {WasmSoundKitFrameDecoder}
+     */
+    static newUnencrypted() {
+        const ret = wasm.wasmsoundkitframedecoder_newUnencrypted();
+        return WasmSoundKitFrameDecoder.__wrap(ret);
+    }
+    /**
+     * @param {string} key
+     * @returns {WasmSoundKitFrameDecoder}
+     */
+    static newWithDecimalKey(key) {
+        const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsoundkitframedecoder_newWithDecimalKey(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmSoundKitFrameDecoder.__wrap(ret[0]);
+    }
+    /**
+     * @param {Uint8Array} key
+     * @returns {WasmSoundKitFrameDecoder}
+     */
+    static newWithKeyBytes(key) {
+        const ptr0 = passArray8ToWasm0(key, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsoundkitframedecoder_newWithKeyBytes(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmSoundKitFrameDecoder.__wrap(ret[0]);
+    }
+    /**
+     * @param {Uint8Array} bytes
+     * @returns {Array<any>}
+     */
+    push(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsoundkitframedecoder_push(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    reset() {
+        wasm.wasmsoundkitframedecoder_reset(this.__wbg_ptr);
+    }
+    /**
+     * @param {string} key
+     */
+    setDecimalKey(key) {
+        const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsoundkitframedecoder_setDecimalKey(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * @param {Uint8Array} key
+     */
+    setKeyBytes(key) {
+        const ptr0 = passArray8ToWasm0(key, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsoundkitframedecoder_setKeyBytes(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+}
+if (Symbol.dispose) WasmSoundKitFrameDecoder.prototype[Symbol.dispose] = WasmSoundKitFrameDecoder.prototype.free;
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -380,6 +493,9 @@ const WasmMusicDecoderFinalization = (typeof FinalizationRegistry === 'undefined
 const WasmOpusDeboxerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmopusdeboxer_free(ptr, 1));
+const WasmSoundKitFrameDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmsoundkitframedecoder_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();

@@ -1,0 +1,14 @@
+[package]
+name = "lori-asha-premix-bench"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Benchmark comparing soundkit-opus and libopus-rs on Lori Asha Premix tracks"
+
+[dependencies]
+bytes = "1"
+soundkit = { path = "../soundkit", version = "0.12.2" }
+soundkit-decoder = { path = "../soundkit-decoder" }
+soundkit-opus = { path = "../soundkit-opus" }
+libopus_rust = { package = "libopus", git = "https://github.com/wavey-ai/opus-rs" }
+opus-sys = { package = "opus-sys", git = "https://github.com/wavey-ai/opus-rs" }

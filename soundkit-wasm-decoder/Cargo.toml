@@ -32,7 +32,7 @@ webm-opus = ["webm", "soundkit-webm/opus"]
 [dependencies]
 soundkit = { path = "../soundkit" }
 access-unit = { git = "https://github.com/wavey-ai/access-unit.git", optional = true }
-frame-header = "0.2.0"
+frame-header = { git = "https://github.com/wavey-ai/frame-header.git" }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 

@@ -1,6 +1,8 @@
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use soundkit::audio_packet::Decoder;
 use soundkit::audio_types::AudioData;
+use soundkit::crypto::ChaCha20Poly1305PacketCipher;
+use soundkit::frame_stream::{SoundKitFrame, SoundKitFrameStream, SoundKitFrameStreamOptions};
 use soundkit::raw_pcm::{RawPcmFormat, RawPcmStreamProcessor};
 use soundkit::wav::WavStreamProcessor;
 use wasm_bindgen::prelude::*;
@@ -61,6 +63,11 @@ pub struct WasmAacDeboxer {
 #[wasm_bindgen]
 pub struct WasmAudioTrackDemuxer {
     demuxer: AudioTrackDemuxer,
+}
+
+#[wasm_bindgen]
+pub struct WasmSoundKitFrameDecoder {
+    stream: SoundKitFrameStream,
 }
 
 enum DecoderState {
@@ -296,6 +303,85 @@ impl WasmAudioTrackDemuxer {
     pub fn flush(&mut self) -> Result<Array, JsValue> {
         let events = self.demuxer.flush().map_err(js_error)?;
         audio_demux_events_to_js(events)
+    }
+}
+
+#[wasm_bindgen]
+impl WasmSoundKitFrameDecoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self::new_unencrypted()
+    }
+
+    #[wasm_bindgen(js_name = newUnencrypted)]
+    pub fn new_unencrypted() -> Self {
+        Self {
+            stream: SoundKitFrameStream::default(),
+        }
+    }
+
+    #[wasm_bindgen(js_name = newWithKeyBytes)]
+    pub fn new_with_key_bytes(key: &[u8]) -> Result<WasmSoundKitFrameDecoder, JsValue> {
+        let cipher =
+            ChaCha20Poly1305PacketCipher::new(key).map_err(|error| js_error(error.to_string()))?;
+        Ok(Self::with_cipher(cipher))
+    }
+
+    #[wasm_bindgen(js_name = newWithDecimalKey)]
+    pub fn new_with_decimal_key(key: &str) -> Result<WasmSoundKitFrameDecoder, JsValue> {
+        let cipher = ChaCha20Poly1305PacketCipher::new_from_decimal_key(key)
+            .map_err(|error| js_error(error.to_string()))?;
+        Ok(Self::with_cipher(cipher))
+    }
+
+    #[wasm_bindgen(js_name = setKeyBytes)]
+    pub fn set_key_bytes(&mut self, key: &[u8]) -> Result<(), JsValue> {
+        let cipher =
+            ChaCha20Poly1305PacketCipher::new(key).map_err(|error| js_error(error.to_string()))?;
+        self.stream.set_cipher(Some(cipher));
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = setDecimalKey)]
+    pub fn set_decimal_key(&mut self, key: &str) -> Result<(), JsValue> {
+        let cipher = ChaCha20Poly1305PacketCipher::new_from_decimal_key(key)
+            .map_err(|error| js_error(error.to_string()))?;
+        self.stream.set_cipher(Some(cipher));
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = clearKey)]
+    pub fn clear_key(&mut self) {
+        self.stream.set_cipher(None);
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Array, JsValue> {
+        let frames = self.stream.push(bytes).map_err(js_error)?;
+        soundkit_frames_to_js(frames)
+    }
+
+    pub fn finish(&self) -> Result<(), JsValue> {
+        self.stream.finish().map_err(js_error)
+    }
+
+    pub fn reset(&mut self) {
+        self.stream.reset();
+    }
+
+    #[wasm_bindgen(js_name = bufferedBytes)]
+    pub fn buffered_bytes(&self) -> usize {
+        self.stream.buffered_bytes()
+    }
+}
+
+impl WasmSoundKitFrameDecoder {
+    fn with_cipher(cipher: ChaCha20Poly1305PacketCipher) -> Self {
+        Self {
+            stream: SoundKitFrameStream::new(SoundKitFrameStreamOptions {
+                cipher: Some(cipher),
+                ..SoundKitFrameStreamOptions::default()
+            }),
+        }
     }
 }
 
@@ -1195,6 +1281,153 @@ fn audio_frame_to_js(frame: &AudioData) -> Result<JsValue, JsValue> {
         &Uint8Array::from(frame.data().as_slice()).into(),
     )?;
     Ok(object.into())
+}
+
+fn soundkit_frames_to_js(frames: Vec<SoundKitFrame>) -> Result<Array, JsValue> {
+    let array = Array::new();
+    for frame in frames {
+        array.push(&soundkit_frame_to_js(&frame)?);
+    }
+    Ok(array)
+}
+
+fn soundkit_frame_to_js(frame: &SoundKitFrame) -> Result<JsValue, JsValue> {
+    let object = Object::new();
+    let header = &frame.header;
+
+    let header_object = Object::new();
+    Reflect::set(
+        &header_object,
+        &JsValue::from_str("encoding"),
+        &JsValue::from_str(soundkit_encoding_name(header.encoding())),
+    )?;
+    Reflect::set(
+        &header_object,
+        &JsValue::from_str("encodingCode"),
+        &JsValue::from_f64(soundkit_encoding_code(header.encoding()) as f64),
+    )?;
+    Reflect::set(
+        &header_object,
+        &JsValue::from_str("channels"),
+        &JsValue::from_f64(header.channels() as f64),
+    )?;
+    Reflect::set(
+        &header_object,
+        &JsValue::from_str("sampleRate"),
+        &JsValue::from_f64(header.sample_rate() as f64),
+    )?;
+    Reflect::set(
+        &header_object,
+        &JsValue::from_str("frameCount"),
+        &JsValue::from_f64(header.frame_count() as f64),
+    )?;
+    Reflect::set(
+        &header_object,
+        &JsValue::from_str("bitsPerSample"),
+        &JsValue::from_f64(header.bits_per_sample() as f64),
+    )?;
+    Reflect::set(
+        &header_object,
+        &JsValue::from_str("endianness"),
+        &JsValue::from_str(soundkit_endianness_name(header.endianness())),
+    )?;
+    Reflect::set(
+        &header_object,
+        &JsValue::from_str("packetFlags"),
+        &JsValue::from_f64(header.packet_flags() as f64),
+    )?;
+    Reflect::set(
+        &header_object,
+        &JsValue::from_str("payloadSize"),
+        &JsValue::from_f64(frame.payload.len() as f64),
+    )?;
+    Reflect::set(
+        &header_object,
+        &JsValue::from_str("encryptedPayloadSize"),
+        &JsValue::from_f64(frame.encrypted_payload_size as f64),
+    )?;
+    Reflect::set(
+        &header_object,
+        &JsValue::from_str("headerBytes"),
+        &JsValue::from_f64(frame.encoded_header_bytes.len() as f64),
+    )?;
+    if let Some(packet_crc32) = header.packet_crc32_value() {
+        Reflect::set(
+            &header_object,
+            &JsValue::from_str("packetCrc32"),
+            &JsValue::from_f64(packet_crc32 as f64),
+        )?;
+    }
+    set_optional_u64_string(&header_object, "id", header.id())?;
+    set_optional_u64_string(&header_object, "pts", header.pts())?;
+
+    let header_value: JsValue = header_object.into();
+    Reflect::set(&object, &JsValue::from_str("header"), &header_value)?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("data"),
+        &Uint8Array::from(frame.payload.as_slice()).into(),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("encrypted"),
+        &JsValue::from_bool(frame.encrypted),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("payloadSize"),
+        &JsValue::from_f64(frame.payload.len() as f64),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("encryptedPayloadSize"),
+        &JsValue::from_f64(frame.encrypted_payload_size as f64),
+    )?;
+    set_optional_u64_string(&object, "trackId", header.id())?;
+    set_optional_u64_string(&object, "id", header.id())?;
+    set_optional_u64_string(&object, "pts", header.pts())?;
+
+    Ok(object.into())
+}
+
+fn soundkit_encoding_code(encoding: &frame_header::EncodingFlag) -> u8 {
+    match encoding {
+        frame_header::EncodingFlag::PCMSigned => 0,
+        frame_header::EncodingFlag::PCMFloat => 1,
+        frame_header::EncodingFlag::Opus => 2,
+        frame_header::EncodingFlag::FLAC => 3,
+        frame_header::EncodingFlag::AAC => 4,
+        frame_header::EncodingFlag::H264 => 5,
+    }
+}
+
+fn soundkit_encoding_name(encoding: &frame_header::EncodingFlag) -> &'static str {
+    match encoding {
+        frame_header::EncodingFlag::PCMSigned => "PCMSigned",
+        frame_header::EncodingFlag::PCMFloat => "PCMFloat",
+        frame_header::EncodingFlag::Opus => "Opus",
+        frame_header::EncodingFlag::FLAC => "FLAC",
+        frame_header::EncodingFlag::AAC => "AAC",
+        frame_header::EncodingFlag::H264 => "H264",
+    }
+}
+
+fn soundkit_endianness_name(endianness: &frame_header::Endianness) -> &'static str {
+    match endianness {
+        frame_header::Endianness::LittleEndian => "LittleEndian",
+        frame_header::Endianness::BigEndian => "BigEndian",
+    }
+}
+
+fn set_optional_u64_string(object: &Object, key: &str, value: Option<u64>) -> Result<(), JsValue> {
+    if let Some(value) = value {
+        Reflect::set(
+            object,
+            &JsValue::from_str(key),
+            &JsValue::from_str(&value.to_string()),
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "audio-demux")]

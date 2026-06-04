@@ -24,4 +24,5 @@ members = [
   "soundkit-decoder",
   "soundkit-rubberband-sys",
   "soundkit-rubberband",
+  "lori-asha-premix-bench",
 ]

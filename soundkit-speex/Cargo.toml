@@ -7,8 +7,8 @@ description = "Pure Rust Ogg Speex decoder wrapper for soundkit."
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-frame-header = "0.2.0"
+frame-header = { git = "https://github.com/wavey-ai/frame-header.git" }
 memchr = "2"
 oxideav-core = "0.1"
-oxideav-speex = "0.0.6"
+oxideav-speex = { git = "https://github.com/OxideAV/oxideav-speex.git" }
 soundkit = { path = "../soundkit" }
