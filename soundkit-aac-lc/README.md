@@ -71,6 +71,80 @@ source-WAV quality measurements for WESTSIDE.
 `tests/no_alloc_decode.rs` also guards the current fixture path against
 steady-state heap allocations after decoder warmup.
 
+## Fast Native Loop
+
+Use this native-only loop while iterating on `soundkit-aac-lc`; reserve wasm,
+FDK/Symphonia, and full release benchmarks for integration checkpoints:
+
+```bash
+cargo test -p aac-wasm-bench --no-default-features --features soundkit-lc
+cargo test -p soundkit-aac-lc scalefactor
+cargo test -p soundkit-aac-lc imdct_fast
+```
+
+The full native benchmark uses the WESTSIDE AAC fixture and, when the sibling
+`bitneedle` checkout is present, reports decoded AAC quality against the source
+WAV as `source-vs-*` measurements. Override the source WAV path with
+`SOUNDKIT_AAC_SOURCE_WAV=/path/to/source.wav`.
+
+## Current Benchmarks
+
+Native command:
+
+```bash
+cargo run -p aac-wasm-bench --release -- 5
+```
+
+Fixture: `golden/aac/WESTSIDE_MIX_4_CONFIRMATION_130323_256k.aac`, 9171 ADTS
+frames, 48 kHz stereo, 195.648 seconds of AAC frame audio.
+
+| Decoder | Iterations | Decoded frames | Elapsed | RTF | Frames/sec | RMS | Peak |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `fdk-aac-sys` | 5 | 45,855 | 2,045.506 ms | 0.002091 | 22,417.4 | 0.162843351 | 0.918304443 |
+| `soundkit-aac-lc` | 5 | 45,855 | 1,250.680 ms | 0.001278 | 36,664.1 | 0.162846547 | 0.918334007 |
+| `soundkit-lc-reuse` | 5 | 45,855 | 1,355.441 ms | 0.001386 | 33,830.3 | 0.162846547 | 0.918334007 |
+| `symphonia-aac` | 5 | 45,855 | 743.409 ms | 0.000760 | 61,682.1 | 0.162845552 | 1.001383424 |
+
+Decoder-oracle checks compare decoded PCM against FDK with channel-aligned
+offset search:
+
+| Comparison | Status | RMSE | Mean abs | Max abs | SNR |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `fdk-vs-symphonia` | pass | 0.001002403 | 0.000045033 | 0.260961175 | 44.215 dB |
+| `fdk-vs-soundkit` | pass | 0.001242798 | 0.000132421 | 0.370039735 | 42.348 dB |
+
+Source-WAV quality measurements compare each AAC decode against
+`WESTSIDE_MIX 4 CONFIRMATION_130323.wav`:
+
+| Comparison | RMSE | Mean abs | Max abs | SNR | p99 abs | p999 abs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `source-vs-fdk` | 0.006896303 | 0.004594121 | 0.334225774 | 27.510 dB | 0.023480892 | 0.038754225 |
+| `source-vs-soundkit` | 0.006919222 | 0.004613361 | 0.383684549 | 27.480 dB | 0.023648702 | 0.038796075 |
+| `source-vs-symphonia` | 0.006894503 | 0.004592889 | 0.363226533 | 27.511 dB | 0.023478046 | 0.038671419 |
+
+Wasm command:
+
+```bash
+wasm-pack test --node --release soundkit-wasm-decoder --no-default-features --features aac-lc-bench -- --nocapture
+```
+
+The wasm quality test computes SoundKit PCM inside Rust wasm and reports saved
+native FDK/Symphonia baselines without linking either comparator into wasm:
+
+| Comparison | Source | Compared samples | Offset | RMSE | Mean abs | Max abs | p99 abs | p999 abs | SNR |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `saved-source-vs-fdk` | saved native | - | - | 0.006896303 | 0.004594121 | 0.334225774 | 0.023480892 | 0.038754225 | 27.510 dB |
+| `saved-source-vs-symphonia` | saved native | - | - | 0.006894503 | 0.004592889 | 0.363226533 | 0.023478046 | 0.038671419 | 27.511 dB |
+| `wasm-source-vs-sk` | computed in wasm | 18,779,958 | 2,048 samples | 0.006919222 | 0.004613361 | 0.383684535 | 0.023648679 | 0.038796104 | 27.480 dB |
+
+| Wasm path | Iterations | Decoded frames | Elapsed | RTF | Frames/sec | Checksum |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `wasm-core-raw` | 5 | 45,855 | 1,476.331 ms | 0.001509 | 31,060.1 | `24eb18ebd8fc27e4` |
+| `wasm-js-interleaved` | 5 | 45,855 | 1,642.932 ms | 0.001679 | 27,910.5 | `8c2d7264b07abe0a` |
+| `wasm-js-into` | 5 | 45,855 | 1,605.535 ms | 0.001641 | 28,560.6 | `0d4a1cec5595b60a` |
+
+## Wasm Build
+
 The pure decoder builds directly for Rust wasm:
 
 ```sh
@@ -93,6 +167,8 @@ update:
 cargo build -p soundkit --target wasm32-unknown-unknown --release --no-default-features --features wasm
 ```
 
+## Status Notes
+
 Full production acceptance still needs broader fixture coverage, a
 browser/worker packet harness, wasm SIMD, and wider fallback coverage for
 remaining unsupported tools beyond AAC-LC. The current config and packet paths
@@ -103,17 +179,5 @@ uses a `rustfft`-backed IMDCT, following the local `mel-spec`
 CPU FFT precedent, and keeps its transform scratch buffers in reusable decoder
 state. The hot bitreader path uses a buffered MSB-first reservoir, and synthesis
 tracks previous/current window shapes per channel for AAC-correct overlap-add.
-The current native WESTSIDE release baseline is about 36.7k frames/sec for
-direct SoundKit AAC-LC decode, 33.8k frames/sec for reusable SoundKit decoder
-state, 22.4k frames/sec for `fdk-aac-sys`, and 61.7k frames/sec for Symphonia.
-Against the WESTSIDE source WAV, saved baselines are FDK RMSE 0.006896303 /
-SNR 27.510 dB, Symphonia RMSE 0.006894503 / SNR 27.511 dB, and SoundKit
-RMSE 0.006919222 / SNR 27.480 dB. The wasm-bindgen Node checkpoint computes
-the SoundKit source-WAV quality metrics inside Rust wasm and reports the saved
-FDK/Symphonia baselines without linking either comparator into the wasm build.
-The current `wasm32-unknown-unknown` + `wasm-bindgen` Node release baseline is
-about 31.1k frames/sec for core raw access-unit decode, 27.9k frames/sec through
-the JS-facing interleaved API, and 28.6k frames/sec through the caller-provided
-reusable `Float32Array` output API on the WESTSIDE fixture. Further performance
-work should focus on a tighter MDCT, wasm SIMD, and fixture-driven edge cases
-rather than another scalar IMDCT path.
+Further performance work should focus on a tighter MDCT, wasm SIMD, and
+fixture-driven edge cases rather than another scalar IMDCT path.
