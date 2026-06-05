@@ -10,7 +10,7 @@ repository = "https://github.com/wavey-ai/soundkit"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["detect", "raw-pcm", "wav", "mp3", "vorbis", "aiff", "alac", "flac", "webm", "opus-debox", "aac-debox", "audio-demux"]
+default = ["detect", "raw-pcm", "wav", "mp3", "vorbis", "aiff", "alac", "flac", "webm", "opus-debox", "aac-debox", "aac-lc", "audio-demux"]
 detect = ["dep:access-unit"]
 audio-demux = ["dep:soundkit-audio-demux"]
 raw-pcm = []
@@ -21,6 +21,8 @@ flac = ["dep:soundkit-flac"]
 aac = ["dep:soundkit-aac", "soundkit-aac/fdk"]
 m4a = ["aac", "soundkit-aac/mp4-decoder"]
 aac-debox = ["dep:soundkit-aac", "soundkit-aac/mp4-demux"]
+aac-lc = ["dep:soundkit-aac-lc"]
+aac-lc-bench = ["aac-lc"]
 alac = ["dep:soundkit-alac"]
 aiff = ["dep:soundkit-aiff"]
 opus = ["dep:soundkit-opus"]
@@ -38,6 +40,7 @@ wasm-bindgen = "0.2"
 
 soundkit-audio-demux = { path = "../soundkit-audio-demux", optional = true }
 soundkit-aac = { path = "../soundkit-aac", default-features = false, optional = true }
+soundkit-aac-lc = { path = "../soundkit-aac-lc", optional = true }
 soundkit-aiff = { path = "../soundkit-aiff", optional = true }
 soundkit-alac = { path = "../soundkit-alac", optional = true }
 soundkit-flac = { path = "../soundkit-flac", default-features = false, features = ["claxon-decoder"], optional = true }
@@ -46,3 +49,7 @@ soundkit-ogg-opus = { path = "../soundkit-ogg-opus", default-features = false, o
 soundkit-opus = { path = "../soundkit-opus", optional = true }
 soundkit-vorbis = { path = "../soundkit-vorbis", optional = true }
 soundkit-webm = { path = "../soundkit-webm", default-features = false, optional = true }
+
+[dev-dependencies]
+aac-wasm-bench = { path = "../aac-wasm-bench", default-features = false, features = ["soundkit-lc"] }
+wasm-bindgen-test = "0.3"

@@ -1,0 +1,21 @@
+[package]
+name = "aac-wasm-bench"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "WASM AAC decoder benchmark for SoundKit AAC-LC, FDK AAC, Symphonia, and OxideAV status."
+
+[features]
+default = ["fdk", "symphonia", "soundkit-lc"]
+fdk = ["dep:fdk-aac"]
+symphonia = ["dep:symphonia-codec-aac", "dep:symphonia-core"]
+oxideav = ["dep:oxideav-aac"]
+soundkit-lc = ["dep:soundkit-aac-lc"]
+
+[dependencies]
+fdk-aac = { git = "https://github.com/wavey-ai/fdk-aac-rs.git", optional = true }
+oxideav-aac = { git = "https://github.com/OxideAV/oxideav-aac.git", optional = true }
+soundkit = { path = "../soundkit" }
+soundkit-aac-lc = { path = "../soundkit-aac-lc", optional = true }
+symphonia-codec-aac = { version = "0.6.0", optional = true }
+symphonia-core = { version = "0.6.0", optional = true }

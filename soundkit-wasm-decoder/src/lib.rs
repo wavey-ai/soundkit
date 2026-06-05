@@ -1,4 +1,5 @@
-use js_sys::{Array, Object, Reflect, Uint8Array};
+use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
+#[cfg(any(feature = "aac", feature = "m4a", feature = "mp3", feature = "flac"))]
 use soundkit::audio_packet::Decoder;
 use soundkit::audio_types::AudioData;
 use soundkit::crypto::ChaCha20Poly1305PacketCipher;
@@ -15,6 +16,8 @@ use soundkit_aac::AacDecoder;
 use soundkit_aac::AacDecoderMp4;
 #[cfg(feature = "aac-debox")]
 use soundkit_aac::{AacMp4DemuxEvent, AacMp4Demuxer};
+#[cfg(feature = "aac-lc")]
+use soundkit_aac_lc::AacLcDecoder;
 #[cfg(feature = "aiff")]
 use soundkit_aiff::AiffDecoder;
 #[cfg(feature = "alac")]
@@ -40,6 +43,7 @@ use soundkit_webm::{WebmOpusDemuxEvent, WebmOpusDemuxer};
 
 const MIN_DETECTION_BYTES: usize = 8192;
 const MAX_DETECTION_BYTES: usize = 65_536;
+#[cfg(any(feature = "aac", feature = "m4a", feature = "mp3", feature = "flac"))]
 const DEFAULT_SCRATCH_SAMPLES: usize = 262_144;
 
 #[wasm_bindgen]
@@ -57,6 +61,13 @@ pub struct WasmOpusDeboxer {
 #[wasm_bindgen]
 pub struct WasmAacDeboxer {
     state: AacDeboxState,
+}
+
+#[cfg(feature = "aac-lc")]
+#[wasm_bindgen]
+pub struct WasmAacLcDecoder {
+    decoder: AacLcDecoder,
+    interleaved: Vec<f32>,
 }
 
 #[cfg(feature = "audio-demux")]
@@ -268,6 +279,124 @@ impl WasmAacDeboxer {
     pub fn flush(&mut self) -> Result<Array, JsValue> {
         let events = self.flush_events().map_err(js_error)?;
         aac_debox_events_to_js(events)
+    }
+}
+
+#[cfg(feature = "aac-lc")]
+#[wasm_bindgen]
+impl WasmAacLcDecoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(audio_specific_config: &[u8]) -> Result<WasmAacLcDecoder, JsValue> {
+        Ok(Self {
+            decoder: AacLcDecoder::from_audio_specific_config(audio_specific_config)
+                .map_err(|error| js_error(error.to_string()))?,
+            interleaved: Vec::new(),
+        })
+    }
+
+    #[wasm_bindgen(getter, js_name = sampleRate)]
+    pub fn sample_rate(&self) -> u32 {
+        self.decoder.frame_info().sample_rate
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn channels(&self) -> usize {
+        self.decoder.frame_info().channels
+    }
+
+    #[wasm_bindgen(getter, js_name = framesPerAccessUnit)]
+    pub fn frames_per_access_unit(&self) -> usize {
+        self.decoder.frame_info().frames
+    }
+
+    #[wasm_bindgen(js_name = decodeInterleaved)]
+    pub fn decode_interleaved(&mut self, access_unit: &[u8]) -> Result<Float32Array, JsValue> {
+        let mut interleaved = std::mem::take(&mut self.interleaved);
+
+        {
+            let decoded = self
+                .decoder
+                .decode_access_unit(access_unit)
+                .map_err(|error| js_error(error.to_string()))?;
+            let channels = decoded.channels();
+            let channel_count = channels.len();
+            let frames = decoded.frames();
+
+            interleaved.clear();
+            interleaved.resize(frames * channel_count, 0.0);
+
+            for frame in 0..frames {
+                for (channel_index, channel) in channels.iter().enumerate() {
+                    interleaved[frame * channel_count + channel_index] = channel[frame];
+                }
+            }
+        }
+
+        let output = Float32Array::from(interleaved.as_slice());
+        self.interleaved = interleaved;
+        Ok(output)
+    }
+
+    #[wasm_bindgen(js_name = decodeInterleavedInto)]
+    pub fn decode_interleaved_into(
+        &mut self,
+        access_unit: &[u8],
+        output: &Float32Array,
+    ) -> Result<usize, JsValue> {
+        let info = self.decoder.frame_info();
+        let required_len = info.frames * info.channels;
+        if output.length() < required_len as u32 {
+            return Err(js_error(format!(
+                "output Float32Array is too small: need {required_len}, got {}",
+                output.length()
+            )));
+        }
+
+        let mut interleaved = std::mem::take(&mut self.interleaved);
+
+        {
+            let decoded = self
+                .decoder
+                .decode_access_unit(access_unit)
+                .map_err(|error| js_error(error.to_string()))?;
+            let channels = decoded.channels();
+            let channel_count = channels.len();
+            let frames = decoded.frames();
+
+            interleaved.clear();
+            interleaved.resize(frames * channel_count, 0.0);
+
+            for frame in 0..frames {
+                for (channel_index, channel) in channels.iter().enumerate() {
+                    interleaved[frame * channel_count + channel_index] = channel[frame];
+                }
+            }
+        }
+
+        if output.length() == required_len as u32 {
+            output.copy_from(&interleaved);
+        } else {
+            output
+                .subarray(0, required_len as u32)
+                .copy_from(&interleaved);
+        }
+        self.interleaved = interleaved;
+        Ok(required_len)
+    }
+
+    #[wasm_bindgen(js_name = decodePlanar)]
+    pub fn decode_planar(&mut self, access_unit: &[u8]) -> Result<Array, JsValue> {
+        let decoded = self
+            .decoder
+            .decode_access_unit(access_unit)
+            .map_err(|error| js_error(error.to_string()))?;
+        let array = Array::new();
+
+        for channel in decoded.channels() {
+            array.push(&Float32Array::from(channel.as_slice()).into());
+        }
+
+        Ok(array)
     }
 }
 
@@ -703,6 +832,7 @@ where
     Ok(frames)
 }
 
+#[cfg(any(feature = "aiff", feature = "alac"))]
 fn process_single_add_api<D, F>(
     decoder: &mut D,
     bytes: &[u8],
@@ -718,6 +848,7 @@ where
     Ok(frames)
 }
 
+#[cfg(any(feature = "aac", feature = "m4a", feature = "mp3"))]
 fn decode_i16_with_drain<D, F>(
     decoder: &mut D,
     bytes: &[u8],
@@ -783,6 +914,7 @@ where
     Ok(frames)
 }
 
+#[cfg(any(feature = "aac", feature = "m4a", feature = "mp3"))]
 fn audio_data_i16(sample_rate: u32, channels: u8, samples: &[i16]) -> AudioData {
     let mut bytes = Vec::with_capacity(samples.len() * 2);
     for sample in samples {

@@ -3,10 +3,9 @@ use crate::audio_bytes::{
     f32le_to_i16, s16be_to_i16, s16le_to_i16, s24be_to_i16, s24le_to_i16, s32be_to_i16,
     s32le_to_i16,
 };
-use crate::audio_packet::FrameHeader;
 use crate::audio_pipeline::{vec_i16_to_f32, vec_i32_to_f32};
-use crate::audio_types::{EncodingFlag, Endianness};
 use crate::wav::WavStreamProcessor;
+use frame_header::{EncodingFlag, Endianness, FrameHeader};
 use js_sys::{Array, Float32Array, Int16Array, Object, Reflect};
 use wasm_bindgen::prelude::*;
 use web_sys::Worker;
@@ -98,7 +97,10 @@ impl WavToPkt {
             self.wav_reader.channel_count().try_into().unwrap(),
             self.wav_reader.bits_per_sample().try_into().unwrap(),
             Endianness::LittleEndian,
-        );
+            None,
+            None,
+        )
+        .unwrap();
         header.encode(&mut packet_data).unwrap();
         packet_data.extend_from_slice(&data);
         self.packets.push(packet_data);

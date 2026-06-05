@@ -29,7 +29,7 @@ codec blockers for AAC and Opus decode:
 
 ```text
 detect, raw-pcm, wav, mp3, vorbis, aiff, alac, flac, webm,
-opus-debox, aac-debox, audio-demux
+opus-debox, aac-debox, aac-lc, audio-demux
 ```
 
 ## Import
@@ -39,6 +39,7 @@ import init, {
   WasmMusicDecoder,
   WasmAudioTrackDemuxer,
   WasmAacDeboxer,
+  WasmAacLcDecoder,
   WasmOpusDeboxer,
 } from "./soundkit-wasm-decoder/pkg/soundkit_wasm_decoder.js";
 
@@ -122,8 +123,57 @@ Supported `newWithFormat` strings depend on enabled Cargo features:
 | `opus` | PCM via native Opus path | no |
 | `ogg-opus`, `opus-ogg` | PCM via native Opus path | no |
 
-For browser AAC and Opus, prefer the debox APIs below and decode packets with a
-separate JS/WASM codec.
+For ADTS/M4A AAC container streams, prefer the debox APIs below. For AAC-LC raw
+access units in the SoundKit packet stream, use `WasmAacLcDecoder`.
+
+## AAC-LC Raw Access Unit Decoder
+
+Use `WasmAacLcDecoder` when SoundKit already has AAC-LC access units and an
+MPEG-4 `AudioSpecificConfig`. This is the Rust-built wasm path for the
+SoundKit-owned AAC-LC decoder.
+
+```js
+const decoder = new WasmAacLcDecoder(audioSpecificConfig);
+
+for await (const accessUnit of rawAacAccessUnits) {
+  const pcm = decoder.decodeInterleaved(accessUnit);
+  audioWorklet.enqueue(pcm, decoder.sampleRate, decoder.channels);
+}
+```
+
+Constructor:
+
+```ts
+new WasmAacLcDecoder(audioSpecificConfig: Uint8Array)
+```
+
+Properties:
+
+```ts
+sampleRate: number
+channels: number
+framesPerAccessUnit: number
+```
+
+Methods:
+
+```ts
+decodeInterleaved(accessUnit: Uint8Array): Float32Array
+decodeInterleavedInto(accessUnit: Uint8Array, output: Float32Array): number
+decodePlanar(accessUnit: Uint8Array): Float32Array[]
+```
+
+`decodeInterleaved` returns interleaved `f32` PCM. `decodePlanar` returns one
+`Float32Array` per channel. `decodeInterleavedInto` writes interleaved `f32` PCM
+into a caller-owned `Float32Array` and returns the number of samples written,
+allowing worker/player code to reuse output buffers.
+
+Current AAC-LC wasm support is raw access-unit only. MP4/M4A deboxing is handled
+by `WasmAacDeboxer` / `WasmAudioTrackDemuxer`; raw-block `END`/`FIL` elements
+are handled. Unsupported SBR/HE-AAC, PS, program-config-element channels,
+channel layouts beyond stereo, and SBR raw-block fill payloads fail with
+explicit error messages so callers can route those streams to a fallback
+decoder.
 
 ## Generic Audio Track Demuxing
 

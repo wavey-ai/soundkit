@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "soundkit",
   "soundkit-aac",
+  "soundkit-aac-lc",
   "soundkit-flac",
   "soundkit-g711",
   "soundkit-g722",
@@ -25,4 +26,5 @@ members = [
   "soundkit-rubberband-sys",
   "soundkit-rubberband",
   "lori-asha-premix-bench",
+  "aac-wasm-bench",
 ]
