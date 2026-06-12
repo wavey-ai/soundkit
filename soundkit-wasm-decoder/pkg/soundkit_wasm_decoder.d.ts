@@ -20,6 +20,18 @@ export class WasmAacDeboxer {
     push(bytes: Uint8Array): Array<any>;
 }
 
+export class WasmAacLcDecoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    decodeInterleaved(access_unit: Uint8Array): Float32Array;
+    decodeInterleavedInto(access_unit: Uint8Array, output: Float32Array): number;
+    decodePlanar(access_unit: Uint8Array): Array<any>;
+    constructor(audio_specific_config: Uint8Array);
+    readonly channels: number;
+    readonly framesPerAccessUnit: number;
+    readonly sampleRate: number;
+}
+
 export class WasmAudioTrackDemuxer {
     free(): void;
     [Symbol.dispose](): void;
@@ -99,6 +111,7 @@ export interface InitOutput {
     readonly __wbg_wasmmusicdecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdeboxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmaacdeboxer_free: (a: number, b: number) => void;
+    readonly __wbg_wasmaaclcdecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmaudiotrackdemuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmsoundkitframedecoder_free: (a: number, b: number) => void;
     readonly wasmmusicdecoder_new: () => number;
@@ -115,6 +128,13 @@ export interface InitOutput {
     readonly wasmaacdeboxer_newWithFormat: (a: number, b: number) => [number, number, number];
     readonly wasmaacdeboxer_push: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmaacdeboxer_flush: (a: number) => [number, number, number];
+    readonly wasmaaclcdecoder_new: (a: number, b: number) => [number, number, number];
+    readonly wasmaaclcdecoder_sampleRate: (a: number) => number;
+    readonly wasmaaclcdecoder_channels: (a: number) => number;
+    readonly wasmaaclcdecoder_framesPerAccessUnit: (a: number) => number;
+    readonly wasmaaclcdecoder_decodeInterleaved: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmaaclcdecoder_decodeInterleavedInto: (a: number, b: number, c: number, d: any) => [number, number, number];
+    readonly wasmaaclcdecoder_decodePlanar: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmaudiotrackdemuxer_new: () => number;
     readonly wasmaudiotrackdemuxer_newWithFormat: (a: number, b: number) => [number, number, number];
     readonly wasmaudiotrackdemuxer_push: (a: number, b: number, c: number) => [number, number, number];

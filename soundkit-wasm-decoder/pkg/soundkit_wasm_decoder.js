@@ -74,6 +74,95 @@ export class WasmAacDeboxer {
 }
 if (Symbol.dispose) WasmAacDeboxer.prototype[Symbol.dispose] = WasmAacDeboxer.prototype.free;
 
+export class WasmAacLcDecoder {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmAacLcDecoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmaaclcdecoder_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get channels() {
+        const ret = wasm.wasmaaclcdecoder_channels(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {Uint8Array} access_unit
+     * @returns {Float32Array}
+     */
+    decodeInterleaved(access_unit) {
+        const ptr0 = passArray8ToWasm0(access_unit, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmaaclcdecoder_decodeInterleaved(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {Uint8Array} access_unit
+     * @param {Float32Array} output
+     * @returns {number}
+     */
+    decodeInterleavedInto(access_unit, output) {
+        const ptr0 = passArray8ToWasm0(access_unit, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmaaclcdecoder_decodeInterleavedInto(this.__wbg_ptr, ptr0, len0, output);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * @param {Uint8Array} access_unit
+     * @returns {Array<any>}
+     */
+    decodePlanar(access_unit) {
+        const ptr0 = passArray8ToWasm0(access_unit, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmaaclcdecoder_decodePlanar(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @returns {number}
+     */
+    get framesPerAccessUnit() {
+        const ret = wasm.wasmaaclcdecoder_framesPerAccessUnit(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {Uint8Array} audio_specific_config
+     */
+    constructor(audio_specific_config) {
+        const ptr0 = passArray8ToWasm0(audio_specific_config, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmaaclcdecoder_new(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmAacLcDecoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {number}
+     */
+    get sampleRate() {
+        const ret = wasm.wasmaaclcdecoder_sampleRate(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) WasmAacLcDecoder.prototype[Symbol.dispose] = WasmAacLcDecoder.prototype.free;
+
 export class WasmAudioTrackDemuxer {
     static __wrap(ptr) {
         const obj = Object.create(WasmAudioTrackDemuxer.prototype);
@@ -432,29 +521,44 @@ if (Symbol.dispose) WasmSoundKitFrameDecoder.prototype[Symbol.dispose] = WasmSou
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
-        __wbg___wbindgen_throw_9c31b086c2b26051: function(arg0, arg1) {
+        __wbg___wbindgen_throw_1506f2235d1bdba0: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
-        __wbg_new_02d162bc6cf02f60: function() {
+        __wbg_length_7abca14930109c1c: function(arg0) {
+            const ret = arg0.length;
+            return ret;
+        },
+        __wbg_new_ce1ab61c1c2b300d: function() {
             const ret = new Object();
             return ret;
         },
-        __wbg_new_310879b66b6e95e1: function() {
+        __wbg_new_d90091b82fdf5b91: function() {
             const ret = new Array();
             return ret;
         },
-        __wbg_new_from_slice_269e35316ed2d061: function(arg0, arg1) {
+        __wbg_new_from_slice_18fa1f71286d66b8: function(arg0, arg1) {
             const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
             return ret;
         },
-        __wbg_push_b77c476b01548d0a: function(arg0, arg1) {
+        __wbg_new_from_slice_956df4f769fb782c: function(arg0, arg1) {
+            const ret = new Float32Array(getArrayF32FromWasm0(arg0, arg1));
+            return ret;
+        },
+        __wbg_push_a6822215aa43e71c: function(arg0, arg1) {
             const ret = arg0.push(arg1);
             return ret;
         },
-        __wbg_set_a0e911be3da02782: function() { return handleError(function (arg0, arg1, arg2) {
+        __wbg_set_6e30c9374c26414c: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = Reflect.set(arg0, arg1, arg2);
             return ret;
         }, arguments); },
+        __wbg_set_bd7b6300364788fc: function(arg0, arg1, arg2) {
+            arg0.set(getArrayF32FromWasm0(arg1, arg2));
+        },
+        __wbg_subarray_1a710c4bd4560bee: function(arg0, arg1, arg2) {
+            const ret = arg0.subarray(arg1 >>> 0, arg2 >>> 0);
+            return ret;
+        },
         __wbindgen_cast_0000000000000001: function(arg0) {
             // Cast intrinsic for `F64 -> Externref`.
             const ret = arg0;
@@ -484,6 +588,9 @@ function __wbg_get_imports() {
 const WasmAacDeboxerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmaacdeboxer_free(ptr, 1));
+const WasmAacLcDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmaaclcdecoder_free(ptr, 1));
 const WasmAudioTrackDemuxerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmaudiotrackdemuxer_free(ptr, 1));
@@ -503,9 +610,22 @@ function addToExternrefTable0(obj) {
     return idx;
 }
 
+function getArrayF32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
+
+let cachedFloat32ArrayMemory0 = null;
+function getFloat32ArrayMemory0() {
+    if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
+        cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
+    }
+    return cachedFloat32ArrayMemory0;
 }
 
 function getStringFromWasm0(ptr, len) {
@@ -613,6 +733,7 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedFloat32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;
