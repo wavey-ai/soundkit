@@ -48,6 +48,14 @@ export class WasmAudioTrackDemuxer {
     push(bytes: Uint8Array): Array<any>;
 }
 
+export class WasmFlacEncoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    encodePlanarF32(planar: Float32Array, frames_per_channel: number): Uint8Array;
+    constructor(sample_rate: number, channels: number, bits_per_sample: number, frame_size: number, compression_level: number);
+    reset(): void;
+}
+
 export class WasmMusicDecoder {
     free(): void;
     [Symbol.dispose](): void;
@@ -88,6 +96,14 @@ export class WasmOpusDeboxer {
     push(bytes: Uint8Array): Array<any>;
 }
 
+export class WasmOpusEncoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    encodeInterleavedI16(interleaved: Int16Array): Uint8Array;
+    constructor(sample_rate: number, channels: number, bitrate: number, frame_size: number);
+    reset(): void;
+}
+
 export class WasmSoundKitFrameDecoder {
     free(): void;
     [Symbol.dispose](): void;
@@ -108,51 +124,59 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly __wbg_wasmmusicdecoder_free: (a: number, b: number) => void;
-    readonly __wbg_wasmopusdeboxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmaacdeboxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmaaclcdecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmaudiotrackdemuxer_free: (a: number, b: number) => void;
+    readonly __wbg_wasmflacencoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmmusicdecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmopusdeboxer_free: (a: number, b: number) => void;
+    readonly __wbg_wasmopusencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmsoundkitframedecoder_free: (a: number, b: number) => void;
-    readonly wasmmusicdecoder_new: () => number;
-    readonly wasmmusicdecoder_newWithFormat: (a: number, b: number) => [number, number, number];
-    readonly wasmmusicdecoder_newRawLinear16: (a: number, b: number) => [number, number, number];
-    readonly wasmmusicdecoder_newRawLinear32: (a: number, b: number) => [number, number, number];
-    readonly wasmmusicdecoder_push: (a: number, b: number, c: number) => [number, number, number];
-    readonly wasmmusicdecoder_flush: (a: number) => [number, number, number];
-    readonly wasmopusdeboxer_new: () => number;
-    readonly wasmopusdeboxer_newWithFormat: (a: number, b: number) => [number, number, number];
-    readonly wasmopusdeboxer_push: (a: number, b: number, c: number) => [number, number, number];
-    readonly wasmopusdeboxer_flush: (a: number) => [number, number, number];
+    readonly wasmaacdeboxer_flush: (a: number) => [number, number, number];
     readonly wasmaacdeboxer_new: () => number;
     readonly wasmaacdeboxer_newWithFormat: (a: number, b: number) => [number, number, number];
     readonly wasmaacdeboxer_push: (a: number, b: number, c: number) => [number, number, number];
-    readonly wasmaacdeboxer_flush: (a: number) => [number, number, number];
-    readonly wasmaaclcdecoder_new: (a: number, b: number) => [number, number, number];
-    readonly wasmaaclcdecoder_sampleRate: (a: number) => number;
     readonly wasmaaclcdecoder_channels: (a: number) => number;
-    readonly wasmaaclcdecoder_framesPerAccessUnit: (a: number) => number;
     readonly wasmaaclcdecoder_decodeInterleaved: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmaaclcdecoder_decodeInterleavedInto: (a: number, b: number, c: number, d: any) => [number, number, number];
     readonly wasmaaclcdecoder_decodePlanar: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmaaclcdecoder_framesPerAccessUnit: (a: number) => number;
+    readonly wasmaaclcdecoder_new: (a: number, b: number) => [number, number, number];
+    readonly wasmaaclcdecoder_sampleRate: (a: number) => number;
+    readonly wasmaudiotrackdemuxer_flush: (a: number) => [number, number, number];
     readonly wasmaudiotrackdemuxer_new: () => number;
     readonly wasmaudiotrackdemuxer_newWithFormat: (a: number, b: number) => [number, number, number];
     readonly wasmaudiotrackdemuxer_push: (a: number, b: number, c: number) => [number, number, number];
-    readonly wasmaudiotrackdemuxer_flush: (a: number) => [number, number, number];
-    readonly wasmsoundkitframedecoder_new: () => number;
-    readonly wasmsoundkitframedecoder_newWithKeyBytes: (a: number, b: number) => [number, number, number];
-    readonly wasmsoundkitframedecoder_newWithDecimalKey: (a: number, b: number) => [number, number, number];
-    readonly wasmsoundkitframedecoder_setKeyBytes: (a: number, b: number, c: number) => [number, number];
-    readonly wasmsoundkitframedecoder_setDecimalKey: (a: number, b: number, c: number) => [number, number];
-    readonly wasmsoundkitframedecoder_clearKey: (a: number) => void;
-    readonly wasmsoundkitframedecoder_push: (a: number, b: number, c: number) => [number, number, number];
-    readonly wasmsoundkitframedecoder_finish: (a: number) => [number, number];
-    readonly wasmsoundkitframedecoder_reset: (a: number) => void;
+    readonly wasmflacencoder_encodePlanarF32: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmflacencoder_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly wasmflacencoder_reset: (a: number) => [number, number];
+    readonly wasmmusicdecoder_flush: (a: number) => [number, number, number];
+    readonly wasmmusicdecoder_new: () => number;
+    readonly wasmmusicdecoder_newRawLinear16: (a: number, b: number) => [number, number, number];
+    readonly wasmmusicdecoder_newRawLinear32: (a: number, b: number) => [number, number, number];
+    readonly wasmmusicdecoder_newWithFormat: (a: number, b: number) => [number, number, number];
+    readonly wasmmusicdecoder_push: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmopusdeboxer_flush: (a: number) => [number, number, number];
+    readonly wasmopusdeboxer_new: () => number;
+    readonly wasmopusdeboxer_newWithFormat: (a: number, b: number) => [number, number, number];
+    readonly wasmopusdeboxer_push: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmopusencoder_encodeInterleavedI16: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmopusencoder_new: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmopusencoder_reset: (a: number) => [number, number];
     readonly wasmsoundkitframedecoder_bufferedBytes: (a: number) => number;
-    readonly wasmopusdeboxer_newAuto: () => number;
+    readonly wasmsoundkitframedecoder_clearKey: (a: number) => void;
+    readonly wasmsoundkitframedecoder_finish: (a: number) => [number, number];
+    readonly wasmsoundkitframedecoder_new: () => number;
+    readonly wasmsoundkitframedecoder_newWithDecimalKey: (a: number, b: number) => [number, number, number];
+    readonly wasmsoundkitframedecoder_newWithKeyBytes: (a: number, b: number) => [number, number, number];
+    readonly wasmsoundkitframedecoder_push: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmsoundkitframedecoder_reset: (a: number) => void;
+    readonly wasmsoundkitframedecoder_setDecimalKey: (a: number, b: number, c: number) => [number, number];
+    readonly wasmsoundkitframedecoder_setKeyBytes: (a: number, b: number, c: number) => [number, number];
+    readonly wasmmusicdecoder_newAuto: () => number;
     readonly wasmaacdeboxer_newAuto: () => number;
     readonly wasmaudiotrackdemuxer_newAuto: () => number;
-    readonly wasmmusicdecoder_newAuto: () => number;
+    readonly wasmopusdeboxer_newAuto: () => number;
     readonly wasmsoundkitframedecoder_newUnencrypted: () => number;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;

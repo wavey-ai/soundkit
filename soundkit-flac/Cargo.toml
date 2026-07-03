@@ -8,13 +8,16 @@ access-unit = { git = "https://github.com/wavey-ai/access-unit.git" }
 libc = "0.2.158"
 libflac-sys = { git = "https://github.com/mgeier/libflac-sys.git", optional = true }
 claxon = { version = "0.4", optional = true }
+oxideav-core = { version = "0.1.26", optional = true }
+oxideav-flac = { version = "0.0.11", optional = true }
 soundkit = { path = "../soundkit" }
 tracing = "0.1.40"
 
 [features]
-default = ["libflac"]
+default = ["libflac", "oxideav-encoder"]
 libflac = ["libflac-sys"]
 claxon-decoder = ["claxon"]
+oxideav-encoder = ["dep:oxideav-core", "dep:oxideav-flac"]
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

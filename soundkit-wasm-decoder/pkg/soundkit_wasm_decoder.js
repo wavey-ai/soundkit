@@ -234,6 +234,56 @@ export class WasmAudioTrackDemuxer {
 }
 if (Symbol.dispose) WasmAudioTrackDemuxer.prototype[Symbol.dispose] = WasmAudioTrackDemuxer.prototype.free;
 
+export class WasmFlacEncoder {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmFlacEncoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmflacencoder_free(ptr, 0);
+    }
+    /**
+     * @param {Float32Array} planar
+     * @param {number} frames_per_channel
+     * @returns {Uint8Array}
+     */
+    encodePlanarF32(planar, frames_per_channel) {
+        const ptr0 = passArrayF32ToWasm0(planar, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmflacencoder_encodePlanarF32(this.__wbg_ptr, ptr0, len0, frames_per_channel);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {number} sample_rate
+     * @param {number} channels
+     * @param {number} bits_per_sample
+     * @param {number} frame_size
+     * @param {number} compression_level
+     */
+    constructor(sample_rate, channels, bits_per_sample, frame_size, compression_level) {
+        const ret = wasm.wasmflacencoder_new(sample_rate, channels, bits_per_sample, frame_size, compression_level);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmFlacEncoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    reset() {
+        const ret = wasm.wasmflacencoder_reset(this.__wbg_ptr);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+}
+if (Symbol.dispose) WasmFlacEncoder.prototype[Symbol.dispose] = WasmFlacEncoder.prototype.free;
+
 export class WasmMusicDecoder {
     static __wrap(ptr) {
         const obj = Object.create(WasmMusicDecoder.prototype);
@@ -405,6 +455,54 @@ export class WasmOpusDeboxer {
     }
 }
 if (Symbol.dispose) WasmOpusDeboxer.prototype[Symbol.dispose] = WasmOpusDeboxer.prototype.free;
+
+export class WasmOpusEncoder {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmOpusEncoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmopusencoder_free(ptr, 0);
+    }
+    /**
+     * @param {Int16Array} interleaved
+     * @returns {Uint8Array}
+     */
+    encodeInterleavedI16(interleaved) {
+        const ptr0 = passArray16ToWasm0(interleaved, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmopusencoder_encodeInterleavedI16(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {number} sample_rate
+     * @param {number} channels
+     * @param {number} bitrate
+     * @param {number} frame_size
+     */
+    constructor(sample_rate, channels, bitrate, frame_size) {
+        const ret = wasm.wasmopusencoder_new(sample_rate, channels, bitrate, frame_size);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmOpusEncoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    reset() {
+        const ret = wasm.wasmopusencoder_reset(this.__wbg_ptr);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+}
+if (Symbol.dispose) WasmOpusEncoder.prototype[Symbol.dispose] = WasmOpusEncoder.prototype.free;
 
 export class WasmSoundKitFrameDecoder {
     static __wrap(ptr) {
@@ -594,12 +692,18 @@ const WasmAacLcDecoderFinalization = (typeof FinalizationRegistry === 'undefined
 const WasmAudioTrackDemuxerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmaudiotrackdemuxer_free(ptr, 1));
+const WasmFlacEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmflacencoder_free(ptr, 1));
 const WasmMusicDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmmusicdecoder_free(ptr, 1));
 const WasmOpusDeboxerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmopusdeboxer_free(ptr, 1));
+const WasmOpusEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmopusencoder_free(ptr, 1));
 const WasmSoundKitFrameDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmsoundkitframedecoder_free(ptr, 1));
@@ -632,6 +736,14 @@ function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);
 }
 
+let cachedUint16ArrayMemory0 = null;
+function getUint16ArrayMemory0() {
+    if (cachedUint16ArrayMemory0 === null || cachedUint16ArrayMemory0.byteLength === 0) {
+        cachedUint16ArrayMemory0 = new Uint16Array(wasm.memory.buffer);
+    }
+    return cachedUint16ArrayMemory0;
+}
+
 let cachedUint8ArrayMemory0 = null;
 function getUint8ArrayMemory0() {
     if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.byteLength === 0) {
@@ -649,9 +761,23 @@ function handleError(f, args) {
     }
 }
 
+function passArray16ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 2, 2) >>> 0;
+    getUint16ArrayMemory0().set(arg, ptr / 2);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
     getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArrayF32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getFloat32ArrayMemory0().set(arg, ptr / 4);
     WASM_VECTOR_LEN = arg.length;
     return ptr;
 }
@@ -734,6 +860,7 @@ function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
     wasmModule = module;
     cachedFloat32ArrayMemory0 = null;
+    cachedUint16ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

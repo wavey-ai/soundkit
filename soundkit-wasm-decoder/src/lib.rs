@@ -1,6 +1,8 @@
 use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
 #[cfg(any(feature = "aac", feature = "m4a", feature = "mp3", feature = "flac"))]
 use soundkit::audio_packet::Decoder;
+#[cfg(any(feature = "flac", feature = "opus"))]
+use soundkit::audio_packet::Encoder;
 use soundkit::audio_types::AudioData;
 use soundkit::crypto::ChaCha20Poly1305PacketCipher;
 use soundkit::frame_stream::{SoundKitFrame, SoundKitFrameStream, SoundKitFrameStreamOptions};
@@ -25,7 +27,7 @@ use soundkit_alac::AlacDecoder;
 #[cfg(feature = "audio-demux")]
 use soundkit_audio_demux::{AudioDemuxEvent, AudioTrackDemuxer};
 #[cfg(feature = "flac")]
-use soundkit_flac::FlacDecoderClaxon;
+use soundkit_flac::{FlacDecoderClaxon, FlacEncoder};
 #[cfg(feature = "mp3")]
 use soundkit_mp3::Mp3Decoder;
 #[cfg(feature = "ogg-opus")]
@@ -33,7 +35,7 @@ use soundkit_ogg_opus::OggOpusDecoder;
 #[cfg(feature = "opus-debox")]
 use soundkit_ogg_opus::{OggOpusDemuxEvent, OggOpusDemuxer};
 #[cfg(feature = "opus")]
-use soundkit_opus::OpusStreamDecoder;
+use soundkit_opus::{OpusEncoder, OpusStreamDecoder};
 #[cfg(feature = "vorbis")]
 use soundkit_vorbis::VorbisDecoder;
 #[cfg(feature = "webm")]
@@ -79,6 +81,26 @@ pub struct WasmAudioTrackDemuxer {
 #[wasm_bindgen]
 pub struct WasmSoundKitFrameDecoder {
     stream: SoundKitFrameStream,
+}
+
+#[cfg(feature = "flac")]
+#[wasm_bindgen]
+pub struct WasmFlacEncoder {
+    encoder: FlacEncoder,
+    channels: u8,
+    bits_per_sample: u32,
+}
+
+// Opus encoder backed by soundkit-opus -> libopus-rs (Rust), so both the player
+// and the press /cut editor encode Opus through soundkit rather than a separate
+// libopus wasm bundle or any C dependency.
+#[cfg(feature = "opus")]
+#[wasm_bindgen]
+pub struct WasmOpusEncoder {
+    encoder: OpusEncoder,
+    frame_size: u32,
+    channels: u8,
+    output: Vec<u8>,
 }
 
 enum DecoderState {
@@ -500,6 +522,115 @@ impl WasmSoundKitFrameDecoder {
     #[wasm_bindgen(js_name = bufferedBytes)]
     pub fn buffered_bytes(&self) -> usize {
         self.stream.buffered_bytes()
+    }
+}
+
+#[cfg(feature = "flac")]
+#[wasm_bindgen]
+impl WasmFlacEncoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        sample_rate: u32,
+        channels: u8,
+        bits_per_sample: u32,
+        frame_size: u32,
+        compression_level: u32,
+    ) -> Result<WasmFlacEncoder, JsValue> {
+        let mut encoder = FlacEncoder::new(
+            sample_rate,
+            bits_per_sample,
+            channels as u32,
+            frame_size,
+            compression_level,
+        );
+        encoder.init().map_err(js_error)?;
+        Ok(Self {
+            encoder,
+            channels,
+            bits_per_sample,
+        })
+    }
+
+    #[wasm_bindgen(js_name = encodePlanarF32)]
+    pub fn encode_planar_f32(
+        &mut self,
+        planar: &[f32],
+        frames_per_channel: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        let channels = self.channels as usize;
+        let frames = frames_per_channel as usize;
+        let expected = channels
+            .checked_mul(frames)
+            .ok_or_else(|| js_error("FLAC encode input is too large".to_string()))?;
+        if planar.len() < expected {
+            return Err(js_error(format!(
+                "planar input too short: need {expected} samples, got {}",
+                planar.len()
+            )));
+        }
+
+        let interleaved = planar_f32_to_interleaved_i32(
+            &planar[..expected],
+            frames,
+            channels,
+            self.bits_per_sample,
+        )?;
+        let mut output = vec![0u8; expected.saturating_mul(8).saturating_add(4096)];
+        let encoded = self
+            .encoder
+            .encode_i32(&interleaved, &mut output)
+            .map_err(js_error)?;
+        output.truncate(encoded);
+        Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    pub fn reset(&mut self) -> Result<(), JsValue> {
+        self.encoder.reset().map_err(js_error)
+    }
+}
+
+#[cfg(feature = "opus")]
+#[wasm_bindgen]
+impl WasmOpusEncoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        sample_rate: u32,
+        channels: u8,
+        bitrate: u32,
+        frame_size: u32,
+    ) -> Result<WasmOpusEncoder, JsValue> {
+        // bits_per_sample is unused by the Opus encoder (it operates on i16 PCM).
+        let mut encoder = OpusEncoder::new(sample_rate, 16, channels as u32, frame_size, bitrate);
+        encoder.init().map_err(js_error)?;
+        Ok(Self {
+            encoder,
+            frame_size,
+            channels,
+            // Max Opus packet is ~1275 bytes/channel; 4096 covers stereo CBR.
+            output: vec![0u8; 4096],
+        })
+    }
+
+    // Encodes one interleaved-i16 frame of `frame_size * channels` samples (the
+    // caller zero-pads the final short frame) and returns the raw Opus packet.
+    #[wasm_bindgen(js_name = encodeInterleavedI16)]
+    pub fn encode_interleaved_i16(&mut self, interleaved: &[i16]) -> Result<Uint8Array, JsValue> {
+        let required = self.frame_size as usize * self.channels as usize;
+        if interleaved.len() < required {
+            return Err(js_error(format!(
+                "opus encode input too short: need {required} samples, got {}",
+                interleaved.len()
+            )));
+        }
+        let written = self
+            .encoder
+            .encode_i16(&interleaved[..required], &mut self.output)
+            .map_err(js_error)?;
+        Ok(Uint8Array::from(&self.output[..written]))
+    }
+
+    pub fn reset(&mut self) -> Result<(), JsValue> {
+        self.encoder.reset().map_err(js_error)
     }
 }
 
@@ -2018,6 +2149,49 @@ fn aac_debox_event_to_js(event: AacDeboxEvent) -> Result<JsValue, JsValue> {
 
 fn js_error(error: String) -> JsValue {
     JsValue::from_str(&error)
+}
+
+#[cfg(feature = "flac")]
+fn planar_f32_to_interleaved_i32(
+    planar: &[f32],
+    frames: usize,
+    channels: usize,
+    bits_per_sample: u32,
+) -> Result<Vec<i32>, JsValue> {
+    let scale = match bits_per_sample {
+        1..=16 => 32768.0f64,
+        17..=24 => 8_388_608.0f64,
+        25..=32 => 2_147_483_648.0f64,
+        _ => {
+            return Err(js_error(format!(
+                "Unsupported FLAC bits-per-sample for wasm encoder: {bits_per_sample}"
+            )));
+        }
+    };
+    let max_sample = match bits_per_sample {
+        1..=16 => i16::MAX as i32,
+        17..=24 => 8_388_607i32,
+        _ => i32::MAX,
+    };
+    let min_sample = match bits_per_sample {
+        1..=16 => i16::MIN as i32,
+        17..=24 => -8_388_608i32,
+        _ => i32::MIN,
+    };
+
+    let mut interleaved = Vec::with_capacity(frames.saturating_mul(channels));
+    for frame in 0..frames {
+        for channel in 0..channels {
+            let sample = planar[(channel * frames) + frame].clamp(-1.0, 1.0) as f64;
+            let scaled = if sample < 0.0 {
+                (sample * scale).round()
+            } else {
+                (sample * (scale - 1.0)).round()
+            };
+            interleaved.push((scaled as i64).clamp(min_sample as i64, max_sample as i64) as i32);
+        }
+    }
+    Ok(interleaved)
 }
 
 #[cfg(test)]

@@ -4,16 +4,207 @@ use core::slice;
 use libflac_sys as ffi;
 #[cfg(feature = "libflac")]
 use libflac_sys::*;
+#[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
+use soundkit::audio_packet::Encoder;
 #[cfg(feature = "libflac")]
-use soundkit::audio_packet::{Decoder, Encoder};
-#[cfg(feature = "libflac")]
+use soundkit::audio_packet::Decoder;
+#[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
 use std::cell::RefCell;
-#[cfg(feature = "libflac")]
+#[cfg(feature = "oxideav-encoder")]
+use std::collections::VecDeque;
+#[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
 use std::rc::Rc;
 #[cfg(feature = "libflac")]
 use tracing::{debug, error, trace};
+#[cfg(feature = "oxideav-encoder")]
+use oxideav_core::registry::codec::Encoder as OxideEncoder;
+#[cfg(feature = "oxideav-encoder")]
+use oxideav_core::{AudioFrame as OxideAudioFrame, CodecId, CodecParameters, Error as OxideError};
+#[cfg(feature = "oxideav-encoder")]
+use oxideav_core::{Frame as OxideFrame, SampleFormat};
 
-#[cfg(feature = "libflac")]
+#[cfg(feature = "oxideav-encoder")]
+pub struct FlacEncoder {
+    sample_rate: u32,
+    channels: u32,
+    bits_per_sample: u32,
+    frame_length: u32,
+    bitrate: u32,
+    inner: Box<dyn OxideEncoder>,
+    pending_packets: VecDeque<Vec<u8>>,
+    stream_header: Vec<u8>,
+    emitted_stream_header: bool,
+}
+
+#[cfg(feature = "oxideav-encoder")]
+impl FlacEncoder {
+    fn sample_format(bits_per_sample: u32) -> Result<SampleFormat, String> {
+        match bits_per_sample {
+            1..=16 => Ok(SampleFormat::S16),
+            17..=24 => Ok(SampleFormat::S24),
+            25..=32 => Ok(SampleFormat::S32),
+            _ => Err(format!(
+                "Unsupported FLAC bits per sample: {}",
+                bits_per_sample
+            )),
+        }
+    }
+
+    fn build_params(
+        sample_rate: u32,
+        bits_per_sample: u32,
+        channels: u32,
+        bitrate: u32,
+    ) -> Result<CodecParameters, String> {
+        let sample_format = Self::sample_format(bits_per_sample)?;
+        let channels = u16::try_from(channels)
+            .map_err(|_| format!("Channel count {} exceeds u16", channels))?;
+        let mut params = CodecParameters::audio(CodecId::new("flac"));
+        params.sample_rate = Some(sample_rate);
+        params.channels = Some(channels);
+        params.sample_format = Some(sample_format);
+        if bitrate > 0 {
+            params.bit_rate = Some(u64::from(bitrate));
+        }
+        Ok(params)
+    }
+
+    fn make_inner(
+        sample_rate: u32,
+        bits_per_sample: u32,
+        channels: u32,
+        bitrate: u32,
+    ) -> Result<(Box<dyn OxideEncoder>, Vec<u8>), String> {
+        let params = Self::build_params(sample_rate, bits_per_sample, channels, bitrate)?;
+        let inner = oxideav_flac::encoder::make_encoder(&params)
+            .map_err(|error| format!("Failed to create oxideav FLAC encoder: {error}"))?;
+        let stream_header = inner.output_params().extradata.clone();
+        Ok((inner, stream_header))
+    }
+
+    fn queue_ready_packets(&mut self) -> Result<(), String> {
+        loop {
+            match self.inner.receive_packet() {
+                Ok(packet) => {
+                    let mut data = packet.data;
+                    if !self.emitted_stream_header {
+                        let mut first_packet =
+                            Vec::with_capacity(self.stream_header.len() + data.len());
+                        first_packet.extend_from_slice(&self.stream_header);
+                        first_packet.append(&mut data);
+                        data = first_packet;
+                        self.emitted_stream_header = true;
+                    }
+                    self.pending_packets.push_back(data);
+                }
+                Err(OxideError::NeedMore) => return Ok(()),
+                Err(error) => return Err(format!("Failed to receive FLAC packet: {error}")),
+            }
+        }
+    }
+
+    fn copy_next_packet(&mut self, output: &mut [u8]) -> Result<usize, String> {
+        let packet = self
+            .pending_packets
+            .pop_front()
+            .ok_or_else(|| "FLAC encoder produced no packet".to_string())?;
+        if output.len() < packet.len() {
+            return Err(format!(
+                "Output buffer of len {} too small for FLAC packet of len {}",
+                output.len(),
+                packet.len()
+            ));
+        }
+        output[..packet.len()].copy_from_slice(&packet);
+        Ok(packet.len())
+    }
+}
+
+#[cfg(feature = "oxideav-encoder")]
+impl Encoder for FlacEncoder {
+    fn new(
+        sample_rate: u32,
+        bits_per_sample: u32,
+        channels: u32,
+        frame_length: u32,
+        bitrate: u32,
+    ) -> Self {
+        let (inner, stream_header) =
+            Self::make_inner(sample_rate, bits_per_sample, channels, bitrate)
+                .unwrap_or_else(|error| panic!("{error}"));
+
+        Self {
+            sample_rate,
+            channels,
+            bits_per_sample,
+            frame_length,
+            bitrate,
+            inner,
+            pending_packets: VecDeque::new(),
+            stream_header,
+            emitted_stream_header: false,
+        }
+    }
+
+    fn init(&mut self) -> Result<(), String> {
+        self.reset()
+    }
+
+    fn encode_i16(&mut self, _input: &[i16], _output: &mut [u8]) -> Result<usize, String> {
+        Err("Not implemented - FLAC uses i32 input".to_string())
+    }
+
+    fn encode_i32(&mut self, input: &[i32], output: &mut [u8]) -> Result<usize, String> {
+        let channels = self.channels as usize;
+        if channels == 0 {
+            return Err("FLAC encoder requires at least one channel".to_string());
+        }
+        if !input.len().is_multiple_of(channels) {
+            return Err(format!(
+                "FLAC encoder input length {} is not divisible by channel count {}",
+                input.len(),
+                channels
+            ));
+        }
+
+        if self.pending_packets.is_empty() {
+            let mut audio_bytes = Vec::with_capacity(input.len() * std::mem::size_of::<i32>());
+            for sample in input {
+                audio_bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+
+            let frame = OxideFrame::Audio(OxideAudioFrame {
+                samples: (input.len() / channels) as u32,
+                pts: None,
+                data: vec![audio_bytes],
+            });
+
+            self.inner
+                .send_frame(&frame)
+                .map_err(|error| format!("Failed to encode FLAC frame: {error}"))?;
+            self.queue_ready_packets()?;
+        }
+
+        self.copy_next_packet(output)
+    }
+
+    fn reset(&mut self) -> Result<(), String> {
+        let (inner, stream_header) = Self::make_inner(
+            self.sample_rate,
+            self.bits_per_sample,
+            self.channels,
+            self.bitrate,
+        )?;
+        self.inner = inner;
+        self.stream_header = stream_header;
+        self.pending_packets.clear();
+        self.emitted_stream_header = false;
+        let _ = self.frame_length;
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
 pub struct FlacEncoder {
     encoder: *mut ffi::FLAC__StreamEncoder,
     sample_rate: u32,
@@ -24,7 +215,7 @@ pub struct FlacEncoder {
     compression_level: u32,
 }
 
-#[cfg(feature = "libflac")]
+#[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
 extern "C" fn write_callback(
     _encoder: *const ffi::FLAC__StreamEncoder,
     buffer: *const ffi::FLAC__byte,
@@ -41,7 +232,7 @@ extern "C" fn write_callback(
     ffi::FLAC__STREAM_ENCODER_WRITE_STATUS_OK
 }
 
-#[cfg(feature = "libflac")]
+#[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
 impl Encoder for FlacEncoder {
     fn new(
         sample_rate: u32,
@@ -144,7 +335,7 @@ impl Encoder for FlacEncoder {
     }
 }
 
-#[cfg(feature = "libflac")]
+#[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
 impl Drop for FlacEncoder {
     fn drop(&mut self) {
         unsafe {
@@ -636,25 +827,25 @@ pub use claxon_decoder::FlacDecoderClaxon;
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "libflac")]
+    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
     use super::*;
-    #[cfg(feature = "libflac")]
+    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
     use soundkit::audio_bytes::{f32le_to_s24, s16le_to_i32, s24le_to_i32};
     use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
-    #[cfg(feature = "libflac")]
+    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
     use soundkit::wav::WavStreamProcessor;
     use std::fs;
-    #[cfg(feature = "libflac")]
+    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
     use std::fs::File;
-    #[cfg(feature = "libflac")]
+    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
     use std::io::Read;
-    #[cfg(feature = "libflac")]
+    #[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
     use std::io::Write;
-    #[cfg(feature = "libflac")]
+    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Once;
-    #[cfg(feature = "libflac")]
+    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
     use tracing::trace;
 
     fn init_tracing() {
@@ -676,7 +867,7 @@ mod tests {
             .join(file)
     }
 
-    #[cfg(feature = "libflac")]
+    #[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
     fn golden_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -844,15 +1035,17 @@ mod tests {
 
         trace!(chunks_encoded = n, "FLAC encoding complete");
 
-        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
-        let mut file = File::create(output_path).expect("Failed to create output file");
-        file.write_all(&encoded_data)
-            .expect("Failed to write to output file");
+        if !output_path.as_os_str().is_empty() {
+            fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+            fs::write(output_path, &encoded_data).expect("Failed to write encoded FLAC output");
+        }
+
+        assert!(!encoded_data.is_empty(), "FLAC encoder produced no bytes");
 
         encoder.reset().expect("Failed to reset encoder");
     }
 
-    #[cfg(feature = "libflac")]
+    #[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
     #[test]
     fn test_flac_encoder_with_wave_16bit() {
         run_flac_encoder_with_wav_file(
@@ -861,7 +1054,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "libflac")]
+    #[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
     #[test]
     fn test_flac_encoder_with_wave_24bit() {
         run_flac_encoder_with_wav_file(
@@ -870,12 +1063,21 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "libflac")]
+    #[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
     #[test]
     fn test_flac_encoder_with_wave_32bit() {
         run_flac_encoder_with_wav_file(
             &testdata_path("wav_32f/A_Tusk_is_used_to_make_costly_gifts.wav"),
             &golden_path("flac/A_Tusk_is_used_to_make_costly_gifts_32float.flac"),
+        );
+    }
+
+    #[cfg(all(feature = "oxideav-encoder", feature = "libflac"))]
+    #[test]
+    fn test_oxideav_flac_encoder_streaming_packets_roundtrip() {
+        run_flac_encoder_with_wav_file(
+            &testdata_path("wav_stereo/A_Tusk_is_used_to_make_costly_gifts.wav"),
+            Path::new(""),
         );
     }
 
