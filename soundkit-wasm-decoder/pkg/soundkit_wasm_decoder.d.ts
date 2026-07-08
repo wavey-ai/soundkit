@@ -120,6 +120,10 @@ export class WasmSoundKitFrameDecoder {
     setKeyBytes(key: Uint8Array): void;
 }
 
+export function buildSoundKitFrameHeaderV2(encoding: number, payload_size: number, sample_size: number, sample_rate: number, channels: number, bits_per_sample: number, pts: number): Uint8Array;
+
+export function buildSoundKitFrameV2(encoding: number, payload: Uint8Array, sample_size: number, sample_rate: number, channels: number, bits_per_sample: number, pts: number): Uint8Array;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -132,6 +136,8 @@ export interface InitOutput {
     readonly __wbg_wasmopusdeboxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmsoundkitframedecoder_free: (a: number, b: number) => void;
+    readonly buildSoundKitFrameHeaderV2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly buildSoundKitFrameV2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly wasmaacdeboxer_flush: (a: number) => [number, number, number];
     readonly wasmaacdeboxer_new: () => number;
     readonly wasmaacdeboxer_newWithFormat: (a: number, b: number) => [number, number, number];
