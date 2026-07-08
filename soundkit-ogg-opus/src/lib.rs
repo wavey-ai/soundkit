@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn demux_ogg_opus_packets() {
         let data = fs::read(testdata_path(
-            "ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg",
+            "ogg_opus/A_Tusk_is_used_to_make_costly_gifts_48khz.ogg",
         ))
         .unwrap();
         let mut demuxer = OggOpusDemuxer::new();
@@ -525,14 +525,14 @@ mod tests {
 
         let config = config.expect("OpusHead event");
         assert_eq!(config.channels, 1);
-        assert_eq!(config.sample_rate, 16_000);
+        assert_eq!(config.sample_rate, 48_000);
         assert!(packets > 0);
     }
 
     #[cfg(feature = "decode")]
     #[test]
     fn test_ogg_opus_decode_waveform() {
-        let input_path = testdata_path(&format!("ogg_opus/{}.ogg", TEST_FILE));
+        let input_path = testdata_path(&format!("ogg_opus/{}_48khz.ogg", TEST_FILE));
         let data = fs::read(&input_path).unwrap();
         assert!(!data.is_empty(), "fixture ogg opus missing or empty");
 
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn decode_ogg_opus_stream() {
         let data = fs::read(testdata_path(
-            "ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg",
+            "ogg_opus/A_Tusk_is_used_to_make_costly_gifts_48khz.ogg",
         ))
         .unwrap();
 
@@ -618,7 +618,7 @@ mod tests {
     #[cfg(feature = "decode")]
     #[test]
     fn decode_ogg_opus_and_write_wav() {
-        let input_path = testdata_path("ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg");
+        let input_path = testdata_path("ogg_opus/A_Tusk_is_used_to_make_costly_gifts_48khz.ogg");
         let data = fs::read(&input_path).unwrap();
 
         init_tracing();

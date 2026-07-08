@@ -1,12 +1,68 @@
 use frame_header::{EncodingFlag, Endianness};
 use memchr::memmem;
-use oxideav_core::{
-    CodecId, CodecParameters, Decoder as OxideDecoder, Error as OxideError, Frame,
-    Packet as OxidePacket, SampleFormat, TimeBase,
-};
-use oxideav_speex::header::{SpeexHeader, SPEEX_SIGNATURE};
+use oxideav_speex::SpeexDecoder as OxideSpeexDecoder;
 use soundkit::audio_types::AudioData;
 use std::collections::VecDeque;
+use std::fmt;
+
+const SPEEX_SIGNATURE: &[u8; 8] = b"Speex   ";
+const SPEEX_HEADER_MIN_SIZE: usize = 80;
+
+#[derive(Debug, Clone, Copy)]
+struct SpeexHeaderInfo {
+    rate: u32,
+    mode: u32,
+    channels: u8,
+    frames_per_packet: u32,
+    extra_headers: usize,
+}
+
+fn read_le_u32(data: &[u8], offset: usize) -> Result<u32, String> {
+    let bytes: [u8; 4] = data
+        .get(offset..offset + 4)
+        .ok_or_else(|| "Truncated Speex header".to_string())?
+        .try_into()
+        .map_err(|_| "Invalid Speex header field".to_string())?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn parse_speex_header(data: &[u8]) -> Result<SpeexHeaderInfo, String> {
+    if data.len() < SPEEX_HEADER_MIN_SIZE || !data.starts_with(SPEEX_SIGNATURE) {
+        return Err("Invalid Speex header packet".to_string());
+    }
+
+    let rate = read_le_u32(data, 36)?;
+    let mode = read_le_u32(data, 40)?;
+    let channels = read_le_u32(data, 48)?;
+    let frames_per_packet = read_le_u32(data, 64)?;
+    let extra_headers = read_le_u32(data, 68)?;
+
+    let fallback_rate = match mode {
+        0 => 8_000,
+        1 => 16_000,
+        2 => 32_000,
+        _ => 8_000,
+    };
+
+    Ok(SpeexHeaderInfo {
+        rate: if rate == 0 { fallback_rate } else { rate },
+        mode,
+        channels: channels.clamp(1, u8::MAX as u32) as u8,
+        frames_per_packet: frames_per_packet.max(1),
+        extra_headers: extra_headers as usize,
+    })
+}
+
+fn push_i16le_samples(samples: &[i16], out: &mut Vec<u8>) {
+    out.reserve(samples.len() * 2);
+    for &sample in samples {
+        out.extend_from_slice(&sample.to_le_bytes());
+    }
+}
+
+fn error_to_string(error: impl fmt::Display) -> String {
+    error.to_string()
+}
 
 #[derive(Debug)]
 struct OggPageHeader {
@@ -156,7 +212,7 @@ struct SpeexStreamInfo {
 /// codec core.
 pub struct SpeexDecoder {
     parser: OggPacketParser,
-    decoder: Option<Box<dyn OxideDecoder>>,
+    decoder: Option<OxideSpeexDecoder>,
     info: Option<SpeexStreamInfo>,
     headers_to_skip: usize,
     flushed: bool,
@@ -181,10 +237,11 @@ impl SpeexDecoder {
     /// a complete packet or page has produced audio.
     pub fn add(&mut self, data: &[u8]) -> Result<Option<AudioData>, String> {
         if data.is_empty() && !self.flushed {
+            // The packet decoder has no buffered transport state of its own:
+            // Ogg page assembly is handled above, and Speex packets decode
+            // synchronously once complete. Mark flushed so repeated empty
+            // calls are no-ops.
             self.flushed = true;
-            if let Some(decoder) = self.decoder.as_mut() {
-                decoder.flush().map_err(oxide_error_to_string)?;
-            }
         }
 
         let packets: Vec<_> = self.parser.push(data).collect();
@@ -232,33 +289,22 @@ impl SpeexDecoder {
     }
 
     fn init_from_header(&mut self, packet: OggPacket) -> Result<(), String> {
-        if !packet.data.starts_with(SPEEX_SIGNATURE) {
-            return Err("Invalid Speex header packet".to_string());
+        let header = parse_speex_header(&packet.data)?;
+
+        if header.mode > 1 {
+            return Err(format!(
+                "Unsupported Speex mode {}: this decoder currently supports narrowband and wideband",
+                header.mode
+            ));
         }
 
-        let header = SpeexHeader::parse(&packet.data).map_err(oxide_error_to_string)?;
-        let sample_rate = if header.rate == 0 {
-            header.mode.sample_rate()
-        } else {
-            header.rate
-        };
-        let channels = header.nb_channels as u8;
-
-        let mut params = CodecParameters::audio(CodecId::new("speex"));
-        params.extradata = packet.data;
-        params.sample_rate = Some(sample_rate);
-        params.channels = Some(header.nb_channels as u16);
-        params.sample_format = Some(SampleFormat::S16);
-
-        let decoder =
-            oxideav_speex::decoder::make_decoder(&params).map_err(oxide_error_to_string)?;
-        self.decoder = Some(decoder);
+        self.decoder = Some(OxideSpeexDecoder::new());
         self.info = Some(SpeexStreamInfo {
-            sample_rate,
-            channels,
+            sample_rate: header.rate,
+            channels: header.channels,
             serial: packet.serial,
         });
-        self.headers_to_skip = 1 + header.extra_headers as usize;
+        self.headers_to_skip = 1 + header.extra_headers;
         Ok(())
     }
 
@@ -270,22 +316,23 @@ impl SpeexDecoder {
             .decoder
             .as_mut()
             .ok_or_else(|| "Speex decoder not initialized".to_string())?;
-        let packet = OxidePacket::new(0, TimeBase::new(1, info.sample_rate as i64), data);
 
-        decoder
-            .send_packet(&packet)
-            .map_err(oxide_error_to_string)?;
+        let samples = decoder
+            .decode_packet_pcm_i16(&data)
+            .map_err(error_to_string)?;
 
-        loop {
-            match decoder.receive_frame() {
-                Ok(Frame::Audio(frame)) => {
-                    if let Some(data) = frame.data.first() {
-                        pcm_bytes.extend_from_slice(data);
-                    }
+        // oxideav-speex's public top-level decoder returns the decoded full-rate
+        // Speex PCM for each packet. Ogg Speex is normally mono at this layer;
+        // if the container declares multiple channels, preserve the declared
+        // channel count by duplicating the mono stream rather than returning a
+        // byte count that disagrees with AudioData's channel metadata.
+        if info.channels <= 1 {
+            push_i16le_samples(&samples, pcm_bytes);
+        } else {
+            for sample in samples {
+                for _ in 0..info.channels {
+                    pcm_bytes.extend_from_slice(&sample.to_le_bytes());
                 }
-                Ok(_) => {}
-                Err(OxideError::NeedMore) | Err(OxideError::Eof) => break,
-                Err(error) => return Err(oxide_error_to_string(error)),
             }
         }
 
@@ -297,10 +344,6 @@ impl Default for SpeexDecoder {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn oxide_error_to_string(error: OxideError) -> String {
-    error.to_string()
 }
 
 #[cfg(test)]

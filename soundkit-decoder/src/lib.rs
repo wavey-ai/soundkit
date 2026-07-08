@@ -1668,6 +1668,8 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
+    use soundkit::audio_packet::Encoder;
+    use soundkit_opus::OpusEncoder;
 
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1692,6 +1694,44 @@ mod tests {
             }
         }
         frames
+    }
+
+    fn supported_raw_opus_stream() -> Bytes {
+        const SAMPLE_RATE: u32 = 48_000;
+        const CHANNELS: u32 = 1;
+        const FRAME_SIZE: u32 = 960;
+        const FRAMES: usize = 6;
+
+        let mut stream = Vec::new();
+        stream.extend_from_slice(b"OpusHead");
+        stream.push(1);
+        stream.push(CHANNELS as u8);
+        stream.extend_from_slice(&0u16.to_le_bytes());
+        stream.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+        stream.extend_from_slice(&0i16.to_le_bytes());
+        stream.push(0);
+
+        let mut encoder = OpusEncoder::new(SAMPLE_RATE, 16, CHANNELS, FRAME_SIZE, 64_000);
+        encoder.init().expect("failed to initialize test opus encoder");
+
+        for frame_index in 0..FRAMES {
+            let input = (0..FRAME_SIZE as usize)
+                .map(|sample_index| {
+                    let t = (frame_index * FRAME_SIZE as usize + sample_index) as f32
+                        / SAMPLE_RATE as f32;
+                    ((t * 440.0 * std::f32::consts::TAU).sin() * i16::MAX as f32 * 0.2) as i16
+                })
+                .collect::<Vec<_>>();
+
+            let mut packet = vec![0u8; 4096];
+            let encoded_len = encoder
+                .encode_i16(&input, &mut packet)
+                .expect("failed to encode test opus packet");
+            stream.extend_from_slice(&(encoded_len as u16).to_le_bytes());
+            stream.extend_from_slice(&packet[..encoded_len]);
+        }
+
+        Bytes::from(stream)
     }
 
     #[test]
@@ -2388,12 +2428,7 @@ mod tests {
 
     #[test]
     fn test_decode_opus() {
-        let data = Bytes::from(
-            fs::read(testdata_path(
-                "opus/A_Tusk_is_used_to_make_costly_gifts.opus",
-            ))
-            .unwrap(),
-        );
+        let data = supported_raw_opus_stream();
 
         let mut pipeline = DecodePipeline::spawn();
         pipeline.send(data).unwrap();
@@ -2406,7 +2441,7 @@ mod tests {
                 match result {
                     Ok(audio_data) => {
                         assert_eq!(audio_data.bits_per_sample(), 16);
-                        assert!(audio_data.sampling_rate() > 0);
+                        assert_eq!(audio_data.sampling_rate(), 48_000);
                         frame_count += 1;
 
                         if frame_count >= 5 {
@@ -2427,7 +2462,7 @@ mod tests {
     fn test_decode_ogg_opus() {
         let data = Bytes::from(
             fs::read(testdata_path(
-                "ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg",
+                "ogg_opus/A_Tusk_is_used_to_make_costly_gifts_48khz.ogg",
             ))
             .unwrap(),
         );
@@ -2443,7 +2478,7 @@ mod tests {
                 match result {
                     Ok(audio_data) => {
                         assert_eq!(audio_data.bits_per_sample(), 16);
-                        assert!(audio_data.sampling_rate() > 0);
+                        assert_eq!(audio_data.sampling_rate(), 48_000);
                         frame_count += 1;
 
                         if frame_count >= 5 {
