@@ -27,6 +27,6 @@ soundkit-opus = { path = "../soundkit-opus" }
 soundkit-ogg-opus = { path = "../soundkit-ogg-opus" }
 soundkit-webm = { path = "../soundkit-webm" }
 rtrb = "0.3"
-frame-header = "0.2.0"
+frame-header = "0.2.1"
 bytes = "1"
 rubato = "0.14.1"

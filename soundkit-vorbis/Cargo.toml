@@ -7,7 +7,7 @@ description = "Streaming Ogg Vorbis decoder for soundkit using pure Rust Lewton.
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-frame-header = "0.2.0"
+frame-header = "0.2.1"
 lewton = "0.10.2"
 memchr = "2"
 soundkit = { path = "../soundkit" }

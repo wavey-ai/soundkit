@@ -7,7 +7,7 @@ description = "Pure Rust raw AC-3 decoder wrapper for soundkit."
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-frame-header = "0.2.0"
+frame-header = "0.2.1"
 oxideav-ac3 = "0.0.6"
 oxideav-core = "0.1"
 soundkit = { path = "../soundkit" }
