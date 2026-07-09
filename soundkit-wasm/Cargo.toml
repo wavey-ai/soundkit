@@ -1,5 +1,5 @@
 [package]
-name = "soundkit-wasm-decoder"
+name = "soundkit-wasm"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -10,14 +10,33 @@ repository = "https://github.com/wavey-ai/soundkit"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["detect", "raw-pcm", "wav", "mp3", "vorbis", "aiff", "alac", "flac", "webm", "opus", "opus-debox", "aac-debox", "aac-lc", "audio-demux"]
+default = [
+  "detect",
+  "raw-pcm",
+  "wav",
+  "mp3",
+  "vorbis",
+  "aiff",
+  "alac",
+  "flac",
+  "webm",
+  "opus",
+  "opus-debox",
+  "aac-debox",
+  "aac-lc",
+  "audio-demux",
+]
 detect = ["dep:access-unit"]
 audio-demux = ["dep:soundkit-audio-demux"]
 raw-pcm = []
 wav = []
 mp3 = ["dep:soundkit-mp3"]
 vorbis = ["dep:soundkit-vorbis"]
-flac = ["dep:soundkit-flac", "soundkit-flac/claxon-decoder", "soundkit-flac/oxideav-encoder"]
+flac = [
+  "dep:soundkit-flac",
+  "soundkit-flac/claxon-decoder",
+  "soundkit-flac/oxideav-encoder",
+]
 aac = ["dep:soundkit-aac", "soundkit-aac/fdk"]
 m4a = ["aac", "soundkit-aac/mp4-decoder"]
 aac-debox = ["dep:soundkit-aac", "soundkit-aac/mp4-demux"]
@@ -51,5 +70,7 @@ soundkit-vorbis = { path = "../soundkit-vorbis", optional = true }
 soundkit-webm = { path = "../soundkit-webm", default-features = false, optional = true }
 
 [dev-dependencies]
-aac-wasm-bench = { path = "../aac-wasm-bench", default-features = false, features = ["soundkit-lc"] }
+aac-wasm-bench = { path = "../aac-wasm-bench", default-features = false, features = [
+  "soundkit-lc",
+] }
 wasm-bindgen-test = "0.3"

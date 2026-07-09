@@ -21,7 +21,7 @@ members = [
   "soundkit-ogg-opus",
   "soundkit-webm",
   "soundkit-audio-demux",
-  "soundkit-wasm-decoder",
+  "soundkit-wasm",
   "soundkit-decoder",
   "soundkit-rubberband-sys",
   "soundkit-rubberband",

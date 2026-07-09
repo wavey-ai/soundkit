@@ -6,7 +6,7 @@ test:
 
 .PHONY: wasm
 wasm:
-	wasm-pack build soundkit-wasm-decoder \
+	wasm-pack build soundkit-wasm \
 		--target web \
 		--out-dir pkg \
-		--features ogg-opus,webm-opus
+		--features default

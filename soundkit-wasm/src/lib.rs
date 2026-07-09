@@ -525,7 +525,6 @@ impl WasmSoundKitFrameDecoder {
     }
 }
 
-
 #[wasm_bindgen(js_name = buildSoundKitFrameHeaderV2)]
 pub fn build_soundkit_frame_header_v2(
     encoding: u8,
@@ -1709,7 +1708,6 @@ fn soundkit_frame_to_js(frame: &SoundKitFrame) -> Result<JsValue, JsValue> {
     Ok(object.into())
 }
 
-
 fn soundkit_encoding_from_code(code: u8) -> Result<frame_header::EncodingFlag, JsValue> {
     match code {
         0 => Ok(frame_header::EncodingFlag::PCMSigned),
@@ -1718,7 +1716,9 @@ fn soundkit_encoding_from_code(code: u8) -> Result<frame_header::EncodingFlag, J
         3 => Ok(frame_header::EncodingFlag::FLAC),
         4 => Ok(frame_header::EncodingFlag::AAC),
         5 => Ok(frame_header::EncodingFlag::H264),
-        _ => Err(js_error(format!("Unsupported SoundKit v2 encoding code: {code}"))),
+        _ => Err(js_error(format!(
+            "Unsupported SoundKit v2 encoding code: {code}"
+        ))),
     }
 }
 
@@ -1732,10 +1732,14 @@ fn soundkit_frame_header_v2(
     pts: f64,
 ) -> Result<frame_header::FrameHeaderV2, JsValue> {
     if payload_size == 0 {
-        return Err(js_error("SoundKit v2 frame requires payload_size > 0.".to_string()));
+        return Err(js_error(
+            "SoundKit v2 frame requires payload_size > 0.".to_string(),
+        ));
     }
     if sample_size == 0 {
-        return Err(js_error("SoundKit v2 frame requires sample_size > 0.".to_string()));
+        return Err(js_error(
+            "SoundKit v2 frame requires sample_size > 0.".to_string(),
+        ));
     }
     let pts_value = if pts.is_finite() && pts >= 0.0 {
         Some(pts.round() as u64)
