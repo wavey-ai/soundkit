@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-rubberband"
-version = "0.1.0"
+version = "0.12.3"
 edition = "2021"
 license = "GPL-2.0-or-later"
 description = "High-level Rust wrapper for Rubber Band offline music stretching."

@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-rubberband-sys"
-version = "0.1.0"
+version = "0.12.3"
 edition = "2021"
 license = "GPL-2.0-or-later"
 description = "Low-level Rust FFI bindings for the Rubber Band Library."

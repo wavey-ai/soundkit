@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-gsm"
-version = "0.1.0"
+version = "0.12.3"
 edition = "2021"
 license = "MIT"
 description = "GSM 06.10 codec wrapper for soundkit using libgsm."

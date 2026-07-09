@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-opus"
-version = "0.0.1"
+version = "0.12.3"
 edition = "2021"
 license = "MIT"
 description = "Opus Encoder traits"
@@ -12,7 +12,7 @@ readme = "README.md"
 # crate provides; the previous `libopus` (opus-rs) git dep was the C-FFI build
 # and its API had drifted, so the opus feature never compiled.
 libopus-rs = { path = "../../libopus-rs" }
-soundkit = { version = "0.12.2", path = "../soundkit" }
+soundkit = { version = "0.12.3", path = "../soundkit" }
 frame-header = { git = "https://github.com/wavey-ai/frame-header.git" }
 tracing = "0.1.40"
 

@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-ogg-opus"
-version = "0.0.1"
+version = "0.12.3"
 edition = "2021"
 license = "MIT"
 description = "Streaming Ogg Opus decoder built on soundkit and ogg"
@@ -9,8 +9,8 @@ readme = "README.md"
 
 [dependencies]
 frame-header = { git = "https://github.com/wavey-ai/frame-header.git", optional = true }
-soundkit = { version = "0.12.2", path = "../soundkit", optional = true }
-soundkit-opus = { version = "0.0.1", path = "../soundkit-opus", optional = true }
+soundkit = { version = "0.12.3", path = "../soundkit", optional = true }
+soundkit-opus = { version = "0.12.3", path = "../soundkit-opus", optional = true }
 tracing = "0.1.40"
 memchr = "2.7"
 

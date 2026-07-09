@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-audio-demux"
-version = "0.1.0"
+version = "0.12.3"
 edition = "2021"
 license = "MIT"
 description = "Streaming audio track demuxer for browser-safe SoundKit container extraction."

@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-amr"
-version = "0.1.0"
+version = "0.12.3"
 edition = "2021"
 license = "MIT"
 description = "OpenCORE AMR-NB codec wrapper for soundkit."

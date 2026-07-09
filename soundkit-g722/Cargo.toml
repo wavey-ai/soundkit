@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-g722"
-version = "0.1.0"
+version = "0.12.3"
 edition = "2021"
 license = "MIT"
 description = "Native Rust G.722 codec wrapper for soundkit."
@@ -9,4 +9,3 @@ repository = "https://github.com/wavey-ai/soundkit"
 [dependencies]
 ezk-g722 = "0.1.1"
 soundkit = { path = "../soundkit" }
-
