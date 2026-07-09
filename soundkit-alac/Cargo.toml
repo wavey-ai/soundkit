@@ -8,5 +8,5 @@ repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
 alac = { version = "0.5.0", features = ["caf"] }
-frame-header = { git = "https://github.com/wavey-ai/frame-header.git" }
+frame-header = "0.2.0"
 soundkit = { path = "../soundkit" }

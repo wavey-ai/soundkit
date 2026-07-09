@@ -8,6 +8,6 @@ repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
 bitflags = "2.6.0"
-frame-header = { git = "https://github.com/wavey-ai/frame-header.git" }
+frame-header = "0.2.0"
 soundkit = { path = "../soundkit" }
 soundkit-rubberband-sys = { path = "../soundkit-rubberband-sys" }
