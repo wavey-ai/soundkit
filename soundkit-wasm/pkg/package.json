@@ -1,0 +1,21 @@
+{
+  "name": "soundkit-wasm",
+  "type": "module",
+  "description": "Browser WASM streaming music decoder facade for SoundKit codecs.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wavey-ai/soundkit"
+  },
+  "files": [
+    "soundkit_wasm_bg.wasm",
+    "soundkit_wasm.js",
+    "soundkit_wasm.d.ts"
+  ],
+  "main": "soundkit_wasm.js",
+  "types": "soundkit_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
