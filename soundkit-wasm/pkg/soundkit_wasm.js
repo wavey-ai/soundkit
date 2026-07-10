@@ -543,10 +543,10 @@ export class WasmOpusDecoder {
     /**
      * @param {number} channels
      * @param {number} sample_rate
-     * @param {number} _frame_size
+     * @param {number} frame_size
      */
-    constructor(channels, sample_rate, _frame_size) {
-        const ret = wasm.wasmopusdecoder_new(channels, sample_rate, _frame_size);
+    constructor(channels, sample_rate, frame_size) {
+        const ret = wasm.wasmopusdecoder_new(channels, sample_rate, frame_size);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }

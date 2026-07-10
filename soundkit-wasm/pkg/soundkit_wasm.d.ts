@@ -110,7 +110,7 @@ export class WasmOpusDecoder {
     dec_frame(packet: Uint8Array): WasmOpusDecodeResult;
     dec_frame_reuse(packet: Uint8Array): number;
     destroy(): void;
-    constructor(channels: number, sample_rate: number, _frame_size: number);
+    constructor(channels: number, sample_rate: number, frame_size: number);
     readonly decodedSize: number;
     readonly outputLen: number;
     readonly outputPtr: number;

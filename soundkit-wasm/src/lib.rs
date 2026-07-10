@@ -711,7 +711,7 @@ impl WasmOpusDecoder {
     pub fn new(
         channels: usize,
         sample_rate: i32,
-        _frame_size: usize,
+        frame_size: usize,
     ) -> Result<WasmOpusDecoder, JsValue> {
         if sample_rate != 48_000 {
             return Err(js_error(
@@ -720,9 +720,12 @@ impl WasmOpusDecoder {
         }
         let mut decoder = OpusDecoder::new(sample_rate as usize, channels);
         decoder.init().map_err(js_error)?;
+        let output_len = frame_size
+            .saturating_mul(channels)
+            .max(channels.max(1));
         Ok(Self {
             decoder,
-            output: Vec::new(),
+            output: vec![0; output_len],
             decoded_size: 0,
         })
     }
