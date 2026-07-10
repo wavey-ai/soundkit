@@ -35,7 +35,7 @@ use soundkit_ogg_opus::OggOpusDecoder;
 #[cfg(feature = "opus-debox")]
 use soundkit_ogg_opus::{OggOpusDemuxEvent, OggOpusDemuxer};
 #[cfg(feature = "opus")]
-use soundkit_opus::{OpusEncoder, OpusStreamDecoder};
+use soundkit_opus::{OpusDecoder, OpusEncoder, OpusStreamDecoder};
 #[cfg(feature = "vorbis")]
 use soundkit_vorbis::VorbisDecoder;
 #[cfg(feature = "webm")]
@@ -101,6 +101,21 @@ pub struct WasmOpusEncoder {
     frame_size: u32,
     channels: u8,
     output: Vec<u8>,
+}
+
+#[cfg(feature = "opus")]
+#[wasm_bindgen]
+pub struct WasmOpusDecoder {
+    decoder: OpusDecoder,
+    output: Vec<i16>,
+    decoded_size: usize,
+}
+
+#[cfg(feature = "opus")]
+#[wasm_bindgen]
+pub struct WasmOpusDecodeResult {
+    output: Vec<i16>,
+    decoded_size: usize,
 }
 
 enum DecoderState {
@@ -686,6 +701,84 @@ impl WasmOpusEncoder {
 
     pub fn reset(&mut self) -> Result<(), JsValue> {
         self.encoder.reset().map_err(js_error)
+    }
+}
+
+#[cfg(feature = "opus")]
+#[wasm_bindgen]
+impl WasmOpusDecoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        channels: usize,
+        sample_rate: i32,
+        _frame_size: usize,
+    ) -> Result<WasmOpusDecoder, JsValue> {
+        if sample_rate != 48_000 {
+            return Err(js_error(
+                "soundkit wasm currently supports 48 kHz CELT-only Opus decode".to_string(),
+            ));
+        }
+        let mut decoder = OpusDecoder::new(sample_rate as usize, channels);
+        decoder.init().map_err(js_error)?;
+        Ok(Self {
+            decoder,
+            output: Vec::new(),
+            decoded_size: 0,
+        })
+    }
+
+    #[wasm_bindgen(js_name = dec_frame)]
+    pub fn dec_frame(&mut self, packet: &[u8]) -> Result<WasmOpusDecodeResult, JsValue> {
+        self.decode_reuse(packet)?;
+        Ok(WasmOpusDecodeResult {
+            output: self.output.clone(),
+            decoded_size: self.decoded_size,
+        })
+    }
+
+    #[wasm_bindgen(js_name = dec_frame_reuse)]
+    pub fn dec_frame_reuse(&mut self, packet: &[u8]) -> Result<usize, JsValue> {
+        self.decode_reuse(packet)
+    }
+
+    #[wasm_bindgen(getter, js_name = decodedSize)]
+    pub fn decoded_size(&self) -> usize {
+        self.decoded_size
+    }
+
+    #[wasm_bindgen(getter, js_name = outputPtr)]
+    pub fn output_ptr(&self) -> usize {
+        self.output.as_ptr() as usize
+    }
+
+    #[wasm_bindgen(getter, js_name = outputLen)]
+    pub fn output_len(&self) -> usize {
+        self.output.len()
+    }
+
+    pub fn destroy(self) {}
+
+    fn decode_reuse(&mut self, packet: &[u8]) -> Result<usize, JsValue> {
+        let samples_per_channel = self
+            .decoder
+            .decode_i16(packet, &mut self.output, false)
+            .map_err(js_error)?;
+        self.decoded_size = samples_per_channel;
+        Ok(self.decoded_size)
+    }
+}
+
+#[cfg(feature = "opus")]
+#[wasm_bindgen]
+impl WasmOpusDecodeResult {
+    #[wasm_bindgen(getter, js_name = decodedSize)]
+    pub fn decoded_size(&self) -> usize {
+        self.decoded_size
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn output(&self) -> Vec<i16> {
+        self.output.clone()
     }
 }
 
