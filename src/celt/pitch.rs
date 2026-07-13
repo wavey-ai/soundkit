@@ -429,6 +429,83 @@ pub fn comb_filter(
     }
 }
 
+pub fn comb_filter_in_place(
+    y: &mut [f32],
+    base: usize,
+    t0: usize,
+    t1: usize,
+    n: usize,
+    g0: f32,
+    g1: f32,
+    tapset0: usize,
+    tapset1: usize,
+    window: Option<&[f32]>,
+    mut overlap: usize,
+) {
+    // libopus calls the decoder postfilter as comb_filter(out_syn, out_syn, ...).
+    // For long pitches, later taps can read samples filtered earlier in the same frame.
+    if g0 == 0.0 && g1 == 0.0 {
+        return;
+    }
+
+    let t0 = t0.max(COMBFILTER_MINPERIOD);
+    let t1 = t1.max(COMBFILTER_MINPERIOD);
+    let g00 = g0 * GAINS[tapset0][0];
+    let g01 = g0 * GAINS[tapset0][1];
+    let g02 = g0 * GAINS[tapset0][2];
+    let g10 = g1 * GAINS[tapset1][0];
+    let g11 = g1 * GAINS[tapset1][1];
+    let g12 = g1 * GAINS[tapset1][2];
+
+    if g0 == g1 && t0 == t1 && tapset0 == tapset1 {
+        overlap = 0;
+    }
+    if window.is_none() {
+        overlap = 0;
+    }
+    let window = window.unwrap_or(&[]);
+
+    let mut i = 0usize;
+    let mut x1 = y[base + 1 - t1];
+    let mut x2 = y[base - t1];
+    let mut x3 = y[base - t1 - 1];
+    let mut x4 = y[base - t1 - 2];
+    while i < overlap {
+        let x0 = y[base + i - t1 + 2];
+        let f = window[i] * window[i];
+        y[base + i] = y[base + i]
+            + (1.0 - f) * g00 * y[base + i - t0]
+            + (1.0 - f) * g01 * (y[base + i - t0 + 1] + y[base + i - t0 - 1])
+            + (1.0 - f) * g02 * (y[base + i - t0 + 2] + y[base + i - t0 - 2])
+            + f * g10 * x2
+            + f * g11 * (x1 + x3)
+            + f * g12 * (x0 + x4);
+        x4 = x3;
+        x3 = x2;
+        x2 = x1;
+        x1 = x0;
+        i += 1;
+    }
+
+    if g1 == 0.0 {
+        return;
+    }
+
+    x4 = y[base + i - t1 - 2];
+    x3 = y[base + i - t1 - 1];
+    x2 = y[base + i - t1];
+    x1 = y[base + i - t1 + 1];
+    while i < n {
+        let x0 = y[base + i - t1 + 2];
+        y[base + i] = y[base + i] + g10 * x2 + g11 * (x1 + x3) + g12 * (x0 + x4);
+        x4 = x3;
+        x3 = x2;
+        x2 = x1;
+        x1 = x0;
+        i += 1;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_prefilter(
     mode: &CeltMode,

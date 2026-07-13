@@ -83,6 +83,10 @@ impl RangeEncoder {
         self.error
     }
 
+    pub(crate) fn final_range(&self) -> u32 {
+        self.rng
+    }
+
     pub fn storage_bytes(&self) -> usize {
         self.storage as usize
     }
@@ -371,6 +375,10 @@ impl RangeDecoder {
 
     pub fn error(&self) -> i32 {
         self.error
+    }
+
+    pub(crate) fn final_range(&self) -> u32 {
+        self.rng
     }
 
     pub fn storage_bytes(&self) -> usize {

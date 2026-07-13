@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     io::stdin().read_to_string(&mut input)?;
 
     println!(
-        "impl\tmode\tframe_size\tbitrate\tframe\tlen\ttransient\tspread\ttrim\tcoded\tintensity\tdual\tbalance\tebits\tpulses\tcollapse"
+        "impl\tmode\tframe_size\tbitrate\tframe\tlen\ttransient\tprefilter\tpitch\tqgain\ttapset\tspread\ttrim\tcoded\tintensity\tdual\tbalance\tebits\tpulses\tcollapse"
     );
     let mut states = HashMap::<String, StreamState>::new();
     for line in input.lines() {
@@ -110,8 +110,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|mask| format!("{mask:02x}"))
             .collect::<Vec<_>>()
             .join(",");
+        let (pitch, qgain, tapset) = decoded
+            .prefilter
+            .map(|prefilter| (prefilter.pitch, prefilter.qgain, prefilter.tapset))
+            .unwrap_or((0, 0, 0));
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             cols[0],
             cols[1],
             frame_size,
@@ -119,6 +123,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             frame,
             packet.len(),
             i32::from(decoded.is_transient),
+            i32::from(decoded.prefilter.is_some()),
+            pitch,
+            qgain,
+            tapset,
             decoded.spread,
             decoded.alloc_trim,
             decoded.allocation.coded_bands,

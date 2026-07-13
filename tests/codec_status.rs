@@ -15,6 +15,46 @@ fn tone(frame_size: usize, channels: usize, frame_index: usize) -> Vec<f32> {
     pcm
 }
 
+fn centered_u16(value: u32) -> f32 {
+    ((value & 0xffff) as i32 - 32_768) as f32 * (1.0 / 32_768.0)
+}
+
+fn triangle_wave(phase: u32) -> f32 {
+    let p = (phase & 0xffff) as i32;
+    let v = if p < 32_768 { p - 16_384 } else { 49_152 - p };
+    v as f32 * (1.0 / 16_384.0)
+}
+
+fn raw_celt_bench_frame(frame_size: usize, frame_index: usize) -> Vec<f32> {
+    let mut pcm = Vec::with_capacity(frame_size * 2);
+    let start = frame_index * frame_size;
+    let mut noise = 0x1234_5678u32;
+    for _ in 0..start {
+        noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    }
+    for i in start..start + frame_size {
+        noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let tri_a = triangle_wave((i as u32).wrapping_mul(713));
+        let tri_b = triangle_wave((i as u32).wrapping_mul(1451).wrapping_add(0x4000));
+        let tri_c = triangle_wave((i as u32).wrapping_mul(977).wrapping_add(0x2000));
+        let tri_d = triangle_wave((i as u32).wrapping_mul(3511).wrapping_add(0x6000));
+        let n = centered_u16(noise) * (1.0 / 4096.0);
+        let pulse = (i as u32) & 8191;
+        let transient = if pulse < 64 {
+            (64 - pulse) as f32 * (1.0 / 512.0)
+        } else {
+            0.0
+        };
+        pcm.push((0.25 * tri_a + 0.125 * tri_b + n + transient).clamp(-1.0, 1.0));
+        pcm.push((0.21875 * tri_c - 0.09375 * tri_d - n - 0.5 * transient).clamp(-1.0, 1.0));
+    }
+    pcm
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[test]
 fn encode_and_decode_48k_celt_only_smoke_path() {
     let mut encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
@@ -35,6 +75,14 @@ fn encode_and_decode_48k_celt_only_smoke_path() {
     assert!(decoded.iter().any(|sample| sample.abs() > 1e-5));
 
     let mut decoder = Decoder::new(48_000, 2).unwrap();
+    let mut decoded_f32_into = Vec::new();
+    let decoded_f32_samples = decoder
+        .decode_f32_into(&packet, false, &mut decoded_f32_into)
+        .unwrap();
+    assert_eq!(decoded_f32_samples, 960);
+    assert_eq!(decoded_f32_into, decoded);
+
+    let mut decoder = Decoder::new(48_000, 2).unwrap();
     let decoded_i16 = decoder.decode_i16(&packet, false).unwrap();
     let mut decoder = Decoder::new(48_000, 2).unwrap();
     let mut decoded_into = Vec::new();
@@ -43,6 +91,44 @@ fn encode_and_decode_48k_celt_only_smoke_path() {
         .unwrap();
     assert_eq!(decoded_samples, 960);
     assert_eq!(decoded_into, decoded_i16);
+}
+
+#[test]
+fn celt_encoder_carries_final_range_rng_between_frames() {
+    let mut encoder = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    encoder.set_bitrate(128_000).unwrap();
+    encoder.set_vbr(false).unwrap();
+
+    let mut packet = Vec::new();
+    for frame in 0..=91 {
+        packet = encoder
+            .encode_f32(&raw_celt_bench_frame(120, frame), 120)
+            .unwrap();
+    }
+
+    assert_eq!(
+        hex(&packet),
+        "e4be0dd79fb8ecc723b754a861007abfb47dfb6c6d44417e7cbe7dae671022b8e681556640de34de"
+    );
+}
+
+#[test]
+fn celt_encoder_counts_decay_limited_coarse_energy_badness_like_c() {
+    let mut encoder = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    encoder.set_bitrate(128_000).unwrap();
+    encoder.set_vbr(false).unwrap();
+
+    let mut packet = Vec::new();
+    for frame in 0..=227 {
+        packet = encoder
+            .encode_f32(&raw_celt_bench_frame(120, frame), 120)
+            .unwrap();
+    }
+
+    assert_eq!(
+        hex(&packet),
+        "e4e927f194cee4aa8f6c33e989b902b9c491db3a10a5daca8197018a6fe2aac58518294d3a2c1351"
+    );
 }
 
 #[test]

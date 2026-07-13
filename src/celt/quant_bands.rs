@@ -133,7 +133,6 @@ fn quant_coarse_energy_impl(
             let old_e = old_e_bands[idx].max(-9.0);
             let f = x - coef * old_e - prev[c];
             let mut qi = (0.5 + f).floor() as i32;
-            let qi0 = qi;
             let decay_bound = old_e_bands[idx].max(-28.0) - max_decay;
             if qi < 0 && x < decay_bound {
                 qi += (decay_bound - x) as i32;
@@ -141,6 +140,7 @@ fn quant_coarse_energy_impl(
                     qi = 0;
                 }
             }
+            let qi0 = qi;
 
             tell = enc.tell();
             let bits_left = budget - tell - 3 * channels as i32 * (end as i32 - i as i32);
@@ -289,11 +289,12 @@ pub fn quant_coarse_energy(
             max_decay,
             lfe,
         );
-
-        if two_pass
+        let tell_inter = enc.tell_frac() as i32;
+        let select_intra = two_pass
             && (badness1 < badness2
-                || (badness1 == badness2 && enc.tell_frac() as i32 + intra_bias > tell_intra))
-        {
+                || (badness1 == badness2 && tell_inter + intra_bias > tell_intra));
+
+        if select_intra {
             *enc = enc_intra_state.expect("two-pass intra state exists");
             old_e_bands.copy_from_slice(&old_e_bands_intra[..old_e_bands.len()]);
             error.copy_from_slice(&error_intra[..error.len()]);

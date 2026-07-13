@@ -1,3 +1,5 @@
+#include <float.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +11,7 @@
 #define SAMPLE_RATE 48000
 #define CHANNELS 2
 #define MAX_PACKET_BYTES 1275
+#define QUALITY_MAX_LAG_FRAMES (SAMPLE_RATE / 50)
 static const int FRAME_SIZES[] = {120, 240, 480, 960};
 static const int BITRATES[] = {48000, 96000, 128000, 160000, 192000, 256000, 320000, 384000, 512000};
 
@@ -23,10 +26,16 @@ typedef struct {
     int seconds;
     BenchMode mode;
     int dump_packets;
+    int dump_decode_pitch;
 } Options;
 
+typedef struct {
+    int lag_frames;
+    double snr_db;
+} DecodeQuality;
+
 static void usage(void) {
-    fprintf(stderr, "usage: raw_celt_bench_c [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--dump-packets n]\n");
+    fprintf(stderr, "usage: raw_celt_bench_c [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--dump-packets n] [--dump-decode-pitch n]\n");
     exit(2);
 }
 
@@ -45,6 +54,7 @@ static Options parse_options(int argc, char **argv) {
     options.seconds = 4;
     options.mode = MODE_BOTH;
     options.dump_packets = 0;
+    options.dump_decode_pitch = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--repeats") == 0) {
             if (++i >= argc) usage();
@@ -66,6 +76,9 @@ static Options parse_options(int argc, char **argv) {
         } else if (strcmp(argv[i], "--dump-packets") == 0) {
             if (++i >= argc) usage();
             options.dump_packets = parse_positive_int(argv[i]);
+        } else if (strcmp(argv[i], "--dump-decode-pitch") == 0) {
+            if (++i >= argc) usage();
+            options.dump_decode_pitch = parse_positive_int(argv[i]);
         } else {
             usage();
         }
@@ -148,6 +161,10 @@ static void configure_encoder(OpusEncoder *encoder, int bitrate, BenchMode mode)
     if (err != OPUS_OK) goto fail;
     err = opus_encoder_ctl(encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
     if (err != OPUS_OK) goto fail;
+#ifdef DISABLE_PREDICTION
+    err = opus_encoder_ctl(encoder, OPUS_SET_PREDICTION_DISABLED(1));
+    if (err != OPUS_OK) goto fail;
+#endif
     return;
 fail:
     fprintf(stderr, "opus_encoder_ctl failed: %s\n", opus_strerror(err));
@@ -165,6 +182,51 @@ static float decoded_checksum(const float *decoded, int samples) {
     float middle = samples > 0 ? decoded[samples / 2] : 0.0f;
     float last = samples > 0 ? decoded[samples - 1] : 0.0f;
     return first + middle + last;
+}
+
+static DecodeQuality aligned_quality(const float *reference, const float *decoded, int total_frames) {
+    int max_lag = QUALITY_MAX_LAG_FRAMES;
+    int max_available = total_frames > 16 ? total_frames - 16 : 0;
+    if (max_lag > max_available) {
+        max_lag = max_available;
+    }
+    int compare_frames = total_frames - max_lag;
+    DecodeQuality best;
+    best.lag_frames = 0;
+    best.snr_db = -DBL_MAX;
+
+    for (int lag = -max_lag; lag <= max_lag; lag++) {
+        int reference_start = lag >= 0 ? lag : 0;
+        int decoded_start = lag >= 0 ? 0 : -lag;
+        double signal = 0.0;
+        double error = 0.0;
+        for (int frame = 0; frame < compare_frames; frame++) {
+            int ref_base = (reference_start + frame) * CHANNELS;
+            int dec_base = (decoded_start + frame) * CHANNELS;
+            for (int channel = 0; channel < CHANNELS; channel++) {
+                double expected = reference[ref_base + channel];
+                double actual = decoded[dec_base + channel];
+                double diff = expected - actual;
+                signal += expected * expected;
+                error += diff * diff;
+            }
+        }
+
+        double snr_db;
+        if (error <= DBL_EPSILON) {
+            snr_db = INFINITY;
+        } else if (signal <= DBL_EPSILON) {
+            snr_db = -INFINITY;
+        } else {
+            snr_db = 10.0 * log10(signal / error);
+        }
+        if (snr_db > best.snr_db) {
+            best.lag_frames = lag;
+            best.snr_db = snr_db;
+        }
+    }
+
+    return best;
 }
 
 static int encode_packets_with_encoder(
@@ -277,6 +339,33 @@ static double time_encode(
     return value;
 }
 
+static void decode_packets_to_buffer(
+    int frame_size,
+    int packet_count,
+    const unsigned char *packets,
+    const int *packet_lens,
+    float *decoded
+) {
+    int err = OPUS_OK;
+    OpusDecoder *decoder = opus_decoder_create(SAMPLE_RATE, CHANNELS, &err);
+    if (err != OPUS_OK || !decoder) {
+        fprintf(stderr, "opus_decoder_create failed: %s\n", opus_strerror(err));
+        exit(1);
+    }
+
+    for (int frame = 0; frame < packet_count; frame++) {
+        const unsigned char *packet = packets + (size_t)frame * MAX_PACKET_BYTES;
+        float *output = decoded + (size_t)frame * frame_size * CHANNELS;
+        int decoded_frames =
+            opus_decode_float(decoder, packet, packet_lens[frame], output, frame_size, 0);
+        if (decoded_frames != frame_size) {
+            fprintf(stderr, "opus_decode_float returned %d\n", decoded_frames);
+            exit(1);
+        }
+    }
+    opus_decoder_destroy(decoder);
+}
+
 static double time_decode(
     int frame_size,
     int packet_count,
@@ -379,6 +468,83 @@ static void dump_packets(
     }
 }
 
+static void dump_decode_pitch(
+    const Options *options,
+    const float *pcm,
+    int total_frames,
+    unsigned char *packets,
+    int *packet_lens
+) {
+    float *decoded = (float *)malloc((size_t)FRAME_SIZES[3] * CHANNELS * sizeof(float));
+    if (!decoded) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+
+    printf("impl\tmode\tframe_size\tframe_ms\tbitrate\tframe\tlen\tpitch\n");
+    for (BenchMode mode = MODE_CBR; mode <= MODE_VBR; mode++) {
+        if (options->mode != MODE_BOTH && options->mode != mode) {
+            continue;
+        }
+        for (size_t i = 0; i < sizeof(FRAME_SIZES) / sizeof(FRAME_SIZES[0]); i++) {
+            int frame_size = FRAME_SIZES[i];
+            int packet_count = total_frames / frame_size;
+            for (size_t j = 0; j < sizeof(BITRATES) / sizeof(BITRATES[0]); j++) {
+                int bitrate = BITRATES[j];
+                int min_packet = 0;
+                int max_packet = 0;
+                uint64_t checksum = 0;
+                int err = OPUS_OK;
+                OpusDecoder *decoder = NULL;
+                int limit = options->dump_decode_pitch < packet_count ? options->dump_decode_pitch : packet_count;
+                encode_packets(
+                    pcm,
+                    total_frames,
+                    frame_size,
+                    bitrate,
+                    mode,
+                    packets,
+                    packet_lens,
+                    &min_packet,
+                    &max_packet,
+                    &checksum);
+                decoder = opus_decoder_create(SAMPLE_RATE, CHANNELS, &err);
+                if (err != OPUS_OK || !decoder) {
+                    fprintf(stderr, "opus_decoder_create failed: %s\n", opus_strerror(err));
+                    exit(1);
+                }
+                for (int frame = 0; frame < limit; frame++) {
+                    const unsigned char *packet = packets + (size_t)frame * MAX_PACKET_BYTES;
+                    int decoded_frames =
+                        opus_decode_float(decoder, packet, packet_lens[frame], decoded, frame_size, 0);
+                    int pitch = 0;
+                    if (decoded_frames != frame_size) {
+                        fprintf(stderr, "opus_decode_float returned %d\n", decoded_frames);
+                        exit(1);
+                    }
+                    err = opus_decoder_ctl(decoder, OPUS_GET_PITCH(&pitch));
+                    if (err != OPUS_OK) {
+                        fprintf(stderr, "OPUS_GET_PITCH failed: %s\n", opus_strerror(err));
+                        exit(1);
+                    }
+                    printf(
+                        "c\t%s\t%d\t%.1f\t%d\t%d\t%d\t%d\n",
+                        mode_label(mode),
+                        frame_size,
+                        (double)frame_size * 1000.0 / (double)SAMPLE_RATE,
+                        bitrate,
+                        frame,
+                        packet_lens[frame],
+                        pitch);
+                }
+                opus_decoder_destroy(decoder);
+            }
+        }
+    }
+
+    free(decoded);
+}
+
 int main(int argc, char **argv) {
     Options options = parse_options(argc, argv);
     int total_frames = 0;
@@ -387,20 +553,30 @@ int main(int argc, char **argv) {
     unsigned char *packets =
         (unsigned char *)malloc((size_t)max_packets * MAX_PACKET_BYTES);
     int *packet_lens = (int *)malloc((size_t)max_packets * sizeof(int));
-    if (!packets || !packet_lens) {
+    float *quality_decoded = (float *)malloc((size_t)total_frames * CHANNELS * sizeof(float));
+    if (!packets || !packet_lens || !quality_decoded) {
         fprintf(stderr, "out of memory\n");
         exit(1);
     }
 
     if (options.dump_packets > 0) {
         dump_packets(&options, pcm, total_frames, packets, packet_lens);
+        free(quality_decoded);
+        free(packet_lens);
+        free(packets);
+        free(pcm);
+        return 0;
+    }
+    if (options.dump_decode_pitch > 0) {
+        dump_decode_pitch(&options, pcm, total_frames, packets, packet_lens);
+        free(quality_decoded);
         free(packet_lens);
         free(packets);
         free(pcm);
         return 0;
     }
 
-    printf("impl\tmode\tframe_size\tframe_ms\tbitrate\tencode_ms\tdecode_ms\tbytes\tmin_packet\tmax_packet\tchecksum\n");
+    printf("impl\tmode\tframe_size\tframe_ms\tbitrate\tencode_ms\tdecode_ms\tbytes\tmin_packet\tmax_packet\tchecksum\tquality_lag\tquality_snr_db\n");
     for (BenchMode mode = MODE_CBR; mode <= MODE_VBR; mode++) {
         if (options.mode != MODE_BOTH && options.mode != mode) {
             continue;
@@ -441,11 +617,13 @@ int main(int argc, char **argv) {
                     &packet_max_for_decode,
                     &encode_sum);
                 float decode_sum = 0.0f;
+                decode_packets_to_buffer(frame_size, packet_count, packets, packet_lens, quality_decoded);
+                DecodeQuality quality = aligned_quality(pcm, quality_decoded, packet_count * frame_size);
                 double decode_ms =
                     time_decode(frame_size, packet_count, options.repeats, packets, packet_lens, &decode_sum);
                 uint64_t checksum = encode_sum ^ (uint64_t)decode_sum;
                 printf(
-                    "c\t%s\t%d\t%.1f\t%d\t%.4f\t%.4f\t%d\t%d\t%d\t%llu\n",
+                    "c\t%s\t%d\t%.1f\t%d\t%.4f\t%.4f\t%d\t%d\t%d\t%llu\t%d\t%.2f\n",
                     mode_label(mode),
                     frame_size,
                     (double)frame_size * 1000.0 / (double)SAMPLE_RATE,
@@ -455,11 +633,14 @@ int main(int argc, char **argv) {
                     bytes,
                     min_packet,
                     max_packet,
-                    (unsigned long long)checksum);
+                    (unsigned long long)checksum,
+                    quality.lag_frames,
+                    quality.snr_db);
             }
         }
     }
 
+    free(quality_decoded);
     free(packet_lens);
     free(packets);
     free(pcm);

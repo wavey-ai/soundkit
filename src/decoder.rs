@@ -1,6 +1,8 @@
-use crate::celt::codec::{decode_spectral_frame_into, CeltFrameConfig, CeltFrameDecodeScratch};
+use crate::celt::codec::{
+    decode_spectral_frame_into_with_anti_collapse, CeltFrameConfig, CeltFrameDecodeScratch,
+};
 use crate::celt::modes::CeltMode;
-use crate::celt::pitch::{comb_filter, COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD};
+use crate::celt::pitch::{comb_filter_in_place, COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD};
 use crate::celt::synthesis::{
     celt_synthesis_with_overlap_into, deemphasis_interleaved_i16_into, deemphasis_interleaved_into,
     SynthesisScratch,
@@ -15,11 +17,12 @@ pub struct Decoder {
     channels: usize,
     mode: CeltMode,
     old_band_e: Vec<f32>,
+    old_log_e: Vec<f32>,
+    old_log_e2: Vec<f32>,
     preemph_mem: Vec<f32>,
     overlap_mem: Vec<Vec<f32>>,
     postfilter_mem: Vec<Vec<f32>>,
     postfilter_work: Vec<Vec<f32>>,
-    postfilter_source: Vec<Vec<f32>>,
     decode_scratch: CeltFrameDecodeScratch,
     synthesis_channels: Vec<Vec<f32>>,
     synthesis_scratch: SynthesisScratch,
@@ -42,11 +45,12 @@ impl Decoder {
             sample_rate,
             channels,
             old_band_e: vec![0.0; channels * mode.nb_ebands],
+            old_log_e: vec![-28.0; channels * mode.nb_ebands],
+            old_log_e2: vec![-28.0; channels * mode.nb_ebands],
             preemph_mem: vec![0.0; channels],
             overlap_mem: vec![vec![0.0; mode.overlap]; channels],
             postfilter_mem: vec![vec![0.0; COMBFILTER_MAXPERIOD]; channels],
             postfilter_work: vec![Vec::new(); channels],
-            postfilter_source: vec![Vec::new(); channels],
             decode_scratch: CeltFrameDecodeScratch::default(),
             synthesis_channels: vec![Vec::new(); channels],
             synthesis_scratch: SynthesisScratch::default(),
@@ -97,15 +101,25 @@ impl Decoder {
     }
 
     pub fn decode_f32(&mut self, packet: &[u8], decode_fec: bool) -> Result<Vec<f32>> {
-        let channels = self.decode_channels(packet, decode_fec)?;
         let mut pcm = Vec::new();
+        self.decode_f32_into(packet, decode_fec, &mut pcm)?;
+        Ok(pcm)
+    }
+
+    pub fn decode_f32_into(
+        &mut self,
+        packet: &[u8],
+        decode_fec: bool,
+        pcm: &mut Vec<f32>,
+    ) -> Result<usize> {
+        let channels = self.decode_channels(packet, decode_fec)?;
         deemphasis_interleaved_into(
             &self.mode,
             &self.synthesis_channels[..channels],
             &mut self.preemph_mem,
-            &mut pcm,
+            pcm,
         )?;
-        Ok(pcm)
+        Ok(pcm.len() / channels)
     }
 
     fn decode_channels(&mut self, packet: &[u8], _decode_fec: bool) -> Result<usize> {
@@ -147,11 +161,13 @@ impl Decoder {
         }
 
         let config = CeltFrameConfig::new(&self.mode, lm, stream_channels, frame.len())?;
-        let decoded = decode_spectral_frame_into(
+        let decoded = decode_spectral_frame_into_with_anti_collapse(
             &self.mode,
             &config,
             frame,
             &mut self.old_band_e,
+            &self.old_log_e,
+            &self.old_log_e2,
             &mut self.seed,
             &mut self.decode_scratch,
         )?;
@@ -189,9 +205,22 @@ impl Decoder {
                 right[0].clear();
                 right[0].extend_from_slice(&left[0]);
             }
+            self.update_energy_history(decoded.is_transient);
             Ok(self.channels)
         } else {
+            self.update_energy_history(decoded.is_transient);
             Ok(stream_channels)
+        }
+    }
+
+    fn update_energy_history(&mut self, is_transient: bool) {
+        if is_transient {
+            for (history, &energy) in self.old_log_e.iter_mut().zip(&self.old_band_e) {
+                *history = history.min(energy);
+            }
+        } else {
+            self.old_log_e2.copy_from_slice(&self.old_log_e);
+            self.old_log_e.copy_from_slice(&self.old_band_e);
         }
     }
 
@@ -224,20 +253,13 @@ impl Decoder {
                 if self.postfilter_work[c].len() < needed {
                     self.postfilter_work[c].resize(needed, 0.0);
                 }
-                if self.postfilter_source[c].len() < needed {
-                    self.postfilter_source[c].resize(needed, 0.0);
-                }
                 let work = &mut self.postfilter_work[c][..needed];
-                let source = &mut self.postfilter_source[c][..needed];
                 work[..COMBFILTER_MAXPERIOD].copy_from_slice(&self.postfilter_mem[c]);
                 work[COMBFILTER_MAXPERIOD..COMBFILTER_MAXPERIOD + n]
                     .copy_from_slice(&self.synthesis_channels[c]);
 
-                source.copy_from_slice(work);
-                comb_filter(
+                comb_filter_in_place(
                     work,
-                    COMBFILTER_MAXPERIOD,
-                    source,
                     COMBFILTER_MAXPERIOD,
                     self.postfilter_period_old,
                     self.postfilter_period,
@@ -250,11 +272,8 @@ impl Decoder {
                     self.mode.overlap,
                 );
                 if lm != 0 {
-                    source.copy_from_slice(work);
-                    comb_filter(
+                    comb_filter_in_place(
                         work,
-                        COMBFILTER_MAXPERIOD + short,
-                        source,
                         COMBFILTER_MAXPERIOD + short,
                         self.postfilter_period,
                         postfilter_pitch.max(COMBFILTER_MINPERIOD),

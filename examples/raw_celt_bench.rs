@@ -160,6 +160,75 @@ fn decoded_checksum(decoded: &[f32]) -> f32 {
     first + middle + last
 }
 
+#[derive(Clone, Copy)]
+struct DecodeQuality {
+    lag_frames: isize,
+    snr_db: f64,
+}
+
+fn decode_packets(
+    packets: &[Vec<u8>],
+    frame_size: usize,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let mut decoder = Decoder::new(SAMPLE_RATE as i32, CHANNELS)?;
+    let mut decoded = Vec::with_capacity(packets.len() * frame_size * CHANNELS);
+    let mut frame = Vec::new();
+    for packet in packets {
+        let decoded_frames = decoder.decode_f32_into(black_box(packet), false, &mut frame)?;
+        if decoded_frames != frame_size || frame.len() != frame_size * CHANNELS {
+            return Err("unexpected decoded frame size".into());
+        }
+        decoded.extend_from_slice(&frame);
+    }
+    Ok(decoded)
+}
+
+fn aligned_quality(reference: &[f32], decoded: &[f32]) -> DecodeQuality {
+    let total_frames = (reference.len().min(decoded.len())) / CHANNELS;
+    let max_lag = (SAMPLE_RATE / 50).min(total_frames.saturating_sub(16));
+    let compare_frames = total_frames.saturating_sub(max_lag);
+    let mut best = DecodeQuality {
+        lag_frames: 0,
+        snr_db: f64::NEG_INFINITY,
+    };
+
+    for lag in -(max_lag as isize)..=(max_lag as isize) {
+        let (reference_start, decoded_start) = if lag >= 0 {
+            (lag as usize, 0)
+        } else {
+            (0, (-lag) as usize)
+        };
+        let mut signal = 0.0f64;
+        let mut error = 0.0f64;
+        for frame in 0..compare_frames {
+            let ref_base = (reference_start + frame) * CHANNELS;
+            let dec_base = (decoded_start + frame) * CHANNELS;
+            for channel in 0..CHANNELS {
+                let expected = f64::from(reference[ref_base + channel]);
+                let actual = f64::from(decoded[dec_base + channel]);
+                let diff = expected - actual;
+                signal += expected * expected;
+                error += diff * diff;
+            }
+        }
+        let snr_db = if error <= f64::EPSILON {
+            f64::INFINITY
+        } else if signal <= f64::EPSILON {
+            f64::NEG_INFINITY
+        } else {
+            10.0 * (signal / error).log10()
+        };
+        if snr_db > best.snr_db {
+            best = DecodeQuality {
+                lag_frames: lag,
+                snr_db,
+            };
+        }
+    }
+
+    best
+}
+
 fn encode_with_encoder(
     encoder: &mut Encoder,
     pcm: &[f32],
@@ -255,11 +324,12 @@ fn time_decode(
     let mut last_checksum = 0.0f32;
     for _ in 0..repeats {
         let mut decoder = Decoder::new(SAMPLE_RATE as i32, CHANNELS)?;
+        let mut decoded = Vec::new();
         let start = Instant::now();
         let mut checksum = 0.0f32;
         for packet in packets {
-            let decoded = decoder.decode_f32(black_box(packet), false)?;
-            if decoded.len() != frame_size * CHANNELS {
+            let decoded_frames = decoder.decode_f32_into(black_box(packet), false, &mut decoded)?;
+            if decoded_frames != frame_size || decoded.len() != frame_size * CHANNELS {
                 return Err("unexpected decoded frame size".into());
             }
             checksum += decoded_checksum(&decoded);
@@ -314,18 +384,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return dump_packets(&pcm, &options, limit);
     }
 
-    println!("impl\tmode\tframe_size\tframe_ms\tbitrate\tencode_ms\tdecode_ms\tbytes\tmin_packet\tmax_packet\tchecksum");
+    println!("impl\tmode\tframe_size\tframe_ms\tbitrate\tencode_ms\tdecode_ms\tbytes\tmin_packet\tmax_packet\tchecksum\tquality_lag\tquality_snr_db");
     for &mode in modes(&options) {
         for &frame_size in &CELT_FRAME_SIZES_48K {
             for &bitrate in &BITRATES {
                 let (encode_ms, bytes, min_packet, max_packet, encode_checksum) =
                     time_encode(&pcm, frame_size, bitrate, mode, options.repeats)?;
                 let encoded = encode_packets(&pcm, frame_size, bitrate, mode)?;
+                let decoded = decode_packets(&encoded.packets, frame_size)?;
+                let quality = aligned_quality(&pcm, &decoded);
                 let (decode_ms, decode_checksum) =
                     time_decode(&encoded.packets, frame_size, options.repeats)?;
                 let checksum = encode_checksum ^ u64::from(decode_checksum.to_bits());
                 println!(
-                    "rust\t{}\t{}\t{:.1}\t{}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}",
+                    "rust\t{}\t{}\t{:.1}\t{}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{:.2}",
                     mode.label(),
                     frame_size,
                     frame_size as f64 * 1000.0 / SAMPLE_RATE as f64,
@@ -335,7 +407,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bytes,
                     min_packet,
                     max_packet,
-                    checksum
+                    checksum,
+                    quality.lag_frames,
+                    quality.snr_db
                 );
             }
         }

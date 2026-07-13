@@ -2,8 +2,8 @@
 //! `celt/celt_encoder.c`, and `celt/celt_decoder.c` control path.
 
 use crate::celt::bands::{
-    haar1, quant_all_bands_mono_with_scratch, quant_all_bands_stereo_with_scratch, BandCoder,
-    BandScratch, SPREAD_NORMAL,
+    anti_collapse, haar1, quant_all_bands_mono_with_scratch, quant_all_bands_stereo_with_scratch,
+    BandCoder, BandScratch, SPREAD_NORMAL,
 };
 use crate::celt::entropy::{RangeDecoder, RangeEncoder};
 use crate::celt::mathops::{celt_exp2, ec_ilog};
@@ -20,6 +20,7 @@ use crate::celt::rate::{
 use crate::{Error, Result};
 
 const BITRES: i32 = 3;
+const ENERGY_FLOOR_DB: f32 = -28.0;
 
 pub const TRIM_ICDF: [u8; 11] = [126, 124, 119, 109, 87, 41, 19, 9, 4, 2, 0];
 pub const SPREAD_ICDF: [u8; 4] = [25, 23, 2, 0];
@@ -817,6 +818,7 @@ pub struct CeltFrameDecodeInfo {
 pub struct CeltFrameDecodeScratch {
     pub x: Vec<f32>,
     pub y: Vec<f32>,
+    anti_collapse_x: Vec<f32>,
     pub tf_res: Vec<i32>,
     pub collapse_masks: Vec<u8>,
     pub band_e: Vec<f32>,
@@ -1184,6 +1186,7 @@ pub fn encode_spectral_frame_with_scratch(
         }
     }
     enc.finish();
+    *seed = enc.final_range();
     if enc.error() != 0 {
         return Err(Error::BufferTooSmall);
     }
@@ -1239,6 +1242,43 @@ pub fn decode_spectral_frame_into(
     config: &CeltFrameConfig,
     data: &[u8],
     old_band_e: &mut [f32],
+    seed: &mut u32,
+    scratch: &mut CeltFrameDecodeScratch,
+) -> Result<CeltFrameDecodeInfo> {
+    decode_spectral_frame_into_impl(mode, config, data, old_band_e, None, None, seed, scratch)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn decode_spectral_frame_into_with_anti_collapse(
+    mode: &CeltMode,
+    config: &CeltFrameConfig,
+    data: &[u8],
+    old_band_e: &mut [f32],
+    old_log_e: &[f32],
+    old_log_e2: &[f32],
+    seed: &mut u32,
+    scratch: &mut CeltFrameDecodeScratch,
+) -> Result<CeltFrameDecodeInfo> {
+    decode_spectral_frame_into_impl(
+        mode,
+        config,
+        data,
+        old_band_e,
+        Some(old_log_e),
+        Some(old_log_e2),
+        seed,
+        scratch,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_spectral_frame_into_impl(
+    mode: &CeltMode,
+    config: &CeltFrameConfig,
+    data: &[u8],
+    old_band_e: &mut [f32],
+    old_log_e: Option<&[f32]>,
+    old_log_e2: Option<&[f32]>,
     seed: &mut u32,
     scratch: &mut CeltFrameDecodeScratch,
 ) -> Result<CeltFrameDecodeInfo> {
@@ -1413,9 +1453,7 @@ pub fn decode_spectral_frame_into(
         }
     }
 
-    if anti_collapse_rsv > 0 {
-        let _anti_collapse_on = dec.decode_bits(1) != 0;
-    }
+    let anti_collapse_on = anti_collapse_rsv > 0 && dec.decode_bits(1) != 0;
     unquant_energy_finalise(
         mode,
         config.start,
@@ -1427,6 +1465,54 @@ pub fn decode_spectral_frame_into(
         &mut dec,
         config.channels,
     );
+    if anti_collapse_on {
+        if let (Some(old_log_e), Some(old_log_e2)) = (old_log_e, old_log_e2) {
+            if config.channels == 1 {
+                let _ = anti_collapse(
+                    mode,
+                    &mut scratch.x[..n],
+                    &scratch.collapse_masks,
+                    config.lm,
+                    config.channels,
+                    n,
+                    config.start,
+                    config.end,
+                    old_band_e,
+                    old_log_e,
+                    old_log_e2,
+                    &scratch.allocation.pulses,
+                    *seed,
+                    false,
+                );
+            } else {
+                scratch.anti_collapse_x.resize(config.channels * n, 0.0);
+                scratch.anti_collapse_x[..n].copy_from_slice(&scratch.x[..n]);
+                scratch.anti_collapse_x[n..2 * n].copy_from_slice(&scratch.y[..n]);
+                let _ = anti_collapse(
+                    mode,
+                    &mut scratch.anti_collapse_x[..config.channels * n],
+                    &scratch.collapse_masks,
+                    config.lm,
+                    config.channels,
+                    n,
+                    config.start,
+                    config.end,
+                    old_band_e,
+                    old_log_e,
+                    old_log_e2,
+                    &scratch.allocation.pulses,
+                    *seed,
+                    false,
+                );
+                scratch.x[..n].copy_from_slice(&scratch.anti_collapse_x[..n]);
+                scratch.y[..n].copy_from_slice(&scratch.anti_collapse_x[n..2 * n]);
+            }
+        }
+    }
+    if silence {
+        old_band_e[..config.channels * mode.nb_ebands].fill(ENERGY_FLOOR_DB);
+    }
+    *seed = dec.final_range();
     if dec.error() != 0 {
         return Err(Error::InvalidPacket);
     }

@@ -95,6 +95,8 @@ pub struct Encoder {
     mdct_scratch: MdctScratch,
     spectral_scratch: CeltFrameEncodeScratch,
     pcm_f32_scratch: Vec<f32>,
+    filtered_scratch: Vec<f32>,
+    transient_scratch: Vec<f32>,
 }
 
 impl Encoder {
@@ -136,6 +138,8 @@ impl Encoder {
             mdct_scratch: MdctScratch::default(),
             spectral_scratch: CeltFrameEncodeScratch::default(),
             pcm_f32_scratch: Vec::new(),
+            filtered_scratch: Vec::new(),
+            transient_scratch: Vec::new(),
             mode,
         })
     }
@@ -303,13 +307,19 @@ impl Encoder {
         equiv * 95 / 100
     }
 
-    fn transient_analysis(inputs: &[Vec<f32>], channels: usize, len: usize) -> TransientAnalysis {
+    fn transient_analysis(
+        inputs: &[Vec<f32>],
+        channels: usize,
+        len: usize,
+        scratch: &mut Vec<f32>,
+    ) -> TransientAnalysis {
         let len2 = len / 2;
         let mut mask_metric = 0i32;
         let mut tf_chan = 0usize;
 
         for (c, input) in inputs.iter().take(channels).enumerate() {
-            let mut tmp = vec![0.0f32; len];
+            scratch.resize(len, 0.0);
+            let tmp = &mut scratch[..len];
             let mut mem0 = 0.0f32;
             let mut mem1 = 0.0f32;
             for i in 0..len {
@@ -593,7 +603,8 @@ impl Encoder {
             diff /= (channels * (end - 1)) as f32;
         }
 
-        trim -= ((diff + 1.0) / 6.0).clamp(-2.0, 2.0);
+        let tilt = ((diff + 1.0) / 6.0).clamp(-2.0, 2.0);
+        trim -= tilt;
         trim -= 2.0 * tf_estimate;
         if let Some(tonality_slope) = analysis_tonality_slope {
             trim -= (2.0 * (tonality_slope + 0.05)).clamp(-2.0, 2.0);
@@ -623,11 +634,11 @@ impl Encoder {
             > ((mode.ebands[13] as usize) << (lm + 1)) as f32 * sum_lr
     }
 
-    fn dc_reject_frame(&mut self, pcm: &[f32], frame_size: usize) -> Vec<f32> {
+    fn dc_reject_frame_into(&mut self, pcm: &[f32], frame_size: usize, filtered: &mut Vec<f32>) {
         let cutoff_hz = 3.0f32;
         let coef = 6.3 * cutoff_hz / self.sample_rate as f32;
         let coef2 = 1.0 - coef;
-        let mut filtered = vec![0.0f32; frame_size * self.channels];
+        filtered.resize(frame_size * self.channels, 0.0);
 
         if self.channels == 2 {
             let mut m0 = self.hp_mem[0];
@@ -651,8 +662,6 @@ impl Encoder {
             }
             self.hp_mem[0] = m0;
         }
-
-        filtered
     }
 
     fn encode_filtered_f32_with_frame_bytes(
@@ -722,8 +731,12 @@ impl Encoder {
         for c in 0..self.channels {
             self.overlap_mem[c].copy_from_slice(&inputs[c][n..n + overlap]);
         }
-
-        let transient = Self::transient_analysis(&inputs, self.channels, n + overlap);
+        let transient = Self::transient_analysis(
+            &inputs,
+            self.channels,
+            n + overlap,
+            &mut self.transient_scratch,
+        );
         config.is_transient = lm > 0 && transient.is_transient && (frame_bytes * 8) as i32 >= 16;
         config.tf_estimate = transient.tf_estimate;
         config.tf_chan = if stream_channels == 1 {
@@ -744,7 +757,6 @@ impl Encoder {
             short_blocks,
             &mut self.mdct_scratch,
         );
-
         let eff_end = self.mode.eff_ebands;
         let mut band_e = vec![0.0f32; stream_channels * self.mode.nb_ebands];
         compute_band_energies(&self.mode, &freq, &mut band_e, eff_end, stream_channels, lm);
@@ -1044,13 +1056,16 @@ impl Encoder {
             return Err(Error::BadArg);
         }
         self.analysis_info = self.analysis.run(pcm, frame_size, self.channels);
-        let filtered = self.dc_reject_frame(pcm, frame_size);
+        let mut filtered = std::mem::take(&mut self.filtered_scratch);
+        self.dc_reject_frame_into(pcm, frame_size, &mut filtered);
         let frame_bytes = if self.vbr {
             self.vbr_frame_bytes(&filtered, frame_size)
         } else {
             self.frame_bytes_for_bitrate(frame_size)
         };
-        self.encode_filtered_f32_with_frame_bytes(&filtered, frame_size, frame_bytes)
+        let result = self.encode_filtered_f32_with_frame_bytes(&filtered, frame_size, frame_bytes);
+        self.filtered_scratch = filtered;
+        result
     }
 
     pub fn encode_f32_with_frame_bytes(
@@ -1066,7 +1081,10 @@ impl Encoder {
             return Err(Error::BadArg);
         }
         self.analysis_info = self.analysis.run(pcm, frame_size, self.channels);
-        let filtered = self.dc_reject_frame(pcm, frame_size);
-        self.encode_filtered_f32_with_frame_bytes(&filtered, frame_size, frame_bytes)
+        let mut filtered = std::mem::take(&mut self.filtered_scratch);
+        self.dc_reject_frame_into(pcm, frame_size, &mut filtered);
+        let result = self.encode_filtered_f32_with_frame_bytes(&filtered, frame_size, frame_bytes);
+        self.filtered_scratch = filtered;
+        result
     }
 }
