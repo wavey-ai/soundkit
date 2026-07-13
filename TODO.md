@@ -50,8 +50,9 @@ benchmark helper's configured `OPUS_DIR` when validating behavior.
   the constrained reservoir. The temporal-VBR rate factor now uses CELT
   `equiv_rate`, matching upstream `compute_vbr()`, instead of the nominal Opus
   bitrate. In the latest one-second VBR matrix the largest observed gap remains
-  about `0.21 dB`; the mean absolute quality gap is down from about
-  `0.0567 dB` to `0.0392 dB`.
+  about `0.21 dB`; the mean absolute quality gap is about `0.0392 dB`. The
+  final `equiv_rate` fix moved the mean absolute gap from about `0.0411 dB` to
+  about `0.0392 dB`.
 - Rust still keeps a `0.50` constrained-VBR blend for non-5 ms frames while
   libopus uses `0.67` everywhere. The C value fixes the 5 ms / 48 kb/s gap, but
   a traced post-`equiv_rate` experiment still worsened the VBR mean abs quality
@@ -76,17 +77,26 @@ gap and diverges at frame 1.
 - The Opus-layer high-pass filter and CELT preemphasis formulas match libopus;
   the previous apparent preemphasis mismatch was caused by tracing before C's
   stereo-width fade.
-- Packet probing shows frames 1-4 now align on transient, prefilter, spread,
-  trim, coded bands, intensity, dual stereo, balance, and fine-energy bits. The
-  next visible split is pulse distribution, likely caused by coarse-energy
-  symbol/tell drift before allocation rather than a remaining high-level control
-  mismatch.
+- Packet probing shows frame 1 aligns on transient, prefilter, spread, trim,
+  coded bands, intensity, dual stereo, balance, and fine-energy bits. The first
+  range-position split is immediately after coarse energy, before allocation or
+  PVQ.
+- The first coarse-energy symbol split is frame 1, band 10, channel 0. The
+  predictor state matches before the split (`old=2.560059`, `prev=-0.640015`),
+  but the current band log-energy crosses a quantization threshold:
+  Rust `x=1.949469`, `qi=1`; C `x=1.895186`, `qi=0`.
+- Default C and scalar C produce identical packets and quality for this row, so
+  the mismatch is not a C SIMD-vs-scalar artifact.
+- The next trace should move upstream from `amp2_log2`/band energy to MDCT,
+  CELT preemphasis, stereo fade, and DC reject for frame 1 band 10 channel 0.
 
 ## P0: Finish CELT CBR/VBR Quality Parity
 
-- Resume the 5 ms / 48 kb/s CBR trace inside coarse energy/PVQ after the
-  high-level controls. Patch any confirmed Rust algorithm issue; otherwise
-  document the drift with C/Rust evidence and move to the next quality gap.
+- Resume the 5 ms / 48 kb/s CBR trace upstream of coarse energy: compare
+  `bandLogE`, raw band energy, MDCT coefficients, CELT preemphasis, stereo fade,
+  and DC reject for frame 1 band 10 channel 0. Patch any confirmed Rust
+  algorithm issue; otherwise document the drift with C/Rust evidence and move
+  to the next quality gap.
 - Continue the VBR trace from the target/reservoir checkpoint. Current evidence
   shows the target inputs are closer after the `equiv_rate` fix, but C's
   universal `0.67` constrained blend exposes lower-level CELT coding/allocation

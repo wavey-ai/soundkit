@@ -25,6 +25,24 @@ used as behavioral reference material during the port.
 This is not a complete Opus codec yet. The usable audio path today is CELT-only
 raw frames, not Ogg Opus and not SILK/hybrid speech coding.
 
+## Codec Status
+
+Treat the current encoder as experimental. The CELT-only CBR and constrained
+VBR paths are usable for internal testing, dogfooding, and non-critical
+generated-audio workflows, but they are not yet production drop-in replacements
+for libopus.
+
+The latest raw CELT parity work brought constrained VBR closer to upstream C:
+the checked matrix has a mean absolute aligned-SNR gap of about `0.039 dB`, with
+the largest observed VBR row gap about `0.21 dB`. VBR tracks the target byte
+budget and packet-size envelope, but it is not byte-identical to C and still has
+near-threshold energy/allocation decision drift.
+
+The largest known CBR quality gap is still the 5 ms / 48 kb/s case, about
+`0.30 dB` on the deterministic benchmark fixture. That split is currently
+traced to current-frame band-energy drift before coarse-energy quantization, not
+to packet corruption or decoder interop failure.
+
 See [PORTING.md](PORTING.md) for the module-by-module plan and test status.
 See [SAFETY.md](SAFETY.md) for the unsafe-code policy.
 
