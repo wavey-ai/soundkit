@@ -26,6 +26,7 @@ pub(crate) struct AnalysisInfo {
     pub tonality: f32,
     pub tonality_slope: f32,
     pub activity: f32,
+    pub max_pitch_ratio: f32,
     pub bandwidth: usize,
     pub leak_boost: [u8; LEAK_BANDS],
 }
@@ -294,6 +295,8 @@ impl TonalityAnalysisState {
         let mut frame_tonality = 0.0f32;
         let mut frame_noisiness = 0.0f32;
         let mut relative_e = 0.0f32;
+        let mut below_max_pitch = 0.0f32;
+        let mut above_max_pitch = 0.0f32;
         let mut max_frame_tonality = 0.0f32;
         let mut band_tonality_values = [0.0f32; NB_TBANDS];
         for b in 0..NB_TBANDS {
@@ -312,6 +315,11 @@ impl TonalityAnalysisState {
             }
             let log_energy = (energy + 1e-10).ln();
             band_log2[b + 1] = 0.5 * ANALYSIS_LOG2_E * log_energy;
+            if TBANDS[b] < 64 {
+                below_max_pitch += energy;
+            } else {
+                above_max_pitch += energy;
+            }
 
             self.energy[self.energy_count][b] = energy;
             frame_noisiness += noise_energy / (1e-15 + energy);
@@ -394,6 +402,7 @@ impl TonalityAnalysisState {
         }
 
         let hp_band_energy = hp_ener * (1.0 / (60.0 * 60.0));
+        above_max_pitch += hp_band_energy;
         let noise_ratio = if self.prev_bandwidth == 20 {
             10.0
         } else {
@@ -423,6 +432,11 @@ impl TonalityAnalysisState {
         }
 
         slope /= 64.0;
+        let max_pitch_ratio = if above_max_pitch > below_max_pitch {
+            below_max_pitch / above_max_pitch
+        } else {
+            1.0
+        };
         frame_noisiness /= NB_TBANDS as f32;
         relative_e /= NB_TBANDS as f32;
         if self.count < 10 {
@@ -439,6 +453,7 @@ impl TonalityAnalysisState {
             tonality: frame_tonality,
             tonality_slope: slope,
             activity,
+            max_pitch_ratio,
             bandwidth,
             leak_boost,
         };

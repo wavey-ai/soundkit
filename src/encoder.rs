@@ -86,6 +86,7 @@ pub struct Encoder {
     intensity: usize,
     delayed_intra: f32,
     stream_channels: usize,
+    hybrid_stereo_width_q14: i32,
     stereo_saving: f32,
     last_coded_bands: usize,
     vbr: bool,
@@ -132,6 +133,7 @@ impl Encoder {
             intensity: 0,
             delayed_intra: 1.0,
             stream_channels: channels,
+            hybrid_stereo_width_q14: 1 << 14,
             stereo_saving: 0.0,
             last_coded_bands: 0,
             vbr: false,
@@ -299,6 +301,40 @@ impl Encoder {
         }
         // Equivalent-rate approximation of upstream CELT complexity path.
         equiv * 95 / 100
+    }
+
+    fn target_stereo_width_q14(equiv_rate: i32) -> i32 {
+        if equiv_rate > 32_000 {
+            1 << 14
+        } else if equiv_rate < 16_000 {
+            0
+        } else {
+            16_384 - 2_048 * (32_000 - equiv_rate) / (equiv_rate - 14_000)
+        }
+    }
+
+    fn apply_stereo_width_fade(
+        mode: &CeltMode,
+        frame_size: usize,
+        previous_width_q14: i32,
+        target_width_q14: i32,
+        pcm: &mut [f32],
+    ) {
+        let reduction_start = 1.0 - previous_width_q14 as f32 * (1.0 / 16_384.0);
+        let reduction_end = 1.0 - target_width_q14 as f32 * (1.0 / 16_384.0);
+        let overlap = mode.overlap.min(frame_size);
+        for i in 0..overlap {
+            let w = mode.window[i] * mode.window[i];
+            let reduction = w * reduction_end + (1.0 - w) * reduction_start;
+            let diff = 0.5 * (pcm[2 * i] - pcm[2 * i + 1]) * reduction;
+            pcm[2 * i] -= diff;
+            pcm[2 * i + 1] += diff;
+        }
+        for i in overlap..frame_size {
+            let diff = 0.5 * (pcm[2 * i] - pcm[2 * i + 1]) * reduction_end;
+            pcm[2 * i] -= diff;
+            pcm[2 * i + 1] += diff;
+        }
     }
 
     fn transient_analysis(
@@ -660,7 +696,7 @@ impl Encoder {
 
     fn encode_filtered_f32_with_frame_bytes(
         &mut self,
-        pcm: &[f32],
+        pcm: &mut [f32],
         frame_size: usize,
         frame_bytes: usize,
         allow_vbr_shrink: bool,
@@ -686,6 +722,20 @@ impl Encoder {
         let n = frame_size;
         let m = 1usize << lm;
         let overlap = self.mode.overlap;
+        let target_stereo_width_q14 = Self::target_stereo_width_q14(equiv_rate);
+        let previous_stereo_width_q14 = self.hybrid_stereo_width_q14;
+        if self.channels == 2
+            && (previous_stereo_width_q14 < (1 << 14) || target_stereo_width_q14 < (1 << 14))
+        {
+            Self::apply_stereo_width_fade(
+                &self.mode,
+                frame_size,
+                previous_stereo_width_q14,
+                target_stereo_width_q14,
+                pcm,
+            );
+        }
+        self.hybrid_stereo_width_q14 = target_stereo_width_q14;
 
         let mut inputs = Vec::with_capacity(self.channels);
         for c in 0..self.channels {
@@ -713,6 +763,9 @@ impl Encoder {
             self.prefilter_tapset,
             prefilter_tapset,
             prefilter_enabled,
+            self.analysis_info
+                .valid
+                .then_some(self.analysis_info.max_pitch_ratio),
             frame_bytes,
             self.channels,
             n,
@@ -1101,7 +1154,7 @@ impl Encoder {
             self.frame_bytes_for_bitrate(frame_size)
         };
         let result =
-            self.encode_filtered_f32_with_frame_bytes(&filtered, frame_size, frame_bytes, true);
+            self.encode_filtered_f32_with_frame_bytes(&mut filtered, frame_size, frame_bytes, true);
         self.filtered_scratch = filtered;
         result
     }
@@ -1121,8 +1174,12 @@ impl Encoder {
         self.analysis_info = self.analysis.run(pcm, frame_size, self.channels);
         let mut filtered = std::mem::take(&mut self.filtered_scratch);
         self.dc_reject_frame_into(pcm, frame_size, &mut filtered);
-        let result =
-            self.encode_filtered_f32_with_frame_bytes(&filtered, frame_size, frame_bytes, false);
+        let result = self.encode_filtered_f32_with_frame_bytes(
+            &mut filtered,
+            frame_size,
+            frame_bytes,
+            false,
+        );
         self.filtered_scratch = filtered;
         result
     }

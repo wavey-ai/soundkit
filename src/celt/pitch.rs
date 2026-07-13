@@ -516,6 +516,7 @@ pub fn run_prefilter(
     prev_tapset: usize,
     prefilter_tapset: usize,
     enabled: bool,
+    max_pitch_ratio: Option<f32>,
     packet_bytes: usize,
     channels: usize,
     n: usize,
@@ -550,6 +551,9 @@ pub fn run_prefilter(
         );
         pitch_index = pitch_index.min(COMBFILTER_MAXPERIOD - 2);
         gain1 *= 0.7;
+    }
+    if let Some(max_pitch_ratio) = max_pitch_ratio {
+        gain1 *= max_pitch_ratio;
     }
 
     let mut threshold = 0.2f32;

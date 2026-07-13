@@ -55,7 +55,9 @@ benchmark helper's configured `OPUS_DIR` when validating behavior.
   libopus uses `0.67` everywhere. The C value fixes the 5 ms / 48 kb/s gap but
   still worsens several 2.5 ms high-rate rows, so the remaining state-history
   mismatch needs to be fixed before using `0.67` universally.
-- The largest CBR gap is still 5 ms / 48 kb/s at about `0.32 dB`.
+- The largest CBR gap is still 5 ms / 48 kb/s, now about `0.30 dB` after
+  porting the Opus-layer stereo-width fade and analysis `max_pitch_ratio`
+  prefilter scaling.
 
 ## Stop Point: 5 ms / 48 kb/s CBR
 
@@ -63,21 +65,24 @@ This is the best next correctness target because it is the largest CBR quality
 gap and diverges at frame 1.
 
 - Frame 0 is byte-identical.
-- Frame 1 first visible control split is allocation trim:
-  Rust selects trim index `4`, C selects `3`.
-- The trim value is near the `3.5` rounding boundary, but the component drift is
-  already visible before MDCT/band analysis.
+- Frame 1 no longer splits at allocation trim; Rust and C both select trim
+  index `3` after the Opus-layer stereo-width fade is applied before CELT
+  preemphasis.
 - The benchmark fixture generation is textually aligned between Rust and C.
-- The Opus-layer high-pass filter and CELT preemphasis formulas match libopus.
-- The current suspicion is the CELT pitch prefilter/comb-filter path. Resume by
-  comparing Rust `run_prefilter` and `comb_filter` decisions/output against C,
-  including the fact that C may use SSE `comb_filter_const` while Rust is scalar.
+- The Opus-layer high-pass filter and CELT preemphasis formulas match libopus;
+  the previous apparent preemphasis mismatch was caused by tracing before C's
+  stereo-width fade.
+- Packet probing shows frames 1-4 now align on transient, prefilter, spread,
+  trim, coded bands, intensity, dual stereo, balance, and fine-energy bits. The
+  next visible split is pulse distribution, likely caused by coarse-energy
+  symbol/tell drift before allocation rather than a remaining high-level control
+  mismatch.
 
 ## P0: Finish CELT CBR/VBR Quality Parity
 
-- Resume the 5 ms / 48 kb/s CBR trace at the CELT prefilter boundary. Patch any
-  confirmed Rust algorithm issue; otherwise document the drift with C/Rust
-  evidence and move to the next quality gap.
+- Resume the 5 ms / 48 kb/s CBR trace inside coarse energy/PVQ after the
+  high-level controls. Patch any confirmed Rust algorithm issue; otherwise
+  document the drift with C/Rust evidence and move to the next quality gap.
 - Extend the clean 2.5 ms CBR packet checks beyond one second, especially the
   now-clean 128 kb/s fixture.
 - Trace 10 ms and 20 ms / 128 kb/s CBR frame-0 divergence after the high-level
