@@ -1,10 +1,9 @@
 # libopus-rs
 
-Pure Rust port of libopus 1.5.2.
+Rust implementation of the Opus 1.5.2 codec.
 
-This repository is intentionally not a wrapper around the C library. The target
-is a Rust implementation of the Opus 1.5.2 codec, with the upstream C test suite
-used as behavioral reference material during the port.
+This crate does not wrap libopus or expose a C API. Upstream libopus 1.5.2 tests
+and fixtures are used as behavioral reference material during the port.
 
 ## Current Support
 
@@ -22,8 +21,8 @@ used as behavioral reference material during the port.
   `Encoder`/`Decoder` types for 2.5, 5, 10, and 20 ms fullband frames
   with CBR, constrained VBR, or exact compressed-frame-byte controls
 
-This is not a complete Opus codec yet. The usable audio path today is CELT-only
-raw frames, not Ogg Opus and not SILK/hybrid speech coding.
+The codec is incomplete. The supported audio path is limited to CELT-only raw
+frames. Ogg Opus, SILK, and hybrid speech coding are not implemented.
 
 See [PORTING.md](PORTING.md) for the module-by-module plan and test status.
 See [SAFETY.md](SAFETY.md) for the unsafe-code policy.
@@ -37,10 +36,10 @@ cargo build --release
 
 The crate is built with `#![forbid(unsafe_code)]`. It does not expose a C API.
 
-## WAV smoke test
+## WAV Round Trip
 
-The `wav_celt` example can round-trip 48 kHz mono/stereo PCM16 WAV through the
-current pure-Rust CELT-only packet path:
+The `wav_celt` example round-trips 48 kHz mono/stereo PCM16 WAV through the
+implemented CELT-only packet path:
 
 ```sh
 cargo run --release --example wav_celt -- roundtrip input.wav output.lors decoded.wav
@@ -52,7 +51,7 @@ cargo run --release --example wav_celt -- roundtrip --frame-size 960 --frame-byt
 `output.lors` is a simple length-prefixed raw packet stream for testing this
 port. It is not Ogg Opus yet.
 
-To export side-by-side decoded WAVs for listening comparisons:
+Export side-by-side decoded WAVs for listening comparisons:
 
 ```sh
 tools/export_roundtrip_wavs.sh --input input-audio --out-dir path/to/roundtrips --mode both
@@ -87,8 +86,8 @@ faster. Positive deltas mean Rust was faster than C. Byte counts are raw Opus
 packet bytes, not wrapper/container bytes. Packet ranges show per-frame compressed
 packet byte sizes.
 
-Run `tools/run_raw_celt_bench.sh` to generate the current table on your machine.
-For one quick check, use:
+Run `tools/run_raw_celt_bench.sh` to generate a local table. For a minimal
+check, use:
 
 ```sh
 AUDIO_SECONDS=1 REPEATS=1 MODE=both tools/run_raw_celt_bench.sh
@@ -105,13 +104,13 @@ tools/run_wasm_celt_bench.sh
 
 Use `AUDIO_SECONDS`, `REPEATS`, `BITRATE`, or `SIMD_RUSTFLAGS` to adjust the
 run. `tools/build_wasm_simd.sh --example wasm_celt_bench` builds only the
-`simd128` artifact when you just need the wasm output.
+`simd128` artifact.
 
-Current local measurements do not justify enabling wasm SIMD by default. The
+Local measurements do not justify enabling wasm SIMD by default. The
 `simd128` build produced matching checksums, but it was generally slower than
 the scalar wasm build in Node on Apple Silicon, with the 5 ms frame case showing
-the clearest regression. Treat the scalar wasm build as the baseline for now and
-use this benchmark only to validate future targeted SIMD work.
+the clearest regression. Treat the scalar wasm build as the baseline. Use this
+benchmark to validate targeted SIMD work.
 
 ## Full-track wasm comparison
 
@@ -128,8 +127,8 @@ The benchmark serves the local `pkg/libopus_rs_bg.wasm` wasm-pack output and
 Chrome for each codec/bitrate case, and measures the public browser JS API path
 for 20 ms stereo CELT frames. The default bitrate set is 48, 128, and
 196 kb/s. Use `--json /tmp/wasm-browser-bench.json` to keep the raw samples.
-The fixture is deterministic synthetic 48 kHz stereo audio so the run can be
-repeated when system load is lower.
+The fixture is deterministic synthetic 48 kHz stereo audio for repeatable runs
+under lower system load.
 
 The Rust cases also support `rust-cbr-reuse` and `rust-vbr-reuse`, which decode
 into the wasm decoder's owned output buffer and expose `outputPtr`/`outputLen`
@@ -137,7 +136,7 @@ for JS callers that want to avoid cloning the result. To capture a Chrome CPU
 profile around a Rust decode loop, run a single Rust case with
 `--profile-rust-decode /tmp/rust-decode.cpuprofile.json`.
 
-A full-track browser-shape comparison was run on:
+A full-track browser API comparison was run on:
 
 ```text
 /Users/jamie/Downloads/Lori Asha - Lori Asha Album Premix/02 - Lori Asha - Westside.mp3
@@ -147,8 +146,8 @@ The source was decoded and resampled once with `ffmpeg` to identical `48 kHz`
 stereo `s16` PCM, then encoded and decoded in Node.js with 20 ms frames through
 `libopusjs` C wasm and pure Rust `libopus-rs` wasm. Quality metrics below are
 delay-aligned against the source PCM; unaligned RMSE/SNR numbers are misleading
-because the two paths have different codec delay. The current `libopusjs`
-wrapper does not expose a CBR/VBR toggle and uses libopus' default VBR behavior.
+because the two paths have different codec delay. The `libopusjs` wrapper does
+not expose a CBR/VBR toggle and uses libopus' default VBR behavior.
 Rust wasm defaults to CBR for Bitneedle, and also exposes constrained VBR via
 `encoder.set_vbr(true)`.
 
@@ -163,9 +162,9 @@ Rust wasm defaults to CBR for Bitneedle, and also exposes constrained VBR via
 
 All wasm paths encoded and decoded the full track without failures. Rust VBR
 tracks the target byte budget and varies packet sizes, but on this workload it
-does not close the quality gap to C. Rust decode is competitive and faster at
-48 kb/s; Rust encode is still slower, especially at 128 kb/s, and needs targeted
-profiling before claiming parity with the C encoder.
+does not reduce the quality gap relative to C. Rust decode performance is faster
+at 48 kb/s; Rust encode remains slower, especially at 128 kb/s, and requires
+targeted profiling before parity claims with the C encoder.
 
 A snapshot of a local run (`AUDIO_SECONDS=1 REPEATS=1 MODE=both`) is included below:
 
@@ -244,7 +243,7 @@ A snapshot of a local run (`AUDIO_SECONDS=1 REPEATS=1 MODE=both`) is included be
 | vbr | 20.0 ms | 384 kb/s | 112.48x | +33.3% | 160.69x | +108.3% | 149.97x | 334.67x | 48151 | 49010 | 958-982 | 953-1275 |
 | vbr | 20.0 ms | 512 kb/s | 87.33x | +31.9% | 114.53x | +143.4% | 115.22x | 278.71x | 63800 | 63750 | 1276-1276 | 1275-1275 |
 
-Run `tools/run_raw_celt_bench.sh` to generate your machine's current table.
+Run `tools/run_raw_celt_bench.sh` to generate a local current table.
 
 ## Encoder Parity Next Steps
 
@@ -278,10 +277,10 @@ divergence is in the energy/allocation/PVQ payload path.
 
 The 5 ms / 128 kb/s one-second CBR dump is now byte-identical for all 200
 frames. Packet sizes match across the CBR matrix; remaining byte mismatches
-still need first-symbol traces.
+require first-symbol traces.
 
-The 10 and 20 ms CBR paths still diverge from frame 0. A control-symbol trace
-for 128 kb/s shows frame-0 transient, TF, spread, trim, and coded-band decisions
+The 10 and 20 ms CBR paths diverge from frame 0. A control-symbol trace for
+128 kb/s shows frame-0 transient, TF, spread, trim, and coded-band decisions
 matching libopus, so the next mismatch is past the high-level CELT control
 symbols, in the energy/PVQ payload path.
 
@@ -305,8 +304,8 @@ Resume from this checkpoint:
 
 1. Trace the 2.5 ms / 128 kb/s frame-91 mismatch from the first divergent
    post-control entropy symbol.
-2. Extend the now-matching 5 ms / 128 kb/s one-second CBR fixture before treating
-   that path as done.
+2. Extend the now-matching 5 ms / 128 kb/s one-second CBR fixture before
+   classifying that path as complete.
 3. After the frame-91 fix, extend 2.5 ms CBR byte parity past the one-second
    fixture at 48, 96, and 128 kb/s.
 4. Trace 10 and 20 ms frame-0 parity after the matching control symbols through
