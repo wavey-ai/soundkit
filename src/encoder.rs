@@ -1003,7 +1003,7 @@ impl Encoder {
         if allow_vbr_shrink && self.vbr {
             let vbr_rate = self.vbr_rate_frac(frame_size);
             config.vbr_state = Some(CeltVbrConfig {
-                bitrate: self.bitrate,
+                equiv_rate,
                 vbr_rate,
                 effective_bytes: (vbr_rate >> (BITRES + 3)).max(2) as usize,
                 reservoir: self.vbr_reservoir,

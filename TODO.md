@@ -47,14 +47,18 @@ benchmark helper's configured `OPUS_DIR` when validating behavior.
     before MDCT.
 - VBR now uses the libopus-style target path for activity, stereo saving,
   dynalloc, transient/TF boost, tonality, pitch-change boost, temporal VBR, and
-  the constrained reservoir. In the latest one-second VBR matrix the largest
-  observed gap is about `0.21 dB`; the mean absolute quality gap is down from
-  about `0.0567 dB` to `0.0411 dB` after moving 5 ms frames to libopus'
-  `0.67` constrained blend.
+  the constrained reservoir. The temporal-VBR rate factor now uses CELT
+  `equiv_rate`, matching upstream `compute_vbr()`, instead of the nominal Opus
+  bitrate. In the latest one-second VBR matrix the largest observed gap remains
+  about `0.21 dB`; the mean absolute quality gap is down from about
+  `0.0567 dB` to `0.0392 dB`.
 - Rust still keeps a `0.50` constrained-VBR blend for non-5 ms frames while
-  libopus uses `0.67` everywhere. The C value fixes the 5 ms / 48 kb/s gap but
-  still worsens several 2.5 ms high-rate rows, so the remaining state-history
-  mismatch needs to be fixed before using `0.67` universally.
+  libopus uses `0.67` everywhere. The C value fixes the 5 ms / 48 kb/s gap, but
+  a traced post-`equiv_rate` experiment still worsened the VBR mean abs quality
+  gap to about `0.0658 dB` and worsened mean per-row packet-length closeness
+  from about `1.83` to `2.28` bytes, mostly on 10/20 ms rows. Keep the
+  conservative blend until the lower-level CELT coding/allocation mismatch is
+  removed.
 - The largest CBR gap is still 5 ms / 48 kb/s, now about `0.30 dB` after
   porting the Opus-layer stereo-width fade and analysis `max_pitch_ratio`
   prefilter scaling.
@@ -83,13 +87,18 @@ gap and diverges at frame 1.
 - Resume the 5 ms / 48 kb/s CBR trace inside coarse energy/PVQ after the
   high-level controls. Patch any confirmed Rust algorithm issue; otherwise
   document the drift with C/Rust evidence and move to the next quality gap.
+- Continue the VBR trace from the target/reservoir checkpoint. Current evidence
+  shows the target inputs are closer after the `equiv_rate` fix, but C's
+  universal `0.67` constrained blend exposes lower-level CELT coding/allocation
+  quality gaps instead of improving the matrix.
 - Extend the clean 2.5 ms CBR packet checks beyond one second, especially the
   now-clean 128 kb/s fixture.
 - Trace 10 ms and 20 ms / 128 kb/s CBR frame-0 divergence after the high-level
   controls. Transient, TF, spread, trim, and coded-band symbols were previously
   aligned, so the remaining split should be in energy, allocation, or PVQ.
-- Finish constrained-VBR parity by removing the remaining state-history
-  mismatch that prevents using libopus' `0.67` constrained blend everywhere.
+- Finish constrained-VBR parity by removing the remaining allocation/PVQ or
+  state-history mismatch that prevents using libopus' `0.67` constrained blend
+  everywhere.
 - Keep exact packet comparisons in the loop, but treat quality/cross-decode
   checks as the higher-value signal when byte drift is caused by harmless float
   thresholds.

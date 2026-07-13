@@ -290,6 +290,6 @@ fn vbr_packet_budget_varies_with_signal_shape() {
 
 #[test]
 fn celt_vbr_tracks_constrained_reservoir_over_raw_fixture() {
-    assert_eq!(vbr_stats(120, 128_000, 400), (16_439, 36, 59));
+    assert_eq!(vbr_stats(120, 128_000, 400), (16_439, 34, 59));
     assert_eq!(vbr_stats(960, 128_000, 50), (16_370, 320, 500));
 }

@@ -780,7 +780,7 @@ impl CeltFrameConfig {
             is_transient: false,
             spread: SPREAD_NORMAL,
             alloc_trim: 5,
-            intensity: mode.nb_ebands,
+            intensity: 0,
             dual_stereo: false,
             disable_inv: false,
             last_coded_bands: 0,
@@ -799,7 +799,7 @@ impl CeltFrameConfig {
 
 #[derive(Clone, Copy, Debug)]
 pub struct CeltVbrConfig {
-    pub bitrate: i32,
+    pub equiv_rate: i32,
     pub vbr_rate: i32,
     pub effective_bytes: usize,
     pub reservoir: i32,
@@ -985,7 +985,7 @@ fn compute_vbr_target(
     target = base_target + (constrained_vbr_blend * (target - base_target) as f32) as i32;
 
     if config.tf_estimate < 0.2 {
-        let amount = 0.0000031 * (96_000 - vbr.bitrate).clamp(0, 32_000) as f32;
+        let amount = 0.0000031 * (96_000 - vbr.equiv_rate).clamp(0, 32_000) as f32;
         let tvbr_factor = vbr.temporal_vbr * amount;
         target += (tvbr_factor * target as f32) as i32;
     }
