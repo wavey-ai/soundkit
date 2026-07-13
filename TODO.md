@@ -45,15 +45,16 @@ benchmark helper's configured `OPUS_DIR` when validating behavior.
   - 256/384/512 kb/s frame 17: first split is fine-energy band 0 channel 1
     (`q2=26` Rust, `q2=27` C), with about `0.0009 dB` drift already visible
     before MDCT.
-- VBR now uses the libopus-style target path for stereo saving, dynalloc,
-  transient/TF boost, tonality, pitch-change boost, temporal VBR, and the
-  constrained reservoir. In the latest one-second VBR matrix the largest
-  observed gap is about `0.25 dB`; 2.5 ms / 320 kb/s is down to about `0.03 dB`
-  and 2.5 ms / 384 kb/s is down to about `0.09 dB`.
-- Rust still keeps a `0.50` constrained-VBR blend where libopus uses `0.67`.
-  The C value improves some high-rate rows after the pitch-change fix, but
-  currently worsens 2.5 ms / 320 kb/s because the remaining state history is
-  not yet fully aligned.
+- VBR now uses the libopus-style target path for activity, stereo saving,
+  dynalloc, transient/TF boost, tonality, pitch-change boost, temporal VBR, and
+  the constrained reservoir. In the latest one-second VBR matrix the largest
+  observed gap is about `0.21 dB`; the mean absolute quality gap is down from
+  about `0.0567 dB` to `0.0411 dB` after moving 5 ms frames to libopus'
+  `0.67` constrained blend.
+- Rust still keeps a `0.50` constrained-VBR blend for non-5 ms frames while
+  libopus uses `0.67` everywhere. The C value fixes the 5 ms / 48 kb/s gap but
+  still worsens several 2.5 ms high-rate rows, so the remaining state-history
+  mismatch needs to be fixed before using `0.67` universally.
 - The largest CBR gap is still 5 ms / 48 kb/s at about `0.32 dB`.
 
 ## Stop Point: 5 ms / 48 kb/s CBR

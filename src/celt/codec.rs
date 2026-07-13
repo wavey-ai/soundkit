@@ -809,6 +809,7 @@ pub struct CeltVbrConfig {
     pub stereo_saving: f32,
     pub temporal_vbr: f32,
     pub analysis_valid: bool,
+    pub activity: f32,
     pub tonality: f32,
     pub pitch_change: bool,
 }
@@ -951,6 +952,9 @@ fn compute_vbr_target(
     }
 
     let mut target = base_target;
+    if vbr.analysis_valid && vbr.activity < 0.4 {
+        target -= (((coded_bins << BITRES) as f32) * (0.4 - vbr.activity)) as i32;
+    }
     if config.channels == 2 && coded_bins > 0 {
         let coded_stereo_bands = config.intensity.min(coded_bands);
         let coded_stereo_dof =
@@ -977,7 +981,8 @@ fn compute_vbr_target(
     let floor_depth = (((channels * bins) << BITRES) as f32 * dynalloc.max_depth) as i32;
     target = target.min(floor_depth.max(target >> 2));
 
-    target = base_target + (0.50 * (target - base_target) as f32) as i32;
+    let constrained_vbr_blend = if config.lm == 1 { 0.67 } else { 0.50 };
+    target = base_target + (constrained_vbr_blend * (target - base_target) as f32) as i32;
 
     if config.tf_estimate < 0.2 {
         let amount = 0.0000031 * (96_000 - vbr.bitrate).clamp(0, 32_000) as f32;

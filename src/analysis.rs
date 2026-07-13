@@ -25,6 +25,7 @@ pub(crate) struct AnalysisInfo {
     pub valid: bool,
     pub tonality: f32,
     pub tonality_slope: f32,
+    pub activity: f32,
     pub bandwidth: usize,
     pub leak_boost: [u8; LEAK_BANDS],
 }
@@ -38,6 +39,8 @@ pub(crate) struct TonalityAnalysisState {
     mem_fill: usize,
     prev_band_tonality: [f32; NB_TBANDS],
     prev_tonality: f32,
+    low_e: [f32; NB_TBANDS],
+    high_e: [f32; NB_TBANDS],
     mean_e: [f32; NB_TBANDS + 1],
     prev_bandwidth: usize,
     energy: [[f32; NB_TBANDS]; NB_FRAMES],
@@ -64,6 +67,8 @@ impl TonalityAnalysisState {
             mem_fill: 0,
             prev_band_tonality: [0.0; NB_TBANDS],
             prev_tonality: 0.0,
+            low_e: [0.0; NB_TBANDS],
+            high_e: [0.0; NB_TBANDS],
             mean_e: [0.0; NB_TBANDS + 1],
             prev_bandwidth: 0,
             energy: [[0.0; NB_TBANDS]; NB_FRAMES],
@@ -223,6 +228,7 @@ impl TonalityAnalysisState {
 
         let mut tonality = vec![0.0f32; 240];
         let mut tonality2 = vec![0.0f32; 240];
+        let mut noisiness = vec![0.0f32; 240];
         for i in 1..240 {
             let x1r = output[i].r + output[480 - i].r;
             let x1i = output[i].i - output[480 - i].i;
@@ -243,7 +249,7 @@ impl TonalityAnalysisState {
             mod1 *= mod1;
 
             let mut mod2 = d2_angle2 - Self::float2int(d2_angle2);
-            let _noisiness = noisiness1 + mod2.abs();
+            noisiness[i] = noisiness1 + mod2.abs();
             mod2 *= mod2;
             mod2 *= mod2;
 
@@ -286,11 +292,14 @@ impl TonalityAnalysisState {
 
         let mut slope = 0.0f32;
         let mut frame_tonality = 0.0f32;
+        let mut frame_noisiness = 0.0f32;
+        let mut relative_e = 0.0f32;
         let mut max_frame_tonality = 0.0f32;
         let mut band_tonality_values = [0.0f32; NB_TBANDS];
         for b in 0..NB_TBANDS {
             let mut energy = 0.0f32;
             let mut tonal_energy = 0.0f32;
+            let mut noise_energy = 0.0f32;
             for i in TBANDS[b]..TBANDS[b + 1] {
                 let raw_bin_energy = output[i].r * output[i].r
                     + output[480 - i].r * output[480 - i].r
@@ -299,10 +308,33 @@ impl TonalityAnalysisState {
                 let bin_energy = raw_bin_energy * INV_CELT_SIG_SCALE_SQUARED;
                 energy += bin_energy;
                 tonal_energy += bin_energy * tonality[i].max(0.0);
+                noise_energy += bin_energy * 2.0 * (0.5 - noisiness[i]);
             }
-            band_log2[b + 1] = Self::half_log2_energy(energy);
+            let log_energy = (energy + 1e-10).ln();
+            band_log2[b + 1] = 0.5 * ANALYSIS_LOG2_E * log_energy;
 
             self.energy[self.energy_count][b] = energy;
+            frame_noisiness += noise_energy / (1e-15 + energy);
+            if self.count == 0 {
+                self.high_e[b] = log_energy;
+                self.low_e[b] = log_energy;
+            }
+            if self.high_e[b] > self.low_e[b] + 7.5 {
+                if self.high_e[b] - log_energy > log_energy - self.low_e[b] {
+                    self.high_e[b] -= 0.01;
+                } else {
+                    self.low_e[b] += 0.01;
+                }
+            }
+            if log_energy > self.high_e[b] {
+                self.high_e[b] = log_energy;
+                self.low_e[b] = self.low_e[b].max(self.high_e[b] - 15.0);
+            } else if log_energy < self.low_e[b] {
+                self.low_e[b] = log_energy;
+                self.high_e[b] = self.high_e[b].min(self.low_e[b] + 15.0);
+            }
+            relative_e += (log_energy - self.low_e[b]) / (1e-5 + self.high_e[b] - self.low_e[b]);
+
             let mut l1 = 0.0f32;
             let mut l2 = 0.0f32;
             for frame in 0..NB_FRAMES {
@@ -391,6 +423,12 @@ impl TonalityAnalysisState {
         }
 
         slope /= 64.0;
+        frame_noisiness /= NB_TBANDS as f32;
+        relative_e /= NB_TBANDS as f32;
+        if self.count < 10 {
+            relative_e = 0.5;
+        }
+        let activity = frame_noisiness + (1.0 - frame_noisiness) * relative_e;
         let mut frame_tonality = max_frame_tonality / (NB_TBANDS - NB_TONAL_SKIP_BANDS) as f32;
         frame_tonality = frame_tonality.max(self.prev_tonality * 0.8);
         self.prev_tonality = frame_tonality;
@@ -400,6 +438,7 @@ impl TonalityAnalysisState {
             valid: true,
             tonality: frame_tonality,
             tonality_slope: slope,
+            activity,
             bandwidth,
             leak_boost,
         };

@@ -960,6 +960,7 @@ impl Encoder {
                 stereo_saving: self.stereo_saving,
                 temporal_vbr,
                 analysis_valid: self.analysis_info.valid,
+                activity: self.analysis_info.activity,
                 tonality: self.analysis_info.tonality,
                 pitch_change,
             });
