@@ -9,6 +9,7 @@ const DETECT_SIZE: usize = 100;
 const CELT_SIG_SCALE: f32 = 32768.0;
 const INV_CELT_SIG_SCALE_SQUARED: f32 = 1.0 / (CELT_SIG_SCALE * CELT_SIG_SCALE);
 const ANALYSIS_COUNT_MAX: usize = 10_000;
+const NB_TONAL_SKIP_BANDS: usize = 9;
 const ANALYSIS_LOG2_E: f32 = 1.442_695;
 const ANALYSIS_PI: f64 = 3.141_592_653;
 const ANALYSIS_INV_2PI: f32 = (0.5 / ANALYSIS_PI) as f32;
@@ -22,6 +23,7 @@ const TBANDS: [usize; NB_TBANDS + 1] = [
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct AnalysisInfo {
     pub valid: bool,
+    pub tonality: f32,
     pub tonality_slope: f32,
     pub bandwidth: usize,
     pub leak_boost: [u8; LEAK_BANDS],
@@ -35,6 +37,7 @@ pub(crate) struct TonalityAnalysisState {
     inmem: [f32; ANALYSIS_BUF_SIZE],
     mem_fill: usize,
     prev_band_tonality: [f32; NB_TBANDS],
+    prev_tonality: f32,
     mean_e: [f32; NB_TBANDS + 1],
     prev_bandwidth: usize,
     energy: [[f32; NB_TBANDS]; NB_FRAMES],
@@ -60,6 +63,7 @@ impl TonalityAnalysisState {
             inmem: [0.0; ANALYSIS_BUF_SIZE],
             mem_fill: 0,
             prev_band_tonality: [0.0; NB_TBANDS],
+            prev_tonality: 0.0,
             mean_e: [0.0; NB_TBANDS + 1],
             prev_bandwidth: 0,
             energy: [[0.0; NB_TBANDS]; NB_FRAMES],
@@ -281,6 +285,9 @@ impl TonalityAnalysisState {
         band_log2[0] = Self::half_log2_energy(first_band_energy * INV_CELT_SIG_SCALE_SQUARED);
 
         let mut slope = 0.0f32;
+        let mut frame_tonality = 0.0f32;
+        let mut max_frame_tonality = 0.0f32;
+        let mut band_tonality_values = [0.0f32; NB_TBANDS];
         for b in 0..NB_TBANDS {
             let mut energy = 0.0f32;
             let mut tonal_energy = 0.0f32;
@@ -307,6 +314,13 @@ impl TonalityAnalysisState {
             stationarity *= stationarity;
             let band_tonality =
                 (tonal_energy / (1e-15 + energy)).max(stationarity * self.prev_band_tonality[b]);
+            band_tonality_values[b] = band_tonality;
+            frame_tonality += band_tonality;
+            if b >= NB_TBANDS - NB_TONAL_SKIP_BANDS {
+                frame_tonality -= band_tonality_values[b + NB_TONAL_SKIP_BANDS - NB_TBANDS];
+            }
+            max_frame_tonality = max_frame_tonality
+                .max((1.0 + 0.03 * (b as f32 - NB_TBANDS as f32)) * frame_tonality);
             slope += band_tonality * (b as f32 - 8.0);
             self.prev_band_tonality[b] = band_tonality;
 
@@ -377,10 +391,14 @@ impl TonalityAnalysisState {
         }
 
         slope /= 64.0;
+        let mut frame_tonality = max_frame_tonality / (NB_TBANDS - NB_TONAL_SKIP_BANDS) as f32;
+        frame_tonality = frame_tonality.max(self.prev_tonality * 0.8);
+        self.prev_tonality = frame_tonality;
         self.energy_count = (self.energy_count + 1) % NB_FRAMES;
         self.count = (self.count + 1).min(ANALYSIS_COUNT_MAX);
         self.info[write_pos] = AnalysisInfo {
             valid: true,
+            tonality: frame_tonality,
             tonality_slope: slope,
             bandwidth,
             leak_boost,
@@ -414,6 +432,9 @@ impl TonalityAnalysisState {
         }
 
         let pos0 = pos;
+        let mut tonality_max = info.tonality;
+        let mut tonality_avg = info.tonality;
+        let mut tonality_count = 1usize;
         let mut bandwidth_span = 6usize;
         for _ in 0..3 {
             pos += 1;
@@ -423,6 +444,9 @@ impl TonalityAnalysisState {
             if pos == self.write_pos {
                 break;
             }
+            tonality_max = tonality_max.max(self.info[pos].tonality);
+            tonality_avg += self.info[pos].tonality;
+            tonality_count += 1;
             info.bandwidth = info.bandwidth.max(self.info[pos].bandwidth);
             bandwidth_span -= 1;
         }
@@ -435,6 +459,7 @@ impl TonalityAnalysisState {
             }
             info.bandwidth = info.bandwidth.max(self.info[pos].bandwidth);
         }
+        info.tonality = (tonality_avg / tonality_count as f32).max(tonality_max - 0.2);
 
         info
     }

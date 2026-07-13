@@ -563,14 +563,12 @@ fn dynalloc_analysis_with_scratch(
     offsets: &mut [i32],
     importance: &mut [i32],
     scratch: &mut DynallocAnalysisScratch,
-) {
+) -> DynallocAnalysis {
     const LSB_DEPTH: i32 = 24;
 
     offsets[..mode.nb_ebands].fill(0);
     importance[..mode.nb_ebands].fill(13);
-    if packet_bytes < 30 + 5 * lm {
-        return;
-    }
+    let mut max_depth = -31.9f32;
 
     scratch.noise_floor.resize(mode.nb_ebands, 0.0);
     scratch.noise_floor[..mode.nb_ebands].fill(0.0);
@@ -587,6 +585,17 @@ fn dynalloc_analysis_with_scratch(
     scratch.band_log_e3.resize(mode.nb_ebands, 0.0);
     scratch.band_log_e3[..mode.nb_ebands].fill(0.0);
     let band_log_e3 = &mut scratch.band_log_e3[..mode.nb_ebands];
+    for c in 0..channels {
+        for i in 0..end {
+            max_depth = max_depth.max(band_log_e[c * mode.nb_ebands + i] - noise_floor[i]);
+        }
+    }
+    if packet_bytes < 30 + 5 * lm {
+        return DynallocAnalysis {
+            total_boost: 0,
+            max_depth,
+        };
+    }
     for c in 0..channels {
         let channel = c * mode.nb_ebands;
         band_log_e3[..end].copy_from_slice(&band_log_e2[channel..channel + end]);
@@ -698,6 +707,16 @@ fn dynalloc_analysis_with_scratch(
         offsets[i] = boost;
         total_boost += boost_bits;
     }
+    DynallocAnalysis {
+        total_boost,
+        max_depth,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct DynallocAnalysis {
+    total_boost: i32,
+    max_depth: f32,
 }
 
 pub fn encode_alloc_trim(
@@ -744,6 +763,7 @@ pub struct CeltFrameConfig {
     pub tf_chan: usize,
     pub signal_bandwidth: usize,
     pub analysis_leak_boost: Option<[u8; 19]>,
+    pub vbr_state: Option<CeltVbrConfig>,
 }
 
 impl CeltFrameConfig {
@@ -772,8 +792,34 @@ impl CeltFrameConfig {
             tf_chan: 0,
             signal_bandwidth: mode.nb_ebands - 1,
             analysis_leak_boost: None,
+            vbr_state: None,
         })
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CeltVbrConfig {
+    pub bitrate: i32,
+    pub vbr_rate: i32,
+    pub effective_bytes: usize,
+    pub reservoir: i32,
+    pub drift: i32,
+    pub offset: i32,
+    pub count: i32,
+    pub stereo_saving: f32,
+    pub temporal_vbr: f32,
+    pub analysis_valid: bool,
+    pub tonality: f32,
+    pub pitch_change: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CeltVbrUpdate {
+    pub packet_bytes: usize,
+    pub reservoir: i32,
+    pub drift: i32,
+    pub offset: i32,
+    pub count: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -787,6 +833,7 @@ pub struct CeltFrameEncodeResult {
     pub is_transient: bool,
     pub spread: i32,
     pub alloc_trim: i32,
+    pub vbr_update: Option<CeltVbrUpdate>,
 }
 
 #[derive(Clone, Debug)]
@@ -881,6 +928,120 @@ fn anti_collapse_reservation(is_transient: bool, lm: usize, bits: i32) -> i32 {
     }
 }
 
+fn compute_vbr_target(
+    mode: &CeltMode,
+    config: &CeltFrameConfig,
+    vbr: &CeltVbrConfig,
+    dynalloc: DynallocAnalysis,
+) -> i32 {
+    let channels = config.channels as i32;
+    let lm = config.lm as i32;
+    let lm_diff = (mode.max_lm - config.lm) as i32;
+    let mut base_target = vbr.vbr_rate - ((40 * channels + 20) << BITRES);
+    base_target += vbr.offset >> lm_diff;
+
+    let coded_bands = if config.last_coded_bands != 0 {
+        config.last_coded_bands
+    } else {
+        mode.nb_ebands
+    };
+    let mut coded_bins = (mode.ebands[coded_bands] as i32) << lm;
+    if config.channels == 2 {
+        coded_bins += (mode.ebands[config.intensity.min(coded_bands)] as i32) << lm;
+    }
+
+    let mut target = base_target;
+    if config.channels == 2 && coded_bins > 0 {
+        let coded_stereo_bands = config.intensity.min(coded_bands);
+        let coded_stereo_dof =
+            ((mode.ebands[coded_stereo_bands] as i32) << lm) - coded_stereo_bands as i32;
+        let max_frac = 0.8 * coded_stereo_dof as f32 / coded_bins as f32;
+        let stereo_saving = vbr.stereo_saving.min(1.0);
+        let stereo_savings = (max_frac * target as f32)
+            .min((stereo_saving - 0.1) * ((coded_stereo_dof << BITRES) as f32));
+        target -= stereo_savings as i32;
+    }
+
+    target += dynalloc.total_boost - (19 << config.lm);
+    target += (2.0 * (config.tf_estimate - 0.044) * target as f32) as i32;
+
+    if vbr.analysis_valid {
+        let tonal = (vbr.tonality - 0.15).max(0.0) - 0.12;
+        target += (((coded_bins << BITRES) as f32) * 1.2 * tonal) as i32;
+        if vbr.pitch_change {
+            target += (((coded_bins << BITRES) as f32) * 0.8) as i32;
+        }
+    }
+
+    let bins = (mode.ebands[mode.nb_ebands - 2] as i32) << lm;
+    let floor_depth = (((channels * bins) << BITRES) as f32 * dynalloc.max_depth) as i32;
+    target = target.min(floor_depth.max(target >> 2));
+
+    target = base_target + (0.50 * (target - base_target) as f32) as i32;
+
+    if config.tf_estimate < 0.2 {
+        let amount = 0.0000031 * (96_000 - vbr.bitrate).clamp(0, 32_000) as f32;
+        let tvbr_factor = vbr.temporal_vbr * amount;
+        target += (tvbr_factor * target as f32) as i32;
+    }
+
+    target.min(2 * base_target)
+}
+
+fn apply_vbr_shrink(
+    mode: &CeltMode,
+    config: &CeltFrameConfig,
+    vbr: CeltVbrConfig,
+    dynalloc: DynallocAnalysis,
+    encoded_total_boost: i32,
+    enc: &mut RangeEncoder,
+    total_bits: &mut i32,
+    total_bits_frac: &mut i32,
+) -> CeltVbrUpdate {
+    let lm_diff = (mode.max_lm - config.lm) as i32;
+    let target = compute_vbr_target(mode, config, &vbr, dynalloc) + enc.tell_frac() as i32;
+    let min_allowed = ((enc.tell_frac() as i32 + encoded_total_boost + ((1 << (BITRES + 3)) - 1))
+        >> (BITRES + 3))
+        + 2;
+    let max_packet_bytes = config.packet_bytes.min(1275usize >> (3 - config.lm));
+    let mut packet_bytes = ((target + (1 << (BITRES + 2))) >> (BITRES + 3))
+        .max(min_allowed)
+        .max(2)
+        .min(max_packet_bytes as i32) as usize;
+    let delta = target - vbr.vbr_rate;
+
+    let quantized_target = (packet_bytes as i32) << (BITRES + 3);
+    let mut reservoir = vbr.reservoir + quantized_target - vbr.vbr_rate;
+    if reservoir < 0 {
+        let adjust = (-reservoir) / (8 << BITRES);
+        packet_bytes = (packet_bytes + adjust as usize).min(max_packet_bytes);
+        reservoir = 0;
+    }
+
+    enc.shrink(packet_bytes);
+    *total_bits = packet_bytes as i32 * 8;
+    *total_bits_frac = *total_bits << BITRES;
+
+    let mut count = vbr.count;
+    let alpha = if count < 970 {
+        count += 1;
+        1.0 / (count + 20) as f32
+    } else {
+        0.001
+    };
+    let mut drift = vbr.drift;
+    drift += (alpha * (((delta << lm_diff) - vbr.offset - drift) as f32)) as i32;
+    let offset = -drift;
+
+    CeltVbrUpdate {
+        packet_bytes,
+        reservoir,
+        drift,
+        offset,
+        count,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn encode_spectral_frame(
     mode: &CeltMode,
@@ -934,8 +1095,11 @@ pub fn encode_spectral_frame_with_scratch(
         return Err(Error::BadArg);
     }
 
-    let total_bits = (config.packet_bytes * 8) as i32;
-    let total_bits_frac = total_bits << BITRES;
+    let mut total_bits = (config.packet_bytes * 8) as i32;
+    let mut total_bits_frac = total_bits << BITRES;
+    let effective_bytes = config
+        .vbr_state
+        .map_or(config.packet_bytes, |vbr| vbr.effective_bytes);
     let eff_end = config.end.min(mode.eff_ebands);
     let mut enc = RangeEncoder::new(config.packet_bytes);
     let silence = false;
@@ -959,7 +1123,7 @@ pub fn encode_spectral_frame_with_scratch(
     );
     scratch.offsets.resize(mode.nb_ebands, 0);
     scratch.importance.resize(mode.nb_ebands, 13);
-    {
+    let dynalloc = {
         let band_log_e_read = &*band_log_e;
         let band_log_e2 = config.band_log_e2.as_deref().unwrap_or(band_log_e_read);
         if band_log_e2.len() < config.channels * mode.nb_ebands {
@@ -974,7 +1138,7 @@ pub fn encode_spectral_frame_with_scratch(
             config.end,
             config.channels,
             config.lm,
-            config.packet_bytes,
+            effective_bytes,
             is_transient,
             config.vbr,
             config.constrained_vbr,
@@ -982,8 +1146,8 @@ pub fn encode_spectral_frame_with_scratch(
             &mut scratch.offsets,
             &mut scratch.importance,
             &mut scratch.dynalloc,
-        );
-    }
+        )
+    };
     for c in 0..config.channels {
         for i in config.start..config.end {
             let idx = i + c * mode.nb_ebands;
@@ -1015,13 +1179,13 @@ pub fn encode_spectral_frame_with_scratch(
     );
     scratch.tf_res.resize(mode.nb_ebands, 0);
     scratch.tf_res[..mode.nb_ebands].fill(0);
-    let tf_select = if config.packet_bytes >= 15 * config.channels {
+    let tf_select = if effective_bytes >= 15 * config.channels {
         let tf_x = if config.tf_chan == 1 {
             y.as_ref().map(|right| &right[..]).unwrap_or(&x[..])
         } else {
             &x[..]
         };
-        let lambda = 80.max(20480 / config.packet_bytes as i32 + 2);
+        let lambda = 80.max(20480 / effective_bytes as i32 + 2);
         let tf_select = tf_analysis(
             mode,
             eff_end,
@@ -1068,6 +1232,18 @@ pub fn encode_spectral_frame_with_scratch(
         &mut enc,
     );
     let alloc_trim = encode_alloc_trim(config.alloc_trim, total_bits_frac, total_boost, &mut enc);
+    let vbr_update = config.vbr_state.map(|vbr| {
+        apply_vbr_shrink(
+            mode,
+            config,
+            vbr,
+            dynalloc,
+            total_boost,
+            &mut enc,
+            &mut total_bits,
+            &mut total_bits_frac,
+        )
+    });
 
     let mut bits = total_bits_frac - enc.tell_frac() as i32 - 1;
     let anti_collapse_rsv = anti_collapse_reservation(is_transient, config.lm, bits);
@@ -1211,6 +1387,7 @@ pub fn encode_spectral_frame_with_scratch(
         is_transient,
         spread,
         alloc_trim,
+        vbr_update,
     })
 }
 

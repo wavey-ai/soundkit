@@ -3,7 +3,7 @@ use crate::celt::bands::{
     compute_band_energies, hysteresis_decision, normalise_bands, spreading_decision, SPREAD_NORMAL,
 };
 use crate::celt::codec::{
-    encode_spectral_frame_with_scratch, CeltFrameConfig, CeltFrameEncodeScratch,
+    encode_spectral_frame_with_scratch, CeltFrameConfig, CeltFrameEncodeScratch, CeltVbrConfig,
 };
 use crate::celt::mathops::{celt_log2, celt_sqrt};
 use crate::celt::mdct::{clt_mdct_forward_with_scratch, MdctScratch};
@@ -29,6 +29,7 @@ const INTENSITY_HYSTERESIS: [f32; 21] = [
     8.0, 8.0,
 ];
 const CELT_SIG_SCALE: f32 = 32_768.0;
+const BITRES: i32 = 3;
 const TRANSIENT_INV_TABLE: [u8; 128] = [
     255, 255, 156, 110, 86, 70, 59, 51, 45, 40, 37, 33, 31, 28, 26, 25, 23, 22, 21, 20, 19, 18, 17,
     16, 16, 15, 15, 14, 13, 13, 12, 12, 12, 12, 11, 11, 11, 10, 10, 10, 9, 9, 9, 9, 9, 9, 8, 8, 8,
@@ -88,8 +89,11 @@ pub struct Encoder {
     stereo_saving: f32,
     last_coded_bands: usize,
     vbr: bool,
-    vbr_reservoir: f32,
-    vbr_prev_energy: f32,
+    vbr_reservoir: i32,
+    vbr_drift: i32,
+    vbr_offset: i32,
+    vbr_count: i32,
+    spec_avg: f32,
     analysis: TonalityAnalysisState,
     analysis_info: AnalysisInfo,
     mdct_scratch: MdctScratch,
@@ -131,8 +135,11 @@ impl Encoder {
             stereo_saving: 0.0,
             last_coded_bands: 0,
             vbr: false,
-            vbr_reservoir: 0.0,
-            vbr_prev_energy: 0.0,
+            vbr_reservoir: 0,
+            vbr_drift: 0,
+            vbr_offset: 0,
+            vbr_count: 0,
+            spec_avg: 0.0,
             analysis: TonalityAnalysisState::new(),
             analysis_info: AnalysisInfo::default(),
             mdct_scratch: MdctScratch::default(),
@@ -169,15 +176,22 @@ impl Encoder {
             return Err(Error::BadArg);
         }
         self.bitrate = bitrate;
-        self.vbr_reservoir = 0.0;
+        self.reset_vbr_state();
         Ok(())
     }
 
     pub fn set_vbr(&mut self, enabled: bool) -> Result<()> {
         self.vbr = enabled;
-        self.vbr_reservoir = 0.0;
-        self.vbr_prev_energy = 0.0;
+        self.reset_vbr_state();
         Ok(())
+    }
+
+    fn reset_vbr_state(&mut self) {
+        self.vbr_reservoir = 0;
+        self.vbr_drift = 0;
+        self.vbr_offset = 0;
+        self.vbr_count = 0;
+        self.spec_avg = 0.0;
     }
 
     fn frame_lm(&self, frame_size: usize) -> Result<usize> {
@@ -198,64 +212,44 @@ impl Encoder {
             .clamp(CELT_MIN_FRAME_BYTES, CELT_MAX_FRAME_BYTES)
     }
 
-    fn vbr_frame_bytes(&mut self, pcm: &[f32], frame_size: usize) -> usize {
-        let target = self.frame_bytes_for_bitrate(frame_size) as f32 + 1.0;
-        let sample_count = frame_size * self.channels;
-        let mut energy = 0.0f32;
-        let mut derivative = 0.0f32;
-        let mut stereo_diff = 0.0f32;
-        let mut stereo_sum = 0.0f32;
+    fn vbr_rate_frac(&self, frame_size: usize) -> i32 {
+        let den = self.sample_rate >> BITRES;
+        (self.bitrate * frame_size as i32 + (den >> 1)) / den
+    }
 
-        for i in 0..frame_size {
-            for c in 0..self.channels {
-                let sample = pcm[i * self.channels + c];
-                energy += sample * sample;
-                if i > 0 {
-                    let previous = pcm[(i - 1) * self.channels + c];
-                    let delta = sample - previous;
-                    derivative += delta * delta;
-                }
-            }
-            if self.channels == 2 {
-                let left = pcm[i * 2];
-                let right = pcm[i * 2 + 1];
-                let sum = left + right;
-                let diff = left - right;
-                stereo_sum += sum * sum;
-                stereo_diff += diff * diff;
-            }
+    fn vbr_initial_frame_bytes(&self, frame_size: usize) -> usize {
+        let vbr_rate = self.vbr_rate_frac(frame_size);
+        let max_allowed = ((2 * vbr_rate - self.vbr_reservoir) >> (BITRES + 3))
+            .clamp(2, CELT_MAX_FRAME_BYTES as i32);
+        max_allowed as usize
+    }
+
+    fn temporal_vbr(
+        &mut self,
+        band_log_e: &[f32],
+        start: usize,
+        end: usize,
+        channels: usize,
+        lm: usize,
+        is_transient: bool,
+    ) -> f32 {
+        if end <= start || band_log_e.len() < channels * self.mode.nb_ebands {
+            return 0.0;
         }
-
-        let rms = (energy / sample_count as f32).sqrt();
-        let derivative = (derivative / sample_count.max(1) as f32).sqrt();
-        let hf_score = (derivative / (rms + 1e-5) * 0.35).clamp(0.0, 1.0);
-        let energy_score = (rms * 3.0).clamp(0.0, 1.0);
-        let transient_score = if self.vbr_prev_energy > 0.0 {
-            ((rms / (self.vbr_prev_energy + 1e-5)) - 1.0).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let stereo_score = if self.channels == 2 {
-            (stereo_diff / (stereo_sum + stereo_diff + 1e-5)).sqrt()
-        } else {
-            0.0
-        };
-
-        let complexity =
-            (0.38 * energy_score + 0.28 * hf_score + 0.22 * transient_score + 0.12 * stereo_score)
-                .clamp(0.0, 1.0);
-        let min_bytes = (target * 0.45).round().max(CELT_MIN_FRAME_BYTES as f32);
-        let max_bytes = (target * 1.75).round().min(CELT_MAX_FRAME_BYTES as f32);
-        // Bias toward Opus constrained-VBR behavior: slightly higher base than the legacy
-        // scalar plus a mild reservoir feedback term to stabilize long-term bitrate.
-        let reservoir_correction = (self.vbr_reservoir / target).clamp(-0.25, 0.25);
-        let desired = target * (0.86 + 0.60 * complexity) * (1.0 + 0.2 * reservoir_correction);
-        let chosen = desired.round().clamp(min_bytes, max_bytes) as usize;
-
-        self.vbr_reservoir =
-            (self.vbr_reservoir + target - chosen as f32).clamp(-target * 50.0, target * 50.0);
-        self.vbr_prev_energy = rms;
-        chosen
+        let mut follow = -10.0f32;
+        let mut frame_avg = 0.0f32;
+        let offset = if is_transient { 0.5 * lm as f32 } else { 0.0 };
+        for i in start..end {
+            follow = (follow - 1.0).max(band_log_e[i] - offset);
+            if channels == 2 {
+                follow = follow.max(band_log_e[self.mode.nb_ebands + i] - offset);
+            }
+            frame_avg += follow;
+        }
+        frame_avg /= (end - start) as f32;
+        let temporal_vbr = (frame_avg - self.spec_avg).clamp(-1.5, 3.0);
+        self.spec_avg += 0.02 * temporal_vbr;
+        temporal_vbr
     }
 
     fn validate_frame_bytes(frame_bytes: usize) -> Result<()> {
@@ -669,6 +663,7 @@ impl Encoder {
         pcm: &[f32],
         frame_size: usize,
         frame_bytes: usize,
+        allow_vbr_shrink: bool,
     ) -> Result<Vec<u8>> {
         let lm = self.frame_lm(frame_size)?;
         Self::validate_frame_bytes(frame_bytes)?;
@@ -707,6 +702,8 @@ impl Encoder {
         let prefilter_enabled =
             frame_bytes > 12 * stream_channels && (frame_bytes * 8) as i32 >= 16;
         let prefilter_tapset = self.tapset_decision as usize;
+        let previous_prefilter_period = self.prefilter_period.max(COMBFILTER_MINPERIOD);
+        let previous_prefilter_gain = self.prefilter_gain;
         let (prefilter, prefilter_gain) = run_prefilter(
             &self.mode,
             &mut inputs,
@@ -720,6 +717,10 @@ impl Encoder {
             self.channels,
             n,
         );
+        let pitch_change = (prefilter_gain > 0.4 || previous_prefilter_gain > 0.4)
+            && (!self.analysis_info.valid || self.analysis_info.tonality > 0.3)
+            && ((prefilter.pitch as f32) > 1.26 * previous_prefilter_period as f32
+                || (prefilter.pitch as f32) < 0.79 * previous_prefilter_period as f32);
         config.prefilter = Some(prefilter);
         self.prefilter_period = if prefilter.pitch > 0 {
             prefilter.pitch as usize
@@ -769,6 +770,18 @@ impl Encoder {
             &mut band_log_e,
             stream_channels,
         );
+        let temporal_vbr = if allow_vbr_shrink && self.vbr {
+            self.temporal_vbr(
+                &band_log_e,
+                config.start,
+                config.end,
+                stream_channels,
+                lm,
+                config.is_transient,
+            )
+        } else {
+            0.0
+        };
         let mut band_log_e2 = None;
         if config.is_transient {
             let mut long_freq = vec![0.0f32; self.channels * n];
@@ -934,6 +947,23 @@ impl Encoder {
                 equiv_rate,
             );
         }
+        if allow_vbr_shrink && self.vbr {
+            let vbr_rate = self.vbr_rate_frac(frame_size);
+            config.vbr_state = Some(CeltVbrConfig {
+                bitrate: self.bitrate,
+                vbr_rate,
+                effective_bytes: (vbr_rate >> (BITRES + 3)).max(2) as usize,
+                reservoir: self.vbr_reservoir,
+                drift: self.vbr_drift,
+                offset: self.vbr_offset,
+                count: self.vbr_count,
+                stereo_saving: self.stereo_saving,
+                temporal_vbr,
+                analysis_valid: self.analysis_info.valid,
+                tonality: self.analysis_info.tonality,
+                pitch_change,
+            });
+        }
 
         let encoded = if stream_channels == 1 {
             encode_spectral_frame_with_scratch(
@@ -965,6 +995,12 @@ impl Encoder {
         };
         if stream_channels == 2 {
             self.intensity = encoded.allocation.intensity;
+        }
+        if let Some(update) = encoded.vbr_update {
+            self.vbr_reservoir = update.reservoir;
+            self.vbr_drift = update.drift;
+            self.vbr_offset = update.offset;
+            self.vbr_count = update.count;
         }
         self.last_coded_bands = if self.last_coded_bands != 0 {
             (self.last_coded_bands + 1).min(
@@ -1059,11 +1095,12 @@ impl Encoder {
         let mut filtered = std::mem::take(&mut self.filtered_scratch);
         self.dc_reject_frame_into(pcm, frame_size, &mut filtered);
         let frame_bytes = if self.vbr {
-            self.vbr_frame_bytes(&filtered, frame_size)
+            self.vbr_initial_frame_bytes(frame_size)
         } else {
             self.frame_bytes_for_bitrate(frame_size)
         };
-        let result = self.encode_filtered_f32_with_frame_bytes(&filtered, frame_size, frame_bytes);
+        let result =
+            self.encode_filtered_f32_with_frame_bytes(&filtered, frame_size, frame_bytes, true);
         self.filtered_scratch = filtered;
         result
     }
@@ -1083,7 +1120,8 @@ impl Encoder {
         self.analysis_info = self.analysis.run(pcm, frame_size, self.channels);
         let mut filtered = std::mem::take(&mut self.filtered_scratch);
         self.dc_reject_frame_into(pcm, frame_size, &mut filtered);
-        let result = self.encode_filtered_f32_with_frame_bytes(&filtered, frame_size, frame_bytes);
+        let result =
+            self.encode_filtered_f32_with_frame_bytes(&filtered, frame_size, frame_bytes, false);
         self.filtered_scratch = filtered;
         result
     }

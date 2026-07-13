@@ -12,8 +12,9 @@ benchmark helper's configured `OPUS_DIR` when validating behavior.
 - The crate is a safe Rust implementation, not a C wrapper; keep
   `#![forbid(unsafe_code)]` intact.
 - The usable codec path is 48 kHz CELT-only fullband raw Opus packets.
-- `Encoder` supports 2.5, 5, 10, and 20 ms CELT frames with CBR, heuristic
-  constrained VBR, and exact compressed-frame-byte controls.
+- `Encoder` supports 2.5, 5, 10, and 20 ms CELT frames with CBR,
+  libopus-style constrained VBR target/reservoir control, and exact
+  compressed-frame-byte controls.
 - `Decoder` supports single-frame CELT-only fullband packets and exposes
   reusable-output `decode_i16_into` and `decode_f32_into` paths.
 - Packet parsing, repacketizing, padding/unpadding, soft clipping, entropy,
@@ -44,8 +45,16 @@ benchmark helper's configured `OPUS_DIR` when validating behavior.
   - 256/384/512 kb/s frame 17: first split is fine-energy band 0 channel 1
     (`q2=26` Rust, `q2=27` C), with about `0.0009 dB` drift already visible
     before MDCT.
-- The current quality matrix's largest observed gap is VBR 2.5 ms / 320 kb/s at
-  about `0.43 dB`; the largest CBR gap is 5 ms / 48 kb/s at about `0.32 dB`.
+- VBR now uses the libopus-style target path for stereo saving, dynalloc,
+  transient/TF boost, tonality, pitch-change boost, temporal VBR, and the
+  constrained reservoir. In the latest one-second VBR matrix the largest
+  observed gap is about `0.25 dB`; 2.5 ms / 320 kb/s is down to about `0.03 dB`
+  and 2.5 ms / 384 kb/s is down to about `0.09 dB`.
+- Rust still keeps a `0.50` constrained-VBR blend where libopus uses `0.67`.
+  The C value improves some high-rate rows after the pitch-change fix, but
+  currently worsens 2.5 ms / 320 kb/s because the remaining state history is
+  not yet fully aligned.
+- The largest CBR gap is still 5 ms / 48 kb/s at about `0.32 dB`.
 
 ## Stop Point: 5 ms / 48 kb/s CBR
 
@@ -73,8 +82,8 @@ gap and diverges at frame 1.
 - Trace 10 ms and 20 ms / 128 kb/s CBR frame-0 divergence after the high-level
   controls. Transient, TF, spread, trim, and coded-band symbols were previously
   aligned, so the remaining split should be in energy, allocation, or PVQ.
-- Replace the current heuristic VBR sizing with libopus' constrained-VBR target
-  and reservoir logic once the CBR path is better pinned down.
+- Finish constrained-VBR parity by removing the remaining state-history
+  mismatch that prevents using libopus' `0.67` constrained blend everywhere.
 - Keep exact packet comparisons in the loop, but treat quality/cross-decode
   checks as the higher-value signal when byte drift is caused by harmless float
   thresholds.

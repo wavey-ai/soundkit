@@ -51,6 +51,25 @@ fn raw_celt_bench_frame(frame_size: usize, frame_index: usize) -> Vec<f32> {
     pcm
 }
 
+fn vbr_stats(frame_size: usize, bitrate: i32, frames: usize) -> (usize, usize, usize) {
+    let mut encoder = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    encoder.set_bitrate(bitrate).unwrap();
+    encoder.set_vbr(true).unwrap();
+
+    let mut bytes = 0usize;
+    let mut min_packet = usize::MAX;
+    let mut max_packet = 0usize;
+    for frame in 0..frames {
+        let packet = encoder
+            .encode_f32(&raw_celt_bench_frame(frame_size, frame), frame_size)
+            .unwrap();
+        bytes += packet.len();
+        min_packet = min_packet.min(packet.len());
+        max_packet = max_packet.max(packet.len());
+    }
+    (bytes, min_packet, max_packet)
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -267,4 +286,10 @@ fn vbr_packet_budget_varies_with_signal_shape() {
         decoder.decode_f32(&transient_packet, false).unwrap().len(),
         240
     );
+}
+
+#[test]
+fn celt_vbr_tracks_constrained_reservoir_over_raw_fixture() {
+    assert_eq!(vbr_stats(120, 128_000, 400), (16_439, 36, 59));
+    assert_eq!(vbr_stats(960, 128_000, 50), (16_370, 320, 500));
 }
