@@ -4,10 +4,16 @@ use core::slice;
 use libflac_sys as ffi;
 #[cfg(feature = "libflac")]
 use libflac_sys::*;
-#[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
-use soundkit::audio_packet::Encoder;
+#[cfg(feature = "oxideav-encoder")]
+use oxideav_core::registry::codec::Encoder as OxideEncoder;
+#[cfg(feature = "oxideav-encoder")]
+use oxideav_core::{AudioFrame as OxideAudioFrame, CodecId, CodecParameters, Error as OxideError};
+#[cfg(feature = "oxideav-encoder")]
+use oxideav_core::{Frame as OxideFrame, SampleFormat};
 #[cfg(feature = "libflac")]
 use soundkit::audio_packet::Decoder;
+#[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
+use soundkit::audio_packet::Encoder;
 #[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
 use std::cell::RefCell;
 #[cfg(feature = "oxideav-encoder")]
@@ -16,12 +22,13 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 #[cfg(feature = "libflac")]
 use tracing::{debug, error, trace};
-#[cfg(feature = "oxideav-encoder")]
-use oxideav_core::registry::codec::Encoder as OxideEncoder;
-#[cfg(feature = "oxideav-encoder")]
-use oxideav_core::{AudioFrame as OxideAudioFrame, CodecId, CodecParameters, Error as OxideError};
-#[cfg(feature = "oxideav-encoder")]
-use oxideav_core::{Frame as OxideFrame, SampleFormat};
+
+#[cfg(feature = "packet-codec")]
+mod frame_codec;
+#[cfg(feature = "packet-codec")]
+pub use frame_codec::{
+    FlacFrameConfig, FlacFrameDecoder, FlacFrameEncoder, FlacFrameError, FlacProfile,
+};
 
 #[cfg(feature = "oxideav-encoder")]
 pub struct FlacEncoder {

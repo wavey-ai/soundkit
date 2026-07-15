@@ -1664,12 +1664,12 @@ fn interleave_vecs_f32(channels: &[Vec<f32>]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soundkit::audio_packet::Encoder;
+    use soundkit_opus::OpusEncoder;
     use std::f32::consts::PI;
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
-    use soundkit::audio_packet::Encoder;
-    use soundkit_opus::OpusEncoder;
 
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1712,7 +1712,9 @@ mod tests {
         stream.push(0);
 
         let mut encoder = OpusEncoder::new(SAMPLE_RATE, 16, CHANNELS, FRAME_SIZE, 64_000);
-        encoder.init().expect("failed to initialize test opus encoder");
+        encoder
+            .init()
+            .expect("failed to initialize test opus encoder");
 
         for frame_index in 0..FRAMES {
             let input = (0..FRAME_SIZE as usize)

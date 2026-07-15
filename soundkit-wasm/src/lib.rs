@@ -720,9 +720,7 @@ impl WasmOpusDecoder {
         }
         let mut decoder = OpusDecoder::new(sample_rate as usize, channels);
         decoder.init().map_err(js_error)?;
-        let output_len = frame_size
-            .saturating_mul(channels)
-            .max(channels.max(1));
+        let output_len = frame_size.saturating_mul(channels).max(channels.max(1));
         Ok(Self {
             decoder,
             output: vec![0; output_len],
