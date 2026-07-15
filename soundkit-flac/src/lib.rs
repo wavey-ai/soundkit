@@ -27,7 +27,8 @@ use tracing::{debug, error, trace};
 mod frame_codec;
 #[cfg(feature = "packet-codec")]
 pub use frame_codec::{
-    FlacFrameConfig, FlacFrameDecoder, FlacFrameEncoder, FlacFrameError, FlacProfile,
+    DecodedFlacFrame, EncodedFlacFrame, FlacFrameConfig, FlacFrameDecoder, FlacFrameEncoder,
+    FlacFrameError, FlacProfile,
 };
 
 #[cfg(feature = "oxideav-encoder")]
@@ -838,9 +839,11 @@ mod tests {
     use super::*;
     #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
     use soundkit::audio_bytes::{f32le_to_s24, s16le_to_i32, s24le_to_i32};
+    #[cfg(any(feature = "libflac", feature = "claxon-decoder"))]
     use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
     #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
     use soundkit::wav::WavStreamProcessor;
+    #[cfg(any(feature = "libflac", feature = "claxon-decoder"))]
     use std::fs;
     #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
     use std::fs::File;
@@ -850,11 +853,26 @@ mod tests {
     use std::io::Write;
     #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
     use std::path::Path;
+    #[cfg(any(
+        feature = "libflac",
+        feature = "oxideav-encoder",
+        feature = "claxon-decoder"
+    ))]
     use std::path::PathBuf;
+    #[cfg(any(
+        feature = "libflac",
+        feature = "oxideav-encoder",
+        feature = "claxon-decoder"
+    ))]
     use std::sync::Once;
     #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
     use tracing::trace;
 
+    #[cfg(any(
+        feature = "libflac",
+        feature = "oxideav-encoder",
+        feature = "claxon-decoder"
+    ))]
     fn init_tracing() {
         static INIT: Once = Once::new();
         INIT.call_once(|| {
@@ -865,8 +883,14 @@ mod tests {
         });
     }
 
+    #[cfg(any(feature = "libflac", feature = "claxon-decoder"))]
     const TEST_FILE: &str = "A_Tusk_is_used_to_make_costly_gifts";
 
+    #[cfg(any(
+        feature = "libflac",
+        feature = "oxideav-encoder",
+        feature = "claxon-decoder"
+    ))]
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")

@@ -136,7 +136,7 @@ pub fn f32s_to_le_bytes(samples: &[f32]) -> Vec<u8> {
 }
 
 pub fn f32s_from_le_bytes(bytes: &[u8]) -> Result<Vec<f32>, String> {
-    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+    if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
         return Err(format!(
             "invalid f32le byte length {}; expected multiple of 4",
             bytes.len()
