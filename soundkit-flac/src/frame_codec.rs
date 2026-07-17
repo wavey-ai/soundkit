@@ -23,6 +23,7 @@ const FLAC_MIN_BLOCK_SIZE: u32 = 32;
 const FLAC_MAX_BLOCK_SIZE: u32 = 65_535;
 const FLAC_MAX_SAMPLE_RATE: u32 = (1 << 20) - 1;
 const MAX_PACKET_OVERHEAD_BYTES: usize = 4_096;
+const MAX_PACKET_EXPANSION_RATIO: usize = 8;
 
 /// Encoding effort for one independently framed packet.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -110,7 +111,7 @@ impl FlacFrameConfig {
 
     fn maximum_packet_bytes(&self) -> Result<usize, FlacFrameError> {
         self.raw_pcm_bytes()?
-            .checked_mul(2)
+            .checked_mul(MAX_PACKET_EXPANSION_RATIO)
             .and_then(|bytes| bytes.checked_add(MAX_PACKET_OVERHEAD_BYTES))
             .ok_or(FlacFrameError::Overflow("FLAC packet size limit"))
     }
@@ -668,6 +669,16 @@ mod tests {
             assert_eq!(decoded.samples, samples);
             assert_eq!(decoded.to_s24le().unwrap(), bytes);
         }
+    }
+
+    #[test]
+    fn defensive_packet_cap_allows_expanded_eight_channel_realtime_frames() {
+        let config = config(8, 24, 240);
+        let legacy_stereo_centric_cap = config.raw_pcm_bytes().unwrap() * 2 + 4_096;
+        assert!(
+            config.maximum_packet_bytes().unwrap() > legacy_stereo_centric_cap,
+            "8-channel 5 ms frames can expand beyond the old stereo-centric cap"
+        );
     }
 
     #[test]
