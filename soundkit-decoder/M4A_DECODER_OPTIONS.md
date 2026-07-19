@@ -2,7 +2,7 @@
 
 ## Context
 
-**Boxer** (`wavey-ai/boxer`): Takes raw AAC frames (with ADTS headers) → Boxes into fMP4 for streaming
+**Boxer** ([`wavey-ai/boxer`](https://github.com/wavey-ai/boxer)): Takes raw AAC frames (with ADTS headers) → Boxes into fMP4 for streaming
 **Inverse**: Take M4A container → Extract raw AAC → Decode with FDK
 
 ## Option 1: Standard `mp4` Crate (0.14.0)
