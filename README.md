@@ -11,12 +11,13 @@ and fixtures are used as behavioral reference material during the port.
 - safe repacketizer and packet padding/unpadding APIs
 - soft clipping
 - CELT entropy/range coder
-- CELT mathops, laplace, CWRS/PVQ, DFT, MDCT, mode construction, rate
-  allocation, frame control symbols, spectral frame coding, quantized energy,
-  band quantization, dynamic allocation analysis, theta RDO, energy-error
-  feedback, pitch prefilter signaling/filtering, decoder postfiltering, spread
-  decision state, band helpers, synthesis/deemphasis, rotation, and algebraic
-  VQ
+- CELT math, Laplace, CWRS/PVQ, DFT, and MDCT
+- CELT mode construction, rate allocation, and frame control symbols
+- spectral frame coding, quantized energy, and band quantization
+- dynamic allocation analysis, theta RDO, and energy-error feedback
+- pitch prefilter signaling, filtering, and decoder postfiltering
+- spread decision state, band helpers, synthesis, deemphasis, rotation, and
+  algebraic VQ
 - experimental 48 kHz CELT-only raw packet encode/decode through the Rust
   `Encoder`/`Decoder` types for 2.5, 5, 10, and 20 ms fullband frames
   with CBR, constrained VBR, or exact compressed-frame-byte controls
@@ -95,12 +96,15 @@ RUST_BENCH_RUSTFLAGS='-C target-cpu=native -C target-feature=+avx2' tools/run_ra
 ```
 
 Set `OPUS_DIR=path/to/opus-1.5.2` to compare against a built upstream source
-tree; otherwise the script uses `pkg-config opus`. The C reference is configured
+tree. Otherwise the script uses `pkg-config opus`. The C reference is configured
 for restricted-lowdelay/fullband mode with CBR or constrained VBR. Reported
 speed columns are normalized as realtime speedup:
 `RTFx = (seconds * 1000) / elapsed_ms`, where 1.0x is realtime, and larger is
-faster. Positive deltas mean Rust took longer than C; negative deltas mean Rust
+faster.
+
+Positive deltas mean Rust took longer than C. Negative deltas mean Rust
 was faster. Byte counts are raw Opus packet bytes, not wrapper/container bytes.
+
 Packet ranges show per-frame compressed packet byte sizes. The SNR and lag
 columns are aligned decode-quality checks against the deterministic fixture.
 The script also builds `raw_celt_decode_dump_c` in the benchmark directory for
@@ -127,9 +131,9 @@ run. `tools/build_wasm_simd.sh --example wasm_celt_bench` builds only the
 `simd128` artifact.
 
 Local measurements do not justify enabling wasm SIMD by default. The
-`simd128` build produced matching checksums, but it was generally slower than
-the scalar wasm build in Node on Apple Silicon, with the 5 ms frame case showing
-the clearest regression. Treat the scalar wasm build as the baseline. Use this
+`simd128` build produced matching checksums. It was usually slower than the
+scalar WASM build in Node on Apple Silicon. The 5 ms frame case had the clearest
+regression. Treat the scalar WASM build as the baseline. Use this
 benchmark to validate targeted SIMD work.
 
 ## Full-track wasm comparison
@@ -142,17 +146,17 @@ npm run bench:browser-wasm -- --seconds 10 --repeats 3 \
   --cases c,rust-cbr,rust-vbr,rust-cbr-reuse,rust-vbr-reuse
 ```
 
-The benchmark serves the local `pkg/libopus_rs_bg.wasm` wasm-pack output and
-`../libopusjs/release/libopus.wasm` over localhost, launches a fresh headless
-Chrome for each codec/bitrate case, and measures the public browser JS API path
-for 20 ms stereo CELT frames. The default bitrate set is 48, 128, and
+The benchmark serves the local `pkg/libopus_rs_bg.wasm` output and
+`../libopusjs/release/libopus.wasm` through localhost. It starts a new headless
+Chrome for each codec and bitrate case. It measures the public browser
+JavaScript API for 20 ms stereo CELT frames. The default bitrate set is 48, 128, and
 196 kb/s. Use `--json /tmp/wasm-browser-bench.json` to keep the raw samples.
 The fixture is deterministic synthetic 48 kHz stereo audio for repeatable runs
 under lower system load.
 
-The Rust cases also support `rust-cbr-reuse` and `rust-vbr-reuse`, which decode
-into the wasm decoder's owned output buffer and expose `outputPtr`/`outputLen`
-for JS callers that want to avoid cloning the result. To capture a Chrome CPU
+The Rust cases also support `rust-cbr-reuse` and `rust-vbr-reuse`. These cases
+decode into the WASM decoder's output buffer. They expose `outputPtr` and
+`outputLen` so JavaScript callers do not have to clone the result. To capture a Chrome CPU
 profile around a Rust decode loop, run a single Rust case with
 `--profile-rust-decode /tmp/rust-decode.cpuprofile.json`.
 
@@ -162,12 +166,13 @@ A full-track browser API comparison was run on:
 /Users/jamie/Downloads/Lori Asha - Lori Asha Album Premix/02 - Lori Asha - Westside.mp3
 ```
 
-The source was decoded and resampled once with `ffmpeg` to identical `48 kHz`
-stereo `s16` PCM, then encoded and decoded in Node.js with 20 ms frames through
-`libopusjs` C wasm and pure Rust `libopus-rs` wasm. Quality metrics below are
-delay-aligned against the source PCM; unaligned RMSE/SNR numbers are misleading
+`ffmpeg` decoded and resampled the source one time to identical `48 kHz` stereo
+`s16` PCM. Node.js then encoded and decoded 20 ms frames. It used `libopusjs` C
+WASM and pure Rust `libopus-rs` WASM. Quality metrics below are
+delay-aligned against the source PCM. Unaligned RMSE/SNR numbers are misleading
 because the two paths have different codec delay. The `libopusjs` wrapper does
 not expose a CBR/VBR toggle and uses libopus' default VBR behavior.
+
 Rust wasm defaults to CBR for Bitneedle, and also exposes constrained VBR via
 `encoder.set_vbr(true)`.
 
@@ -183,7 +188,7 @@ Rust wasm defaults to CBR for Bitneedle, and also exposes constrained VBR via
 All wasm paths encoded and decoded the full track without failures. Rust VBR
 tracks the target byte budget and varies packet sizes, but on this workload it
 does not reduce the quality gap relative to C. Rust decode performance is faster
-at 48 kb/s; Rust encode remains slower, especially at 128 kb/s, and requires
+at 48 kb/s. Rust encode remains slower, especially at 128 kb/s, and requires
 targeted profiling before parity claims with the C encoder.
 
 A snapshot of a local run (`AUDIO_SECONDS=1 REPEATS=1 MODE=both`) is included below:
@@ -268,29 +273,35 @@ Run `tools/run_raw_celt_bench.sh` to generate a local current table.
 ## Encoder Parity Next Steps
 
 CBR byte parity remains the active target before VBR parity. On the
-deterministic raw CELT fixture at 128 kb/s, the `AnalysisInfo.tonality_slope`
-port moved the 2.5 ms first mismatch from frame 7 to frame 15. The analysis
+deterministic 128 kb/s raw CELT fixture, the first 2.5 ms mismatch was frame 7.
+The `AnalysisInfo.tonality_slope` port moved it to frame 15. The analysis
 leak-boost port moved the 2.5 ms mismatch to frame 22 and the 5 ms mismatch to
-frame 9. Porting CELT's `FLOAT_APPROX` `celt_log2`/`celt_exp2` helpers fixed
+frame 9.
+
+Porting CELT's `FLOAT_APPROX` `celt_log2`/`celt_exp2` helpers fixed
 the 2.5 ms frame-22 fine-energy bit flip. Matching C's scaled-energy
 `band_log2` path for analysis leak boost fixed the 2.5 ms frame-25 dynalloc
 split. Mirroring libopus' energy-error feedback on the local `bandLogE` copy
-before trim analysis fixed the 2.5 ms frame-29 trim split. Mirroring libopus'
+before trim analysis fixed the 2.5 ms frame-29 trim split.
+
+Mirroring libopus'
 post-frame RNG handoff from the folding LCG seed to the range coder's final
 `rng` fixed the 2.5 ms frame-91 theta-RDO split. Matching libopus' coarse-energy
 badness baseline after the max-decay adjustment fixed the 2.5 ms frame-227
-inter/intra split; the one-second CBR dump is now byte-identical at 2.5 ms for
-48, 96, 128, 192, and 320 kb/s, and at 5 ms / 128 kb/s.
+inter/intra split. The one-second CBR dump is byte-identical at 2.5 ms for 48,
+96, 128, 192, and 320 kb/s. It is also byte-identical at 5 ms and 128 kb/s.
 
 The 2.5 ms / 128 kb/s frame-15 allocation mismatch was caused by missing
 `AnalysisInfo.leak_boost` dynalloc input. The previous frame-22 payload mismatch
-was caused by Rust using exact `f32::log2`/`exp2` while this pinned libopus build
-uses `FLOAT_APPROX`, which changed fine-energy quantization by one raw bit.
+occurred because Rust used exact `f32::log2` and `exp2`. This pinned libopus
+build uses `FLOAT_APPROX`. That difference changed fine-energy quantization by
+one raw bit.
+
 The previous frame-25 allocation mismatch was caused by Rust adding C's
 `1e-10f` analysis-log epsilon before applying the same energy scale C uses.
 That rounded `leak_boost[3]` from 63 to 64, crossing the dynalloc threshold for
 band 3. The previous frame-29 trim/coded-band split was caused by Rust computing
-allocation trim from the uncorrected local `band_log_e`; libopus applies the
+allocation trim from the uncorrected local `band_log_e`. Libopus applies the
 prior `energyError` feedback to `bandLogE` before `alloc_trim_analysis`.
 
 The previous 2.5 ms / 128 kb/s frame-91 split was caused by Rust carrying the
@@ -301,55 +312,57 @@ down/up candidate reconstruction, and selected down-rounded candidate.
 
 The previous 2.5 ms / 128 kb/s frame-227 split was caused by Rust counting
 max-decay-limited coarse-energy deltas as badness. Libopus records the
-coarse-energy `qi0` baseline after the max-decay clamp; Rust recorded it before
+coarse-energy `qi0` baseline after the max-decay clamp. Rust recorded it before
 the clamp, causing the intra pass to appear better and leaving only 713
 allocation fractional bits where C had 1045. With the baseline moved, frame 227
 matches C's inter decision, allocation, and packet bytes.
 
-The 5 ms / 128 kb/s one-second CBR dump is byte-identical for all 200 frames,
-and 2.5 ms / 48, 96, 128, 192, and 320 kb/s CBR are byte-identical for all 400
-one-second frames. Packet sizes match across the CBR matrix; remaining byte
-mismatches require first-symbol traces. In the latest one-second packet
-matrix, the remaining 2.5 ms CBR mismatches are 160 kb/s frame 226 and
-256/384/512 kb/s frame 17.
+The 5 ms, 128 kb/s one-second CBR dump is byte-identical for all 200 frames. The
+2.5 ms CBR dumps are byte-identical for all 400 frames at these rates: 48, 96,
+128, 192, and 320 kb/s. Packet sizes match across the CBR matrix. Remaining byte
+mismatches require first-symbol traces. The remaining 2.5 ms CBR mismatches are
+frame 226 at 160 kb/s and frame 17 at 256, 384, and 512 kb/s.
 
 The 2.5 ms / 160 kb/s frame-226 trace also reaches matching high-level controls
 and matching allocation. The first split is the first fine-energy raw bit for
-band 0, channel 0: Rust encodes `q2=15` and C encodes `q2=14` because the
-coarse-energy residual straddles the exact `-0.03125` threshold
+band 0, channel 0. Rust encodes `q2=15`, and C encodes `q2=14`. The coarse-energy
+residual crosses the exact `-0.03125` threshold
 (`-0.031249762` Rust versus `-0.031250238` C). Scalar C matches default C
 through this frame cluster, so this is tracked as floating sensitivity rather
 than a confirmed Rust algorithm bug.
 
 The 2.5 ms / 256 kb/s frame-17 trace reached matching high-level controls and
 matching raw-bit call order. The first split is fine energy for band 0,
-channel 1: C encodes `q2=27` and Rust encodes `q2=26` because the band log
-energy differs by about `0.0009 dB` and crosses the raw-bit threshold. The drift
-is already present in the pre-MDCT input/first MDCT bin, and scalar C still
-matches default C, so this is tracked as floating sensitivity rather than a
-confirmed Rust algorithm bug.
+channel 1. C encodes `q2=27`, and Rust encodes `q2=26`. The band log energy
+differs by approximately `0.0009 dB` and crosses the raw-bit threshold. The
+drift is present in the pre-MDCT input and first MDCT bin.
 
-The 10 and 20 ms CBR paths diverge from frame 0. A control-symbol trace for
-128 kb/s shows frame-0 transient, TF, spread, trim, and coded-band decisions
-matching libopus, so the next mismatch is past the high-level CELT control
-symbols, in the energy/PVQ payload path.
+Scalar C still
+matches default C. Thus, this is floating sensitivity, not a confirmed Rust
+algorithm bug.
 
-Decoder quality checkpoint from 2026-07-13: the native raw CELT benchmark now
-reports aligned SNR and lag for Rust and C, and
-`examples/raw_celt_decode_dump.rs` / `tools/raw_celt_decode_dump.c` can decode
-packet dumps from either implementation with either decoder. This found a real
-decoder bug: libopus applies the CELT decoder postfilter in place, so delayed
-taps can read samples filtered earlier in the same frame. Rust now uses the same
-in-place feedback, tracks decoder `oldLogE`/`oldLogE2` for anti-collapse, and
-applies the decoded silence energy floor. On the latest one-second 72-row
-CBR/VBR matrix, the largest aligned-SNR gap is `0.43 dB` and all aligned lags
-match.
-Symmetric same-packet checks show Rust and C decoders agree within `0.01 dB` max
-aligned-SNR delta with no lag mismatches for both C-generated and Rust-generated
-packets, so the remaining matrix quality gaps are packet/encoder-side until a
-same-packet decoder check proves otherwise. Rust decoding C-generated 512 kb/s
-packets now tracks C at 2.5, 5, 10, and 20 ms (`42.39`, `41.26`, `41.56`, and
-`40.89 dB` respectively in the latest one-second cross-decode run).
+The 10 and 20 ms CBR paths diverge from frame 0. A 128 kb/s control-symbol trace
+shows that frame-0 high-level decisions match libopus. These decisions include
+transient, TF, spread, trim, and coded-band values. Thus, the next mismatch is
+in the energy/PVQ payload path.
+
+Decoder quality checkpoint from 2026-07-13: the native raw CELT benchmark
+reports aligned SNR and lag for Rust and C. The Rust and C dump tools can decode
+packets from either implementation with either decoder.
+
+This work found a decoder bug. Libopus applies the CELT decoder postfilter in
+place. Thus, delayed taps can read samples filtered earlier in the same frame.
+Rust now uses the same in-place feedback. It tracks decoder `oldLogE` and
+`oldLogE2` for anti-collapse and applies the decoded silence energy floor.
+
+In the latest one-second, 72-row CBR/VBR matrix, the largest aligned-SNR gap is
+`0.43 dB`. All aligned lags match. Symmetric same-packet checks agree within a
+`0.01 dB` maximum aligned-SNR delta. There are no lag mismatches for C-generated
+or Rust-generated packets. Thus, remaining matrix quality gaps are on the
+packet or encoder side until a same-packet check shows otherwise.
+
+Rust decoding of C-generated 512 kb/s packets tracks C at all tested durations.
+At 2.5, 5, 10, and 20 ms, results are `42.39`, `41.26`, `41.56`, and `40.89 dB`.
 
 Ported in this checkpoint:
 
@@ -384,7 +397,7 @@ Resume from this checkpoint:
 5. After CBR is bit-identical for the raw CELT matrix, port libopus'
    constrained VBR target/reservoir logic and repeat VBR packet dumps.
 6. Keep the aligned quality matrix and same-packet cross-decode helpers in the
-   loop; quality regressions should block byte-parity work even when packet
+   loop. Quality regressions should block byte-parity work even when packet
    sizes remain plausible.
 
 ## License
