@@ -65,7 +65,7 @@ boundary is narrower:
 | Video codecs | Out of scope | No | SoundKit can demux/debox some audio containers, but it does not decode video codecs such as H.264, H.265, VPx, or AV1. |
 
 Everything else in the decode matrix is currently on a pure-Rust decode path.
-MP3 decode uses `nanomp3`; MP3 encode is the part that pulls in LAME.
+MP3 decode uses `nanomp3`. MP3 encode is the part that pulls in LAME.
 Rubber Band is also a native dependency, but it is a time-stretch/resampling
 tool rather than a codec decoder.
 

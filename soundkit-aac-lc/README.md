@@ -2,7 +2,7 @@
 
 SoundKit-owned AAC-LC decoder core.
 
-This crate is the home for a pure Rust, wasm-oriented AAC-LC decoder that accepts
+This crate contains a pure Rust, WebAssembly-oriented AAC-LC decoder. It accepts
 raw AAC access units from the SoundKit packet stream and returns PCM.
 
 ## Initial Scope
@@ -10,7 +10,7 @@ raw AAC access units from the SoundKit packet stream and returns PCM.
 - MPEG-4 AAC-LC only.
 - Mono and stereo only.
 - 1024-sample AAC-LC frames.
-- Raw access-unit input; no MP4/M4A demuxing, deboxing, or ADTS streaming API.
+- Raw access-unit input. No MP4/M4A demuxing, deboxing, or ADTS streaming API.
 - `AudioSpecificConfig` or equivalent metadata is required at initialization.
 - HE-AAC, SBR, PS, ER AAC, AAC-LD, AAC-ELD, USAC/xHE-AAC, and channel layouts beyond
   mono/stereo are unsupported and must be routed to a fallback decoder.
@@ -47,7 +47,7 @@ raw AAC access units from the SoundKit packet stream and returns PCM.
 4. Implement DSP:
    - inverse quantization support tables
    - IMDCT. `rustfft`-backed DCT-IV path done and checked against the scalar
-     reference. wasm SIMD tuning is still pending.
+     reference. WASM SIMD tuning is still pending.
    - windowing. AAC sine and KBD windows done.
    - overlap-add. Only-long, long-start, long-stop, and eight-short reusable-state
      paths are in place.
@@ -55,8 +55,8 @@ raw AAC access units from the SoundKit packet stream and returns PCM.
    Browser/worker wasm coverage lives in `soundkit-wasm-decoder` and is built
    with Rust `wasm32-unknown-unknown` plus `wasm-bindgen`.
 
-The public API is already shaped around the final packet path. The decoder now emits
-planar `f32` PCM for raw AAC-LC access units and can decode the
+The public API is already shaped around the final packet path. The decoder emits
+planar `f32` PCM for raw AAC-LC access units. It can decode the
 `golden/aac/WESTSIDE_MIX_4_CONFIRMATION_130323_256k.aac` fixture after stripping
 ADTS headers: 9171/9171 access units decode and pass the native FDK oracle
 tolerance. Run:
@@ -65,15 +65,15 @@ tolerance. Run:
 cargo run -p soundkit-aac-lc --example probe_adts_fixture
 ```
 
-`aac-wasm-bench` now has an automated native FDK oracle conformance test for
-this fixture, native benchmark lines for the SoundKit AAC-LC path, and
-source-WAV quality measurements for WESTSIDE.
+`aac-wasm-bench` has an automated native FDK oracle conformance test for this
+fixture. It also has native SoundKit AAC-LC benchmark lines and source-WAV
+quality measurements for WESTSIDE.
 `tests/no_alloc_decode.rs` also guards the current fixture path against
 steady-state heap allocations after decoder warmup.
 
 ## Fast Native Loop
 
-Use this native-only loop while iterating on `soundkit-aac-lc`; reserve wasm,
+Use this native-only loop while iterating on `soundkit-aac-lc`. Reserve wasm,
 FDK/Symphonia, and full release benchmarks for integration checkpoints:
 
 ```bash
@@ -83,8 +83,8 @@ cargo test -p soundkit-aac-lc imdct_fast
 ```
 
 The full native benchmark uses the WESTSIDE AAC fixture and, when the sibling
-`bitneedle` checkout is present, reports decoded AAC quality against the source
-WAV as `source-vs-*` measurements. Override the source WAV path with
+`bitneedle` checkout is present, compares decoded AAC with the source WAV. It
+reports the result as `source-vs-*` measurements. Override the source WAV path with
 `SOUNDKIT_AAC_SOURCE_WAV=/path/to/source.wav`.
 
 ## Current Benchmarks
@@ -169,15 +169,21 @@ cargo build -p soundkit --target wasm32-unknown-unknown --release --no-default-f
 
 ## Status Notes
 
-Full production acceptance still needs broader fixture coverage, a
-browser/worker packet harness, wasm SIMD, and wider fallback coverage for
-remaining unsupported tools beyond AAC-LC. The current config and packet paths
-already report explicit fallback errors for SBR/HE-AAC, PS, program-config
-element channels, channel layouts beyond stereo, and SBR raw-block fill
-payloads. The current DSP path
-uses a `rustfft`-backed IMDCT, following the local `mel-spec`
-CPU FFT precedent, and keeps its transform scratch buffers in reusable decoder
-state. The hot bitreader path uses a buffered MSB-first reservoir, and synthesis
-tracks previous/current window shapes per channel for AAC-correct overlap-add.
+Full production acceptance still needs:
+
+- broader fixture coverage
+- a browser and worker packet harness
+- WebAssembly SIMD
+- more fallback coverage for unsupported tools beyond AAC-LC.
+
+The current config and packet paths report fallback errors for SBR/HE-AAC, PS,
+program-config element channels, channel layouts beyond stereo, and SBR
+raw-block fill payloads. The current DSP path uses a `rustfft`-backed IMDCT. This
+follows the local `mel-spec` CPU FFT precedent. It keeps transform scratch
+buffers in reusable decoder state.
+
+The hot bitreader uses a buffered MSB-first
+reservoir. Synthesis tracks previous and current window shapes for each channel
+to get correct AAC overlap-add.
 Further performance work should focus on a tighter MDCT, wasm SIMD, and
 fixture-driven edge cases rather than another scalar IMDCT path.

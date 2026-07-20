@@ -16,7 +16,8 @@ The header structure is as follows:
     |         1 Byte         |       1 Byte      |       2 Bytes      |    ...    |
     |-----------------------------------------------------------------------------|
 
-- **Flag + Config ID**: This is a single byte where the top 3 bits represent the encoding method and the lower 5 bits represent the audio configuration.
+- **Flag + Config ID**: One byte. The top three bits identify the encoding
+  method. The lower five bits identify the audio configuration.
 - **Channel Count**: A byte that represents the number of channels in the audio data.
 - **Frame Size**: There are 2 bytes per frame size. The number of these entries in the header is equal to the channel count. Each entry represents the size of the frame for the corresponding channel.
 

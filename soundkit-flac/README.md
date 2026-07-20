@@ -34,7 +34,7 @@ assert_eq!(decoded.to_s24le()?, input);
 ```
 
 `240` samples at 48 kHz is a 5 ms frame. FLAC itself supports blocks down to
-32 samples; this API does not substitute a hidden 4096-sample block. Use
+32 samples. This API does not substitute a hidden 4096-sample block. Use
 `reset()` on only the affected track when its format generation or continuity
 segment changes.
 
