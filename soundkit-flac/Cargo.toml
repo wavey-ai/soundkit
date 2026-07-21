@@ -7,14 +7,14 @@ description = "FLAC packet codec support for Soundkit"
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-access-unit = "0.1.2"
+access-unit = { git = "https://github.com/wavey-ai/access-unit.git" }
 libc = "0.2.158"
 libflac-sys = { version = "0.3.4", optional = true }
 claxon = { version = "0.4", optional = true }
 flacenc = { version = "=0.5.1", default-features = false, optional = true }
 oxideav-core = { version = "0.1.26", optional = true }
 oxideav-flac = { version = "0.0.11", optional = true }
-soundkit = "0.12.3"
+soundkit = { git = "https://github.com/wavey-ai/soundkit.git", package = "soundkit" }
 tracing = "0.1.40"
 
 [features]
