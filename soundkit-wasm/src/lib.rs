@@ -1,4 +1,5 @@
 use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
+use soundkit::audio_content_crypto::{AudioContentCipher, AudioGroupMetadata};
 #[cfg(any(feature = "aac", feature = "m4a", feature = "mp3", feature = "flac"))]
 use soundkit::audio_packet::Decoder;
 #[cfg(any(feature = "flac", feature = "opus"))]
@@ -47,6 +48,142 @@ const MIN_DETECTION_BYTES: usize = 8192;
 const MAX_DETECTION_BYTES: usize = 65_536;
 #[cfg(any(feature = "aac", feature = "m4a", feature = "mp3", feature = "flac"))]
 const DEFAULT_SCRATCH_SAMPLES: usize = 262_144;
+
+#[wasm_bindgen]
+pub struct WasmAudioContentCipher {
+    cipher: AudioContentCipher,
+}
+
+#[wasm_bindgen]
+impl WasmAudioContentCipher {
+    #[wasm_bindgen(constructor)]
+    pub fn new(key: &[u8]) -> Result<WasmAudioContentCipher, JsValue> {
+        let cipher = AudioContentCipher::new(key).map_err(|error| js_error(error.to_string()))?;
+        Ok(Self { cipher })
+    }
+
+    pub fn seal(
+        &self,
+        key_epoch: u32,
+        nonce: &[u8],
+        plaintext: &[u8],
+        authenticated_data: &[u8],
+    ) -> Result<Uint8Array, JsValue> {
+        let envelope = self
+            .cipher
+            .seal(key_epoch, nonce, plaintext, authenticated_data)
+            .map_err(|error| js_error(error.to_string()))?;
+        Ok(Uint8Array::from(envelope.as_slice()))
+    }
+
+    pub fn open(
+        &self,
+        expected_key_epoch: u32,
+        envelope: &[u8],
+        authenticated_data: &[u8],
+    ) -> Result<Uint8Array, JsValue> {
+        let plaintext = self
+            .cipher
+            .open(expected_key_epoch, envelope, authenticated_data)
+            .map_err(|error| js_error(error.to_string()))?;
+        Ok(Uint8Array::from(plaintext.as_slice()))
+    }
+}
+
+/// Opens the endpoint-specific envelope that transports an audio content key.
+///
+/// The wrapping key comes from P-256 ECDH and HKDF-SHA256. The caller supplies
+/// the canonical key-exchange context as additional authenticated data.
+#[wasm_bindgen]
+pub struct WasmAudioContentKeyUnwrapper {
+    cipher: ChaCha20Poly1305PacketCipher,
+}
+
+#[wasm_bindgen]
+impl WasmAudioContentKeyUnwrapper {
+    #[wasm_bindgen(constructor)]
+    pub fn new(key: &[u8]) -> Result<WasmAudioContentKeyUnwrapper, JsValue> {
+        if key.len() != 32 || key.iter().all(|byte| *byte == 0) {
+            return Err(js_error("invalid audio content wrapping key".to_owned()));
+        }
+        let cipher = ChaCha20Poly1305PacketCipher::new(key)
+            .map_err(|error| js_error(error.to_string()))?;
+        Ok(Self { cipher })
+    }
+
+    pub fn open(
+        &self,
+        nonce: &[u8],
+        ciphertext: &[u8],
+        authenticated_data: &[u8],
+    ) -> Result<Uint8Array, JsValue> {
+        if nonce.len() != 12 || ciphertext.len() != 48 {
+            return Err(js_error("invalid audio content key envelope".to_owned()));
+        }
+        let mut packet = Vec::with_capacity(nonce.len() + ciphertext.len());
+        packet.extend_from_slice(nonce);
+        packet.extend_from_slice(ciphertext);
+        let plaintext = self
+            .cipher
+            .decrypt_nonce_prefixed(&packet, authenticated_data)
+            .map_err(|error| js_error(error.to_string()))?;
+        packet.fill(0);
+        if plaintext.len() != 32 || plaintext.iter().all(|byte| *byte == 0) {
+            return Err(js_error("invalid audio content key".to_owned()));
+        }
+        Ok(Uint8Array::from(plaintext.as_slice()))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[wasm_bindgen(js_name = buildAudioGroupAssociatedData)]
+pub fn build_audio_group_associated_data(
+    session_context: &str,
+    transport_session_id: &str,
+    config_generation: u32,
+    epoch_id: &str,
+    pts_samples: &str,
+    sample_rate: u32,
+    frame_count: u32,
+    group_count: u16,
+    group_id: u16,
+    group_index: u16,
+    channel_start: u16,
+    channel_count: u16,
+    payload_kind: u8,
+    sample_format: u8,
+    flags: u8,
+) -> Result<Uint8Array, JsValue> {
+    let transport_session_id = transport_session_id
+        .parse::<u64>()
+        .map_err(|_| js_error("invalid transport session id".to_owned()))?;
+    let epoch_id = epoch_id
+        .parse::<u64>()
+        .map_err(|_| js_error("invalid audio epoch id".to_owned()))?;
+    let pts_samples = pts_samples
+        .parse::<u64>()
+        .map_err(|_| js_error("invalid audio presentation timestamp".to_owned()))?;
+    let aad = AudioGroupMetadata {
+        session_context: session_context.as_bytes(),
+        transport_session_id,
+        config_generation,
+        epoch_id,
+        pts_samples,
+        sample_rate,
+        frame_count,
+        group_count,
+        group_id,
+        group_index,
+        channel_start,
+        channel_count,
+        payload_kind,
+        sample_format,
+        flags,
+    }
+    .associated_data()
+    .map_err(|error| js_error(error.to_string()))?;
+    Ok(Uint8Array::from(aad.as_slice()))
+}
 
 #[wasm_bindgen]
 pub struct WasmMusicDecoder {
