@@ -133,6 +133,27 @@ impl WasmAudioContentKeyUnwrapper {
         }
         Ok(Uint8Array::from(plaintext.as_slice()))
     }
+
+    pub fn seal(
+        &self,
+        nonce: &[u8],
+        plaintext: &[u8],
+        authenticated_data: &[u8],
+    ) -> Result<Uint8Array, JsValue> {
+        if nonce.len() != 12
+            || plaintext.len() != 32
+            || plaintext.iter().all(|byte| *byte == 0)
+        {
+            return Err(js_error("invalid audio content key".to_owned()));
+        }
+        let mut packet = self
+            .cipher
+            .encrypt_nonce_prefixed(nonce, plaintext, authenticated_data)
+            .map_err(|error| js_error(error.to_string()))?;
+        let ciphertext = Uint8Array::from(&packet[12..]);
+        packet.fill(0);
+        Ok(ciphertext)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
