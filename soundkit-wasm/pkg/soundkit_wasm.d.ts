@@ -44,6 +44,34 @@ export class WasmMusicDecoder {
     push(bytes: Uint8Array): Array<any>;
 }
 
+export class WasmOpusDecodeResult {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    readonly decodedSize: number;
+    readonly output: Int16Array;
+}
+
+export class WasmOpusDecoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    dec_frame(packet: Uint8Array): WasmOpusDecodeResult;
+    dec_frame_reuse(packet: Uint8Array): number;
+    destroy(): void;
+    constructor(channels: number, sample_rate: number, frame_size: number);
+    readonly decodedSize: number;
+    readonly outputLen: number;
+    readonly outputPtr: number;
+}
+
+export class WasmOpusEncoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    encodeInterleavedI16(interleaved: Int16Array): Uint8Array;
+    constructor(sample_rate: number, channels: number, bitrate: number, frame_size: number);
+    reset(): void;
+}
+
 export class WasmSoundKitFrameDecoder {
     free(): void;
     [Symbol.dispose](): void;
@@ -73,6 +101,9 @@ export interface InitOutput {
     readonly __wbg_wasmaudiocontentcipher_free: (a: number, b: number) => void;
     readonly __wbg_wasmaudiocontentkeyunwrapper_free: (a: number, b: number) => void;
     readonly __wbg_wasmmusicdecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmopusdecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmopusdecoderesult_free: (a: number, b: number) => void;
+    readonly __wbg_wasmopusencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmsoundkitframedecoder_free: (a: number, b: number) => void;
     readonly buildAudioGroupAssociatedData: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => [number, number, number];
     readonly buildSoundKitFrameHeaderV2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
@@ -89,6 +120,18 @@ export interface InitOutput {
     readonly wasmmusicdecoder_newRawLinear32: (a: number, b: number) => [number, number, number];
     readonly wasmmusicdecoder_newWithFormat: (a: number, b: number) => [number, number, number];
     readonly wasmmusicdecoder_push: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmopusdecoder_dec_frame: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmopusdecoder_dec_frame_reuse: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmopusdecoder_decodedSize: (a: number) => number;
+    readonly wasmopusdecoder_destroy: (a: number) => void;
+    readonly wasmopusdecoder_new: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmopusdecoder_outputLen: (a: number) => number;
+    readonly wasmopusdecoder_outputPtr: (a: number) => number;
+    readonly wasmopusdecoderesult_decodedSize: (a: number) => number;
+    readonly wasmopusdecoderesult_output: (a: number) => [number, number];
+    readonly wasmopusencoder_encodeInterleavedI16: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmopusencoder_new: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmopusencoder_reset: (a: number) => [number, number];
     readonly wasmsoundkitframedecoder_bufferedBytes: (a: number) => number;
     readonly wasmsoundkitframedecoder_clearKey: (a: number) => void;
     readonly wasmsoundkitframedecoder_finish: (a: number) => [number, number];
@@ -107,6 +150,7 @@ export interface InitOutput {
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __externref_table_dealloc: (a: number) => void;
+    readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_start: () => void;
 }
 

@@ -1,6 +1,14 @@
-use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
+#[cfg(feature = "aac-lc")]
+use js_sys::Float32Array;
+use js_sys::{Array, Object, Reflect, Uint8Array};
 use soundkit::audio_content_crypto::{AudioContentCipher, AudioGroupMetadata};
-#[cfg(any(feature = "aac", feature = "m4a", feature = "mp3", feature = "flac"))]
+#[cfg(any(
+    feature = "aac",
+    feature = "m4a",
+    feature = "mp3",
+    feature = "flac",
+    feature = "opus"
+))]
 use soundkit::audio_packet::Decoder;
 #[cfg(any(feature = "flac", feature = "opus"))]
 use soundkit::audio_packet::Encoder;
@@ -106,8 +114,8 @@ impl WasmAudioContentKeyUnwrapper {
         if key.len() != 32 || key.iter().all(|byte| *byte == 0) {
             return Err(js_error("invalid audio content wrapping key".to_owned()));
         }
-        let cipher = ChaCha20Poly1305PacketCipher::new(key)
-            .map_err(|error| js_error(error.to_string()))?;
+        let cipher =
+            ChaCha20Poly1305PacketCipher::new(key).map_err(|error| js_error(error.to_string()))?;
         Ok(Self { cipher })
     }
 
@@ -140,10 +148,7 @@ impl WasmAudioContentKeyUnwrapper {
         plaintext: &[u8],
         authenticated_data: &[u8],
     ) -> Result<Uint8Array, JsValue> {
-        if nonce.len() != 12
-            || plaintext.len() != 32
-            || plaintext.iter().all(|byte| *byte == 0)
-        {
+        if nonce.len() != 12 || plaintext.len() != 32 || plaintext.iter().all(|byte| *byte == 0) {
             return Err(js_error("invalid audio content key".to_owned()));
         }
         let mut packet = self
