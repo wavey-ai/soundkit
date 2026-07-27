@@ -14,7 +14,7 @@ claxon = { version = "0.4", optional = true }
 flacenc = { version = "=0.5.1", default-features = false, optional = true }
 oxideav-core = { version = "0.1.26", optional = true }
 oxideav-flac = { version = "0.0.11", optional = true }
-soundkit = { git = "https://github.com/wavey-ai/soundkit.git", package = "soundkit" }
+soundkit = { path = "../soundkit" }
 tracing = "0.1.40"
 
 [features]
