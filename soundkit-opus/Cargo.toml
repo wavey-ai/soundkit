@@ -13,7 +13,7 @@ readme = "README.md"
 # and its API had drifted, so the opus feature never compiled.
 libopus-rs = "0.0.2"
 soundkit = { path = "../soundkit" }
-frame-header = { git = "https://github.com/wavey-ai/frame-header.git" }
+frame-header = "0.2.2"
 tracing = "0.1.40"
 
 [dev-dependencies]
