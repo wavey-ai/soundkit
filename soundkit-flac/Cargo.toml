@@ -30,3 +30,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [[example]]
 name = "flac_frame_cost"
 required-features = ["packet-codec"]
+
+[[example]]
+name = "flac_frame_file"
+required-features = ["packet-codec"]

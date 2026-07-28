@@ -515,6 +515,11 @@ fn verified_encoder_config(
     let mut encoder = config::Encoder::default();
     encoder.block_size = frame_config.frame_length as usize;
     encoder.multithread = false;
+    // The entropy estimate does not include the configured Rice parameter
+    // limit. For high-level 24-bit audio, it can select a fixed predictor that
+    // is larger than the verbatim subframe after the Rice value is capped.
+    // Compare the encoded bit counts so FLAC keeps its verbatim fallback.
+    encoder.subframe_coding.fixed.order_sel = config::OrderSel::BitCount;
     match frame_config.profile {
         FlacProfile::Realtime => {
             encoder.subframe_coding.use_lpc = false;
@@ -669,6 +674,36 @@ mod tests {
             assert_eq!(decoded.samples, samples);
             assert_eq!(decoded.to_s24le().unwrap(), bytes);
         }
+    }
+
+    #[test]
+    fn realtime_s24_uses_verbatim_when_capped_rice_would_expand() {
+        let config = config(2, 24, 240);
+        let mut samples = Vec::with_capacity(config.sample_count().unwrap());
+        let mut left = -7_500_000_i32;
+        let mut right = 7_000_000_i32;
+        let mut state = 0x6d2b_79f5_u32;
+        for _ in 0..config.frame_length {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let left_step = ((state >> 13) as i32 & 0x7ffff) - 0x40000;
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let right_step = ((state >> 13) as i32 & 0x7ffff) - 0x40000;
+            left = (left + left_step).clamp(-8_388_608, 8_388_607);
+            right = (right + right_step).clamp(-8_388_608, 8_388_607);
+            samples.extend_from_slice(&[left, right]);
+        }
+
+        let mut encoder = FlacFrameEncoder::new(config).unwrap();
+        let encoded = encoder.encode_i32(&samples).unwrap();
+        assert!(
+            encoded.encoded_bytes() <= encoded.pcm_bytes + 32,
+            "FLAC frame expanded from {} PCM bytes to {} encoded bytes",
+            encoded.pcm_bytes,
+            encoded.encoded_bytes()
+        );
+
+        let mut decoder = FlacFrameDecoder::new(config).unwrap();
+        assert_eq!(decoder.decode(&encoded.payload).unwrap().samples, samples);
     }
 
     #[test]
