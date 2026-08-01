@@ -515,14 +515,6 @@ fn verified_encoder_config(
     let mut encoder = config::Encoder::default();
     encoder.block_size = frame_config.frame_length as usize;
     encoder.multithread = false;
-    // flacenc 0.5.1 can underestimate a 24-bit Rice code when a block has a
-    // large transition into silence. It then materializes a multi-megabyte
-    // unary residual before our packet bound can reject it. Keep 24-bit
-    // packets constant-or-verbatim until the upstream cost model is fixed.
-    if frame_config.bits_per_sample == 24 {
-        encoder.subframe_coding.use_fixed = false;
-        encoder.subframe_coding.use_lpc = false;
-    }
     // The entropy estimate does not include the configured Rice parameter
     // limit. For high-level 24-bit audio, it can select a fixed predictor that
     // is larger than the verbatim subframe after the Rice value is capped.
