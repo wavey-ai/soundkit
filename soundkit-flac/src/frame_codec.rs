@@ -515,6 +515,14 @@ fn verified_encoder_config(
     let mut encoder = config::Encoder::default();
     encoder.block_size = frame_config.frame_length as usize;
     encoder.multithread = false;
+    // flacenc 0.5.1 can underestimate a 24-bit Rice code when a block has a
+    // large transition into silence. It then materializes a multi-megabyte
+    // unary residual before our packet bound can reject it. Keep 24-bit
+    // packets constant-or-verbatim until the upstream cost model is fixed.
+    if frame_config.bits_per_sample == 24 {
+        encoder.subframe_coding.use_fixed = false;
+        encoder.subframe_coding.use_lpc = false;
+    }
     // The entropy estimate does not include the configured Rice parameter
     // limit. For high-level 24-bit audio, it can select a fixed predictor that
     // is larger than the verbatim subframe after the Rice value is capped.
@@ -704,6 +712,37 @@ mod tests {
 
         let mut decoder = FlacFrameDecoder::new(config).unwrap();
         assert_eq!(decoder.decode(&encoded.payload).unwrap().samples, samples);
+    }
+
+    #[test]
+    fn pcm_step_to_silence_stays_within_verbatim_bounds() {
+        for (bits_per_sample, left, right) in [
+            (16, -20_000, -15_000),
+            (24, -2_000_000, -1_500_000),
+        ] {
+            for profile in [FlacProfile::Realtime, FlacProfile::Balanced] {
+                let config = FlacFrameConfig::new(
+                    48_000,
+                    2,
+                    bits_per_sample,
+                    240,
+                    profile,
+                )
+                .unwrap();
+                let mut samples = vec![0; config.sample_count().unwrap()];
+                for frame in 0..120 {
+                    samples[frame * 2] = left + frame as i32 * 127;
+                    samples[frame * 2 + 1] = right + frame as i32 * 63;
+                }
+
+                let mut encoder = FlacFrameEncoder::new(config).unwrap();
+                let encoded = encoder.encode_i32(&samples).unwrap();
+                assert!(encoded.encoded_bytes() <= encoded.pcm_bytes + 32);
+
+                let mut decoder = FlacFrameDecoder::new(config).unwrap();
+                assert_eq!(decoder.decode(&encoded.payload).unwrap().samples, samples);
+            }
+        }
     }
 
     #[test]
