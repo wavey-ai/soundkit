@@ -22,14 +22,25 @@ const TRACK_TYPE_ID: u32 = 0x83;
 const CODEC_ID_ID: u32 = 0x86;
 const CODEC_PRIVATE_ID: u32 = 0x63A2;
 const AUDIO_ID: u32 = 0xE1;
+const VIDEO_ID: u32 = 0xE0;
 const SAMPLING_FREQUENCY_ID: u32 = 0xB5;
 const CHANNELS_ID: u32 = 0x9F;
+const PIXEL_WIDTH_ID: u32 = 0xB0;
+const PIXEL_HEIGHT_ID: u32 = 0xBA;
 const CLUSTER_ID: u32 = 0x1F43B675;
+const CLUSTER_TIMECODE_ID: u32 = 0xE7;
+const INFO_ID: u32 = 0x1549A966;
+const TIMECODE_SCALE_ID: u32 = 0x2AD7B1;
 const SIMPLE_BLOCK_ID: u32 = 0xA3;
 const BLOCK_ID: u32 = 0xA1;
+const BLOCK_GROUP_ID: u32 = 0xA0;
+const BLOCK_DURATION_ID: u32 = 0x9B;
+const REFERENCE_BLOCK_ID: u32 = 0xFB;
+const DEFAULT_DURATION_ID: u32 = 0x23E383;
 
 // Track types
 const TRACK_TYPE_AUDIO: u64 = 2;
+const TRACK_TYPE_VIDEO: u64 = 1;
 
 /// Read a variable-length integer (VINT) used in EBML
 /// Returns (value, bytes_consumed) or None if not enough data
@@ -336,6 +347,65 @@ pub enum WebmAudioDemuxEvent {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebmTrackKind {
+    Audio,
+    Video,
+}
+
+impl WebmTrackKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebmMediaTrackConfig {
+    pub track_number: u64,
+    pub kind: WebmTrackKind,
+    pub codec_id: String,
+    pub codec_private: Vec<u8>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u8>,
+    /// Matroska DefaultDuration, in nanoseconds per decoded frame.
+    pub default_duration_ns: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WebmMediaDemuxEvent {
+    Config {
+        timecode_scale_ns: u64,
+        track: WebmMediaTrackConfig,
+    },
+    Packet {
+        track_number: u64,
+        kind: WebmTrackKind,
+        codec_id: String,
+        data: Vec<u8>,
+        /// Signed time in nanoseconds from the Segment time origin.
+        timestamp_ns: i64,
+        /// Duration of this decoded frame in nanoseconds, when declared.
+        duration_ns: Option<u64>,
+        is_keyframe: bool,
+    },
+}
+
+/// One streaming WebM/Matroska demuxer for both video and audio tracks.
+pub struct WebmMediaDemuxer {
+    buffer: Vec<u8>,
+    state: ParserState,
+    tracks: Vec<WebmMediaTrackConfig>,
+    pending_events: VecDeque<WebmMediaDemuxEvent>,
+    emitted_configs: bool,
+    timecode_scale_ns: u64,
+    cluster_timecode: i64,
+}
+
 enum WebmAudioDecoder {
     #[cfg(feature = "opus")]
     Opus(OpusDecoder),
@@ -349,6 +419,493 @@ enum ParserState {
     Header,
     Tracks,
     Clusters,
+}
+
+impl WebmMediaDemuxer {
+    pub fn new() -> Self {
+        Self {
+            buffer: Vec::with_capacity(65_536),
+            state: ParserState::Header,
+            tracks: Vec::new(),
+            pending_events: VecDeque::new(),
+            emitted_configs: false,
+            timecode_scale_ns: 1_000_000,
+            cluster_timecode: 0,
+        }
+    }
+
+    pub fn add(&mut self, data: &[u8]) -> Result<Vec<WebmMediaDemuxEvent>, String> {
+        self.buffer.extend_from_slice(data);
+        loop {
+            let previous_state = self.state;
+            let consumed = match self.state {
+                ParserState::Header => self.parse_media_header()?,
+                ParserState::Tracks => self.parse_media_tracks()?,
+                ParserState::Clusters => self.parse_media_clusters()?,
+            };
+            if consumed > 0 {
+                self.buffer.drain(..consumed);
+            } else if self.state == previous_state {
+                break;
+            }
+        }
+        Ok(self.pending_events.drain(..).collect())
+    }
+
+    pub fn finish(&mut self) -> Result<Vec<WebmMediaDemuxEvent>, String> {
+        let events = self.add(&[])?;
+        if !self.buffer.is_empty() {
+            return Err(format!(
+                "truncated WebM element: {} buffered bytes remain",
+                self.buffer.len()
+            ));
+        }
+        Ok(events)
+    }
+
+    fn parse_media_header(&mut self) -> Result<usize, String> {
+        if self.buffer.len() < 4 {
+            return Ok(0);
+        }
+        let (id, id_len) = read_element_id(&self.buffer)
+            .ok_or_else(|| "invalid WebM EBML element ID".to_string())?;
+        if id != EBML_ID {
+            return Err(format!("invalid WebM: expected EBML header, got 0x{id:X}"));
+        }
+        let (size, size_len) = match read_vint(&self.buffer[id_len..]) {
+            Some(value) => value,
+            None => return Ok(0),
+        };
+        let total_len = id_len
+            .checked_add(size_len)
+            .and_then(|value| value.checked_add(size as usize))
+            .ok_or_else(|| "WebM EBML header size overflow".to_string())?;
+        if self.buffer.len() < total_len {
+            return Ok(0);
+        }
+        let after_ebml = &self.buffer[total_len..];
+        let Some((segment_id, segment_id_len)) = read_element_id(after_ebml) else {
+            return Ok(total_len);
+        };
+        if segment_id != SEGMENT_ID {
+            return Err(format!(
+                "invalid WebM: expected Segment, got 0x{segment_id:X}"
+            ));
+        }
+        let Some((_, segment_size_len)) = read_vint(&after_ebml[segment_id_len..]) else {
+            return Ok(total_len);
+        };
+        self.state = ParserState::Tracks;
+        Ok(total_len + segment_id_len + segment_size_len)
+    }
+
+    fn parse_media_tracks(&mut self) -> Result<usize, String> {
+        let mut pos = 0usize;
+        while pos + 2 <= self.buffer.len() {
+            let Some((id, id_len)) = read_element_id(&self.buffer[pos..]) else {
+                break;
+            };
+            let Some((size, size_len)) = read_vint(&self.buffer[pos + id_len..]) else {
+                break;
+            };
+            let header_len = id_len + size_len;
+            if is_unknown_ebml_size(size, size_len)
+                && matches!(id, TRACKS_ID | SEGMENT_ID | CLUSTER_ID)
+            {
+                pos += header_len;
+                continue;
+            }
+            let data_start = pos
+                .checked_add(header_len)
+                .ok_or_else(|| "WebM element offset overflow".to_string())?;
+            let data_end = data_start
+                .checked_add(size as usize)
+                .ok_or_else(|| "WebM element size overflow".to_string())?;
+            if data_end > self.buffer.len() {
+                break;
+            }
+            match id {
+                TRACKS_ID => pos += header_len,
+                TRACK_ENTRY_ID => {
+                    let entry = self.buffer[data_start..data_end].to_vec();
+                    if let Some(track) = parse_media_track_entry(&entry)? {
+                        if self
+                            .tracks
+                            .iter()
+                            .all(|existing| existing.track_number != track.track_number)
+                        {
+                            self.tracks.push(track);
+                        }
+                    }
+                    pos = data_end;
+                }
+                INFO_ID => {
+                    self.timecode_scale_ns = parse_media_info(
+                        &self.buffer[data_start..data_end],
+                        self.timecode_scale_ns,
+                    )?;
+                    pos = data_end;
+                }
+                CLUSTER_ID => {
+                    self.emit_media_configs()?;
+                    self.state = ParserState::Clusters;
+                    return Ok(pos);
+                }
+                _ => pos = data_end,
+            }
+        }
+        Ok(pos)
+    }
+
+    fn emit_media_configs(&mut self) -> Result<(), String> {
+        if self.emitted_configs {
+            return Ok(());
+        }
+        if !self
+            .tracks
+            .iter()
+            .any(|track| track.kind == WebmTrackKind::Video)
+        {
+            return Err("WebM source has no supported video track".to_string());
+        }
+        if !self
+            .tracks
+            .iter()
+            .any(|track| track.kind == WebmTrackKind::Audio)
+        {
+            return Err("WebM source has no supported audio track".to_string());
+        }
+        for track in &self.tracks {
+            self.pending_events.push_back(WebmMediaDemuxEvent::Config {
+                timecode_scale_ns: self.timecode_scale_ns,
+                track: track.clone(),
+            });
+        }
+        self.emitted_configs = true;
+        Ok(())
+    }
+
+    fn parse_media_clusters(&mut self) -> Result<usize, String> {
+        let mut pos = 0usize;
+        while pos + 2 <= self.buffer.len() {
+            let Some((id, id_len)) = read_element_id(&self.buffer[pos..]) else {
+                break;
+            };
+            let Some((size, size_len)) = read_vint(&self.buffer[pos + id_len..]) else {
+                break;
+            };
+            let header_len = id_len + size_len;
+            if is_unknown_ebml_size(size, size_len) && id == CLUSTER_ID {
+                self.cluster_timecode = 0;
+                pos += header_len;
+                continue;
+            }
+            let data_start = pos
+                .checked_add(header_len)
+                .ok_or_else(|| "WebM cluster offset overflow".to_string())?;
+            let data_end = data_start
+                .checked_add(size as usize)
+                .ok_or_else(|| "WebM cluster element size overflow".to_string())?;
+            if data_end > self.buffer.len() {
+                break;
+            }
+            match id {
+                CLUSTER_ID => {
+                    self.cluster_timecode = 0;
+                    pos += header_len;
+                }
+                CLUSTER_TIMECODE_ID => {
+                    self.cluster_timecode =
+                        i64::try_from(read_uint(&self.buffer[data_start..data_end], size as usize))
+                            .map_err(|_| "WebM cluster timecode exceeds i64".to_string())?;
+                    pos = data_end;
+                }
+                SIMPLE_BLOCK_ID | BLOCK_ID => {
+                    let block = self.buffer[data_start..data_end].to_vec();
+                    self.emit_media_block(&block, id == SIMPLE_BLOCK_ID, None, None)?;
+                    pos = data_end;
+                }
+                BLOCK_GROUP_ID => {
+                    let group = self.buffer[data_start..data_end].to_vec();
+                    self.parse_media_block_group(&group)?;
+                    pos = data_end;
+                }
+                _ => pos = data_end,
+            }
+        }
+        Ok(pos)
+    }
+
+    fn parse_media_block_group(&mut self, data: &[u8]) -> Result<(), String> {
+        let mut pos = 0usize;
+        let mut block = None;
+        let mut has_reference = false;
+        let mut duration_ticks = None;
+        while pos + 2 <= data.len() {
+            let Some((id, id_len)) = read_element_id(&data[pos..]) else {
+                break;
+            };
+            let Some((size, size_len)) = read_vint(&data[pos + id_len..]) else {
+                break;
+            };
+            let start = pos + id_len + size_len;
+            let end = start
+                .checked_add(size as usize)
+                .ok_or_else(|| "WebM BlockGroup size overflow".to_string())?;
+            if end > data.len() {
+                return Err("truncated WebM BlockGroup".to_string());
+            }
+            match id {
+                BLOCK_ID => block = Some(data[start..end].to_vec()),
+                BLOCK_DURATION_ID => {
+                    duration_ticks = Some(read_uint(&data[start..end], size as usize))
+                }
+                REFERENCE_BLOCK_ID => has_reference = true,
+                _ => {}
+            }
+            pos = end;
+        }
+        if let Some(block) = block {
+            self.emit_media_block(&block, false, Some(!has_reference), duration_ticks)?;
+        }
+        Ok(())
+    }
+
+    fn emit_media_block(
+        &mut self,
+        data: &[u8],
+        simple_block: bool,
+        keyframe_override: Option<bool>,
+        block_duration_ticks: Option<u64>,
+    ) -> Result<(), String> {
+        let (track_number, track_len) =
+            read_vint(data).ok_or_else(|| "invalid WebM block track number".to_string())?;
+        let frame_start = track_len
+            .checked_add(3)
+            .ok_or_else(|| "WebM block header overflow".to_string())?;
+        if data.len() < frame_start {
+            return Err("truncated WebM block header".to_string());
+        }
+        let track = self
+            .tracks
+            .iter()
+            .find(|track| track.track_number == track_number)
+            .cloned();
+        let Some(track) = track else {
+            return Ok(());
+        };
+        let relative = i16::from_be_bytes([data[track_len], data[track_len + 1]]) as i64;
+        let flags = data[track_len + 2];
+        let ticks = self
+            .cluster_timecode
+            .checked_add(relative)
+            .ok_or_else(|| "WebM block timestamp overflow".to_string())?;
+        let timestamp_ns = i128::from(ticks)
+            .checked_mul(i128::from(self.timecode_scale_ns))
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| "WebM nanosecond timestamp overflow".to_string())?;
+        let is_keyframe = keyframe_override.unwrap_or(simple_block && flags & 0x80 != 0);
+        let frames = parse_block_frames(flags, &data[frame_start..])?;
+        let frame_count = frames.len().max(1) as u64;
+        let frame_duration_ns = block_duration_ticks
+            .map(|ticks| {
+                ticks
+                    .checked_mul(self.timecode_scale_ns)
+                    .ok_or_else(|| "WebM BlockDuration overflow".to_string())
+            })
+            .transpose()?
+            .map(|duration| duration / frame_count)
+            .or(track.default_duration_ns);
+        for (frame_index, frame) in frames.into_iter().enumerate() {
+            if !frame.is_empty() {
+                let frame_timestamp_ns = match frame_duration_ns {
+                    Some(duration) => {
+                        let offset = duration
+                            .checked_mul(frame_index as u64)
+                            .and_then(|value| i64::try_from(value).ok())
+                            .ok_or_else(|| "WebM laced frame timestamp overflow".to_string())?;
+                        timestamp_ns
+                            .checked_add(offset)
+                            .ok_or_else(|| "WebM laced frame timestamp overflow".to_string())?
+                    }
+                    None => timestamp_ns,
+                };
+                self.pending_events.push_back(WebmMediaDemuxEvent::Packet {
+                    track_number,
+                    kind: track.kind,
+                    codec_id: track.codec_id.clone(),
+                    data: frame,
+                    timestamp_ns: frame_timestamp_ns,
+                    duration_ns: frame_duration_ns,
+                    is_keyframe,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for WebmMediaDemuxer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn is_unknown_ebml_size(size: u64, encoded_len: usize) -> bool {
+    (1..=8).contains(&encoded_len) && size == (1u64 << (encoded_len * 7)) - 1
+}
+
+fn parse_media_info(data: &[u8], default_scale_ns: u64) -> Result<u64, String> {
+    let mut scale_ns = default_scale_ns;
+    parse_media_settings(data, |id, value| {
+        if id == TIMECODE_SCALE_ID {
+            scale_ns = read_uint(value, value.len());
+        }
+    })?;
+    if scale_ns == 0 {
+        return Err("WebM TimecodeScale must be positive".to_string());
+    }
+    Ok(scale_ns)
+}
+
+fn parse_media_track_entry(data: &[u8]) -> Result<Option<WebmMediaTrackConfig>, String> {
+    let mut pos = 0usize;
+    let mut track_number = None;
+    let mut kind = None;
+    let mut codec_id = String::new();
+    let mut codec_private = Vec::new();
+    let mut width = None;
+    let mut height = None;
+    let mut sample_rate = None;
+    let mut channels = None;
+    let mut default_duration_ns = None;
+    while pos + 2 <= data.len() {
+        let Some((id, id_len)) = read_element_id(&data[pos..]) else {
+            break;
+        };
+        let Some((size, size_len)) = read_vint(&data[pos + id_len..]) else {
+            break;
+        };
+        let start = pos + id_len + size_len;
+        let end = start
+            .checked_add(size as usize)
+            .ok_or_else(|| "WebM TrackEntry size overflow".to_string())?;
+        if end > data.len() {
+            return Err("truncated WebM TrackEntry".to_string());
+        }
+        let value = &data[start..end];
+        match id {
+            TRACK_NUMBER_ID => track_number = Some(read_uint(value, size as usize)),
+            TRACK_TYPE_ID => {
+                kind = match read_uint(value, size as usize) {
+                    TRACK_TYPE_AUDIO => Some(WebmTrackKind::Audio),
+                    TRACK_TYPE_VIDEO => Some(WebmTrackKind::Video),
+                    _ => None,
+                }
+            }
+            CODEC_ID_ID => codec_id = String::from_utf8_lossy(value).into_owned(),
+            CODEC_PRIVATE_ID => codec_private = value.to_vec(),
+            DEFAULT_DURATION_ID => {
+                default_duration_ns =
+                    Some(read_uint(value, size as usize)).filter(|value| *value > 0)
+            }
+            AUDIO_ID => parse_media_audio_settings(value, &mut sample_rate, &mut channels)?,
+            VIDEO_ID => parse_media_video_settings(value, &mut width, &mut height)?,
+            _ => {}
+        }
+        pos = end;
+    }
+    let (Some(track_number), Some(kind)) = (track_number, kind) else {
+        return Ok(None);
+    };
+    let supported = match kind {
+        WebmTrackKind::Audio => matches!(
+            codec_id.as_str(),
+            "A_OPUS" | "A_VORBIS" | "A_AAC" | "A_FLAC" | "A_ALAC"
+        ),
+        WebmTrackKind::Video => matches!(
+            codec_id.as_str(),
+            "V_VP9" | "V_AV1" | "V_MPEG4/ISO/AVC" | "V_MPEGH/ISO/HEVC"
+        ),
+    };
+    if !supported {
+        return Ok(None);
+    }
+    Ok(Some(WebmMediaTrackConfig {
+        track_number,
+        kind,
+        codec_id,
+        codec_private,
+        width,
+        height,
+        sample_rate,
+        channels,
+        default_duration_ns,
+    }))
+}
+
+fn parse_media_audio_settings(
+    data: &[u8],
+    sample_rate: &mut Option<u32>,
+    channels: &mut Option<u8>,
+) -> Result<(), String> {
+    parse_media_settings(data, |id, value| match id {
+        SAMPLING_FREQUENCY_ID => {
+            let rate = read_float(value, value.len());
+            if rate.is_finite() && rate > 0.0 && rate <= u32::MAX as f64 {
+                *sample_rate = Some(rate.round() as u32);
+            }
+        }
+        CHANNELS_ID => {
+            let count = read_uint(value, value.len());
+            if let Ok(count) = u8::try_from(count) {
+                if count > 0 {
+                    *channels = Some(count);
+                }
+            }
+        }
+        _ => {}
+    })
+}
+
+fn parse_media_video_settings(
+    data: &[u8],
+    width: &mut Option<u32>,
+    height: &mut Option<u32>,
+) -> Result<(), String> {
+    parse_media_settings(data, |id, value| {
+        let parsed = u32::try_from(read_uint(value, value.len())).ok();
+        match id {
+            PIXEL_WIDTH_ID => *width = parsed.filter(|value| *value > 0),
+            PIXEL_HEIGHT_ID => *height = parsed.filter(|value| *value > 0),
+            _ => {}
+        }
+    })
+}
+
+fn parse_media_settings<F>(data: &[u8], mut visit: F) -> Result<(), String>
+where
+    F: FnMut(u32, &[u8]),
+{
+    let mut pos = 0usize;
+    while pos + 2 <= data.len() {
+        let Some((id, id_len)) = read_element_id(&data[pos..]) else {
+            break;
+        };
+        let Some((size, size_len)) = read_vint(&data[pos + id_len..]) else {
+            break;
+        };
+        let start = pos + id_len + size_len;
+        let end = start
+            .checked_add(size as usize)
+            .ok_or_else(|| "WebM settings size overflow".to_string())?;
+        if end > data.len() {
+            return Err("truncated WebM track settings".to_string());
+        }
+        visit(id, &data[start..end]);
+        pos = end;
+    }
+    Ok(())
 }
 
 pub struct WebmOpusDemuxer {
@@ -1766,6 +2323,48 @@ mod tests {
 
     #[cfg(feature = "opus")]
     const TEST_FILE: &str = "A_Tusk_is_used_to_make_costly_gifts";
+
+    #[test]
+    fn recognizes_unknown_ebml_sizes_for_every_vint_width() {
+        for encoded_len in 1..=8 {
+            let unknown = (1u64 << (encoded_len * 7)) - 1;
+            assert!(is_unknown_ebml_size(unknown, encoded_len));
+            assert!(!is_unknown_ebml_size(unknown - 1, encoded_len));
+        }
+        assert!(!is_unknown_ebml_size(0x7f, 2));
+        assert!(!is_unknown_ebml_size(0, 0));
+    }
+
+    #[test]
+    fn reads_non_default_timecode_scale_from_info_children() {
+        let info_payload = [0x2A, 0xD7, 0xB1, 0x83, 0x1E, 0x84, 0x80];
+        assert_eq!(
+            parse_media_info(&info_payload, 1_000_000).unwrap(),
+            2_000_000
+        );
+
+        let invalid = [0x2A, 0xD7, 0xB1, 0x81, 0x00];
+        assert!(parse_media_info(&invalid, 1_000_000)
+            .unwrap_err()
+            .contains("positive"));
+    }
+
+    #[test]
+    fn reads_video_default_duration_in_rust() {
+        let entry = vec![
+            0xD7, 0x81, 0x01, // TrackNumber = 1
+            0x83, 0x81, 0x01, // TrackType = video
+            0x86, 0x85, b'V', b'_', b'V', b'P', b'9', 0x23, 0xE3, 0x83, 0x84, 0x01, 0xFC, 0xA0,
+            0x55, // 33,333,333 ns
+            0xE0, 0x88, 0xB0, 0x82, 0x02, 0x80, 0xBA, 0x82, 0x01, 0x68,
+        ];
+        let track = parse_media_track_entry(&entry).unwrap().unwrap();
+        assert_eq!(track.kind, WebmTrackKind::Video);
+        assert_eq!(track.codec_id, "V_VP9");
+        assert_eq!(track.width, Some(640));
+        assert_eq!(track.height, Some(360));
+        assert_eq!(track.default_duration_ns, Some(33_333_333));
+    }
 
     #[cfg(feature = "opus")]
     fn testdata_path(file: &str) -> PathBuf {

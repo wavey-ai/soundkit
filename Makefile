@@ -18,6 +18,7 @@ media-fixtures:
 
 .PHONY: media-conformance
 media-conformance: wasm
+	cd testdata/video-compat/never-final && shasum -a 256 -c SHA256SUMS
 	node scripts/test-video-wasm.mjs
 
 .PHONY: media-upstream-corpus

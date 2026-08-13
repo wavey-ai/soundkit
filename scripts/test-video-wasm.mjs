@@ -1,39 +1,18 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import init, { WasmAudioTrackDemuxer, WasmVideoDecoder } from "../soundkit-wasm/pkg/soundkit_wasm.js";
+import init, {
+  WasmAacLcDecoder,
+  WasmAudioTrackDemuxer,
+  WasmMp4MediaIndex,
+  WasmMusicDecoder,
+  WasmOpusDecoder,
+  WasmVideoDecoder,
+  WasmWebmMediaDemuxer,
+} from "../soundkit-wasm/pkg/soundkit_wasm.js";
 
-const fixtureRoot = resolve(process.argv[2] ?? "build/video-compat/never-final");
+const fixtureRoot = resolve(process.argv[2] ?? "testdata/video-compat/never-final");
 await init({ module_or_path: await readFile(new URL("../soundkit-wasm/pkg/soundkit_wasm_bg.wasm", import.meta.url)) });
-
-function ivfPackets(bytes) {
-  assert.equal(Buffer.from(bytes.subarray(0, 4)).toString("ascii"), "DKIF");
-  const packets = [];
-  let cursor = bytes.readUInt16LE(6);
-  while (cursor < bytes.length) {
-    assert.ok(cursor + 12 <= bytes.length, "truncated IVF packet header");
-    const size = bytes.readUInt32LE(cursor);
-    const timestamp = Number(bytes.readBigUInt64LE(cursor + 4));
-    cursor += 12;
-    assert.ok(cursor + size <= bytes.length, "truncated IVF packet");
-    packets.push({ data: bytes.subarray(cursor, cursor + size), timestamp });
-    cursor += size;
-  }
-  return packets;
-}
-
-function proresPackets(bytes) {
-  const packets = [];
-  let cursor = 0;
-  while (cursor < bytes.length) {
-    assert.ok(cursor + 8 <= bytes.length, "truncated ProRes frame header");
-    const size = bytes.readUInt32BE(cursor);
-    assert.ok(size >= 8 && cursor + size <= bytes.length, "invalid ProRes frame size");
-    packets.push(bytes.subarray(cursor, cursor + size));
-    cursor += size;
-  }
-  return packets;
-}
 
 function assertFrames(codec, frames, expected) {
   assert.equal(frames.length, expected.frames, `${codec} frame count`);
@@ -60,42 +39,239 @@ function assertFrames(codec, frames, expected) {
   console.log(`${codec}: ${frames.length} frames, ${frames[0].width}x${frames[0].height}, ${frames[0].bitDepth}-bit ${frames[0].chromaSampling}`);
 }
 
-async function decodeStream(codec, file, expected) {
-  const decoder = new WasmVideoDecoder(codec);
-  try {
-    const frames = decoder.decodeStream(await readFile(resolve(fixtureRoot, file)));
-    assertFrames(codec, frames, expected);
-  } finally {
-    decoder.free();
-  }
+function countPcmFrames(frames) {
+  return frames.reduce((total, frame) => {
+    const bytesPerFrame = frame.channels * Math.ceil(frame.bitsPerSample / 8);
+    assert.equal(frame.data.byteLength % bytesPerFrame, 0, "Rust PCM frame alignment");
+    return total + frame.data.byteLength / bytesPerFrame;
+  }, 0);
 }
 
-async function decodePackets(codec, file, packetizer, expected) {
-  const decoder = new WasmVideoDecoder(codec);
+
+async function decodeMp4MediaFile(file, expected) {
+  const bytes = await readFile(resolve(fixtureRoot, file));
+  const index = WasmMp4MediaIndex.fromFile(bytes);
+  const decoder = new WasmVideoDecoder(expected.codec);
+  let audioDecoder = null;
+  let audioPackets = 0;
+  let audioBytes = 0;
+  let audioFrames = 0;
   const frames = [];
   try {
-    for (const [index, packet] of packetizer(await readFile(resolve(fixtureRoot, file))).entries()) {
-      const data = packet.data ?? packet;
-      frames.push(...decoder.decode(data, packet.timestamp ?? index, Number.NaN));
+    const tracks = index.tracks();
+    const video = tracks.find((track) => track.kind === "video");
+    const audio = tracks.find((track) => track.kind === "audio");
+    assert.ok(video, `${file} has a Rust-indexed video track`);
+    assert.ok(audio, `${file} has a Rust-indexed audio track`);
+    assert.equal(video.codec, expected.codec, `${file} video codec`);
+    assert.equal(audio.codec, expected.audioCodec, `${file} audio codec`);
+    if (audio.codec === "aac") {
+      audioDecoder = new WasmAacLcDecoder(audio.decoderConfiguration);
+    } else if (audio.codec === "flac") {
+      audioDecoder = WasmMusicDecoder.newWithFormat("flac");
+      audioFrames += countPcmFrames(audioDecoder.push(audio.decoderConfiguration));
+    }
+
+    if (video.decoderConfiguration.byteLength > 0) {
+      frames.push(...decoder.decode(video.decoderConfiguration, Number.NaN, Number.NaN));
+    }
+    for (let sampleIndex = 0; sampleIndex < index.sampleCount; sampleIndex += 1) {
+      const sample = index.sample(sampleIndex);
+      const source = bytes.subarray(sample.offset, sample.offset + sample.size);
+      const packet = index.packet(sampleIndex, source);
+      if (packet.kind === "video") {
+        frames.push(...decoder.decode(packet.data, packet.presentationTime, packet.duration));
+      } else {
+        audioPackets += 1;
+        audioBytes += packet.data.byteLength;
+        if (audioDecoder) {
+          if (audio.codec === "aac") {
+            audioFrames += audioDecoder.decodeInterleaved(packet.data).length / audio.channels;
+          } else {
+            audioFrames += countPcmFrames(audioDecoder.push(packet.data));
+          }
+        } else if (audio.codec === "pcm") {
+          const bytesPerFrame = audio.channels * Math.ceil(audio.bitsPerSample / 8);
+          assert.equal(packet.data.byteLength % bytesPerFrame, 0, `${file} PCM frame alignment`);
+          audioFrames += packet.data.byteLength / bytesPerFrame;
+        }
+      }
+    }
+    if (audio.codec === "flac") {
+      audioFrames += countPcmFrames(audioDecoder.flush());
     }
     frames.push(...decoder.flush());
-    assertFrames(codec, frames, expected);
+    assertFrames(file, frames, expected);
+    assert.ok(audioPackets > 0, `${file} extracts audio packets`);
+    assert.ok(audioBytes > 0, `${file} extracts audio bytes`);
+    assert.equal(audioFrames, expected.audioFrames, `${file} decoded audio frame count`);
+    console.log(`${file}: Rust decoded video plus ${audioFrames} audio frames`);
   } finally {
+    audioDecoder?.free();
     decoder.free();
+    index.free();
   }
 }
 
-await decodeStream("h264", "h264-high.264", { frames: 75, bitDepth: 8, chroma: "420" });
-await decodeStream("hevc", "hevc-main.265", { frames: 75, bitDepth: 8, chroma: "420" });
-await decodeStream("hevc", "hevc-main10.265", { frames: 75, bitDepth: 10, chroma: "420" });
-await decodePackets("vp9", "vp9-profile0.ivf", ivfPackets, { frames: 75, bitDepth: 8, chroma: "420" });
-await decodePackets("av1", "av1-main.ivf", ivfPackets, { frames: 75, bitDepth: 8, chroma: "420" });
-await decodePackets("prores", "prores-422-hq.bin", proresPackets, { frames: 75, bitDepth: 10, chroma: "422" });
-await decodePackets("prores", "prores-4444-alpha.bin", proresPackets, {
+async function decodeWebmMediaFile(file, expected) {
+  const bytes = await readFile(resolve(fixtureRoot, file));
+  const demuxer = new WasmWebmMediaDemuxer();
+  const decoder = new WasmVideoDecoder(expected.codec);
+  const frames = [];
+  let videoConfig = null;
+  let audioConfig = null;
+  let audioPackets = 0;
+  let audioFrames = 0;
+  let audioDecoder = null;
+  try {
+    const events = [];
+    for (let offset = 0; offset < bytes.length; offset += 64 * 1024) {
+      events.push(...demuxer.push(bytes.subarray(offset, offset + 64 * 1024)));
+    }
+    events.push(...demuxer.flush());
+    for (const event of events) {
+      if (event.type === "config") {
+        if (event.kind === "video") videoConfig = event;
+        if (event.kind === "audio") {
+          audioConfig = event;
+          if (event.codecId === "A_OPUS") {
+            audioDecoder = new WasmOpusDecoder(event.channels, event.sampleRate, 5760);
+          }
+        }
+        continue;
+      }
+      if (event.kind === "video") {
+        frames.push(...decoder.decode(event.data, event.timestampNs, Number.NaN));
+      } else {
+        audioPackets += 1;
+        audioFrames += audioDecoder?.dec_frame_reuse(event.data) ?? 0;
+      }
+    }
+    frames.push(...decoder.flush());
+    assert.ok(videoConfig, `${file} has a Rust-indexed video track`);
+    assert.ok(audioConfig, `${file} has a Rust-indexed audio track`);
+    assert.equal(videoConfig.codecId, expected.codecId, `${file} video codec ID`);
+    assert.equal(audioConfig.codecId, expected.audioCodecId, `${file} audio codec ID`);
+    assertFrames(file, frames, expected);
+    assert.ok(audioPackets > 0, `${file} extracts audio packets`);
+    assert.equal(audioFrames, expected.audioFrames, `${file} decoded audio frame count`);
+    console.log(`${file}: Rust decoded video plus ${audioFrames} audio frames`);
+  } finally {
+    audioDecoder?.free();
+    decoder.free();
+    demuxer.free();
+  }
+}
+
+async function inspectExplicitVideoGap(file, expected) {
+  const bytes = await readFile(resolve(fixtureRoot, file));
+  const index = WasmMp4MediaIndex.fromFile(bytes);
+  try {
+    const tracks = index.tracks();
+    const video = tracks.find((track) => track.kind === "video");
+    const audio = tracks.find((track) => track.kind === "audio");
+    assert.equal(video?.codec, expected.codec, `${file} identifies the video codec`);
+    assert.equal(audio?.codec, expected.audioCodec, `${file} identifies the audio codec`);
+    let videoPackets = 0;
+    let audioFrames = 0;
+    for (let sampleIndex = 0; sampleIndex < index.sampleCount; sampleIndex += 1) {
+      const sample = index.sample(sampleIndex);
+      const packet = index.packet(
+        sampleIndex,
+        bytes.subarray(sample.offset, sample.offset + sample.size),
+      );
+      if (packet.kind === "video") {
+        videoPackets += 1;
+      } else {
+        const bytesPerFrame = audio.channels * Math.ceil(audio.bitsPerSample / 8);
+        audioFrames += packet.data.byteLength / bytesPerFrame;
+      }
+    }
+    assert.equal(videoPackets, expected.videoPackets, `${file} extracts every video packet`);
+    assert.equal(audioFrames, expected.audioFrames, `${file} extracted PCM frame count`);
+    assert.throws(
+      () => new WasmVideoDecoder(expected.codec),
+      /not(?: yet)? available|unsupported/i,
+      `${file} reports the native decoder gap explicitly`,
+    );
+    console.log(`${file}: Rust extracted both tracks and reported the explicit decoder gap`);
+  } finally {
+    index.free();
+  }
+}
+
+await decodeMp4MediaFile("h264-high-aac.mp4", {
+  codec: "h264",
+  audioCodec: "aac",
+  audioFrames: 145408,
+  frames: 75,
+  bitDepth: 8,
+  chroma: "420",
+});
+await decodeMp4MediaFile("h264-flac.mp4", {
+  codec: "h264",
+  audioCodec: "flac",
+  audioFrames: 144384,
+  frames: 75,
+  bitDepth: 8,
+  chroma: "420",
+});
+await decodeMp4MediaFile("hevc-main-aac.mov", {
+  codec: "hevc",
+  audioCodec: "aac",
+  audioFrames: 145408,
+  frames: 75,
+  bitDepth: 8,
+  chroma: "420",
+});
+await decodeMp4MediaFile("hevc-main10-pcm.mov", {
+  codec: "hevc",
+  audioCodec: "pcm",
+  audioFrames: 144000,
+  frames: 75,
+  bitDepth: 10,
+  chroma: "420",
+});
+await decodeMp4MediaFile("prores-422-hq-pcm.mov", {
+  codec: "prores",
+  audioCodec: "pcm",
+  audioFrames: 144000,
+  frames: 75,
+  bitDepth: 10,
+  chroma: "422",
+});
+await decodeMp4MediaFile("prores-4444-alpha-pcm.mov", {
+  codec: "prores",
+  audioCodec: "pcm",
+  audioFrames: 144000,
   frames: 75,
   bitDepth: 12,
   chroma: "444",
   hasAlpha: true,
+});
+await decodeWebmMediaFile("vp9-profile0-opus.webm", {
+  codec: "vp9",
+  codecId: "V_VP9",
+  audioCodecId: "A_OPUS",
+  audioFrames: 144960,
+  frames: 75,
+  bitDepth: 8,
+  chroma: "420",
+});
+await decodeWebmMediaFile("av1-main-opus.webm", {
+  codec: "av1",
+  codecId: "V_AV1",
+  audioCodecId: "A_OPUS",
+  audioFrames: 144960,
+  frames: 75,
+  bitDepth: 8,
+  chroma: "420",
+});
+await inspectExplicitVideoGap("dnxhr-hqx-pcm.mov", {
+  codec: "dnxhr",
+  audioCodec: "pcm",
+  audioFrames: 144000,
+  videoPackets: 75,
 });
 
 for (const codec of ["h264", "hevc", "vp9", "av1", "prores"]) {

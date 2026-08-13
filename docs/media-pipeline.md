@@ -5,10 +5,14 @@ SoundKit owns deterministic audio extraction and video decoding for native and W
 ## Pipeline
 
 1. The container demuxer identifies tracks from container metadata.
-2. The audio path emits typed AAC, Opus, Vorbis, MP3, AC-3, or PCM packets.
+2. The audio path emits typed AAC, Opus, Vorbis, FLAC, ALAC, MP3, AC-3, or PCM packets.
 3. The video path emits codec access units with timestamps and sync metadata.
 4. Pure-Rust decoders validate dimensions and decode into bounded planar frames.
 5. WASM exports copy validated Rust frames across the browser boundary.
+
+`Mp4MediaIndex` parses only `moov` and returns validated absolute sample ranges. This matters for camera and NLE files that store a large `mdat` before metadata. Browser code reads the ranges from the `File`; it does not parse or validate MP4. Contiguous QuickTime PCM samples are grouped into bounded 4,096-frame packets.
+
+`WebmMediaDemuxer` streams all supported WebM video and audio tracks. It resolves cluster-relative timestamps and durations to nanoseconds, preserves keyframe state, and timestamps laced frames independently.
 
 The decoded video contract is planar YUV with explicit dimensions, stride, bit depth, chroma sampling, alpha presence, presentation timestamp, and duration. Planes use Y, Cb, Cr, and optional alpha order. Eight-bit samples use one byte. Deeper samples use little-endian 16-bit words.
 
@@ -19,6 +23,7 @@ The deterministic `never-final.mov` matrix covers common artist delivery and upl
 | Container | Video | Audio | Native/WASM status |
 | --- | --- | --- | --- |
 | MP4 | H.264 High 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing |
+| MP4 | H.264 High 8-bit 4:2:0 | FLAC 24-bit 48 kHz stereo | Passing |
 | MOV | HEVC Main 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing |
 | MOV | HEVC Main10 10-bit 4:2:0 | PCM 24-bit 48 kHz stereo | Passing |
 | MOV | ProRes 422 HQ 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Passing |
@@ -30,7 +35,7 @@ The deterministic `never-final.mov` matrix covers common artist delivery and upl
 | IVF | AV1 Main 10-bit monochrome | None | Passing |
 | Annex B | HEVC Main10 HDR10 4:2:0 | None | Passing |
 
-FLAC decode and streaming encode are also required pipeline capabilities. Streaming encoders must call `finish()` once, then use the final `streamHeader()` metadata.
+FLAC decode and streaming encode are required pipeline capabilities. MP4 `dfLa` metadata is normalized into a decoder-ready FLAC stream in Rust. Streaming encoders must call `finish()` once, then use the final `streamHeader()` metadata.
 
 ## Reproduce
 
@@ -40,13 +45,13 @@ Generate the ignored local corpus from a source music video:
 make media-fixtures SOURCE_MEDIA=/absolute/path/to/never-final.mov
 ```
 
-Build optimized WASM and verify decoded video surfaces plus every audio track:
+Build optimized WASM and decode both video and audio from each complete container:
 
 ```sh
 make media-conformance
 ```
 
-Generated fixtures stay below `build/`. The generator and assertions are committed, so the corpus is reproducible without storing artist media in Git.
+The repository stores nine deterministic three-second container fixtures under `testdata/video-compat/never-final`. It does not store the artist source. The generator recreates the fixtures under `build/`, and `media-conformance` verifies the committed SHA-256 manifest before decoding.
 
 Fetch the pinned Chromium corpus and verify its SHA-256 values:
 
@@ -60,7 +65,7 @@ Run the upstream corpus through the optimized release WASM artifact:
 make media-upstream-conformance
 ```
 
-Run deterministic truncation and bit-mutation cases in isolated processes:
+Run deterministic codec and container mutations in isolated processes:
 
 ```sh
 make media-fuzz
@@ -77,4 +82,4 @@ make media-fuzz
 
 ## Remaining format work
 
-DNxHD/DNxHR needs a production-quality pure-Rust decoder. The current API rejects it explicitly instead of silently invoking a device decoder. Additional corpus work should cover H.264 4:2:2/4:4:4, HEVC 4:2:2, ProRes 4444/alpha, variable frame rates, edit lists, fragmented MP4, and Matroska.
+DNxHD/DNxHR needs a production-quality pure-Rust decoder. The current API rejects it explicitly instead of silently invoking a device decoder. Additional corpus work should cover H.264 4:2:2/4:4:4, HEVC 4:2:2, variable frame rates, edit lists, fragmented MP4, and broader Matroska variants.

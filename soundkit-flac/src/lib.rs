@@ -687,10 +687,11 @@ mod claxon_decoder {
         sample_rate: Option<u32>,
         channels: Option<u8>,
         bits_per_sample: Option<u8>,
-        /// Total samples we've already returned from pending buffer
-        samples_returned: usize,
-        /// Flag to track if we've finished decoding the entire stream
-        finished: bool,
+        /// Interleaved samples already decoded from complete FLAC frames.
+        /// The current Claxon adapter reparses its bounded input prefix when
+        /// more bytes arrive, so this prevents completed frames being queued
+        /// twice while pending output drains in smaller chunks.
+        samples_decoded: usize,
     }
 
     impl Default for FlacDecoderClaxon {
@@ -707,8 +708,7 @@ mod claxon_decoder {
                 sample_rate: None,
                 channels: None,
                 bits_per_sample: None,
-                samples_returned: 0,
-                finished: false,
+                samples_decoded: 0,
             }
         }
 
@@ -730,7 +730,7 @@ mod claxon_decoder {
 
         /// Decode all available FLAC frames from the input buffer into pending_samples_i32
         fn decode_all_available(&mut self) -> Result<(), String> {
-            if self.finished || self.input_buffer.is_empty() {
+            if self.input_buffer.is_empty() {
                 return Ok(());
             }
 
@@ -759,8 +759,9 @@ mod claxon_decoder {
             let mut blocks = reader.blocks();
             let mut current_block = Block::empty();
 
-            // Skip samples we've already returned
-            let mut samples_to_skip = self.samples_returned;
+            // Skip complete samples already queued during an earlier parse.
+            let mut samples_to_skip = self.samples_decoded;
+            let mut newly_decoded = 0usize;
 
             loop {
                 match blocks.read_next_or_eof(current_block.into_buffer()) {
@@ -782,14 +783,17 @@ mod claxon_decoder {
                                 if sample_idx >= samples_to_skip {
                                     self.pending_samples_i32
                                         .push(current_block.sample(ch as u32, i as u32));
+                                    newly_decoded += 1;
                                 }
                             }
                         }
                         samples_to_skip = 0;
                     }
                     Ok(None) => {
-                        // End of stream
-                        self.finished = true;
+                        // The decoder API is streaming and has no EOF flag. An
+                        // empty block iterator can mean that only STREAMINFO is
+                        // buffered, as it does for FLAC carried in MP4. Keep the
+                        // decoder open so later container packets can extend it.
                         break;
                     }
                     Err(_e) => {
@@ -798,6 +802,11 @@ mod claxon_decoder {
                     }
                 }
             }
+
+            self.samples_decoded = self
+                .samples_decoded
+                .checked_add(newly_decoded)
+                .ok_or_else(|| "decoded FLAC sample count overflow".to_string())?;
 
             Ok(())
         }
@@ -832,7 +841,6 @@ mod claxon_decoder {
             if to_copy > 0 {
                 output[..to_copy].copy_from_slice(&self.pending_samples_i32[..to_copy]);
                 self.pending_samples_i32.drain(..to_copy);
-                self.samples_returned += to_copy;
             }
 
             Ok(to_copy)
@@ -1149,6 +1157,7 @@ mod tests {
         use super::*;
         use crate::FlacDecoderClaxon;
         use soundkit::audio_packet::Decoder;
+        use std::io::Cursor;
 
         /// Decode FLAC using claxon decoder
         fn decode_with_claxon(
@@ -1243,6 +1252,64 @@ mod tests {
                 bits.unwrap_or(16),
             );
             print_waveform_with_header("FLAC (claxon)", &result);
+        }
+
+        #[test]
+        fn claxon_stream_stays_open_after_metadata_and_drains_without_duplicates() {
+            let input_path = testdata_path(&format!("flac/{}.flac", TEST_FILE));
+            let flac_bytes = fs::read(&input_path).unwrap();
+            let metadata_end = flac_metadata_end(&flac_bytes);
+
+            let mut reference = claxon::FlacReader::new(Cursor::new(&flac_bytes)).unwrap();
+            let expected = reference.samples().collect::<Result<Vec<_>, _>>().unwrap();
+
+            let mut decoder = FlacDecoderClaxon::new();
+            decoder.init().unwrap();
+            let mut scratch = vec![0i32; 257];
+            assert_eq!(
+                decoder
+                    .decode_i32(&flac_bytes[..metadata_end], &mut scratch, false)
+                    .unwrap(),
+                0
+            );
+
+            let mut actual = Vec::new();
+            for chunk in flac_bytes[metadata_end..].chunks(997) {
+                drain_claxon(&mut decoder, chunk, &mut scratch, &mut actual);
+            }
+            drain_claxon(&mut decoder, &[], &mut scratch, &mut actual);
+            assert_eq!(actual, expected);
+        }
+
+        fn drain_claxon(
+            decoder: &mut FlacDecoderClaxon,
+            input: &[u8],
+            scratch: &mut [i32],
+            output: &mut Vec<i32>,
+        ) {
+            let mut next = input;
+            loop {
+                let written = decoder.decode_i32(next, scratch, false).unwrap();
+                output.extend_from_slice(&scratch[..written]);
+                next = &[];
+                if written == 0 {
+                    break;
+                }
+            }
+        }
+
+        fn flac_metadata_end(bytes: &[u8]) -> usize {
+            assert!(bytes.starts_with(b"fLaC"));
+            let mut pos = 4usize;
+            loop {
+                let header = bytes[pos];
+                let size = u32::from_be_bytes([0, bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+                    as usize;
+                pos += 4 + size;
+                if header & 0x80 != 0 {
+                    return pos;
+                }
+            }
         }
 
         #[cfg(feature = "libflac")]

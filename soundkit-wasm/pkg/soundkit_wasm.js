@@ -442,6 +442,103 @@ export class WasmFlacEncoder {
 }
 if (Symbol.dispose) WasmFlacEncoder.prototype[Symbol.dispose] = WasmFlacEncoder.prototype.free;
 
+/**
+ * Seekable, Rust-validated MOV/MP4 audio-and-video sample index.
+ */
+export class WasmMp4MediaIndex {
+    static __wrap(ptr) {
+        const obj = Object.create(WasmMp4MediaIndex.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmMp4MediaIndexFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmMp4MediaIndexFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmmp4mediaindex_free(ptr, 0);
+    }
+    /**
+     * Conformance helper for small complete files. Large browser imports
+     * should locate and read only `moov`, then call the constructor.
+     * @param {Uint8Array} bytes
+     * @returns {WasmMp4MediaIndex}
+     */
+    static fromFile(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmp4mediaindex_fromFile(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmMp4MediaIndex.__wrap(ret[0]);
+    }
+    /**
+     * Construct from the payload bytes inside a `moov` box. This is the
+     * production path for seekable browser files and native file handles.
+     * @param {Uint8Array} moov_payload
+     */
+    constructor(moov_payload) {
+        const ptr0 = passArray8ToWasm0(moov_payload, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmp4mediaindex_new(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmMp4MediaIndexFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Validate and normalize exactly one indexed source range.
+     * @param {number} index
+     * @param {Uint8Array} source_bytes
+     * @returns {object}
+     */
+    packet(index, source_bytes) {
+        const ptr0 = passArray8ToWasm0(source_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmp4mediaindex_packet(this.__wbg_ptr, index, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {number} index
+     * @returns {object}
+     */
+    sample(index) {
+        const ret = wasm.wasmmp4mediaindex_sample(this.__wbg_ptr, index);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @returns {number}
+     */
+    get sampleCount() {
+        const ret = wasm.wasmmp4mediaindex_sampleCount(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {Array<any>}
+     */
+    tracks() {
+        const ret = wasm.wasmmp4mediaindex_tracks(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+}
+if (Symbol.dispose) WasmMp4MediaIndex.prototype[Symbol.dispose] = WasmMp4MediaIndex.prototype.free;
+
 export class WasmMusicDecoder {
     static __wrap(ptr) {
         const obj = Object.create(WasmMusicDecoder.prototype);
@@ -964,6 +1061,52 @@ export class WasmVideoDecoder {
 if (Symbol.dispose) WasmVideoDecoder.prototype[Symbol.dispose] = WasmVideoDecoder.prototype.free;
 
 /**
+ * Streaming Rust WebM demuxer that emits both video and audio tracks.
+ */
+export class WasmWebmMediaDemuxer {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmWebmMediaDemuxerFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmwebmmediademuxer_free(ptr, 0);
+    }
+    /**
+     * @returns {Array<any>}
+     */
+    flush() {
+        const ret = wasm.wasmwebmmediademuxer_flush(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    constructor() {
+        const ret = wasm.wasmwebmmediademuxer_new();
+        this.__wbg_ptr = ret;
+        WasmWebmMediaDemuxerFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @param {Uint8Array} bytes
+     * @returns {Array<any>}
+     */
+    push(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmwebmmediademuxer_push(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+}
+if (Symbol.dispose) WasmWebmMediaDemuxer.prototype[Symbol.dispose] = WasmWebmMediaDemuxer.prototype.free;
+
+/**
  * @param {string} session_context
  * @param {string} transport_session_id
  * @param {number} config_generation
@@ -1119,6 +1262,9 @@ const WasmAudioTrackDemuxerFinalization = (typeof FinalizationRegistry === 'unde
 const WasmFlacEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmflacencoder_free(ptr, 1));
+const WasmMp4MediaIndexFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmmp4mediaindex_free(ptr, 1));
 const WasmMusicDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmmusicdecoder_free(ptr, 1));
@@ -1140,6 +1286,9 @@ const WasmSoundKitFrameDecoderFinalization = (typeof FinalizationRegistry === 'u
 const WasmVideoDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmvideodecoder_free(ptr, 1));
+const WasmWebmMediaDemuxerFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmwebmmediademuxer_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();

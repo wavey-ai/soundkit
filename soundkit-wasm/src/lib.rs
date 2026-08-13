@@ -34,7 +34,10 @@ use soundkit_aiff::AiffDecoder;
 #[cfg(feature = "alac")]
 use soundkit_alac::AlacDecoder;
 #[cfg(feature = "audio-demux")]
-use soundkit_audio_demux::{AudioDemuxEvent, AudioTrackDemuxer};
+use soundkit_audio_demux::{
+    AudioDemuxEvent, AudioTrackDemuxer, MediaSampleIndex, MediaTrackConfig, MediaTrackPacket,
+    Mp4MediaIndex,
+};
 #[cfg(feature = "flac")]
 use soundkit_flac::{FlacDecoderClaxon, FlacEncoder};
 #[cfg(feature = "mp3")]
@@ -50,7 +53,7 @@ use soundkit_video::{VideoDecoder, VideoFrame};
 #[cfg(feature = "vorbis")]
 use soundkit_vorbis::VorbisDecoder;
 #[cfg(feature = "webm")]
-use soundkit_webm::WebmDecoder;
+use soundkit_webm::{WebmDecoder, WebmMediaDemuxEvent, WebmMediaDemuxer, WebmMediaTrackConfig};
 #[cfg(feature = "opus-debox")]
 use soundkit_webm::{WebmOpusDemuxEvent, WebmOpusDemuxer};
 
@@ -241,6 +244,20 @@ pub struct WasmAacLcDecoder {
 #[wasm_bindgen]
 pub struct WasmAudioTrackDemuxer {
     demuxer: AudioTrackDemuxer,
+}
+
+/// Seekable, Rust-validated MOV/MP4 audio-and-video sample index.
+#[cfg(feature = "audio-demux")]
+#[wasm_bindgen]
+pub struct WasmMp4MediaIndex {
+    index: Mp4MediaIndex,
+}
+
+/// Streaming Rust WebM demuxer that emits both video and audio tracks.
+#[cfg(feature = "webm")]
+#[wasm_bindgen]
+pub struct WasmWebmMediaDemuxer {
+    demuxer: WebmMediaDemuxer,
 }
 
 /// Pure-Rust video access-unit decoder shared by browser and native imports.
@@ -682,6 +699,86 @@ impl WasmAudioTrackDemuxer {
     pub fn flush(&mut self) -> Result<Array, JsValue> {
         let events = self.demuxer.flush().map_err(js_error)?;
         audio_demux_events_to_js(events)
+    }
+}
+
+#[cfg(feature = "audio-demux")]
+#[wasm_bindgen]
+impl WasmMp4MediaIndex {
+    /// Construct from the payload bytes inside a `moov` box. This is the
+    /// production path for seekable browser files and native file handles.
+    #[wasm_bindgen(constructor)]
+    pub fn new(moov_payload: &[u8]) -> Result<WasmMp4MediaIndex, JsValue> {
+        Ok(Self {
+            index: Mp4MediaIndex::from_moov_payload(moov_payload).map_err(js_error)?,
+        })
+    }
+
+    /// Conformance helper for small complete files. Large browser imports
+    /// should locate and read only `moov`, then call the constructor.
+    #[wasm_bindgen(js_name = fromFile)]
+    pub fn from_file(bytes: &[u8]) -> Result<WasmMp4MediaIndex, JsValue> {
+        Ok(Self {
+            index: Mp4MediaIndex::from_file(bytes).map_err(js_error)?,
+        })
+    }
+
+    #[wasm_bindgen(js_name = tracks)]
+    pub fn tracks_js(&self) -> Result<Array, JsValue> {
+        let output = Array::new();
+        for track in &self.index.tracks {
+            output.push(&media_track_config_to_js(track)?);
+        }
+        Ok(output)
+    }
+
+    #[wasm_bindgen(getter, js_name = sampleCount)]
+    pub fn sample_count(&self) -> usize {
+        self.index.samples.len()
+    }
+
+    pub fn sample(&self, index: usize) -> Result<Object, JsValue> {
+        let sample = self
+            .index
+            .samples
+            .get(index)
+            .ok_or_else(|| js_error(format!("MP4 sample index {index} is out of range")))?;
+        media_sample_index_to_js(sample)
+    }
+
+    /// Validate and normalize exactly one indexed source range.
+    pub fn packet(&self, index: usize, source_bytes: &[u8]) -> Result<Object, JsValue> {
+        let packet = self
+            .index
+            .packet_from_sample_bytes(index, source_bytes)
+            .map_err(js_error)?;
+        media_track_packet_to_js(&packet)
+    }
+}
+
+#[cfg(feature = "webm")]
+#[wasm_bindgen]
+impl WasmWebmMediaDemuxer {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            demuxer: WebmMediaDemuxer::new(),
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Array, JsValue> {
+        webm_media_events_to_js(self.demuxer.add(bytes).map_err(js_error)?)
+    }
+
+    pub fn flush(&mut self) -> Result<Array, JsValue> {
+        webm_media_events_to_js(self.demuxer.finish().map_err(js_error)?)
+    }
+}
+
+#[cfg(feature = "webm")]
+impl Default for WasmWebmMediaDemuxer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2213,6 +2310,293 @@ fn audio_demux_events_to_js(events: Vec<AudioDemuxEvent>) -> Result<Array, JsVal
         array.push(&audio_demux_event_to_js(event)?);
     }
     Ok(array)
+}
+
+#[cfg(any(feature = "audio-demux", feature = "webm"))]
+const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+#[cfg(any(feature = "audio-demux", feature = "webm"))]
+fn js_safe_u64(value: u64, field: &str) -> Result<JsValue, JsValue> {
+    if value > JS_MAX_SAFE_INTEGER {
+        return Err(js_error(format!(
+            "{field} {value} exceeds JavaScript's exact integer range"
+        )));
+    }
+    Ok(JsValue::from_f64(value as f64))
+}
+
+#[cfg(any(feature = "audio-demux", feature = "webm"))]
+fn js_safe_i64(value: i64, field: &str) -> Result<JsValue, JsValue> {
+    if value.unsigned_abs() > JS_MAX_SAFE_INTEGER {
+        return Err(js_error(format!(
+            "{field} {value} exceeds JavaScript's exact integer range"
+        )));
+    }
+    Ok(JsValue::from_f64(value as f64))
+}
+
+#[cfg(feature = "audio-demux")]
+fn media_track_config_to_js(track: &MediaTrackConfig) -> Result<JsValue, JsValue> {
+    let object = Object::new();
+    Reflect::set(
+        &object,
+        &"container".into(),
+        &track.container.as_str().into(),
+    )?;
+    Reflect::set(&object, &"kind".into(), &track.kind.as_str().into())?;
+    Reflect::set(
+        &object,
+        &"trackId".into(),
+        &js_safe_u64(track.track_id, "trackId")?,
+    )?;
+    Reflect::set(&object, &"codec".into(), &track.codec.as_str().into())?;
+    Reflect::set(&object, &"codecId".into(), &track.codec_id.as_str().into())?;
+    Reflect::set(
+        &object,
+        &"timescale".into(),
+        &JsValue::from_f64(track.timescale as f64),
+    )?;
+    Reflect::set(
+        &object,
+        &"sampleCount".into(),
+        &JsValue::from_f64(track.sample_count as f64),
+    )?;
+    set_optional_u32(&object, "width", track.width)?;
+    set_optional_u32(&object, "height", track.height)?;
+    set_optional_u32(&object, "sampleRate", track.sample_rate)?;
+    set_optional_u8(&object, "channels", track.channels)?;
+    set_optional_u8(&object, "bitsPerSample", track.bits_per_sample)?;
+    Reflect::set(
+        &object,
+        &"pcmEndianness".into(),
+        &track
+            .pcm_endianness
+            .map(|value| JsValue::from_str(value.as_str()))
+            .unwrap_or(JsValue::NULL),
+    )?;
+    Reflect::set(
+        &object,
+        &"pcmFloat".into(),
+        &track
+            .pcm_float
+            .map(JsValue::from_bool)
+            .unwrap_or(JsValue::NULL),
+    )?;
+    Reflect::set(
+        &object,
+        &"codecPrivate".into(),
+        &Uint8Array::from(track.codec_private.as_slice()).into(),
+    )?;
+    Reflect::set(
+        &object,
+        &"decoderConfiguration".into(),
+        &Uint8Array::from(track.decoder_configuration.as_slice()).into(),
+    )?;
+    set_optional_u8(&object, "nalLengthSize", track.nal_length_size)?;
+    Ok(object.into())
+}
+
+#[cfg(feature = "audio-demux")]
+fn media_sample_index_to_js(sample: &MediaSampleIndex) -> Result<Object, JsValue> {
+    let object = Object::new();
+    Reflect::set(
+        &object,
+        &"trackId".into(),
+        &js_safe_u64(sample.track_id, "trackId")?,
+    )?;
+    Reflect::set(&object, &"kind".into(), &sample.kind.as_str().into())?;
+    Reflect::set(&object, &"codec".into(), &sample.codec.as_str().into())?;
+    Reflect::set(
+        &object,
+        &"sampleId".into(),
+        &JsValue::from_f64(sample.sample_id as f64),
+    )?;
+    Reflect::set(
+        &object,
+        &"offset".into(),
+        &js_safe_u64(sample.absolute_offset, "offset")?,
+    )?;
+    Reflect::set(
+        &object,
+        &"size".into(),
+        &JsValue::from_f64(sample.size as f64),
+    )?;
+    Reflect::set(
+        &object,
+        &"decodeTime".into(),
+        &js_safe_u64(sample.decode_time, "decodeTime")?,
+    )?;
+    Reflect::set(
+        &object,
+        &"presentationTime".into(),
+        &js_safe_i64(sample.presentation_time, "presentationTime")?,
+    )?;
+    Reflect::set(
+        &object,
+        &"duration".into(),
+        &JsValue::from_f64(sample.duration as f64),
+    )?;
+    Reflect::set(
+        &object,
+        &"isSync".into(),
+        &JsValue::from_bool(sample.is_sync),
+    )?;
+    Ok(object)
+}
+
+#[cfg(feature = "audio-demux")]
+fn media_track_packet_to_js(packet: &MediaTrackPacket) -> Result<Object, JsValue> {
+    let object = Object::new();
+    Reflect::set(
+        &object,
+        &"trackId".into(),
+        &js_safe_u64(packet.track_id, "trackId")?,
+    )?;
+    Reflect::set(&object, &"kind".into(), &packet.kind.as_str().into())?;
+    Reflect::set(&object, &"codec".into(), &packet.codec.as_str().into())?;
+    Reflect::set(
+        &object,
+        &"sampleId".into(),
+        &JsValue::from_f64(packet.sample_id as f64),
+    )?;
+    Reflect::set(
+        &object,
+        &"data".into(),
+        &Uint8Array::from(packet.data.as_slice()).into(),
+    )?;
+    Reflect::set(
+        &object,
+        &"decodeTime".into(),
+        &js_safe_u64(packet.decode_time, "decodeTime")?,
+    )?;
+    Reflect::set(
+        &object,
+        &"presentationTime".into(),
+        &js_safe_i64(packet.presentation_time, "presentationTime")?,
+    )?;
+    Reflect::set(
+        &object,
+        &"duration".into(),
+        &JsValue::from_f64(packet.duration as f64),
+    )?;
+    Reflect::set(
+        &object,
+        &"isSync".into(),
+        &JsValue::from_bool(packet.is_sync),
+    )?;
+    Ok(object)
+}
+
+#[cfg(feature = "webm")]
+fn webm_media_events_to_js(events: Vec<WebmMediaDemuxEvent>) -> Result<Array, JsValue> {
+    let output = Array::new();
+    for event in events {
+        let object = Object::new();
+        match event {
+            WebmMediaDemuxEvent::Config {
+                timecode_scale_ns,
+                track,
+            } => {
+                Reflect::set(&object, &"type".into(), &"config".into())?;
+                Reflect::set(
+                    &object,
+                    &"timecodeScaleNs".into(),
+                    &js_safe_u64(timecode_scale_ns, "timecodeScaleNs")?,
+                )?;
+                set_webm_media_track(&object, &track)?;
+            }
+            WebmMediaDemuxEvent::Packet {
+                track_number,
+                kind,
+                codec_id,
+                data,
+                timestamp_ns,
+                duration_ns,
+                is_keyframe,
+            } => {
+                Reflect::set(&object, &"type".into(), &"packet".into())?;
+                Reflect::set(
+                    &object,
+                    &"trackId".into(),
+                    &js_safe_u64(track_number, "trackId")?,
+                )?;
+                Reflect::set(&object, &"kind".into(), &kind.as_str().into())?;
+                Reflect::set(&object, &"codecId".into(), &codec_id.into())?;
+                Reflect::set(
+                    &object,
+                    &"data".into(),
+                    &Uint8Array::from(data.as_slice()).into(),
+                )?;
+                Reflect::set(
+                    &object,
+                    &"timestampNs".into(),
+                    &js_safe_i64(timestamp_ns, "timestampNs")?,
+                )?;
+                Reflect::set(
+                    &object,
+                    &"durationNs".into(),
+                    &duration_ns
+                        .map(|value| js_safe_u64(value, "durationNs"))
+                        .transpose()?
+                        .unwrap_or(JsValue::NULL),
+                )?;
+                Reflect::set(
+                    &object,
+                    &"isKeyframe".into(),
+                    &JsValue::from_bool(is_keyframe),
+                )?;
+            }
+        }
+        output.push(&object);
+    }
+    Ok(output)
+}
+
+#[cfg(feature = "webm")]
+fn set_webm_media_track(object: &Object, track: &WebmMediaTrackConfig) -> Result<(), JsValue> {
+    Reflect::set(
+        object,
+        &"trackId".into(),
+        &js_safe_u64(track.track_number, "trackId")?,
+    )?;
+    Reflect::set(object, &"kind".into(), &track.kind.as_str().into())?;
+    Reflect::set(object, &"codecId".into(), &track.codec_id.as_str().into())?;
+    Reflect::set(
+        object,
+        &"codecPrivate".into(),
+        &Uint8Array::from(track.codec_private.as_slice()).into(),
+    )?;
+    for (key, value) in [
+        ("width", track.width),
+        ("height", track.height),
+        ("sampleRate", track.sample_rate),
+    ] {
+        Reflect::set(
+            object,
+            &key.into(),
+            &value
+                .map(|value| JsValue::from_f64(value as f64))
+                .unwrap_or(JsValue::NULL),
+        )?;
+    }
+    Reflect::set(
+        object,
+        &"channels".into(),
+        &track
+            .channels
+            .map(|value| JsValue::from_f64(value as f64))
+            .unwrap_or(JsValue::NULL),
+    )?;
+    Reflect::set(
+        object,
+        &"defaultDurationNs".into(),
+        &track
+            .default_duration_ns
+            .map(|value| js_safe_u64(value, "defaultDurationNs"))
+            .transpose()?
+            .unwrap_or(JsValue::NULL),
+    )?;
+    Ok(())
 }
 
 #[cfg(feature = "audio-demux")]

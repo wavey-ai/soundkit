@@ -27,6 +27,8 @@ impl AudioContainer {
 pub enum AudioCodec {
     Aac,
     Pcm,
+    Flac,
+    Alac,
     Opus,
     Vorbis,
     Mp3,
@@ -39,6 +41,8 @@ impl AudioCodec {
         match self {
             AudioCodec::Aac => "aac",
             AudioCodec::Pcm => "pcm",
+            AudioCodec::Flac => "flac",
+            AudioCodec::Alac => "alac",
             AudioCodec::Opus => "opus",
             AudioCodec::Vorbis => "vorbis",
             AudioCodec::Mp3 => "mp3",
@@ -46,6 +50,94 @@ impl AudioCodec {
             AudioCodec::Unknown(codec) => codec.as_str(),
         }
     }
+}
+
+/// A container track category. This is the shared demux contract; codecs and
+/// renderers remain separate from container parsing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaTrackKind {
+    Audio,
+    Video,
+}
+
+impl MediaTrackKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+}
+
+/// Codec and sample-table metadata for one selected container track.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaTrackConfig {
+    pub container: AudioContainer,
+    pub kind: MediaTrackKind,
+    pub track_id: u64,
+    /// The normalized SoundKit codec name, such as `h264`, `prores`, or `aac`.
+    pub codec: String,
+    /// The exact container sample-entry identifier, such as `hvc1` or `ap4h`.
+    pub codec_id: String,
+    pub timescale: u32,
+    pub sample_count: u32,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u8>,
+    pub bits_per_sample: Option<u8>,
+    pub pcm_endianness: Option<PcmEndianness>,
+    pub pcm_float: Option<bool>,
+    /// Container-native codec configuration (`avcC`, `hvcC`, `av1C`, etc.).
+    pub codec_private: Vec<u8>,
+    /// Decoder-ready configuration. AVC and HEVC parameter sets use Annex B.
+    pub decoder_configuration: Vec<u8>,
+    pub nal_length_size: Option<u8>,
+}
+
+/// One decoder-ready compressed access unit or PCM sample chunk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaTrackPacket {
+    pub track_id: u64,
+    pub kind: MediaTrackKind,
+    pub codec: String,
+    pub sample_id: u32,
+    pub data: Vec<u8>,
+    pub decode_time: u64,
+    pub presentation_time: i64,
+    pub duration: u32,
+    pub is_sync: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DemuxedMediaFile {
+    pub tracks: Vec<MediaTrackConfig>,
+    /// Packets are ordered by their byte position in the source file. This
+    /// preserves streaming locality for interleaved audio and video tracks.
+    pub packets: Vec<MediaTrackPacket>,
+}
+
+/// A validated byte range and timestamp record from a container sample table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaSampleIndex {
+    pub track_id: u64,
+    pub kind: MediaTrackKind,
+    pub codec: String,
+    pub sample_id: u32,
+    pub absolute_offset: u64,
+    pub size: u32,
+    pub decode_time: u64,
+    pub presentation_time: i64,
+    pub duration: u32,
+    pub is_sync: bool,
+}
+
+/// Seekable MOV/MP4 sample index. Browser and native adapters can read `moov`
+/// once, then fetch only each requested sample range from the source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mp4MediaIndex {
+    pub tracks: Vec<MediaTrackConfig>,
+    pub samples: Vec<MediaSampleIndex>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -427,6 +519,525 @@ struct RegularMp4Sample {
     start_time: u64,
     rendering_offset: i32,
     is_sync: bool,
+}
+
+#[cfg(feature = "mp4")]
+#[derive(Clone, Debug)]
+struct Mp4MediaTrackIndex {
+    config: MediaTrackConfig,
+    samples: Vec<RegularMp4Sample>,
+}
+
+#[cfg(feature = "mp4")]
+#[derive(Clone, Debug)]
+struct Mp4VideoSampleEntry {
+    codec: String,
+    codec_id: String,
+    width: u32,
+    height: u32,
+    codec_private: Vec<u8>,
+    decoder_configuration: Vec<u8>,
+    nal_length_size: Option<u8>,
+}
+
+#[cfg(feature = "mp4")]
+#[derive(Clone, Debug, Default)]
+struct Mp4MediaTrakTables {
+    track_id: Option<u32>,
+    kind: Option<MediaTrackKind>,
+    timescale: Option<u32>,
+    audio_entry: Option<RegularAudioSampleEntry>,
+    video_entry: Option<Mp4VideoSampleEntry>,
+    stts: Vec<SttsEntry>,
+    ctts: Vec<CttsEntry>,
+    stsc: Vec<StscEntry>,
+    sample_sizes: Vec<u32>,
+    chunk_offsets: Vec<u64>,
+    sync_samples: Vec<u32>,
+}
+
+/// Demux every supported audio and video track from a complete MOV or MP4
+/// source. The returned packets are decoder-ready: length-prefixed AVC/HEVC
+/// samples are converted to Annex B in Rust.
+#[cfg(feature = "mp4")]
+pub fn demux_mp4_media_file(bytes: &[u8]) -> Result<DemuxedMediaFile, String> {
+    let moov = find_top_level_mp4_box(bytes, b"moov")?
+        .ok_or_else(|| "MP4 source has no moov box".to_string())?;
+    let index = Mp4MediaIndex::from_moov_payload(moov)?;
+    let mut packets = Vec::with_capacity(index.samples.len());
+    for (sample_index, sample) in index.samples.iter().enumerate() {
+        let start = usize::try_from(sample.absolute_offset)
+            .map_err(|_| "MP4 sample offset exceeds this platform".to_string())?;
+        let end = start
+            .checked_add(sample.size as usize)
+            .ok_or_else(|| "MP4 sample byte range overflow".to_string())?;
+        let raw = bytes.get(start..end).ok_or_else(|| {
+            format!(
+                "MP4 track {} sample {} extends past the source",
+                sample.track_id, sample.sample_id
+            )
+        })?;
+        packets.push(index.packet_from_sample_bytes(sample_index, raw)?);
+    }
+    Ok(DemuxedMediaFile {
+        tracks: index.tracks,
+        packets,
+    })
+}
+
+#[cfg(feature = "mp4")]
+impl Mp4MediaIndex {
+    /// Parse a complete MOV/MP4 source. Prefer [`Self::from_moov_payload`]
+    /// with seekable files so a large leading `mdat` does not cross the WASM
+    /// boundary.
+    pub fn from_file(bytes: &[u8]) -> Result<Self, String> {
+        let moov = find_top_level_mp4_box(bytes, b"moov")?
+            .ok_or_else(|| "MP4 source has no moov box".to_string())?;
+        Self::from_moov_payload(moov)
+    }
+
+    /// Parse a `moov` payload without reading `mdat`. All absolute sample
+    /// offsets remain relative to the complete source file.
+    pub fn from_moov_payload(moov: &[u8]) -> Result<Self, String> {
+        let indexes = parse_mp4_media_indexes(moov)?;
+        let mut samples = Vec::new();
+        for track in &indexes {
+            let source_samples = if track.config.codec == "pcm" {
+                coalesce_regular_pcm_samples(track.samples.clone())?
+            } else {
+                track.samples.clone()
+            };
+            let mut track_samples = Vec::with_capacity(source_samples.len());
+            for sample in &source_samples {
+                let presentation_time = i128::from(sample.start_time)
+                    .checked_add(i128::from(sample.rendering_offset))
+                    .and_then(|value| i64::try_from(value).ok())
+                    .ok_or_else(|| "MP4 presentation timestamp overflow".to_string())?;
+                track_samples.push(MediaSampleIndex {
+                    track_id: track.config.track_id,
+                    kind: track.config.kind,
+                    codec: track.config.codec.clone(),
+                    sample_id: sample.sample_id,
+                    absolute_offset: sample.absolute_offset,
+                    size: sample.size,
+                    decode_time: sample.start_time,
+                    presentation_time,
+                    duration: sample.duration,
+                    is_sync: sample.is_sync,
+                });
+            }
+            samples.extend(track_samples);
+        }
+        samples.sort_unstable_by_key(|sample| sample.absolute_offset);
+        Ok(Self {
+            tracks: indexes.into_iter().map(|track| track.config).collect(),
+            samples,
+        })
+    }
+
+    /// Validate and normalize one source sample. Callers must pass exactly the
+    /// byte range described by `samples[sample_index]`.
+    pub fn packet_from_sample_bytes(
+        &self,
+        sample_index: usize,
+        raw: &[u8],
+    ) -> Result<MediaTrackPacket, String> {
+        let sample = self
+            .samples
+            .get(sample_index)
+            .ok_or_else(|| format!("MP4 sample index {sample_index} is out of range"))?;
+        if raw.len() != sample.size as usize {
+            return Err(format!(
+                "MP4 track {} sample {} expected {} bytes, got {}",
+                sample.track_id,
+                sample.sample_id,
+                sample.size,
+                raw.len()
+            ));
+        }
+        let track = self
+            .tracks
+            .iter()
+            .find(|track| track.track_id == sample.track_id)
+            .ok_or_else(|| format!("MP4 sample references unknown track {}", sample.track_id))?;
+        let data = match track.nal_length_size {
+            Some(length_size) => mp4_nals_to_annex_b(raw, length_size)?,
+            None => raw.to_vec(),
+        };
+        Ok(MediaTrackPacket {
+            track_id: sample.track_id,
+            kind: sample.kind,
+            codec: sample.codec.clone(),
+            sample_id: sample.sample_id,
+            data,
+            decode_time: sample.decode_time,
+            presentation_time: sample.presentation_time,
+            duration: sample.duration,
+            is_sync: sample.is_sync,
+        })
+    }
+}
+
+#[cfg(feature = "mp4")]
+fn parse_mp4_media_indexes(moov: &[u8]) -> Result<Vec<Mp4MediaTrackIndex>, String> {
+    let mut indexes = Vec::new();
+    for_each_child_box(moov, |header, payload, _| {
+        if header.name == *b"trak" {
+            if let Some(track) = parse_mp4_media_trak(payload)? {
+                indexes.push(track);
+            }
+        }
+        Ok(())
+    })?;
+    if indexes.is_empty() {
+        return Err("MP4 source has no supported audio or video tracks".to_string());
+    }
+    Ok(indexes)
+}
+
+#[cfg(feature = "mp4")]
+fn find_top_level_mp4_box<'a>(
+    bytes: &'a [u8],
+    target: &[u8; 4],
+) -> Result<Option<&'a [u8]>, String> {
+    let mut pos = 0usize;
+    while pos + 8 <= bytes.len() {
+        let header = Mp4BoxHeader::read(&bytes[pos..])
+            .ok_or_else(|| format!("invalid MP4 box header at byte {pos}"))?;
+        let end = pos
+            .checked_add(header.size)
+            .ok_or_else(|| "MP4 box byte range overflow".to_string())?;
+        if end > bytes.len() {
+            return Err(format!(
+                "truncated MP4 box {} at byte {pos}",
+                String::from_utf8_lossy(&header.name)
+            ));
+        }
+        if &header.name == target {
+            return Ok(Some(&bytes[pos + header.header_size..end]));
+        }
+        pos = end;
+    }
+    Ok(None)
+}
+
+#[cfg(feature = "mp4")]
+fn parse_mp4_media_trak(data: &[u8]) -> Result<Option<Mp4MediaTrackIndex>, String> {
+    let mut tables = Mp4MediaTrakTables::default();
+    walk_boxes(data, &mut |header, payload| {
+        match &header.name {
+            b"tkhd" => tables.track_id = parse_tkhd_track_id(payload),
+            b"mdhd" => tables.timescale = parse_mdhd_timescale(payload),
+            b"hdlr" => {
+                if let Some(kind) = parse_media_track_kind(payload) {
+                    tables.kind = Some(kind);
+                }
+            }
+            b"stsd" => match tables.kind {
+                Some(MediaTrackKind::Audio) => tables.audio_entry = parse_stsd_audio(payload),
+                Some(MediaTrackKind::Video) => tables.video_entry = parse_stsd_video(payload),
+                None => {}
+            },
+            b"stts" => tables.stts = parse_stts(payload),
+            b"ctts" => tables.ctts = parse_ctts(payload),
+            b"stsc" => tables.stsc = parse_stsc(payload),
+            b"stsz" => tables.sample_sizes = parse_stsz(payload),
+            b"stco" => tables.chunk_offsets = parse_stco(payload),
+            b"co64" => tables.chunk_offsets = parse_co64(payload),
+            b"stss" => tables.sync_samples = parse_stss(payload),
+            _ => {}
+        }
+        Ok(())
+    })?;
+
+    let Some(kind) = tables.kind else {
+        return Ok(None);
+    };
+    let track_id = tables
+        .track_id
+        .ok_or_else(|| "MP4 media track is missing tkhd track id".to_string())?;
+    let timescale = tables
+        .timescale
+        .ok_or_else(|| format!("MP4 track {track_id} is missing mdhd timescale"))?;
+    if timescale == 0 {
+        return Err(format!("MP4 track {track_id} has zero timescale"));
+    }
+    let sample_tables = RegularTrakTables {
+        track_id: tables.track_id,
+        is_audio: kind == MediaTrackKind::Audio,
+        timescale: tables.timescale,
+        sample_entry: tables.audio_entry.clone(),
+        stts: tables.stts,
+        ctts: tables.ctts,
+        stsc: tables.stsc,
+        sample_sizes: tables.sample_sizes,
+        chunk_offsets: tables.chunk_offsets,
+        sync_samples: tables.sync_samples,
+    };
+    let samples = build_regular_samples(&sample_tables)?;
+    let sample_count = u32::try_from(samples.len())
+        .map_err(|_| format!("MP4 track {track_id} has too many samples"))?;
+
+    let config = match kind {
+        MediaTrackKind::Audio => {
+            let entry = tables
+                .audio_entry
+                .ok_or_else(|| format!("MP4 audio track {track_id} has no supported codec"))?;
+            let decoder_configuration = match entry.codec {
+                AudioCodec::Flac => normalize_mp4_flac_decoder_configuration(&entry.codec_private)?,
+                _ => entry.codec_private.clone(),
+            };
+            MediaTrackConfig {
+                container: AudioContainer::Mp4,
+                kind,
+                track_id: track_id as u64,
+                codec: entry.codec.as_str().to_string(),
+                codec_id: entry.codec_id,
+                timescale,
+                sample_count,
+                width: None,
+                height: None,
+                sample_rate: Some(entry.sample_rate),
+                channels: Some(entry.channels),
+                bits_per_sample: entry.bits_per_sample,
+                pcm_endianness: entry.pcm_endianness,
+                pcm_float: entry.pcm_float,
+                decoder_configuration,
+                codec_private: entry.codec_private,
+                nal_length_size: None,
+            }
+        }
+        MediaTrackKind::Video => {
+            let entry = tables
+                .video_entry
+                .ok_or_else(|| format!("MP4 video track {track_id} has no supported codec"))?;
+            MediaTrackConfig {
+                container: AudioContainer::Mp4,
+                kind,
+                track_id: track_id as u64,
+                codec: entry.codec,
+                codec_id: entry.codec_id,
+                timescale,
+                sample_count,
+                width: Some(entry.width),
+                height: Some(entry.height),
+                sample_rate: None,
+                channels: None,
+                bits_per_sample: None,
+                pcm_endianness: None,
+                pcm_float: None,
+                codec_private: entry.codec_private,
+                decoder_configuration: entry.decoder_configuration,
+                nal_length_size: entry.nal_length_size,
+            }
+        }
+    };
+    Ok(Some(Mp4MediaTrackIndex { config, samples }))
+}
+
+#[cfg(feature = "mp4")]
+fn normalize_mp4_flac_decoder_configuration(data: &[u8]) -> Result<Vec<u8>, String> {
+    if data.starts_with(b"fLaC") {
+        return Ok(data.to_vec());
+    }
+    if data.len() == 34 {
+        let mut stream = Vec::with_capacity(42);
+        stream.extend_from_slice(b"fLaC");
+        stream.extend_from_slice(&[0x80, 0, 0, 34]);
+        stream.extend_from_slice(data);
+        return Ok(stream);
+    }
+    let metadata = data
+        .get(4..)
+        .ok_or_else(|| "MP4 dfLa decoder configuration is truncated".to_string())?;
+    if metadata.len() < 38 || metadata[0] & 0x7f != 0 {
+        return Err("MP4 dfLa has no leading FLAC STREAMINFO block".to_string());
+    }
+    let streaminfo_size = u32::from_be_bytes([0, metadata[1], metadata[2], metadata[3]]) as usize;
+    if streaminfo_size != 34 || metadata.len() < 4 + streaminfo_size {
+        return Err("MP4 dfLa has an invalid FLAC STREAMINFO block".to_string());
+    }
+    let mut stream = Vec::with_capacity(4 + metadata.len());
+    stream.extend_from_slice(b"fLaC");
+    stream.extend_from_slice(metadata);
+    Ok(stream)
+}
+
+#[cfg(feature = "mp4")]
+fn parse_media_track_kind(data: &[u8]) -> Option<MediaTrackKind> {
+    match data.get(8..12)? {
+        b"soun" => Some(MediaTrackKind::Audio),
+        b"vide" => Some(MediaTrackKind::Video),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "mp4")]
+fn parse_stsd_video(data: &[u8]) -> Option<Mp4VideoSampleEntry> {
+    let entry_count = be_u32(data, 4)?;
+    let mut pos = 8usize;
+    for _ in 0..entry_count {
+        let header = Mp4BoxHeader::read(data.get(pos..)?)?;
+        let end = pos.checked_add(header.size)?;
+        let payload = data.get(pos + header.header_size..end)?;
+        if payload.len() < 78 {
+            pos = end;
+            continue;
+        }
+        let codec_id = String::from_utf8_lossy(&header.name).into_owned();
+        let codec = match &header.name {
+            b"avc1" | b"avc3" => "h264",
+            b"hvc1" | b"hev1" => "hevc",
+            b"av01" => "av1",
+            b"vp09" => "vp9",
+            b"apco" | b"apcs" | b"apcn" | b"apch" | b"ap4h" | b"ap4x" => "prores",
+            b"AVdn" | b"AVdh" => "dnxhr",
+            _ => {
+                pos = end;
+                continue;
+            }
+        };
+        let width = be_u16(payload, 24)? as u32;
+        let height = be_u16(payload, 26)? as u32;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let mut codec_private = Vec::new();
+        let mut decoder_configuration = Vec::new();
+        let mut nal_length_size = None;
+        let _ = for_each_child_box(&payload[78..], |child, child_payload, _| {
+            let is_config = matches!(&child.name, b"avcC" | b"hvcC" | b"av1C" | b"vpcC");
+            if is_config && codec_private.is_empty() {
+                codec_private = child_payload.to_vec();
+                match &child.name {
+                    b"avcC" => {
+                        let (length_size, annex_b) = parse_avcc(child_payload)?;
+                        nal_length_size = Some(length_size);
+                        decoder_configuration = annex_b;
+                    }
+                    b"hvcC" => {
+                        let (length_size, annex_b) = parse_hvcc(child_payload)?;
+                        nal_length_size = Some(length_size);
+                        decoder_configuration = annex_b;
+                    }
+                    _ => decoder_configuration = child_payload.to_vec(),
+                }
+            }
+            Ok(())
+        });
+        return Some(Mp4VideoSampleEntry {
+            codec: codec.to_string(),
+            codec_id,
+            width,
+            height,
+            codec_private,
+            decoder_configuration,
+            nal_length_size,
+        });
+    }
+    None
+}
+
+#[cfg(feature = "mp4")]
+fn parse_avcc(data: &[u8]) -> Result<(u8, Vec<u8>), String> {
+    if data.len() < 7 || data[0] != 1 {
+        return Err("invalid avcC decoder configuration".to_string());
+    }
+    let length_size = (data[4] & 0x03) + 1;
+    let mut pos = 6usize;
+    let mut output = Vec::new();
+    let sps_count = data[5] & 0x1f;
+    for _ in 0..sps_count {
+        append_length_prefixed_configuration_nal(data, &mut pos, &mut output)?;
+    }
+    let pps_count = *data
+        .get(pos)
+        .ok_or_else(|| "truncated avcC PPS count".to_string())?;
+    pos += 1;
+    for _ in 0..pps_count {
+        append_length_prefixed_configuration_nal(data, &mut pos, &mut output)?;
+    }
+    Ok((length_size, output))
+}
+
+#[cfg(feature = "mp4")]
+fn parse_hvcc(data: &[u8]) -> Result<(u8, Vec<u8>), String> {
+    if data.len() < 23 || data[0] != 1 {
+        return Err("invalid hvcC decoder configuration".to_string());
+    }
+    let length_size = (data[21] & 0x03) + 1;
+    let array_count = data[22] as usize;
+    let mut pos = 23usize;
+    let mut output = Vec::new();
+    for _ in 0..array_count {
+        pos = pos
+            .checked_add(1)
+            .ok_or_else(|| "hvcC array offset overflow".to_string())?;
+        let nal_count = be_u16(data, pos).ok_or_else(|| "truncated hvcC array".to_string())?;
+        pos += 2;
+        for _ in 0..nal_count {
+            append_length_prefixed_configuration_nal(data, &mut pos, &mut output)?;
+        }
+    }
+    Ok((length_size, output))
+}
+
+#[cfg(feature = "mp4")]
+fn append_length_prefixed_configuration_nal(
+    data: &[u8],
+    pos: &mut usize,
+    output: &mut Vec<u8>,
+) -> Result<(), String> {
+    let size =
+        be_u16(data, *pos).ok_or_else(|| "truncated codec configuration".to_string())? as usize;
+    *pos += 2;
+    let end = pos
+        .checked_add(size)
+        .ok_or_else(|| "codec configuration NAL size overflow".to_string())?;
+    let nal = data
+        .get(*pos..end)
+        .ok_or_else(|| "truncated codec configuration NAL".to_string())?;
+    output.extend_from_slice(&[0, 0, 0, 1]);
+    output.extend_from_slice(nal);
+    *pos = end;
+    Ok(())
+}
+
+#[cfg(feature = "mp4")]
+fn mp4_nals_to_annex_b(data: &[u8], length_size: u8) -> Result<Vec<u8>, String> {
+    if !(1..=4).contains(&length_size) {
+        return Err(format!("invalid MP4 NAL length size {length_size}"));
+    }
+    let mut output = Vec::with_capacity(data.len().saturating_add(16));
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let header_end = pos
+            .checked_add(length_size as usize)
+            .ok_or_else(|| "MP4 NAL header overflow".to_string())?;
+        let header = data
+            .get(pos..header_end)
+            .ok_or_else(|| "truncated MP4 NAL length".to_string())?;
+        let mut size = 0usize;
+        for byte in header {
+            size = size
+                .checked_mul(256)
+                .and_then(|value| value.checked_add(*byte as usize))
+                .ok_or_else(|| "MP4 NAL size overflow".to_string())?;
+        }
+        if size == 0 {
+            return Err("MP4 sample contains an empty NAL unit".to_string());
+        }
+        let nal_end = header_end
+            .checked_add(size)
+            .ok_or_else(|| "MP4 NAL byte range overflow".to_string())?;
+        let nal = data
+            .get(header_end..nal_end)
+            .ok_or_else(|| "MP4 NAL extends past its sample".to_string())?;
+        output.extend_from_slice(&[0, 0, 0, 1]);
+        output.extend_from_slice(nal);
+        pos = nal_end;
+    }
+    Ok(output)
 }
 
 #[cfg(feature = "mp4")]
@@ -1359,7 +1970,7 @@ fn parse_regular_trak(data: &[u8]) -> Result<Option<RegularMp4AudioTrack>, Strin
     let track_id = tables
         .track_id
         .ok_or_else(|| "MP4 audio track is missing tkhd track id".to_string())?;
-    let samples = build_regular_samples(&tables)?;
+    let mut samples = build_regular_samples(&tables)?;
     if samples.is_empty() {
         return Err("MP4 audio track has no samples".to_string());
     }
@@ -1372,6 +1983,9 @@ fn parse_regular_trak(data: &[u8]) -> Result<Option<RegularMp4AudioTrack>, Strin
             sample_entry.sample_rate = sample_rate;
             sample_entry.channels = channels;
         }
+    }
+    if sample_entry.codec == AudioCodec::Pcm {
+        samples = coalesce_regular_pcm_samples(samples)?;
     }
 
     Ok(Some(RegularMp4AudioTrack {
@@ -1387,6 +2001,54 @@ fn parse_regular_trak(data: &[u8]) -> Result<Option<RegularMp4AudioTrack>, Strin
         codec_private: sample_entry.codec_private,
         samples,
     }))
+}
+
+#[cfg(feature = "mp4")]
+fn coalesce_regular_pcm_samples(
+    samples: Vec<RegularMp4Sample>,
+) -> Result<Vec<RegularMp4Sample>, String> {
+    const MAX_PCM_PACKET_FRAMES: u32 = 4096;
+    const MAX_PCM_PACKET_BYTES: u32 = 1024 * 1024;
+
+    let mut output: Vec<RegularMp4Sample> =
+        Vec::with_capacity(samples.len().div_ceil(MAX_PCM_PACKET_FRAMES as usize));
+    for sample in samples {
+        let can_merge = output.last().is_some_and(|current| {
+            let current_presentation = i128::from(current.start_time)
+                + i128::from(current.rendering_offset)
+                + i128::from(current.duration);
+            let sample_presentation =
+                i128::from(sample.start_time) + i128::from(sample.rendering_offset);
+            current.absolute_offset.checked_add(current.size as u64) == Some(sample.absolute_offset)
+                && current.start_time.checked_add(current.duration as u64)
+                    == Some(sample.start_time)
+                && current_presentation == sample_presentation
+                && current
+                    .duration
+                    .checked_add(sample.duration)
+                    .is_some_and(|duration| duration <= MAX_PCM_PACKET_FRAMES)
+                && current
+                    .size
+                    .checked_add(sample.size)
+                    .is_some_and(|size| size <= MAX_PCM_PACKET_BYTES)
+        });
+        if can_merge {
+            let current = output.last_mut().expect("checked above");
+            current.size = current
+                .size
+                .checked_add(sample.size)
+                .ok_or_else(|| "PCM packet size overflow".to_string())?;
+            current.duration = current
+                .duration
+                .checked_add(sample.duration)
+                .ok_or_else(|| "PCM packet duration overflow".to_string())?;
+            current.is_sync &= sample.is_sync;
+        } else {
+            output.push(sample);
+        }
+    }
+    output.shrink_to_fit();
+    Ok(output)
 }
 
 #[cfg(feature = "mp4")]
@@ -1639,14 +2301,9 @@ fn parse_stsd_mp4a(data: &[u8]) -> Option<Mp4aSampleEntry> {
         if header.name == *b"mp4a" && payload.len() >= 28 {
             let channels = be_u16(payload, 16).unwrap_or(2) as u8;
             let sample_rate = be_u32(payload, 24).unwrap_or(44_100 << 16) >> 16;
-            let mut codec_private = Vec::new();
-            let _ = for_each_child_box(&payload[28..], |child, child_payload, _| {
-                if child.name == *b"esds" {
-                    codec_private =
-                        parse_esds_audio_specific_config(child_payload).unwrap_or_default();
-                }
-                Ok(())
-            });
+            let codec_private = find_audio_sample_entry_private(payload, b"esds")
+                .and_then(parse_esds_audio_specific_config)
+                .unwrap_or_default();
             return Some(Mp4aSampleEntry {
                 sample_rate,
                 channels,
@@ -1677,14 +2334,9 @@ fn parse_stsd_audio(data: &[u8]) -> Option<RegularAudioSampleEntry> {
             let declared_bits = be_u16(payload, 18).and_then(|value| u8::try_from(value).ok());
             let sample_rate = be_u32(payload, 24).unwrap_or(44_100 << 16) >> 16;
             if header.name == *b"mp4a" {
-                let mut codec_private = Vec::new();
-                let _ = for_each_child_box(&payload[28..], |child, child_payload, _| {
-                    if child.name == *b"esds" {
-                        codec_private =
-                            parse_esds_audio_specific_config(child_payload).unwrap_or_default();
-                    }
-                    Ok(())
-                });
+                let codec_private = find_audio_sample_entry_private(payload, b"esds")
+                    .and_then(parse_esds_audio_specific_config)
+                    .unwrap_or_default();
                 return Some(RegularAudioSampleEntry {
                     sample_rate,
                     channels,
@@ -1692,6 +2344,38 @@ fn parse_stsd_audio(data: &[u8]) -> Option<RegularAudioSampleEntry> {
                     codec: AudioCodec::Aac,
                     codec_id: "mp4a".to_string(),
                     packet_format: AudioPacketFormat::Adts,
+                    pcm_endianness: None,
+                    pcm_float: None,
+                    codec_private,
+                });
+            }
+            if header.name == *b"fLaC" {
+                let codec_private = find_audio_sample_entry_private(payload, b"dfLa")
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_default();
+                return Some(RegularAudioSampleEntry {
+                    sample_rate,
+                    channels,
+                    bits_per_sample: declared_bits,
+                    codec: AudioCodec::Flac,
+                    codec_id: "fLaC".to_string(),
+                    packet_format: AudioPacketFormat::Raw,
+                    pcm_endianness: None,
+                    pcm_float: None,
+                    codec_private,
+                });
+            }
+            if header.name == *b"alac" {
+                let codec_private = find_audio_sample_entry_private(payload, b"alac")
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_default();
+                return Some(RegularAudioSampleEntry {
+                    sample_rate,
+                    channels,
+                    bits_per_sample: declared_bits,
+                    codec: AudioCodec::Alac,
+                    codec_id: "alac".to_string(),
+                    packet_format: AudioPacketFormat::Raw,
                     pcm_endianness: None,
                     pcm_float: None,
                     codec_private,
@@ -1722,6 +2406,41 @@ fn parse_stsd_audio(data: &[u8]) -> Option<RegularAudioSampleEntry> {
             });
         }
         pos += header.size;
+    }
+    None
+}
+
+#[cfg(feature = "mp4")]
+fn find_audio_sample_entry_private<'a>(payload: &'a [u8], target: &[u8; 4]) -> Option<&'a [u8]> {
+    let version = be_u16(payload, 8).unwrap_or(0);
+    let children_offset = match version {
+        0 => 28,
+        1 => 44,
+        2 => 64,
+        _ => 28,
+    };
+    find_sample_entry_box(payload.get(children_offset..)?, target)
+}
+
+#[cfg(feature = "mp4")]
+fn find_sample_entry_box<'a>(data: &'a [u8], target: &[u8; 4]) -> Option<&'a [u8]> {
+    let mut pos = 0usize;
+    while pos + 8 <= data.len() {
+        let header = Mp4BoxHeader::read(&data[pos..])?;
+        let end = pos.checked_add(header.size)?;
+        if end > data.len() {
+            return None;
+        }
+        let payload = &data[pos + header.header_size..end];
+        if &header.name == target {
+            return Some(payload);
+        }
+        if matches!(&header.name, b"wave" | b"sinf" | b"schi") {
+            if let Some(found) = find_sample_entry_box(payload, target) {
+                return Some(found);
+            }
+        }
+        pos = end;
     }
     None
 }
@@ -2667,6 +3386,20 @@ mod tests {
         assert_eq!(packets[1].sample_id, Some(2));
         assert_eq!(packets[1].start_time, Some(1024));
         assert_eq!(packets[1].raw_data.as_deref(), Some(&[0x44, 0x55][..]));
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn converts_mp4_dfla_to_a_decoder_ready_flac_stream() {
+        let mut dfla = vec![0, 0, 0, 0, 0x80, 0, 0, 34];
+        dfla.extend_from_slice(&[0x55; 34]);
+        let stream = normalize_mp4_flac_decoder_configuration(&dfla).unwrap();
+        assert_eq!(&stream[..8], b"fLaC\x80\0\0\x22");
+        assert_eq!(&stream[8..], &[0x55; 34]);
+
+        let bare_streaminfo = normalize_mp4_flac_decoder_configuration(&[0x33; 34]).unwrap();
+        assert_eq!(&bare_streaminfo[..8], b"fLaC\x80\0\0\x22");
+        assert!(normalize_mp4_flac_decoder_configuration(&[0; 7]).is_err());
     }
 
     #[cfg(feature = "webm")]

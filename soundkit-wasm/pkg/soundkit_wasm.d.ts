@@ -88,6 +88,31 @@ export class WasmFlacEncoder {
     streamHeader(): Uint8Array;
 }
 
+/**
+ * Seekable, Rust-validated MOV/MP4 audio-and-video sample index.
+ */
+export class WasmMp4MediaIndex {
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Conformance helper for small complete files. Large browser imports
+     * should locate and read only `moov`, then call the constructor.
+     */
+    static fromFile(bytes: Uint8Array): WasmMp4MediaIndex;
+    /**
+     * Construct from the payload bytes inside a `moov` box. This is the
+     * production path for seekable browser files and native file handles.
+     */
+    constructor(moov_payload: Uint8Array);
+    /**
+     * Validate and normalize exactly one indexed source range.
+     */
+    packet(index: number, source_bytes: Uint8Array): object;
+    sample(index: number): object;
+    tracks(): Array<any>;
+    readonly sampleCount: number;
+}
+
 export class WasmMusicDecoder {
     free(): void;
     [Symbol.dispose](): void;
@@ -192,6 +217,17 @@ export class WasmVideoDecoder {
     constructor(codec: string);
 }
 
+/**
+ * Streaming Rust WebM demuxer that emits both video and audio tracks.
+ */
+export class WasmWebmMediaDemuxer {
+    free(): void;
+    [Symbol.dispose](): void;
+    flush(): Array<any>;
+    constructor();
+    push(bytes: Uint8Array): Array<any>;
+}
+
 export function buildAudioGroupAssociatedData(session_context: string, transport_session_id: string, config_generation: number, epoch_id: string, pts_samples: string, sample_rate: number, frame_count: number, group_count: number, group_id: number, group_index: number, channel_start: number, channel_count: number, payload_kind: number, sample_format: number, flags: number): Uint8Array;
 
 export function buildSoundKitFrameHeaderV2(encoding: number, payload_size: number, sample_size: number, sample_rate: number, channels: number, bits_per_sample: number, pts: number): Uint8Array;
@@ -208,6 +244,7 @@ export interface InitOutput {
     readonly __wbg_wasmaudiocontentkeyunwrapper_free: (a: number, b: number) => void;
     readonly __wbg_wasmaudiotrackdemuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmflacencoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmmp4mediaindex_free: (a: number, b: number) => void;
     readonly __wbg_wasmmusicdecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdeboxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdecoder_free: (a: number, b: number) => void;
@@ -215,6 +252,7 @@ export interface InitOutput {
     readonly __wbg_wasmopusencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmsoundkitframedecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmvideodecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmwebmmediademuxer_free: (a: number, b: number) => void;
     readonly buildAudioGroupAssociatedData: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => [number, number, number];
     readonly buildSoundKitFrameHeaderV2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly buildSoundKitFrameV2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
@@ -244,6 +282,12 @@ export interface InitOutput {
     readonly wasmflacencoder_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly wasmflacencoder_reset: (a: number) => [number, number];
     readonly wasmflacencoder_streamHeader: (a: number) => any;
+    readonly wasmmp4mediaindex_fromFile: (a: number, b: number) => [number, number, number];
+    readonly wasmmp4mediaindex_new: (a: number, b: number) => [number, number, number];
+    readonly wasmmp4mediaindex_packet: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmmp4mediaindex_sample: (a: number, b: number) => [number, number, number];
+    readonly wasmmp4mediaindex_sampleCount: (a: number) => number;
+    readonly wasmmp4mediaindex_tracks: (a: number) => [number, number, number];
     readonly wasmmusicdecoder_flush: (a: number) => [number, number, number];
     readonly wasmmusicdecoder_new: () => number;
     readonly wasmmusicdecoder_newRawLinear16: (a: number, b: number) => [number, number, number];
@@ -280,6 +324,9 @@ export interface InitOutput {
     readonly wasmvideodecoder_decodeStream: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmvideodecoder_flush: (a: number) => [number, number, number];
     readonly wasmvideodecoder_new: (a: number, b: number) => [number, number, number];
+    readonly wasmwebmmediademuxer_flush: (a: number) => [number, number, number];
+    readonly wasmwebmmediademuxer_new: () => number;
+    readonly wasmwebmmediademuxer_push: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmmusicdecoder_newAuto: () => number;
     readonly wasmaacdeboxer_newAuto: () => number;
     readonly wasmaudiotrackdemuxer_newAuto: () => number;

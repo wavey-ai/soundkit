@@ -708,19 +708,11 @@ mod tests {
 
     #[test]
     fn pcm_step_to_silence_stays_within_verbatim_bounds() {
-        for (bits_per_sample, left, right) in [
-            (16, -20_000, -15_000),
-            (24, -2_000_000, -1_500_000),
-        ] {
+        for (bits_per_sample, left, right) in [(16, -20_000, -15_000), (24, -2_000_000, -1_500_000)]
+        {
             for profile in [FlacProfile::Realtime, FlacProfile::Balanced] {
-                let config = FlacFrameConfig::new(
-                    48_000,
-                    2,
-                    bits_per_sample,
-                    240,
-                    profile,
-                )
-                .unwrap();
+                let config =
+                    FlacFrameConfig::new(48_000, 2, bits_per_sample, 240, profile).unwrap();
                 let mut samples = vec![0; config.sample_count().unwrap()];
                 for frame in 0..120 {
                     samples[frame * 2] = left + frame as i32 * 127;

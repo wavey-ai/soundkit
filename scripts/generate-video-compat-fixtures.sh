@@ -15,6 +15,9 @@ common_audio="-map 0:a:0 -ar 48000 -ac 2"
 
 # shellcheck disable=SC2086
 ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v libx264 -profile:v high -pix_fmt yuv420p $common_audio -c:a aac -b:a 192k -movflags +faststart "$output_dir/h264-high-aac.mp4"
+# MP4 permits FLAC while QuickTime MOV does not. Force the common professional
+# 24-bit depth; ffmpeg otherwise emits experimental 32-bit FLAC from AAC input.
+ffmpeg -hide_banner -loglevel error -y -i "$output_dir/h264-high-aac.mp4" -map 0:v:0 -map 0:a:0 -c:v copy -c:a flac -sample_fmt s32 -bits_per_raw_sample 24 -strict experimental "$output_dir/h264-flac.mp4"
 # shellcheck disable=SC2086
 ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v libx265 -profile:v main -pix_fmt yuv420p -tag:v hvc1 $common_audio -c:a aac -b:a 192k -movflags +faststart "$output_dir/hevc-main-aac.mov"
 # shellcheck disable=SC2086

@@ -8,7 +8,7 @@ Error.stackTraceLimit = 100;
 
 const scriptPath = fileURLToPath(import.meta.url);
 const upstreamRoot = resolve("build/video-compat/upstream");
-const generatedRoot = resolve(process.env.SOUNDKIT_MEDIA_FIXTURE_ROOT ?? "build/video-compat/never-final");
+const generatedRoot = resolve(process.env.SOUNDKIT_MEDIA_FIXTURE_ROOT ?? "testdata/video-compat/never-final");
 const wasmPackageRoot = resolve(process.env.SOUNDKIT_WASM_PACKAGE_ROOT ?? "soundkit-wasm/pkg");
 
 function ivfLargestPacket(bytes) {
@@ -25,13 +25,6 @@ function ivfLargestPacket(bytes) {
     cursor += size;
   }
   return largest;
-}
-
-function proresFirstPacket(bytes) {
-  assert.ok(bytes.length >= 8);
-  const size = bytes.readUInt32BE(0);
-  assert.ok(size >= 8 && size <= bytes.length);
-  return bytes.subarray(0, size);
 }
 
 function mutate(source, mutation) {
@@ -59,12 +52,81 @@ async function runCase(specification) {
     module_or_path: await readFile(resolve(wasmPackageRoot, "soundkit_wasm_bg.wasm")),
   });
   const source = await readFile(specification.path);
-  const packet = specification.framing === "ivf"
-    ? ivfLargestPacket(source)
-    : specification.framing === "prores"
-      ? proresFirstPacket(source)
-      : source;
+  let packet = specification.framing === "ivf" ? ivfLargestPacket(source) : source;
+  if (specification.framing === "mp4-video-packet") {
+    const index = initModule.WasmMp4MediaIndex.fromFile(source);
+    try {
+      let videoSample;
+      for (let sampleIndex = 0; sampleIndex < index.sampleCount; sampleIndex += 1) {
+        const candidate = index.sample(sampleIndex);
+        if (candidate.kind === "video") {
+          videoSample = { ...candidate, sampleIndex };
+          break;
+        }
+      }
+      assert.ok(videoSample, `${specification.path} has a video sample`);
+      packet = index.packet(
+        videoSample.sampleIndex,
+        source.subarray(videoSample.offset, videoSample.offset + videoSample.size),
+      ).data;
+    } finally {
+      index.free();
+    }
+  }
   const input = mutate(packet, specification.mutation);
+  if (specification.framing === "mp4") {
+    let index;
+    let fatalError;
+    try {
+      try {
+        index = initModule.WasmMp4MediaIndex.fromFile(input);
+        if (index.sampleCount > 0) {
+          const sample = index.sample(0);
+          index.packet(0, input.subarray(sample.offset, sample.offset + sample.size));
+        }
+      } catch (error) {
+        const message = String(error);
+        if (
+          error instanceof WebAssembly.RuntimeError ||
+          /unreachable|out of bounds|memory access|stack overflow/i.test(message)
+        ) fatalError = error;
+      }
+    } finally {
+      try {
+        index?.free();
+      } catch (error) {
+        fatalError ??= error;
+      }
+    }
+    if (fatalError) throw fatalError;
+    return;
+  }
+  if (specification.framing === "webm") {
+    const demuxer = new initModule.WasmWebmMediaDemuxer();
+    let fatalError;
+    try {
+      try {
+        for (let offset = 0; offset < input.length; offset += 4093) {
+          demuxer.push(input.subarray(offset, offset + 4093));
+        }
+        demuxer.flush();
+      } catch (error) {
+        const message = String(error);
+        if (
+          error instanceof WebAssembly.RuntimeError ||
+          /unreachable|out of bounds|memory access|stack overflow/i.test(message)
+        ) fatalError = error;
+      }
+    } finally {
+      try {
+        demuxer.free();
+      } catch (error) {
+        fatalError ??= error;
+      }
+    }
+    if (fatalError) throw fatalError;
+    return;
+  }
   const decoder = new initModule.WasmVideoDecoder(specification.codec);
   let fatalError;
   try {
@@ -106,7 +168,16 @@ const sources = [
   { codec: "vp9", path: resolve(upstreamRoot, "vp90_2_10_show_existing_frame2.vp9.ivf"), framing: "ivf" },
   { codec: "av1", path: resolve(upstreamRoot, "test-25fps.av1.ivf"), framing: "ivf" },
   { codec: "av1", path: resolve(upstreamRoot, "bear_av1_720p_444_10bit.ivf"), framing: "ivf" },
-  { codec: "prores", path: resolve(generatedRoot, "prores-422-hq.bin"), framing: "prores" },
+  {
+    codec: "prores",
+    path: resolve(generatedRoot, "prores-422-hq-pcm.mov"),
+    framing: "mp4-video-packet",
+  },
+  { codec: "container", path: resolve(generatedRoot, "h264-high-aac.mp4"), framing: "mp4" },
+  { codec: "container", path: resolve(generatedRoot, "hevc-main10-pcm.mov"), framing: "mp4" },
+  { codec: "container", path: resolve(generatedRoot, "prores-4444-alpha-pcm.mov"), framing: "mp4" },
+  { codec: "container", path: resolve(generatedRoot, "vp9-profile0-opus.webm"), framing: "webm" },
+  { codec: "container", path: resolve(generatedRoot, "av1-main-opus.webm"), framing: "webm" },
 ];
 const mutations = [
   "empty",
