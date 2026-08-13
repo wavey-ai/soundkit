@@ -76,6 +76,9 @@ pub struct VideoFrame {
     pub height: u32,
     pub bit_depth: u8,
     pub chroma_sampling: ChromaSampling,
+    /// True when plane 3 contains full-resolution alpha. Color planes are
+    /// always ordered Y, Cb, Cr; an alpha plane, when present, follows them.
+    pub has_alpha: bool,
     pub pts: Option<i64>,
     pub duration: Option<u64>,
     pub planes: Vec<VideoPlane>,
@@ -93,20 +96,38 @@ impl VideoFrame {
             ));
         }
         let bytes_per_sample = if self.bit_depth <= 8 { 1 } else { 2 };
-        let expected_planes = if self.chroma_sampling == ChromaSampling::Monochrome {
+        let color_planes = if self.chroma_sampling == ChromaSampling::Monochrome {
             1
         } else {
             3
         };
+        let expected_planes = color_planes + usize::from(self.has_alpha);
         if self.planes.len() != expected_planes {
             return Err(format!(
                 "decoded video frame expected {expected_planes} planes, got {}",
                 self.planes.len()
             ));
         }
-        for plane in &self.planes {
+        let expected_plane_dimensions = |index: usize| match (self.chroma_sampling, index) {
+            (_, 0) => (self.width, self.height),
+            (_, index) if self.has_alpha && index + 1 == expected_planes => {
+                (self.width, self.height)
+            }
+            (ChromaSampling::Cs420, _) => (self.width.div_ceil(2), self.height.div_ceil(2)),
+            (ChromaSampling::Cs422, _) => (self.width.div_ceil(2), self.height),
+            (ChromaSampling::Cs444, _) => (self.width, self.height),
+            (ChromaSampling::Monochrome, _) => (0, 0),
+        };
+        for (index, plane) in self.planes.iter().enumerate() {
             if plane.width == 0 || plane.height == 0 || plane.stride < plane.width {
                 return Err("decoded video plane has invalid dimensions".to_string());
+            }
+            let expected_dimensions = expected_plane_dimensions(index);
+            if (plane.width, plane.height) != expected_dimensions {
+                return Err(format!(
+                    "decoded video plane {index} expected {}x{}, got {}x{}",
+                    expected_dimensions.0, expected_dimensions.1, plane.width, plane.height
+                ));
             }
             let required = (plane.stride as usize)
                 .checked_mul(plane.height as usize)
@@ -216,16 +237,15 @@ impl VideoDecoder {
             DecoderState::Av1(decoder) => decode_av1(decoder, access_unit, pts, duration)?,
             #[cfg(feature = "prores")]
             DecoderState::ProRes => {
-                let frame = oxideav_prores::decoder::decode_packet_with_depth(
+                let output = prores_output_format(access_unit)?;
+                let frame = oxideav_prores::decoder::decode_packet_with_format(
                     access_unit,
                     pts,
-                    Some((
-                        oxideav_prores::decoder::BitDepth::Ten,
-                        prores_chroma_format(access_unit)?,
-                    )),
+                    Some(output.pixel_format),
+                    oxideav_prores::decoder::OutputRange::Full,
                 )
                 .map_err(|error| format!("ProRes decode failed: {error}"))?;
-                vec![prores_frame(frame, pts, duration)?]
+                vec![prores_frame(frame, output.bit_depth, pts, duration)?]
             }
         };
         for frame in &frames {
@@ -353,6 +373,7 @@ fn h264_frame(
         height,
         bit_depth: 8,
         chroma_sampling: ChromaSampling::Cs420,
+        has_alpha: false,
         pts,
         duration,
         planes: vec![
@@ -376,6 +397,7 @@ fn hevc_frame(frame: rust_h265::Frame, pts: Option<i64>, duration: Option<u64>) 
         height,
         bit_depth: frame.bit_depth,
         chroma_sampling: ChromaSampling::Cs420,
+        has_alpha: false,
         pts,
         duration,
         planes: vec![
@@ -407,6 +429,7 @@ fn vp9_frame(frame: vp9dec::Frame, pts: Option<i64>, duration: Option<u64>) -> V
         height,
         bit_depth: frame.bit_depth,
         chroma_sampling,
+        has_alpha: false,
         pts,
         duration,
         planes: vec![
@@ -486,6 +509,7 @@ fn drain_av1(decoder: &mut rusty_av1d::Decoder) -> Result<Vec<VideoFrame>, Strin
             height,
             bit_depth,
             chroma_sampling: sampling,
+            has_alpha: false,
             pts: picture.timestamp(),
             duration: u64::try_from(picture.duration())
                 .ok()
@@ -519,10 +543,10 @@ fn validate_source_plane(
 #[cfg(feature = "prores")]
 fn prores_frame(
     frame: oxideav_core::VideoFrame,
+    bit_depth: u8,
     pts: Option<i64>,
     duration: Option<u64>,
 ) -> Result<VideoFrame, String> {
-    let bits = frame.plane_significant_bits(0).unwrap_or(10);
     let planes = frame.image_planes();
     let y = planes
         .first()
@@ -533,7 +557,7 @@ fn prores_frame(
     let v = planes
         .get(2)
         .ok_or_else(|| "ProRes frame has no chroma plane".to_string())?;
-    let bytes_per_sample = if bits <= 8 { 1 } else { 2 };
+    let bytes_per_sample = if bit_depth <= 8 { 1 } else { 2 };
     let width = (y.stride / bytes_per_sample) as u32;
     let height = (y.data.len() / y.stride) as u32;
     let chroma_sampling = if u.stride * 2 == y.stride {
@@ -541,41 +565,80 @@ fn prores_frame(
     } else {
         ChromaSampling::Cs444
     };
+    let has_alpha = planes.len() == 4;
+    let mut output_planes = vec![
+        VideoPlane {
+            width,
+            height,
+            stride: (y.stride / bytes_per_sample) as u32,
+            data: y.data.clone(),
+        },
+        VideoPlane {
+            width: (u.stride / bytes_per_sample) as u32,
+            height,
+            stride: (u.stride / bytes_per_sample) as u32,
+            data: u.data.clone(),
+        },
+        VideoPlane {
+            width: (v.stride / bytes_per_sample) as u32,
+            height,
+            stride: (v.stride / bytes_per_sample) as u32,
+            data: v.data.clone(),
+        },
+    ];
+    if let Some(alpha) = planes.get(3) {
+        output_planes.push(VideoPlane {
+            width: (alpha.stride / bytes_per_sample) as u32,
+            height,
+            stride: (alpha.stride / bytes_per_sample) as u32,
+            data: alpha.data.clone(),
+        });
+    }
     Ok(VideoFrame {
         width,
         height,
-        bit_depth: bits,
+        bit_depth,
         chroma_sampling,
+        has_alpha,
         pts: frame.pts.or(pts),
         duration,
-        planes: vec![
-            VideoPlane {
-                width,
-                height,
-                stride: (y.stride / bytes_per_sample) as u32,
-                data: y.data.clone(),
-            },
-            VideoPlane {
-                width: (u.stride / bytes_per_sample) as u32,
-                height,
-                stride: (u.stride / bytes_per_sample) as u32,
-                data: u.data.clone(),
-            },
-            VideoPlane {
-                width: (v.stride / bytes_per_sample) as u32,
-                height,
-                stride: (v.stride / bytes_per_sample) as u32,
-                data: v.data.clone(),
-            },
-        ],
+        planes: output_planes,
     })
 }
 
 #[cfg(feature = "prores")]
-fn prores_chroma_format(data: &[u8]) -> Result<oxideav_prores::frame::ChromaFormat, String> {
+#[derive(Clone, Copy)]
+struct ProresOutput {
+    pixel_format: oxideav_core::PixelFormat,
+    bit_depth: u8,
+}
+
+#[cfg(feature = "prores")]
+fn prores_output_format(data: &[u8]) -> Result<ProresOutput, String> {
+    use oxideav_core::PixelFormat;
+    use oxideav_prores::frame::ChromaFormat;
+
     let (header, _) = oxideav_prores::frame::parse_frame(data)
         .map_err(|error| format!("ProRes header decode failed: {error}"))?;
-    Ok(header.chroma_format)
+    let has_alpha = header.alpha_channel_type != 0;
+    match (header.chroma_format, has_alpha) {
+        (ChromaFormat::Y422, false) => Ok(ProresOutput {
+            pixel_format: PixelFormat::Yuv422P10Le,
+            bit_depth: 10,
+        }),
+        (ChromaFormat::Y422, true) => Ok(ProresOutput {
+            pixel_format: PixelFormat::Yuva422P10Le,
+            bit_depth: 10,
+        }),
+        (ChromaFormat::Y444, false) => Ok(ProresOutput {
+            pixel_format: PixelFormat::Yuv444P12Le,
+            bit_depth: 12,
+        }),
+        (ChromaFormat::Y444, true) => Ok(ProresOutput {
+            pixel_format: PixelFormat::Yuva444P12Le,
+            bit_depth: 12,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -599,6 +662,7 @@ mod tests {
             height: 100_000,
             bit_depth: 8,
             chroma_sampling: ChromaSampling::Monochrome,
+            has_alpha: false,
             pts: None,
             duration: None,
             planes: vec![],

@@ -40,7 +40,12 @@ function assertFrames(codec, frames, expected) {
   for (const frame of frames) {
     assert.equal(frame.width, 640, `${codec} width`);
     assert.equal(frame.height, 360, `${codec} height`);
-    assert.ok(frame.planes.length >= 1, `${codec} planes`);
+    assert.equal(frame.hasAlpha, expected.hasAlpha ?? false, `${codec} alpha contract`);
+    assert.equal(
+      frame.planes.length,
+      expected.hasAlpha ? 4 : expected.chroma === "400" ? 1 : 3,
+      `${codec} plane count`,
+    );
     for (const plane of frame.planes) {
       const bytesPerSample = frame.bitDepth <= 8 ? 1 : 2;
       assert.equal(
@@ -86,6 +91,12 @@ await decodeStream("hevc", "hevc-main10.265", { frames: 75, bitDepth: 10, chroma
 await decodePackets("vp9", "vp9-profile0.ivf", ivfPackets, { frames: 75, bitDepth: 8, chroma: "420" });
 await decodePackets("av1", "av1-main.ivf", ivfPackets, { frames: 75, bitDepth: 8, chroma: "420" });
 await decodePackets("prores", "prores-422-hq.bin", proresPackets, { frames: 75, bitDepth: 10, chroma: "422" });
+await decodePackets("prores", "prores-4444-alpha.bin", proresPackets, {
+  frames: 75,
+  bitDepth: 12,
+  chroma: "444",
+  hasAlpha: true,
+});
 
 for (const codec of ["h264", "hevc", "vp9", "av1", "prores"]) {
   const decoder = new WasmVideoDecoder(codec);
@@ -139,6 +150,7 @@ await inspectAudio("h264-high-aac.mp4", { codec: "aac" });
 await inspectAudio("hevc-main-aac.mov", { codec: "aac" });
 await inspectAudio("hevc-main10-pcm.mov", { codec: "pcm", bits: 24 });
 await inspectAudio("prores-422-hq-pcm.mov", { codec: "pcm", bits: 24 });
+await inspectAudio("prores-4444-alpha-pcm.mov", { codec: "pcm", bits: 24 });
 await inspectAudio("dnxhr-hqx-pcm.mov", { codec: "pcm", bits: 24 });
 await inspectAudio("vp9-profile0-opus.webm", { codec: "opus" });
 await inspectAudio("av1-main-opus.webm", { codec: "opus" });

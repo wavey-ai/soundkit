@@ -10,7 +10,7 @@ SoundKit owns deterministic audio extraction and video decoding for native and W
 4. Pure-Rust decoders validate dimensions and decode into bounded planar frames.
 5. WASM exports copy validated Rust frames across the browser boundary.
 
-The decoded video contract is planar YUV with explicit dimensions, stride, bit depth, chroma sampling, presentation timestamp, and duration. Eight-bit samples use one byte. Deeper samples use little-endian 16-bit words.
+The decoded video contract is planar YUV with explicit dimensions, stride, bit depth, chroma sampling, alpha presence, presentation timestamp, and duration. Planes use Y, Cb, Cr, and optional alpha order. Eight-bit samples use one byte. Deeper samples use little-endian 16-bit words.
 
 ## Compatibility baseline
 
@@ -22,6 +22,7 @@ The deterministic `never-final.mov` matrix covers common artist delivery and upl
 | MOV | HEVC Main 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing |
 | MOV | HEVC Main10 10-bit 4:2:0 | PCM 24-bit 48 kHz stereo | Passing |
 | MOV | ProRes 422 HQ 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Passing |
+| MOV | ProRes 4444 12-bit 4:4:4 + alpha | PCM 24-bit 48 kHz stereo | Passing |
 | MOV | DNxHR HQX 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Audio passing; video decoder pending |
 | WebM | VP9 Profile 0 8-bit 4:2:0 | Opus 48 kHz stereo | Passing |
 | WebM | AV1 Main 8-bit 4:2:0 | Opus 48 kHz stereo | Passing |

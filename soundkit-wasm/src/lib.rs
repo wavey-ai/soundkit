@@ -1934,6 +1934,11 @@ fn export_video_frames(frames: Vec<VideoFrame>) -> Result<Array, JsValue> {
         )?;
         Reflect::set(
             &object,
+            &"hasAlpha".into(),
+            &JsValue::from_bool(frame.has_alpha),
+        )?;
+        Reflect::set(
+            &object,
             &"pts".into(),
             &frame
                 .pts

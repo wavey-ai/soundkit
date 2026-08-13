@@ -21,6 +21,10 @@ ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v lib
 ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v libx265 -profile:v main10 -pix_fmt yuv420p10le -tag:v hvc1 $common_audio -c:a pcm_s24le -movflags +faststart "$output_dir/hevc-main10-pcm.mov"
 # shellcheck disable=SC2086
 ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v prores_ks -profile:v 3 -pix_fmt yuv422p10le $common_audio -c:a pcm_s24le -movflags +faststart "$output_dir/prores-422-hq-pcm.mov"
+# ProRes 4444 keeps a coded alpha plane. A source without alpha receives an
+# opaque plane, which still exercises the professional 12-bit 4:4:4 path.
+# shellcheck disable=SC2086
+ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v prores_ks -profile:v 4 -pix_fmt yuva444p10le -alpha_bits 16 $common_audio -c:a pcm_s24le -movflags +faststart "$output_dir/prores-4444-alpha-pcm.mov"
 # shellcheck disable=SC2086
 ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v dnxhd -profile:v dnxhr_hqx -pix_fmt yuv422p10le $common_audio -c:a pcm_s24le "$output_dir/dnxhr-hqx-pcm.mov"
 # shellcheck disable=SC2086
@@ -34,5 +38,6 @@ ffmpeg -hide_banner -loglevel error -y -i "$output_dir/hevc-main10-pcm.mov" -map
 ffmpeg -hide_banner -loglevel error -y -i "$output_dir/vp9-profile0-opus.webm" -map 0:v:0 -c copy -f ivf "$output_dir/vp9-profile0.ivf"
 ffmpeg -hide_banner -loglevel error -y -i "$output_dir/av1-main-opus.webm" -map 0:v:0 -c copy -f ivf "$output_dir/av1-main.ivf"
 ffmpeg -hide_banner -loglevel error -y -i "$output_dir/prores-422-hq-pcm.mov" -map 0:v:0 -c copy -f data "$output_dir/prores-422-hq.bin"
+ffmpeg -hide_banner -loglevel error -y -i "$output_dir/prores-4444-alpha-pcm.mov" -map 0:v:0 -c copy -f data "$output_dir/prores-4444-alpha.bin"
 
 find "$output_dir" -maxdepth 1 -type f -exec shasum -a 256 {} \; | sort -k2 > "$output_dir/SHA256SUMS"
