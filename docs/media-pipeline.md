@@ -44,8 +44,9 @@ The deterministic `never-final.mov` matrix covers common artist delivery and upl
 | MOV | ProRes 422 HQ 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Passing |
 | MOV | ProRes 4444 12-bit 4:4:4 + alpha | PCM 24-bit 48 kHz stereo | Passing |
 | MOV | ProRes 4444 XQ 12-bit 4:4:4 + alpha | PCM 24-bit 48 kHz stereo | Passing |
-| MOV | DNxHR HQX 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Audio passing; video decoder pending |
-| MXF OP1a | DNxHR HQX 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Rust/WASM demux passing; video decoder pending |
+| MOV | DNxHR HQX 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Passing |
+| MOV | DNxHR HQ/SQ/LB 8-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Passing for every profile |
+| MXF OP1a | DNxHR HQX 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Passing |
 | WebM | VP9 Profile 0 8-bit 4:2:0 | Opus 48 kHz stereo | Passing |
 | WebM | VP9 Profile 2 10-bit 4:2:0 | Opus 48 kHz stereo | Passing |
 | WebM | AV1 Main 8-bit 4:2:0 | Opus 48 kHz stereo | Passing |
@@ -72,7 +73,7 @@ Build optimized WASM and decode both video and audio from each complete containe
 make media-conformance
 ```
 
-The repository stores 27 deterministic three-second container fixtures under `testdata/video-compat/never-final`. It does not store the artist source. The generator recreates the fixtures under `build/`, and `media-conformance` verifies the committed SHA-256 manifest before decoding.
+The repository stores 30 deterministic three-second container fixtures under `testdata/video-compat/never-final`. It does not store the artist source. The generator recreates the fixtures under `build/`, and `media-conformance` verifies the committed SHA-256 manifest before decoding.
 
 Fetch the pinned Chromium corpus and verify its SHA-256 values:
 
@@ -100,7 +101,8 @@ make media-fuzz
 - JavaScript performs no media validation. It only feeds bytes and consumes exported Rust values.
 - A dependency-specific release profile keeps `vp9dec` at optimization level 2 because LLVM 21 crashes at level 3 on `wasm32`.
 - The vendored `rusty_av1d` patch fixes high-bit-depth plane access and one malformed-input cleanup panic.
+- The memory-safe Rust DNx decoder is isolated in `soundkit-dnx` under LGPL-2.1-or-later. Its scalar output is byte-identical to the pinned FFmpeg reference across HQX, HQ, SQ, and LB.
 
 ## Remaining format work
 
-DNxHD/DNxHR needs a production-quality pure-Rust decoder. H.264 and HEVC 4:2:2/4:4:4 need decoder extensions; their container and audio paths already pass. The current API rejects these gaps explicitly instead of silently invoking a device decoder. Additional corpus work should cover OP-Atom, clip-wrapped MXF, and broader Matroska variants.
+DNxHR 444 and legacy DNxHD interlaced profiles remain. H.264 and HEVC 4:2:2/4:4:4 need decoder extensions; their container and audio paths already pass. The current API rejects these gaps explicitly instead of silently invoking a device decoder. Additional corpus work should cover OP-Atom, clip-wrapped MXF, and broader Matroska variants.

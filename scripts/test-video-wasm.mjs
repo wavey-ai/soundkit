@@ -16,10 +16,9 @@ import init, {
 const fixtureRoot = resolve(process.argv[2] ?? "testdata/video-compat/never-final");
 await init({ module_or_path: await readFile(new URL("../soundkit-wasm/pkg/soundkit_wasm_bg.wasm", import.meta.url)) });
 
-// These assertions verify the JS/WASM serialization boundary. Frame safety and
-// media validity are already enforced by VideoFrame::validate in Rust before
-// export_video_frames can return an object to JavaScript.
-function assertExportedFrameContract(codec, frames, expected) {
+// Test only: confirm that Rust-owned, Rust-validated frames retain their values
+// after WASM serialization. This is not production media validation.
+function assertWasmFrameSerialization(codec, frames, expected) {
   assert.equal(frames.length, expected.frames, `${codec} frame count`);
   for (const frame of frames) {
     assert.equal(frame.width, 640, `${codec} width`);
@@ -120,7 +119,7 @@ async function decodeMp4MediaFile(file, expected) {
       audioFrames += countPcmFrames(audioDecoder.flush());
     }
     frames.push(...decoder.flush());
-    assertExportedFrameContract(file, frames, expected);
+    assertWasmFrameSerialization(file, frames, expected);
     assert.deepEqual(
       frames.map((frame) => frame.pts).sort((left, right) => left - right),
       videoPresentationTimes.sort((left, right) => left - right),
@@ -192,7 +191,7 @@ async function decodeFragmentedMp4MediaFile(file, expected) {
     }
     frames.push(...videoDecoder.flush());
 
-    assertExportedFrameContract(file, frames, expected);
+    assertWasmFrameSerialization(file, frames, expected);
     assert.deepEqual(
       frames.map((frame) => frame.pts).sort((left, right) => left - right),
       videoPresentationTimes.sort((left, right) => left - right),
@@ -210,7 +209,9 @@ async function decodeFragmentedMp4MediaFile(file, expected) {
 async function inspectMxfMediaFile(file, expected) {
   const bytes = await readFile(resolve(fixtureRoot, file));
   const demuxer = new WasmMxfMediaDemuxer();
+  const decoder = new WasmVideoDecoder("dnxhr");
   const events = [];
+  const frames = [];
   try {
     // Split KLV keys, BER lengths, metadata sets, and essence payloads. Rust
     // owns reassembly, bounds checking, metadata resolution, and DNx headers.
@@ -252,10 +253,20 @@ async function inspectMxfMediaFile(file, expected) {
       expected.audioFrames,
       `${file} PCM frame count`,
     );
+    for (const packet of videoPackets) {
+      frames.push(...decoder.decode(packet.data, packet.presentationTime, packet.duration));
+    }
+    frames.push(...decoder.flush());
+    assertWasmFrameSerialization(file, frames, {
+      frames: expected.videoPackets,
+      bitDepth: 10,
+      chroma: "422",
+    });
     console.log(
-      `${file}: Rust demuxed ${videoPackets.length} DNxHR frames plus ${expected.audioFrames} PCM frames`,
+      `${file}: Rust decoded ${frames.length} DNxHR frames plus ${expected.audioFrames} PCM frames`,
     );
   } finally {
+    decoder.free();
     demuxer.free();
   }
 }
@@ -311,7 +322,7 @@ async function decodeWebmMediaFile(file, expected) {
     assert.ok(audioConfig, `${file} has a Rust-indexed audio track`);
     assert.equal(videoConfig.codecId, expected.codecId, `${file} video codec ID`);
     assert.equal(audioConfig.codecId, expected.audioCodecId, `${file} audio codec ID`);
-    assertExportedFrameContract(file, frames, expected);
+    assertWasmFrameSerialization(file, frames, expected);
     assert.ok(audioPackets > 0, `${file} extracts audio packets`);
     assert.equal(audioFrames, expected.audioFrames, `${file} decoded audio frame count`);
     console.log(`${file}: Rust decoded video plus ${audioFrames} audio frames`);
@@ -319,43 +330,6 @@ async function decodeWebmMediaFile(file, expected) {
     audioDecoder?.free();
     decoder.free();
     demuxer.free();
-  }
-}
-
-async function inspectExplicitVideoGap(file, expected) {
-  const bytes = await readFile(resolve(fixtureRoot, file));
-  const index = WasmMp4MediaIndex.fromFile(bytes);
-  try {
-    const tracks = index.tracks();
-    const video = tracks.find((track) => track.kind === "video");
-    const audio = tracks.find((track) => track.kind === "audio");
-    assert.equal(video?.codec, expected.codec, `${file} identifies the video codec`);
-    assert.equal(audio?.codec, expected.audioCodec, `${file} identifies the audio codec`);
-    let videoPackets = 0;
-    let audioFrames = 0;
-    for (let sampleIndex = 0; sampleIndex < index.sampleCount; sampleIndex += 1) {
-      const sample = index.sample(sampleIndex);
-      const packet = index.packet(
-        sampleIndex,
-        bytes.subarray(sample.offset, sample.offset + sample.size),
-      );
-      if (packet.kind === "video") {
-        videoPackets += 1;
-      } else {
-        const bytesPerFrame = audio.channels * Math.ceil(audio.bitsPerSample / 8);
-        audioFrames += packet.data.byteLength / bytesPerFrame;
-      }
-    }
-    assert.equal(videoPackets, expected.videoPackets, `${file} extracts every video packet`);
-    assert.equal(audioFrames, expected.audioFrames, `${file} extracted PCM frame count`);
-    assert.throws(
-      () => new WasmVideoDecoder(expected.codec),
-      /not(?: yet)? available|unsupported/i,
-      `${file} reports the native decoder gap explicitly`,
-    );
-    console.log(`${file}: Rust extracted both tracks and reported the explicit decoder gap`);
-  } finally {
-    index.free();
   }
 }
 
@@ -561,12 +535,24 @@ await decodeWebmMediaFile("matroska-hevc-aac.mkv", {
   bitDepth: 8,
   chroma: "420",
 });
-await inspectExplicitVideoGap("dnxhr-hqx-pcm.mov", {
+await decodeMp4MediaFile("dnxhr-hqx-pcm.mov", {
   codec: "dnxhr",
   audioCodec: "pcm",
   audioFrames: 144000,
-  videoPackets: 75,
+  frames: 75,
+  bitDepth: 10,
+  chroma: "422",
 });
+for (const profile of ["hq", "sq", "lb"]) {
+  await decodeMp4MediaFile(`dnxhr-${profile}-pcm.mov`, {
+    codec: "dnxhr",
+    audioCodec: "pcm",
+    audioFrames: 144000,
+    frames: 75,
+    bitDepth: 8,
+    chroma: "422",
+  });
+}
 await inspectMxfMediaFile("dnxhr-hqx-pcm.mxf", {
   videoPackets: 75,
   audioPackets: 75,
@@ -589,7 +575,7 @@ await inspectExplicitProfileGap("hevc-main444-10-aac.mov", {
   error: /only 4:2:0.*supported/i,
 });
 
-for (const codec of ["h264", "hevc", "vp9", "av1", "prores"]) {
+for (const codec of ["h264", "hevc", "vp9", "av1", "prores", "dnxhr"]) {
   const decoder = new WasmVideoDecoder(codec);
   try {
     let completed = false;
@@ -606,8 +592,6 @@ for (const codec of ["h264", "hevc", "vp9", "av1", "prores"]) {
     decoder.free();
   }
 }
-
-assert.throws(() => new WasmVideoDecoder("dnxhr"), /not yet available/);
 
 async function inspectAudio(file, expected) {
   const demuxer = WasmAudioTrackDemuxer.newAuto();

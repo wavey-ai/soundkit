@@ -7,12 +7,13 @@ description = "Pure-Rust video decoders and canonical frame surfaces for SoundKi
 repository = "https://github.com/wavey-ai/soundkit"
 
 [features]
-default = ["h264", "hevc", "vp9", "av1", "prores"]
+default = ["h264", "hevc", "vp9", "av1", "prores", "dnx"]
 h264 = ["dep:rusty_h264-common", "dep:rusty_h264-decoder"]
 hevc = ["dep:rust_h265"]
 vp9 = ["dep:vp9dec"]
 av1 = ["dep:rusty_av1d"]
 prores = ["dep:oxideav-core", "dep:oxideav-prores"]
+dnx = ["dep:soundkit-dnx"]
 
 [dependencies]
 rusty_h264-decoder = { version = "0.10.0", default-features = false, optional = true }
@@ -22,3 +23,4 @@ vp9dec = { version = "0.1.1", optional = true }
 rusty_av1d = { version = "1.2.0", default-features = false, features = ["bitdepth_8", "bitdepth_16"], optional = true }
 oxideav-core = { version = "0.1.31", optional = true }
 oxideav-prores = { version = "0.1.1", optional = true }
+soundkit-dnx = { path = "../soundkit-dnx", optional = true }

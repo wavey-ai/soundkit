@@ -1,0 +1,22 @@
+soundkit-dnx
+============
+
+This crate is a memory-safe Rust port derived from the following FFmpeg
+sources at commit ca821e458aabe2fa211d9e94eac38cd69fe2ea09:
+
+- libavcodec/dnxhddec.c
+- libavcodec/dnxhddata.c
+- libavcodec/simple_idct_template.c
+
+Upstream source: https://github.com/FFmpeg/FFmpeg
+
+Relevant upstream copyright notices include:
+
+- Copyright (c) 2007 SmartJog S.A., Baptiste Coudurier
+- Copyright (c) 2011 MirriAd Ltd
+- Copyright (c) 2015 Christophe Gisquet
+- 10-bit support by MirriAd Ltd and Joseph Artsimovich
+- Copyright (c) 2001 Michael Niedermayer
+
+The crate, including its generated codec tables, is distributed under
+LGPL-2.1-or-later. See LICENSE-LGPL-2.1-OR-LATER for the complete license.

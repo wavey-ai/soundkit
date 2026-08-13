@@ -58,6 +58,15 @@ ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v pro
 ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v prores_ks -profile:v 5 -pix_fmt yuva444p10le -alpha_bits 16 $common_audio -c:a pcm_s24le -movflags +faststart "$output_dir/prores-4444xq-alpha-pcm.mov"
 # shellcheck disable=SC2086
 ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v dnxhd -profile:v dnxhr_hqx -pix_fmt yuv422p10le $common_audio -c:a pcm_s24le "$output_dir/dnxhr-hqx-pcm.mov"
+# DNxHR HQ, SQ, and LB use distinct 8-bit VLC and weighting tables. They are
+# routine Avid/Resolve offline and mastering exports, so keep each profile in
+# the executable conformance matrix rather than inferring support from HQX.
+# shellcheck disable=SC2086
+ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v dnxhd -profile:v dnxhr_hq -pix_fmt yuv422p $common_audio -c:a pcm_s24le "$output_dir/dnxhr-hq-pcm.mov"
+# shellcheck disable=SC2086
+ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v dnxhd -profile:v dnxhr_sq -pix_fmt yuv422p $common_audio -c:a pcm_s24le "$output_dir/dnxhr-sq-pcm.mov"
+# shellcheck disable=SC2086
+ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v dnxhd -profile:v dnxhr_lb -pix_fmt yuv422p $common_audio -c:a pcm_s24le "$output_dir/dnxhr-lb-pcm.mov"
 # SMPTE OP1a MXF is a routine Resolve, Media Composer, and broadcast handoff.
 # Keep the same DNxHR HQX + 24-bit PCM programme in both QuickTime and MXF so
 # container conformance can compare identical professional essence.
@@ -82,4 +91,9 @@ ffmpeg -hide_banner -loglevel error -y -i "$output_dir/av1-main-opus.webm" -map 
 ffmpeg -hide_banner -loglevel error -y -i "$output_dir/prores-422-hq-pcm.mov" -map 0:v:0 -c copy -f data "$output_dir/prores-422-hq.bin"
 ffmpeg -hide_banner -loglevel error -y -i "$output_dir/prores-4444-alpha-pcm.mov" -map 0:v:0 -c copy -f data "$output_dir/prores-4444-alpha.bin"
 
-find "$output_dir" -maxdepth 1 -type f ! -name SHA256SUMS -exec shasum -a 256 {} \; | sort -k2 > "$output_dir/SHA256SUMS"
+(
+  cd "$output_dir"
+  find . -maxdepth 1 -type f ! -name SHA256SUMS -exec shasum -a 256 {} \; |
+    sed 's#  \./#  #' |
+    sort -k2 > SHA256SUMS
+)

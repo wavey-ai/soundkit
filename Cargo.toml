@@ -21,6 +21,7 @@ members = [
   "soundkit-ogg-opus",
   "soundkit-webm",
   "soundkit-audio-demux",
+  "soundkit-dnx",
   "soundkit-video",
   "soundkit-wasm",
   "soundkit-decoder",

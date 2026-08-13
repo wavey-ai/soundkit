@@ -1,0 +1,10 @@
+[package]
+name = "soundkit-dnx"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-2.1-or-later"
+description = "Memory-safe Rust VC-3, DNxHD, and DNxHR decoder for SoundKit."
+repository = "https://github.com/wavey-ai/soundkit"
+
+[dev-dependencies]
+sha2 = "0.10"

@@ -230,6 +230,21 @@ const sources = [
     path: resolve(generatedRoot, "prores-4444xq-alpha-pcm.mov"),
     framing: "mp4-video-packet",
   },
+  {
+    codec: "dnxhr",
+    path: resolve(generatedRoot, "dnxhr-hqx-pcm.mov"),
+    framing: "mp4-video-packet",
+  },
+  {
+    codec: "dnxhr",
+    path: resolve(generatedRoot, "dnxhr-hq-pcm.mov"),
+    framing: "mp4-video-packet",
+  },
+  {
+    codec: "dnxhr",
+    path: resolve(generatedRoot, "dnxhr-sq-pcm.mov"),
+    framing: "mp4-video-packet",
+  },
   { codec: "container", path: resolve(generatedRoot, "h264-high-aac.mp4"), framing: "mp4" },
   {
     codec: "container",

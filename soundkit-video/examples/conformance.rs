@@ -65,7 +65,7 @@ fn main() {
         .next()
         .unwrap_or_else(|| fail("missing elementary stream path"));
     if args.next().is_some() {
-        fail("usage: conformance <h264|hevc|vp9|av1|prores> <stream>");
+        fail("usage: conformance <h264|hevc|vp9|av1|prores|dnxhr> <stream>");
     }
     let codec = VideoCodec::parse(&codec_name).unwrap_or_else(|| fail("unsupported codec"));
     let data =
@@ -75,7 +75,7 @@ fn main() {
         VideoCodec::H264 | VideoCodec::Hevc => decoder.decode_stream(&data),
         VideoCodec::Vp9 | VideoCodec::Av1 => decode_ivf(&mut decoder, &data),
         VideoCodec::ProRes => decode_prores(&mut decoder, &data),
-        VideoCodec::DnxHd => Err("DNxHD/DNxHR is not implemented".to_string()),
+        VideoCodec::DnxHd => decoder.decode(&data, None, None),
     };
     let frames = result.unwrap_or_else(|error| fail(error));
     let first = frames

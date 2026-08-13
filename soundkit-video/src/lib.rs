@@ -206,7 +206,7 @@ pub fn inspect_dnx_frame(frame: &[u8]) -> Result<DnxFrameInfo, String> {
     let is_legacy = prefix == 0x0000_0280_0100 || prefix == 0x0000_0280_0200;
     let is_hr = (prefix & 0xffff_0000_ffff) == 0x0300
         && (0x0280..=0x2170).contains(&data_offset)
-        && data_offset % 4 == 0;
+        && data_offset.is_multiple_of(4);
     if !is_legacy && !is_hr {
         return Err(format!("invalid DNx frame prefix 0x{prefix:012x}"));
     }
@@ -400,20 +400,23 @@ impl VideoFrame {
     feature = "hevc",
     feature = "vp9",
     feature = "av1",
-    feature = "prores"
+    feature = "prores",
+    feature = "dnx"
 ))]
 enum DecoderState {
     Disabled,
     #[cfg(feature = "h264")]
-    H264(rusty_h264_decoder::Decoder),
+    H264(Box<rusty_h264_decoder::Decoder>),
     #[cfg(feature = "hevc")]
-    Hevc(rust_h265::Decoder),
+    Hevc(Box<rust_h265::Decoder>),
     #[cfg(feature = "vp9")]
-    Vp9(vp9dec::Decoder),
+    Vp9(Box<vp9dec::Decoder>),
     #[cfg(feature = "av1")]
-    Av1(rusty_av1d::Decoder),
+    Av1(Box<rusty_av1d::Decoder>),
     #[cfg(feature = "prores")]
     ProRes,
+    #[cfg(feature = "dnx")]
+    Dnx,
 }
 
 #[cfg(any(
@@ -421,7 +424,8 @@ enum DecoderState {
     feature = "hevc",
     feature = "vp9",
     feature = "av1",
-    feature = "prores"
+    feature = "prores",
+    feature = "dnx"
 ))]
 pub struct VideoDecoder {
     codec: VideoCodec,
@@ -433,26 +437,24 @@ pub struct VideoDecoder {
     feature = "hevc",
     feature = "vp9",
     feature = "av1",
-    feature = "prores"
+    feature = "prores",
+    feature = "dnx"
 ))]
 impl VideoDecoder {
     pub fn new(codec: VideoCodec) -> Result<Self, String> {
         let state = match codec {
             #[cfg(feature = "h264")]
-            VideoCodec::H264 => DecoderState::H264(rusty_h264_decoder::Decoder::new()),
+            VideoCodec::H264 => DecoderState::H264(Box::new(rusty_h264_decoder::Decoder::new())),
             #[cfg(feature = "hevc")]
-            VideoCodec::Hevc => DecoderState::Hevc(rust_h265::Decoder::new()),
+            VideoCodec::Hevc => DecoderState::Hevc(Box::new(rust_h265::Decoder::new())),
             #[cfg(feature = "vp9")]
-            VideoCodec::Vp9 => DecoderState::Vp9(vp9dec::Decoder::new()),
+            VideoCodec::Vp9 => DecoderState::Vp9(Box::new(vp9dec::Decoder::new())),
             #[cfg(feature = "av1")]
-            VideoCodec::Av1 => DecoderState::Av1(av1_decoder()?),
+            VideoCodec::Av1 => DecoderState::Av1(Box::new(av1_decoder()?)),
             #[cfg(feature = "prores")]
             VideoCodec::ProRes => DecoderState::ProRes,
-            VideoCodec::DnxHd => {
-                return Err(
-                    "DNxHD/DNxHR native decoding is not yet available in SoundKit".to_string(),
-                );
-            }
+            #[cfg(feature = "dnx")]
+            VideoCodec::DnxHd => DecoderState::Dnx,
             #[allow(unreachable_patterns)]
             _ => DecoderState::Disabled,
         };
@@ -527,6 +529,13 @@ impl VideoDecoder {
                 .map_err(|error| format!("ProRes decode failed: {error}"))?;
                 vec![prores_frame(frame, output.bit_depth, pts, duration)?]
             }
+            #[cfg(feature = "dnx")]
+            DecoderState::Dnx => vec![dnx_frame(
+                soundkit_dnx::decode_frame(access_unit)
+                    .map_err(|error| format!("DNx decode failed: {error}"))?,
+                pts,
+                duration,
+            )],
         };
         for frame in &frames {
             frame.validate()?;
@@ -596,7 +605,8 @@ impl VideoDecoder {
     feature = "hevc",
     feature = "vp9",
     feature = "av1",
-    feature = "prores"
+    feature = "prores",
+    feature = "dnx"
 )))]
 pub struct VideoDecoder {
     _private: (),
@@ -607,7 +617,8 @@ pub struct VideoDecoder {
     feature = "hevc",
     feature = "vp9",
     feature = "av1",
-    feature = "prores"
+    feature = "prores",
+    feature = "dnx"
 )))]
 impl VideoDecoder {
     pub fn new(codec: VideoCodec) -> Result<Self, String> {
@@ -930,6 +941,48 @@ fn prores_frame(
     })
 }
 
+#[cfg(feature = "dnx")]
+fn dnx_frame(frame: soundkit_dnx::DnxFrame, pts: Option<i64>, duration: Option<u64>) -> VideoFrame {
+    let width = frame.width;
+    let height = frame.height;
+    let bit_depth = frame.bit_depth;
+    let planes = frame
+        .planes
+        .into_iter()
+        .map(|plane| {
+            let data = if bit_depth <= 8 {
+                plane
+                    .samples
+                    .into_iter()
+                    .map(|sample| sample as u8)
+                    .collect()
+            } else {
+                let mut data = Vec::with_capacity(plane.samples.len() * 2);
+                for sample in plane.samples {
+                    data.extend_from_slice(&sample.to_le_bytes());
+                }
+                data
+            };
+            VideoPlane {
+                width: plane.width,
+                height: plane.height,
+                stride: plane.stride as u32,
+                data,
+            }
+        })
+        .collect();
+    VideoFrame {
+        width,
+        height,
+        bit_depth,
+        chroma_sampling: ChromaSampling::Cs422,
+        has_alpha: false,
+        pts,
+        duration,
+        planes,
+    }
+}
+
 #[cfg(feature = "prores")]
 #[derive(Clone, Copy)]
 struct ProresOutput {
@@ -1053,11 +1106,8 @@ mod tests {
     }
 
     #[test]
-    fn dnx_reports_an_explicit_native_gap() {
-        let error = match VideoDecoder::new(VideoCodec::DnxHd) {
-            Ok(_) => panic!("DNx decoder unexpectedly initialized"),
-            Err(error) => error,
-        };
-        assert!(error.contains("not yet available"));
+    fn dnx_decoder_is_available_in_default_builds() {
+        let decoder = VideoDecoder::new(VideoCodec::DnxHd).unwrap();
+        assert_eq!(decoder.codec(), VideoCodec::DnxHd);
     }
 }
