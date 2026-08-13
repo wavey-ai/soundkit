@@ -2,6 +2,7 @@
 name = "aac-wasm-bench"
 version = "0.12.3"
 edition = "2021"
+publish = false
 license = "MIT"
 description = "WASM AAC decoder benchmark for SoundKit AAC-LC, FDK AAC, Symphonia, and OxideAV status."
 readme = "README.md"

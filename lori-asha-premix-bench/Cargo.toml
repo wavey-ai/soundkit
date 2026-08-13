@@ -2,6 +2,7 @@
 name = "lori-asha-premix-bench"
 version = "0.12.3"
 edition = "2021"
+publish = false
 license = "MIT"
 description = "Benchmark comparing soundkit-opus and libopus-rs on Lori Asha Premix tracks"
 
