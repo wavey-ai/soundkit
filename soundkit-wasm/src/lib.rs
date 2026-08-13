@@ -3421,8 +3421,19 @@ mod tests {
     #[test]
     fn aiff_push_drains_pcm_frames() {
         let data = fixture("aiff/A_Tusk_is_used_to_make_costly_gifts.aiff");
-        let frames = decode_all("aiff", &data, 997);
+        let mut decoder = WasmMusicDecoder::new_with_format("aiff").unwrap();
+        let mut frames = Vec::new();
+        let mut first_output_at = None;
+        for (index, chunk) in data.chunks(997).enumerate() {
+            let output = decoder.push_frames(chunk).unwrap();
+            if !output.is_empty() && first_output_at.is_none() {
+                first_output_at = Some((index + 1) * 997);
+            }
+            frames.extend(output);
+        }
+        frames.extend(decoder.flush_frames().unwrap());
         assert!(!frames.is_empty());
+        assert!(first_output_at.unwrap() < data.len());
         assert_eq!(frames[0].channel_count(), 1);
     }
 

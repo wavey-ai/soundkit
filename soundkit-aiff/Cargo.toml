@@ -8,5 +8,6 @@ repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
 aifc = "0.7.0"
+audio-codec-algorithms = "0.8.0"
 frame-header = "0.2.1"
 soundkit = { path = "../soundkit" }

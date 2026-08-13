@@ -38,7 +38,7 @@ the container layout can require enough metadata/media to be buffered first.
 | Ogg Vorbis | `soundkit-vorbis` / `lewton` | Auto or explicit | Yes | Pure Rust decode and streaming Ogg packet parser. |
 | ALAC in M4A/MP4 | `soundkit-alac` / `alac` | Seekable MP4 index | Yes | Rust reads `moov`, then decodes one ranged ALAC packet at a time. |
 | ALAC in CAF | `soundkit-alac` / `alac` | Auto or explicit | EOF | CAF needs a bounded incremental container parser. |
-| AIFF / AIFF-C | `soundkit-aiff` / `aifc` | Auto or explicit | EOF | Pure Rust reader; current wrapper decodes after EOF. |
+| AIFF / AIFF-C | `soundkit-aiff` | Auto or explicit | Yes | Incremental Rust FORM parser supports integer PCM, float PCM, A-law, u-law, and IMA4. |
 | Raw AC-3 syncframes | `soundkit-ac3` / `oxideav-ac3` | Auto or explicit | Yes | Raw elementary AC-3 stream, not containerized AC-3. |
 | AMR-NB | `soundkit-amr` / OpenCORE AMR-NB | Explicit | Yes | 3GPP `.amr` magic and raw frame streams; C FFI backend. |
 | G.711 u-law / A-law | `soundkit-g711` | Explicit | Yes | Pure Rust PCMU/PCMA decode. |
