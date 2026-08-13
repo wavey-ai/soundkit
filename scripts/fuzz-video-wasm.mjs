@@ -173,13 +173,22 @@ const sources = [
     path: resolve(generatedRoot, "prores-422-hq-pcm.mov"),
     framing: "mp4-video-packet",
   },
+  {
+    codec: "prores",
+    path: resolve(generatedRoot, "prores-4444xq-alpha-pcm.mov"),
+    framing: "mp4-video-packet",
+  },
   { codec: "container", path: resolve(generatedRoot, "h264-high-aac.mp4"), framing: "mp4" },
+  { codec: "container", path: resolve(generatedRoot, "h264-high422-aac.mp4"), framing: "mp4" },
   { codec: "container", path: resolve(generatedRoot, "hevc-main10-pcm.mov"), framing: "mp4" },
+  { codec: "container", path: resolve(generatedRoot, "hevc-main422-10-aac.mov"), framing: "mp4" },
   { codec: "container", path: resolve(generatedRoot, "prores-4444-alpha-pcm.mov"), framing: "mp4" },
   { codec: "container", path: resolve(generatedRoot, "vp9-profile0-opus.webm"), framing: "webm" },
+  { codec: "container", path: resolve(generatedRoot, "vp9-profile2-10bit-opus.webm"), framing: "webm" },
   { codec: "container", path: resolve(generatedRoot, "matroska-h264-aac.mkv"), framing: "webm" },
   { codec: "container", path: resolve(generatedRoot, "matroska-hevc-aac.mkv"), framing: "webm" },
   { codec: "container", path: resolve(generatedRoot, "av1-main-opus.webm"), framing: "webm" },
+  { codec: "container", path: resolve(generatedRoot, "av1-main10-opus.webm"), framing: "webm" },
 ];
 const mutations = [
   "empty",

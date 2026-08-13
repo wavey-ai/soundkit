@@ -24,13 +24,23 @@ The deterministic `never-final.mov` matrix covers common artist delivery and upl
 | --- | --- | --- | --- |
 | MP4 | H.264 High 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing |
 | MP4 | H.264 High 8-bit 4:2:0 | FLAC 24-bit 48 kHz stereo | Passing |
+| MP4 | H.264 High 4:2:2 8-bit | AAC-LC 48 kHz stereo | Demux/audio passing; native video profile pending |
+| MP4 | H.264 High 4:4:4 8-bit | AAC-LC 48 kHz stereo | Demux/audio passing; native video profile pending |
 | MOV | HEVC Main 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing |
 | MOV | HEVC Main10 10-bit 4:2:0 | PCM 24-bit 48 kHz stereo | Passing |
+| MOV | HEVC Main 4:2:2 10-bit | AAC-LC 48 kHz stereo | Demux/audio passing; native video profile pending |
+| MOV | HEVC Main 4:4:4 10-bit | AAC-LC 48 kHz stereo | Demux/audio passing; native video profile pending |
+| MOV | ProRes Proxy 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Passing |
+| MOV | ProRes LT 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Passing |
+| MOV | ProRes 422 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Passing |
 | MOV | ProRes 422 HQ 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Passing |
 | MOV | ProRes 4444 12-bit 4:4:4 + alpha | PCM 24-bit 48 kHz stereo | Passing |
+| MOV | ProRes 4444 XQ 12-bit 4:4:4 + alpha | PCM 24-bit 48 kHz stereo | Passing |
 | MOV | DNxHR HQX 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Audio passing; video decoder pending |
 | WebM | VP9 Profile 0 8-bit 4:2:0 | Opus 48 kHz stereo | Passing |
+| WebM | VP9 Profile 2 10-bit 4:2:0 | Opus 48 kHz stereo | Passing |
 | WebM | AV1 Main 8-bit 4:2:0 | Opus 48 kHz stereo | Passing |
+| WebM | AV1 Main 10-bit 4:2:0 | Opus 48 kHz stereo | Passing |
 | Matroska | H.264 High 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing |
 | Matroska | HEVC Main 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing |
 | IVF | AV1 Main 10-bit 4:4:4 | None | Passing |
@@ -53,7 +63,7 @@ Build optimized WASM and decode both video and audio from each complete containe
 make media-conformance
 ```
 
-The repository stores eleven deterministic three-second container fixtures under `testdata/video-compat/never-final`. It does not store the artist source. The generator recreates the fixtures under `build/`, and `media-conformance` verifies the committed SHA-256 manifest before decoding.
+The repository stores 21 deterministic three-second container fixtures under `testdata/video-compat/never-final`. It does not store the artist source. The generator recreates the fixtures under `build/`, and `media-conformance` verifies the committed SHA-256 manifest before decoding.
 
 Fetch the pinned Chromium corpus and verify its SHA-256 values:
 
@@ -84,4 +94,4 @@ make media-fuzz
 
 ## Remaining format work
 
-DNxHD/DNxHR needs a production-quality pure-Rust decoder. The current API rejects it explicitly instead of silently invoking a device decoder. Additional corpus work should cover H.264 4:2:2/4:4:4, HEVC 4:2:2, variable frame rates, edit lists, fragmented MP4, and broader Matroska variants.
+DNxHD/DNxHR needs a production-quality pure-Rust decoder. H.264 and HEVC 4:2:2/4:4:4 need decoder extensions; their container and audio paths already pass. The current API rejects these gaps explicitly instead of silently invoking a device decoder. Additional corpus work should cover variable frame rates, edit lists, fragmented MP4, MXF, and broader Matroska variants.

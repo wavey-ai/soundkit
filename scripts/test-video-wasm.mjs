@@ -14,7 +14,10 @@ import init, {
 const fixtureRoot = resolve(process.argv[2] ?? "testdata/video-compat/never-final");
 await init({ module_or_path: await readFile(new URL("../soundkit-wasm/pkg/soundkit_wasm_bg.wasm", import.meta.url)) });
 
-function assertFrames(codec, frames, expected) {
+// These assertions verify the JS/WASM serialization boundary. Frame safety and
+// media validity are already enforced by VideoFrame::validate in Rust before
+// export_video_frames can return an object to JavaScript.
+function assertExportedFrameContract(codec, frames, expected) {
   assert.equal(frames.length, expected.frames, `${codec} frame count`);
   for (const frame of frames) {
     assert.equal(frame.width, 640, `${codec} width`);
@@ -101,7 +104,7 @@ async function decodeMp4MediaFile(file, expected) {
       audioFrames += countPcmFrames(audioDecoder.flush());
     }
     frames.push(...decoder.flush());
-    assertFrames(file, frames, expected);
+    assertExportedFrameContract(file, frames, expected);
     assert.ok(audioPackets > 0, `${file} extracts audio packets`);
     assert.ok(audioBytes > 0, `${file} extracts audio bytes`);
     assert.equal(audioFrames, expected.audioFrames, `${file} decoded audio frame count`);
@@ -164,7 +167,7 @@ async function decodeWebmMediaFile(file, expected) {
     assert.ok(audioConfig, `${file} has a Rust-indexed audio track`);
     assert.equal(videoConfig.codecId, expected.codecId, `${file} video codec ID`);
     assert.equal(audioConfig.codecId, expected.audioCodecId, `${file} audio codec ID`);
-    assertFrames(file, frames, expected);
+    assertExportedFrameContract(file, frames, expected);
     assert.ok(audioPackets > 0, `${file} extracts audio packets`);
     assert.equal(audioFrames, expected.audioFrames, `${file} decoded audio frame count`);
     console.log(`${file}: Rust decoded video plus ${audioFrames} audio frames`);
@@ -212,6 +215,46 @@ async function inspectExplicitVideoGap(file, expected) {
   }
 }
 
+async function inspectExplicitProfileGap(file, expected) {
+  const bytes = await readFile(resolve(fixtureRoot, file));
+  const index = WasmMp4MediaIndex.fromFile(bytes);
+  const decoder = new WasmVideoDecoder(expected.codec);
+  try {
+    const video = index.tracks().find((track) => track.kind === "video");
+    assert.ok(video, `${file} has a Rust-indexed video track`);
+    assert.equal(video.codec, expected.codec, `${file} video codec`);
+    let capabilityError = null;
+    try {
+      if (video.decoderConfiguration.byteLength > 0) {
+        decoder.decode(video.decoderConfiguration, Number.NaN, Number.NaN);
+      }
+      for (let sampleIndex = 0; sampleIndex < index.sampleCount; sampleIndex += 1) {
+        const sample = index.sample(sampleIndex);
+        if (sample.kind !== "video") continue;
+        const packet = index.packet(
+          sampleIndex,
+          bytes.subarray(sample.offset, sample.offset + sample.size),
+        );
+        decoder.decode(packet.data, packet.presentationTime, packet.duration);
+      }
+      decoder.flush();
+    } catch (error) {
+      capabilityError = error;
+    }
+    assert.ok(capabilityError, `${file} must not silently decode an unsupported profile`);
+    assert.equal(
+      capabilityError instanceof WebAssembly.RuntimeError,
+      false,
+      `${file} reports a typed capability error rather than trapping`,
+    );
+    assert.match(String(capabilityError), expected.error, `${file} capability error`);
+    console.log(`${file}: Rust reported the explicit native profile gap`);
+  } finally {
+    decoder.free();
+    index.free();
+  }
+}
+
 await decodeMp4MediaFile("h264-high-aac.mp4", {
   codec: "h264",
   audioCodec: "aac",
@@ -252,7 +295,40 @@ await decodeMp4MediaFile("prores-422-hq-pcm.mov", {
   bitDepth: 10,
   chroma: "422",
 });
+await decodeMp4MediaFile("prores-proxy-pcm.mov", {
+  codec: "prores",
+  audioCodec: "pcm",
+  audioFrames: 144000,
+  frames: 75,
+  bitDepth: 10,
+  chroma: "422",
+});
+await decodeMp4MediaFile("prores-lt-pcm.mov", {
+  codec: "prores",
+  audioCodec: "pcm",
+  audioFrames: 144000,
+  frames: 75,
+  bitDepth: 10,
+  chroma: "422",
+});
+await decodeMp4MediaFile("prores-standard-pcm.mov", {
+  codec: "prores",
+  audioCodec: "pcm",
+  audioFrames: 144000,
+  frames: 75,
+  bitDepth: 10,
+  chroma: "422",
+});
 await decodeMp4MediaFile("prores-4444-alpha-pcm.mov", {
+  codec: "prores",
+  audioCodec: "pcm",
+  audioFrames: 144000,
+  frames: 75,
+  bitDepth: 12,
+  chroma: "444",
+  hasAlpha: true,
+});
+await decodeMp4MediaFile("prores-4444xq-alpha-pcm.mov", {
   codec: "prores",
   audioCodec: "pcm",
   audioFrames: 144000,
@@ -270,6 +346,15 @@ await decodeWebmMediaFile("vp9-profile0-opus.webm", {
   bitDepth: 8,
   chroma: "420",
 });
+await decodeWebmMediaFile("vp9-profile2-10bit-opus.webm", {
+  codec: "vp9",
+  codecId: "V_VP9",
+  audioCodecId: "A_OPUS",
+  audioFrames: 144960,
+  frames: 75,
+  bitDepth: 10,
+  chroma: "420",
+});
 await decodeWebmMediaFile("av1-main-opus.webm", {
   codec: "av1",
   codecId: "V_AV1",
@@ -277,6 +362,15 @@ await decodeWebmMediaFile("av1-main-opus.webm", {
   audioFrames: 144960,
   frames: 75,
   bitDepth: 8,
+  chroma: "420",
+});
+await decodeWebmMediaFile("av1-main10-opus.webm", {
+  codec: "av1",
+  codecId: "V_AV1",
+  audioCodecId: "A_OPUS",
+  audioFrames: 144960,
+  frames: 75,
+  bitDepth: 10,
   chroma: "420",
 });
 await decodeWebmMediaFile("matroska-h264-aac.mkv", {
@@ -302,6 +396,22 @@ await inspectExplicitVideoGap("dnxhr-hqx-pcm.mov", {
   audioCodec: "pcm",
   audioFrames: 144000,
   videoPackets: 75,
+});
+await inspectExplicitProfileGap("h264-high422-aac.mp4", {
+  codec: "h264",
+  error: /non-4:2:0 chroma/i,
+});
+await inspectExplicitProfileGap("h264-high444-aac.mp4", {
+  codec: "h264",
+  error: /non-4:2:0 chroma/i,
+});
+await inspectExplicitProfileGap("hevc-main422-10-aac.mov", {
+  codec: "hevc",
+  error: /only 4:2:0.*supported/i,
+});
+await inspectExplicitProfileGap("hevc-main444-10-aac.mov", {
+  codec: "hevc",
+  error: /only 4:2:0.*supported/i,
 });
 
 for (const codec of ["h264", "hevc", "vp9", "av1", "prores"]) {
@@ -353,12 +463,22 @@ async function inspectAudio(file, expected) {
 }
 
 await inspectAudio("h264-high-aac.mp4", { codec: "aac" });
+await inspectAudio("h264-high422-aac.mp4", { codec: "aac" });
+await inspectAudio("h264-high444-aac.mp4", { codec: "aac" });
 await inspectAudio("hevc-main-aac.mov", { codec: "aac" });
 await inspectAudio("hevc-main10-pcm.mov", { codec: "pcm", bits: 24 });
+await inspectAudio("hevc-main422-10-aac.mov", { codec: "aac" });
+await inspectAudio("hevc-main444-10-aac.mov", { codec: "aac" });
+await inspectAudio("prores-proxy-pcm.mov", { codec: "pcm", bits: 24 });
+await inspectAudio("prores-lt-pcm.mov", { codec: "pcm", bits: 24 });
+await inspectAudio("prores-standard-pcm.mov", { codec: "pcm", bits: 24 });
 await inspectAudio("prores-422-hq-pcm.mov", { codec: "pcm", bits: 24 });
 await inspectAudio("prores-4444-alpha-pcm.mov", { codec: "pcm", bits: 24 });
+await inspectAudio("prores-4444xq-alpha-pcm.mov", { codec: "pcm", bits: 24 });
 await inspectAudio("dnxhr-hqx-pcm.mov", { codec: "pcm", bits: 24 });
 await inspectAudio("vp9-profile0-opus.webm", { codec: "opus" });
+await inspectAudio("vp9-profile2-10bit-opus.webm", { codec: "opus" });
 await inspectAudio("av1-main-opus.webm", { codec: "opus" });
+await inspectAudio("av1-main10-opus.webm", { codec: "opus" });
 
 console.log("SoundKit WASM media conformance passed");
