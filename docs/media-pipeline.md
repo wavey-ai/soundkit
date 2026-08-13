@@ -25,6 +25,7 @@ The deterministic `never-final.mov` matrix covers common artist delivery and upl
 | Container | Video | Audio | Native/WASM status |
 | --- | --- | --- | --- |
 | MP4 | H.264 High 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing |
+| MP4 VFR | H.264 High 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing, including edit timeline |
 | MP4 | H.264 High 8-bit 4:2:0 | FLAC 24-bit 48 kHz stereo | Passing |
 | MP4 | H.264 High 4:2:2 8-bit | AAC-LC 48 kHz stereo | Demux/audio passing; native video profile pending |
 | MP4 | H.264 High 4:4:4 8-bit | AAC-LC 48 kHz stereo | Demux/audio passing; native video profile pending |
@@ -65,7 +66,7 @@ Build optimized WASM and decode both video and audio from each complete containe
 make media-conformance
 ```
 
-The repository stores 21 deterministic three-second container fixtures under `testdata/video-compat/never-final`. It does not store the artist source. The generator recreates the fixtures under `build/`, and `media-conformance` verifies the committed SHA-256 manifest before decoding.
+The repository stores 22 deterministic three-second container fixtures under `testdata/video-compat/never-final`. It does not store the artist source. The generator recreates the fixtures under `build/`, and `media-conformance` verifies the committed SHA-256 manifest before decoding.
 
 Fetch the pinned Chromium corpus and verify its SHA-256 values:
 
@@ -96,4 +97,4 @@ make media-fuzz
 
 ## Remaining format work
 
-DNxHD/DNxHR needs a production-quality pure-Rust decoder. H.264 and HEVC 4:2:2/4:4:4 need decoder extensions; their container and audio paths already pass. The current API rejects these gaps explicitly instead of silently invoking a device decoder. Additional corpus work should cover variable frame rates, edit lists, fragmented MP4, MXF, and broader Matroska variants.
+DNxHD/DNxHR needs a production-quality pure-Rust decoder. H.264 and HEVC 4:2:2/4:4:4 need decoder extensions; their container and audio paths already pass. The current API rejects these gaps explicitly instead of silently invoking a device decoder. Additional corpus work should cover fragmented MP4, MXF, and broader Matroska variants.

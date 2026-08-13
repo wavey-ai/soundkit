@@ -179,6 +179,7 @@ const sources = [
     framing: "mp4-video-packet",
   },
   { codec: "container", path: resolve(generatedRoot, "h264-high-aac.mp4"), framing: "mp4" },
+  { codec: "container", path: resolve(generatedRoot, "h264-vfr-aac.mp4"), framing: "mp4" },
   { codec: "container", path: resolve(generatedRoot, "h264-high422-aac.mp4"), framing: "mp4" },
   { codec: "container", path: resolve(generatedRoot, "hevc-main10-pcm.mov"), framing: "mp4" },
   { codec: "container", path: resolve(generatedRoot, "hevc-main422-10-aac.mov"), framing: "mp4" },

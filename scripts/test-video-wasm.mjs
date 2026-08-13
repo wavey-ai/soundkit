@@ -61,6 +61,7 @@ async function decodeMp4MediaFile(file, expected) {
   let audioFrames = 0;
   const frames = [];
   const videoPresentationTimes = [];
+  const videoDurations = [];
   try {
     const tracks = index.tracks();
     const video = tracks.find((track) => track.kind === "video");
@@ -91,6 +92,7 @@ async function decodeMp4MediaFile(file, expected) {
       const packet = index.packet(sampleIndex, source);
       if (packet.kind === "video") {
         videoPresentationTimes.push(packet.presentationTime);
+        videoDurations.push(packet.duration);
         frames.push(...decoder.decode(packet.data, packet.presentationTime, packet.duration));
       } else {
         audioPackets += 1;
@@ -122,6 +124,14 @@ async function decodeMp4MediaFile(file, expected) {
       videoPresentationTimes.sort((left, right) => left - right),
       `${file} preserves the Rust edit-list presentation timeline through decode`,
     );
+    assert.deepEqual(
+      frames.map((frame) => frame.duration).sort((left, right) => left - right),
+      videoDurations.sort((left, right) => left - right),
+      `${file} preserves Rust packet durations through decode`,
+    );
+    if (expected.variableFrameDurations) {
+      assert.ok(new Set(videoDurations).size > 1, `${file} keeps variable frame durations`);
+    }
     assert.ok(audioPackets > 0, `${file} extracts audio packets`);
     assert.ok(audioBytes > 0, `${file} extracts audio bytes`);
     assert.equal(audioFrames, expected.audioFrames, `${file} decoded audio frame count`);
@@ -281,6 +291,15 @@ await decodeMp4MediaFile("h264-high-aac.mp4", {
   chroma: "420",
   videoTimeline: { presentationStart: 0, mediaStart: 1024, duration: 38400 },
   audioTimeline: { presentationStart: 0, mediaStart: 1024, duration: 144000 },
+});
+await decodeMp4MediaFile("h264-vfr-aac.mp4", {
+  codec: "h264",
+  audioCodec: "aac",
+  audioFrames: 144000,
+  frames: 31,
+  bitDepth: 8,
+  chroma: "420",
+  variableFrameDurations: true,
 });
 await decodeMp4MediaFile("h264-flac.mp4", {
   codec: "h264",
@@ -482,6 +501,7 @@ async function inspectAudio(file, expected) {
 }
 
 await inspectAudio("h264-high-aac.mp4", { codec: "aac" });
+await inspectAudio("h264-vfr-aac.mp4", { codec: "aac" });
 await inspectAudio("h264-high422-aac.mp4", { codec: "aac" });
 await inspectAudio("h264-high444-aac.mp4", { codec: "aac" });
 await inspectAudio("hevc-main-aac.mov", { codec: "aac" });
