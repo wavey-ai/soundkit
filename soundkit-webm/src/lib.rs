@@ -11,6 +11,10 @@ use tracing::{debug, trace};
 
 #[cfg(feature = "opus")]
 const MAX_OPUS_FRAME_SAMPLES: usize = 5760; // 120 ms @ 48 kHz
+const MAX_WEBM_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+const MAX_WEBM_METADATA_ELEMENT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_WEBM_PACKET_ELEMENT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_WEBM_BUFFER_BYTES: usize = MAX_WEBM_PACKET_ELEMENT_BYTES as usize + 64 * 1024;
 
 // EBML Element IDs (variable length encoded in files)
 const EBML_ID: u32 = 0x1A45DFA3;
@@ -119,6 +123,39 @@ fn read_float(data: &[u8], size: usize) -> f64 {
         }
         _ => 0.0,
     }
+}
+
+fn append_webm_stream_chunk(buffer: &mut Vec<u8>, data: &[u8]) -> Result<(), String> {
+    if data.len() > MAX_WEBM_INPUT_CHUNK_BYTES {
+        return Err(format!(
+            "WebM input chunk exceeds the {MAX_WEBM_INPUT_CHUNK_BYTES} byte streaming budget"
+        ));
+    }
+    let new_len = buffer
+        .len()
+        .checked_add(data.len())
+        .ok_or_else(|| "WebM buffer size overflow".to_string())?;
+    if new_len > MAX_WEBM_BUFFER_BYTES {
+        return Err(format!(
+            "WebM parser buffer exceeds the {MAX_WEBM_BUFFER_BYTES} byte budget"
+        ));
+    }
+    buffer.extend_from_slice(data);
+    Ok(())
+}
+
+fn bounded_webm_element_size(id: u32, size: u64) -> Result<usize, String> {
+    let budget = if matches!(id, SIMPLE_BLOCK_ID | BLOCK_ID | BLOCK_GROUP_ID) {
+        MAX_WEBM_PACKET_ELEMENT_BYTES
+    } else {
+        MAX_WEBM_METADATA_ELEMENT_BYTES
+    };
+    if size > budget {
+        return Err(format!(
+            "WebM element 0x{id:X} exceeds the {budget} byte budget"
+        ));
+    }
+    usize::try_from(size).map_err(|_| "WebM element size exceeds this platform".to_string())
 }
 
 fn read_signed_vint(data: &[u8]) -> Option<(i64, usize)> {
@@ -440,7 +477,7 @@ impl WebmMediaDemuxer {
     }
 
     pub fn add(&mut self, data: &[u8]) -> Result<Vec<WebmMediaDemuxEvent>, String> {
-        self.buffer.extend_from_slice(data);
+        append_webm_stream_chunk(&mut self.buffer, data)?;
         loop {
             let previous_state = self.state;
             let consumed = match self.state {
@@ -481,9 +518,10 @@ impl WebmMediaDemuxer {
             Some(value) => value,
             None => return Ok(0),
         };
+        let size = bounded_webm_element_size(id, size)?;
         let total_len = id_len
             .checked_add(size_len)
-            .and_then(|value| value.checked_add(size as usize))
+            .and_then(|value| value.checked_add(size))
             .ok_or_else(|| "WebM EBML header size overflow".to_string())?;
         if self.buffer.len() < total_len {
             return Ok(0);
@@ -514,23 +552,30 @@ impl WebmMediaDemuxer {
                 break;
             };
             let header_len = id_len + size_len;
-            if is_unknown_ebml_size(size, size_len)
-                && matches!(id, TRACKS_ID | SEGMENT_ID | CLUSTER_ID)
-            {
+            if id == CLUSTER_ID {
+                self.emit_media_configs()?;
+                self.state = ParserState::Clusters;
+                return Ok(pos);
+            }
+            if id == TRACKS_ID {
                 pos += header_len;
                 continue;
             }
+            if is_unknown_ebml_size(size, size_len) && matches!(id, SEGMENT_ID) {
+                pos += header_len;
+                continue;
+            }
+            let size = bounded_webm_element_size(id, size)?;
             let data_start = pos
                 .checked_add(header_len)
                 .ok_or_else(|| "WebM element offset overflow".to_string())?;
             let data_end = data_start
-                .checked_add(size as usize)
+                .checked_add(size)
                 .ok_or_else(|| "WebM element size overflow".to_string())?;
             if data_end > self.buffer.len() {
                 break;
             }
             match id {
-                TRACKS_ID => pos += header_len,
                 TRACK_ENTRY_ID => {
                     let entry = self.buffer[data_start..data_end].to_vec();
                     if let Some(track) = parse_media_track_entry(&entry)? {
@@ -550,11 +595,6 @@ impl WebmMediaDemuxer {
                         self.timecode_scale_ns,
                     )?;
                     pos = data_end;
-                }
-                CLUSTER_ID => {
-                    self.emit_media_configs()?;
-                    self.state = ParserState::Clusters;
-                    return Ok(pos);
                 }
                 _ => pos = data_end,
             }
@@ -600,28 +640,25 @@ impl WebmMediaDemuxer {
                 break;
             };
             let header_len = id_len + size_len;
-            if is_unknown_ebml_size(size, size_len) && id == CLUSTER_ID {
+            if id == CLUSTER_ID {
                 self.cluster_timecode = 0;
                 pos += header_len;
                 continue;
             }
+            let size = bounded_webm_element_size(id, size)?;
             let data_start = pos
                 .checked_add(header_len)
                 .ok_or_else(|| "WebM cluster offset overflow".to_string())?;
             let data_end = data_start
-                .checked_add(size as usize)
+                .checked_add(size)
                 .ok_or_else(|| "WebM cluster element size overflow".to_string())?;
             if data_end > self.buffer.len() {
                 break;
             }
             match id {
-                CLUSTER_ID => {
-                    self.cluster_timecode = 0;
-                    pos += header_len;
-                }
                 CLUSTER_TIMECODE_ID => {
                     self.cluster_timecode =
-                        i64::try_from(read_uint(&self.buffer[data_start..data_end], size as usize))
+                        i64::try_from(read_uint(&self.buffer[data_start..data_end], size))
                             .map_err(|_| "WebM cluster timecode exceeds i64".to_string())?;
                     pos = data_end;
                 }
@@ -956,7 +993,7 @@ impl WebmOpusDemuxer {
     }
 
     pub fn add(&mut self, data: &[u8]) -> Result<Vec<WebmOpusDemuxEvent>, String> {
-        self.buffer.extend_from_slice(data);
+        append_webm_stream_chunk(&mut self.buffer, data)?;
 
         loop {
             let previous_state = self.state;
@@ -1007,7 +1044,10 @@ impl WebmOpusDemuxer {
         };
 
         let header_len = id_len + size_len;
-        let total_len = header_len + size as usize;
+        let size = bounded_webm_element_size(id, size)?;
+        let total_len = header_len
+            .checked_add(size)
+            .ok_or_else(|| "WebM EBML header size overflow".to_string())?;
 
         if self.buffer.len() < total_len {
             return Ok(0);
@@ -1051,37 +1091,41 @@ impl WebmOpusDemuxer {
             };
 
             let header_len = id_len + size_len;
-            let data_start = pos + header_len;
-            let data_end = data_start + size as usize;
-
             let is_master = matches!(
                 id,
                 TRACKS_ID | TRACK_ENTRY_ID | AUDIO_ID | SEGMENT_ID | CLUSTER_ID
             );
+            if id == CLUSTER_ID {
+                self.emit_config()?;
+                self.state = ParserState::Clusters;
+                return Ok(pos);
+            }
+            if id == TRACKS_ID {
+                pos += header_len;
+                continue;
+            }
             if size == 0x00FFFFFFFFFFFFFF && is_master {
                 pos += header_len;
                 continue;
             }
+            let size = bounded_webm_element_size(id, size)?;
+            let data_start = pos
+                .checked_add(header_len)
+                .ok_or_else(|| "WebM element offset overflow".to_string())?;
+            let data_end = data_start
+                .checked_add(size)
+                .ok_or_else(|| "WebM element size overflow".to_string())?;
 
             if data_end > self.buffer.len() {
                 break;
             }
 
             match id {
-                TRACKS_ID => {
-                    pos += header_len;
-                    continue;
-                }
                 TRACK_ENTRY_ID => {
                     let element_data = self.buffer[data_start..data_end].to_vec();
                     self.parse_track_entry(&element_data)?;
                     pos = data_end;
                     continue;
-                }
-                CLUSTER_ID => {
-                    self.emit_config()?;
-                    self.state = ParserState::Clusters;
-                    return Ok(pos);
                 }
                 _ => {
                     pos = data_end;
@@ -1115,7 +1159,10 @@ impl WebmOpusDemuxer {
 
             let header_len = id_len + size_len;
             let elem_start = pos + header_len;
-            let elem_end = elem_start + size as usize;
+            let size = bounded_webm_element_size(id, size)?;
+            let elem_end = elem_start
+                .checked_add(size)
+                .ok_or_else(|| "WebM track element size overflow".to_string())?;
 
             if elem_end > data.len() {
                 break;
@@ -1124,8 +1171,8 @@ impl WebmOpusDemuxer {
             let elem_data = &data[elem_start..elem_end];
 
             match id {
-                TRACK_NUMBER_ID => track_number = read_uint(elem_data, size as usize),
-                TRACK_TYPE_ID => track_type = read_uint(elem_data, size as usize),
+                TRACK_NUMBER_ID => track_number = read_uint(elem_data, size),
+                TRACK_TYPE_ID => track_type = read_uint(elem_data, size),
                 CODEC_ID_ID => codec_id = String::from_utf8_lossy(elem_data).to_string(),
                 CODEC_PRIVATE_ID => codec_private = elem_data.to_vec(),
                 AUDIO_ID => {
@@ -1145,7 +1192,10 @@ impl WebmOpusDemuxer {
 
                         let audio_header_len = audio_id_len + audio_size_len;
                         let audio_elem_start = audio_pos + audio_header_len;
-                        let audio_elem_end = audio_elem_start + audio_size as usize;
+                        let audio_size = bounded_webm_element_size(audio_id, audio_size)?;
+                        let audio_elem_end = audio_elem_start
+                            .checked_add(audio_size)
+                            .ok_or_else(|| "WebM audio element size overflow".to_string())?;
 
                         if audio_elem_end > elem_data.len() {
                             break;
@@ -1154,14 +1204,13 @@ impl WebmOpusDemuxer {
                         let audio_elem_data = &elem_data[audio_elem_start..audio_elem_end];
                         match audio_id {
                             SAMPLING_FREQUENCY_ID => {
-                                sample_rate =
-                                    read_float(audio_elem_data, audio_size as usize) as u32;
+                                sample_rate = read_float(audio_elem_data, audio_size) as u32;
                                 if sample_rate == 0 {
                                     sample_rate = 48000;
                                 }
                             }
                             CHANNELS_ID => {
-                                channels = read_uint(audio_elem_data, audio_size as usize) as u8;
+                                channels = read_uint(audio_elem_data, audio_size) as u8;
                                 if channels == 0 {
                                     channels = 2;
                                 }
@@ -1237,23 +1286,25 @@ impl WebmOpusDemuxer {
             };
 
             let header_len = id_len + size_len;
-            let data_start = pos + header_len;
-
-            if size == 0x00FFFFFFFFFFFFFF {
+            if id == CLUSTER_ID {
                 pos += header_len;
                 continue;
             }
-
-            let data_end = data_start + size as usize;
+            if is_unknown_ebml_size(size, size_len) {
+                return Err(format!("WebM element 0x{id:X} has an unknown payload size"));
+            }
+            let size = bounded_webm_element_size(id, size)?;
+            let data_start = pos
+                .checked_add(header_len)
+                .ok_or_else(|| "WebM cluster offset overflow".to_string())?;
+            let data_end = data_start
+                .checked_add(size)
+                .ok_or_else(|| "WebM cluster element size overflow".to_string())?;
             if data_end > self.buffer.len() {
                 break;
             }
 
             match id {
-                CLUSTER_ID => {
-                    pos += header_len;
-                    continue;
-                }
                 SIMPLE_BLOCK_ID | BLOCK_ID => {
                     let block_data = self.buffer[data_start..data_end].to_vec();
                     self.parse_block(&block_data)?;
@@ -1341,7 +1392,7 @@ impl WebmAudioDemuxer {
     }
 
     pub fn add(&mut self, data: &[u8]) -> Result<Vec<WebmAudioDemuxEvent>, String> {
-        self.buffer.extend_from_slice(data);
+        append_webm_stream_chunk(&mut self.buffer, data)?;
 
         loop {
             let previous_state = self.state;
@@ -1392,7 +1443,10 @@ impl WebmAudioDemuxer {
         };
 
         let header_len = id_len + size_len;
-        let total_len = header_len + size as usize;
+        let size = bounded_webm_element_size(id, size)?;
+        let total_len = header_len
+            .checked_add(size)
+            .ok_or_else(|| "WebM EBML header size overflow".to_string())?;
 
         if self.buffer.len() < total_len {
             return Ok(0);
@@ -1436,37 +1490,41 @@ impl WebmAudioDemuxer {
             };
 
             let header_len = id_len + size_len;
-            let data_start = pos + header_len;
-            let data_end = data_start + size as usize;
-
             let is_master = matches!(
                 id,
                 TRACKS_ID | TRACK_ENTRY_ID | AUDIO_ID | SEGMENT_ID | CLUSTER_ID
             );
+            if id == CLUSTER_ID {
+                self.emit_config()?;
+                self.state = ParserState::Clusters;
+                return Ok(pos);
+            }
+            if id == TRACKS_ID {
+                pos += header_len;
+                continue;
+            }
             if size == 0x00FFFFFFFFFFFFFF && is_master {
                 pos += header_len;
                 continue;
             }
+            let size = bounded_webm_element_size(id, size)?;
+            let data_start = pos
+                .checked_add(header_len)
+                .ok_or_else(|| "WebM element offset overflow".to_string())?;
+            let data_end = data_start
+                .checked_add(size)
+                .ok_or_else(|| "WebM element size overflow".to_string())?;
 
             if data_end > self.buffer.len() {
                 break;
             }
 
             match id {
-                TRACKS_ID => {
-                    pos += header_len;
-                    continue;
-                }
                 TRACK_ENTRY_ID => {
                     let element_data = self.buffer[data_start..data_end].to_vec();
                     self.parse_track_entry(&element_data)?;
                     pos = data_end;
                     continue;
-                }
-                CLUSTER_ID => {
-                    self.emit_config()?;
-                    self.state = ParserState::Clusters;
-                    return Ok(pos);
                 }
                 _ => {
                     pos = data_end;
@@ -1500,7 +1558,10 @@ impl WebmAudioDemuxer {
 
             let header_len = id_len + size_len;
             let elem_start = pos + header_len;
-            let elem_end = elem_start + size as usize;
+            let size = bounded_webm_element_size(id, size)?;
+            let elem_end = elem_start
+                .checked_add(size)
+                .ok_or_else(|| "WebM track element size overflow".to_string())?;
 
             if elem_end > data.len() {
                 break;
@@ -1509,8 +1570,8 @@ impl WebmAudioDemuxer {
             let elem_data = &data[elem_start..elem_end];
 
             match id {
-                TRACK_NUMBER_ID => track_number = read_uint(elem_data, size as usize),
-                TRACK_TYPE_ID => track_type = read_uint(elem_data, size as usize),
+                TRACK_NUMBER_ID => track_number = read_uint(elem_data, size),
+                TRACK_TYPE_ID => track_type = read_uint(elem_data, size),
                 CODEC_ID_ID => codec_id = String::from_utf8_lossy(elem_data).to_string(),
                 CODEC_PRIVATE_ID => codec_private = elem_data.to_vec(),
                 AUDIO_ID => {
@@ -1530,7 +1591,10 @@ impl WebmAudioDemuxer {
 
                         let audio_header_len = audio_id_len + audio_size_len;
                         let audio_elem_start = audio_pos + audio_header_len;
-                        let audio_elem_end = audio_elem_start + audio_size as usize;
+                        let audio_size = bounded_webm_element_size(audio_id, audio_size)?;
+                        let audio_elem_end = audio_elem_start
+                            .checked_add(audio_size)
+                            .ok_or_else(|| "WebM audio element size overflow".to_string())?;
 
                         if audio_elem_end > elem_data.len() {
                             break;
@@ -1539,14 +1603,13 @@ impl WebmAudioDemuxer {
                         let audio_elem_data = &elem_data[audio_elem_start..audio_elem_end];
                         match audio_id {
                             SAMPLING_FREQUENCY_ID => {
-                                sample_rate =
-                                    read_float(audio_elem_data, audio_size as usize) as u32;
+                                sample_rate = read_float(audio_elem_data, audio_size) as u32;
                                 if sample_rate == 0 {
                                     sample_rate = 48000;
                                 }
                             }
                             CHANNELS_ID => {
-                                channels = read_uint(audio_elem_data, audio_size as usize) as u8;
+                                channels = read_uint(audio_elem_data, audio_size) as u8;
                                 if channels == 0 {
                                     channels = 2;
                                 }
@@ -1620,23 +1683,25 @@ impl WebmAudioDemuxer {
             };
 
             let header_len = id_len + size_len;
-            let data_start = pos + header_len;
-
-            if size == 0x00FFFFFFFFFFFFFF {
+            if id == CLUSTER_ID {
                 pos += header_len;
                 continue;
             }
-
-            let data_end = data_start + size as usize;
+            if is_unknown_ebml_size(size, size_len) {
+                return Err(format!("WebM element 0x{id:X} has an unknown payload size"));
+            }
+            let size = bounded_webm_element_size(id, size)?;
+            let data_start = pos
+                .checked_add(header_len)
+                .ok_or_else(|| "WebM cluster offset overflow".to_string())?;
+            let data_end = data_start
+                .checked_add(size)
+                .ok_or_else(|| "WebM cluster element size overflow".to_string())?;
             if data_end > self.buffer.len() {
                 break;
             }
 
             match id {
-                CLUSTER_ID => {
-                    pos += header_len;
-                    continue;
-                }
                 SIMPLE_BLOCK_ID | BLOCK_ID => {
                     let block_data = self.buffer[data_start..data_end].to_vec();
                     self.parse_block(&block_data)?;
@@ -1740,7 +1805,7 @@ impl WebmDecoder {
 
     /// Feed more bytes of a WebM stream. Returns decoded PCM when available.
     pub fn add(&mut self, data: &[u8]) -> Result<Option<AudioData>, String> {
-        self.buffer.extend_from_slice(data);
+        append_webm_stream_chunk(&mut self.buffer, data)?;
 
         // Try to parse elements
         loop {
@@ -1785,7 +1850,10 @@ impl WebmDecoder {
         };
 
         let header_len = id_len + size_len;
-        let total_len = header_len + size as usize;
+        let size = bounded_webm_element_size(id, size)?;
+        let total_len = header_len
+            .checked_add(size)
+            .ok_or_else(|| "WebM EBML header size overflow".to_string())?;
 
         if self.buffer.len() < total_len {
             return Ok(0);
@@ -1833,47 +1901,46 @@ impl WebmDecoder {
             };
 
             let header_len = id_len + size_len;
-            let data_start = pos + header_len;
-            let data_end = data_start + size as usize;
-
-            // Check for unknown/infinite size
             let is_master = matches!(
                 id,
                 TRACKS_ID | TRACK_ENTRY_ID | AUDIO_ID | SEGMENT_ID | CLUSTER_ID
             );
-
-            // Handle infinite size for master elements
+            if id == CLUSTER_ID {
+                if self.audio_track.is_some() {
+                    self.init_decoder()?;
+                    self.header_complete = true;
+                }
+                self.state = ParserState::Clusters;
+                return Ok(pos);
+            }
+            if id == TRACKS_ID {
+                trace!(size = size, "found Tracks element");
+                pos += header_len;
+                continue;
+            }
             if size == 0x00FFFFFFFFFFFFFF && is_master {
                 pos += header_len;
                 continue;
             }
+            let size = bounded_webm_element_size(id, size)?;
+            let data_start = pos
+                .checked_add(header_len)
+                .ok_or_else(|| "WebM element offset overflow".to_string())?;
+            let data_end = data_start
+                .checked_add(size)
+                .ok_or_else(|| "WebM element size overflow".to_string())?;
 
             if data_end > self.buffer.len() {
                 break;
             }
 
             match id {
-                TRACKS_ID => {
-                    trace!(size = size, "found Tracks element");
-                    // Parse children inline
-                    pos += header_len;
-                    continue;
-                }
                 TRACK_ENTRY_ID => {
                     // Copy the data to avoid borrow checker issues
                     let element_data = self.buffer[data_start..data_end].to_vec();
                     self.parse_track_entry(&element_data)?;
                     pos = data_end;
                     continue;
-                }
-                CLUSTER_ID => {
-                    // We've reached clusters, tracks parsing is done
-                    if self.audio_track.is_some() {
-                        self.init_decoder()?;
-                        self.header_complete = true;
-                    }
-                    self.state = ParserState::Clusters;
-                    return Ok(pos);
                 }
                 _ => {
                     // Skip unknown elements at this level
@@ -1908,7 +1975,10 @@ impl WebmDecoder {
 
             let header_len = id_len + size_len;
             let elem_start = pos + header_len;
-            let elem_end = elem_start + size as usize;
+            let size = bounded_webm_element_size(id, size)?;
+            let elem_end = elem_start
+                .checked_add(size)
+                .ok_or_else(|| "WebM track element size overflow".to_string())?;
 
             if elem_end > data.len() {
                 break;
@@ -1918,10 +1988,10 @@ impl WebmDecoder {
 
             match id {
                 TRACK_NUMBER_ID => {
-                    track_number = read_uint(elem_data, size as usize);
+                    track_number = read_uint(elem_data, size);
                 }
                 TRACK_TYPE_ID => {
-                    track_type = read_uint(elem_data, size as usize);
+                    track_type = read_uint(elem_data, size);
                 }
                 CODEC_ID_ID => {
                     codec_id = String::from_utf8_lossy(elem_data).to_string();
@@ -1947,7 +2017,10 @@ impl WebmDecoder {
 
                         let audio_header_len = audio_id_len + audio_size_len;
                         let audio_elem_start = audio_pos + audio_header_len;
-                        let audio_elem_end = audio_elem_start + audio_size as usize;
+                        let audio_size = bounded_webm_element_size(audio_id, audio_size)?;
+                        let audio_elem_end = audio_elem_start
+                            .checked_add(audio_size)
+                            .ok_or_else(|| "WebM audio element size overflow".to_string())?;
 
                         if audio_elem_end > elem_data.len() {
                             break;
@@ -1957,14 +2030,13 @@ impl WebmDecoder {
 
                         match audio_id {
                             SAMPLING_FREQUENCY_ID => {
-                                sample_rate =
-                                    read_float(audio_elem_data, audio_size as usize) as u32;
+                                sample_rate = read_float(audio_elem_data, audio_size) as u32;
                                 if sample_rate == 0 {
                                     sample_rate = 48000;
                                 }
                             }
                             CHANNELS_ID => {
-                                channels = read_uint(audio_elem_data, audio_size as usize) as u8;
+                                channels = read_uint(audio_elem_data, audio_size) as u8;
                                 if channels == 0 {
                                     channels = 2;
                                 }
@@ -2086,26 +2158,26 @@ impl WebmDecoder {
             };
 
             let header_len = id_len + size_len;
-            let data_start = pos + header_len;
-
-            // Handle infinite size clusters
-            if size == 0x00FFFFFFFFFFFFFF {
+            if id == CLUSTER_ID {
                 pos += header_len;
                 continue;
             }
-
-            let data_end = data_start + size as usize;
+            if is_unknown_ebml_size(size, size_len) {
+                return Err(format!("WebM element 0x{id:X} has an unknown payload size"));
+            }
+            let size = bounded_webm_element_size(id, size)?;
+            let data_start = pos
+                .checked_add(header_len)
+                .ok_or_else(|| "WebM cluster offset overflow".to_string())?;
+            let data_end = data_start
+                .checked_add(size)
+                .ok_or_else(|| "WebM cluster element size overflow".to_string())?;
 
             if data_end > self.buffer.len() {
                 break;
             }
 
             match id {
-                CLUSTER_ID => {
-                    // Parse cluster children
-                    pos += header_len;
-                    continue;
-                }
                 SIMPLE_BLOCK_ID | BLOCK_ID => {
                     // Copy the data to avoid borrow checker issues
                     let block_data = self.buffer[data_start..data_end].to_vec();
@@ -2422,6 +2494,45 @@ mod tests {
             Some(WebmMediaDemuxEvent::Packet { data, .. })
                 if data == [0, 0, 0, 1, 0x65, 0x88]
         ));
+    }
+
+    #[test]
+    fn known_size_cluster_emits_packets_before_cluster_end() {
+        let data = fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("testdata/video-compat/never-final/vp9-profile0-opus.webm"),
+        )
+        .unwrap();
+        let mut demuxer = WebmMediaDemuxer::new();
+        let mut first_packet_at = None;
+        let mut maximum_buffer = 0usize;
+        for (index, chunk) in data.chunks(997).enumerate() {
+            let events = demuxer.add(chunk).unwrap();
+            maximum_buffer = maximum_buffer.max(demuxer.buffer.len());
+            if first_packet_at.is_none()
+                && events
+                    .iter()
+                    .any(|event| matches!(event, WebmMediaDemuxEvent::Packet { .. }))
+            {
+                first_packet_at = Some((index + 1) * 997);
+            }
+        }
+        demuxer.finish().unwrap();
+        assert!(first_packet_at.unwrap() < data.len());
+        assert!(maximum_buffer < 64 * 1024);
+    }
+
+    #[test]
+    fn oversized_block_is_rejected_from_its_header() {
+        let mut demuxer = WebmMediaDemuxer::new();
+        demuxer.state = ParserState::Clusters;
+        let size = MAX_WEBM_PACKET_ELEMENT_BYTES + 1;
+        let mut header = vec![0xA3, 0x01];
+        header.extend_from_slice(&size.to_be_bytes()[1..]);
+        let error = demuxer.add(&header).unwrap_err();
+        assert!(error.contains("element 0xA3"));
+        assert!(demuxer.buffer.len() < 16);
     }
 
     #[cfg(feature = "opus")]

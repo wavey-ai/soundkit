@@ -288,7 +288,7 @@ Current container coverage:
 
 | Container | Audio output | Notes |
 | --- | --- | --- |
-| MP4/M4A/M4V/MOV | AAC as ADTS packets | Uses the regular MP4 AAC demux path. |
+| MP4/M4A/M4V/MOV | AAC as ADTS packets | Sequential input requires `moov` before `mdat`; browser files should use seekable ranges. |
 | fragmented MP4/CMAF | AAC as ADTS packets | Parses init `moov`, then `moof`/`mdat` fragments. Use `fmp4`, `fragmented-mp4`, or `cmaf`. |
 | WebM/Matroska | Opus/Vorbis/other audio packets as raw blocks | Emits CodecPrivate in config. |
 | MPEG-TS/HLS `.ts` | AAC ADTS packets, AAC LATM payloads, MP3 payloads | Parses PAT/PMT/PES and chooses the first supported audio PID. |
@@ -317,6 +317,9 @@ try {
 The adapter skips `mdat` without reading its payload. It reads `moov` once and
 then reads one Rust-indexed sample range at a time.
 
+Do not use the sequential regular MP4 demuxer for tail-`moov` files. It rejects
+`mdat` before `moov` instead of buffering the media extent.
+
 Use `decodeSeekableAlac` from the same module for ALAC M4A files. It constructs
 `WasmAlacPacketDecoder` from Rust-owned track metadata and decodes one packet
 range per iteration.
@@ -332,6 +335,12 @@ timestamps, edit lists, and codec normalization.
 
 Use `WasmMp4MediaDemuxer` only for fragmented MP4 and CMAF byte streams. It now
 releases complete samples before the current `mdat` reaches EOF.
+
+Sequential container calls accept bounded chunks only. Rust also limits MP4
+metadata and compressed packets before allocating their declared sizes.
+
+WebM parsers consume known-size Cluster headers immediately. They emit complete
+blocks before Cluster EOF and bound metadata, packet, and parser-buffer sizes.
 
 ## AAC In M4A/MP4 Deboxing
 

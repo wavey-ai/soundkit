@@ -20,9 +20,15 @@ This path supports NLE files with metadata after multi-gigabyte media data. Cont
 
 The demuxer retains only incomplete metadata, one incomplete sample, and pending sample records. It applies Rust timeline and NAL normalization rules.
 
+Sequential regular MP4 accepts `moov` before `mdat`. A tail-`moov` file must use `Mp4MediaIndex` and seekable ranges.
+
+Unknown top-level boxes are skipped incrementally. Rust limits metadata, input chunks, and individual compressed packets before allocation.
+
 MP4 edit lists are parsed and normalized in Rust. Each track exposes a linear timeline in its own timescale. Packet presentation timestamps include the edit, and `pcm_packet_trim` removes AAC preroll and tail padding exactly. Platform adapters only apply the returned source-frame slice.
 
 `WebmMediaDemuxer` streams all supported WebM video and audio tracks. It resolves cluster-relative timestamps and durations to nanoseconds, preserves keyframe state, and timestamps laced frames independently.
+
+Known-size clusters emit blocks before cluster EOF. Rust bounds metadata elements, packet elements, caller chunks, and the parser buffer.
 
 `MxfMediaDemuxer` incrementally parses bounded KLV records, header metadata, frame-wrapped Generic Container essence, DNx coding-unit headers, and BWF/AES3 PCM in Rust. The browser only provides byte chunks. The first production profile is OP1a DNxHD/DNxHR picture essence with 16- or 24-bit PCM sound essence.
 
@@ -109,6 +115,9 @@ make media-fuzz
 - The container demuxer reports PCM depth, endianness, and integer/float representation.
 - JavaScript performs no media validation. It only feeds bytes and consumes exported Rust values.
 - Seekable MOV and MP4 imports never copy the complete source into JavaScript or WASM memory.
+- Seekable M4A and CAF ALAC imports read one Rust-indexed packet range at a time.
+- Sequential demuxers reject oversized caller chunks, metadata elements, and compressed packets before allocation.
+- WebM and fragmented MP4 emit complete packets before their enclosing media extent ends.
 - A dependency-specific release profile keeps `vp9dec` at optimization level 2 because LLVM 21 crashes at level 3 on `wasm32`.
 - The vendored `rusty_av1d` patch fixes high-bit-depth plane access and one malformed-input cleanup panic.
 - The memory-safe Rust DNx decoder is isolated in `soundkit-dnx` under LGPL-2.1-or-later. Its scalar output matches pinned FFmpeg output across DNxHR and progressive 1080p DNxHD profiles.

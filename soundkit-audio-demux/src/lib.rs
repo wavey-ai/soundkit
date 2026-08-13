@@ -8,8 +8,17 @@ pub use mxf::{MxfMediaDemuxEvent, MxfMediaDemuxer};
 
 const MIN_DETECTION_BYTES: usize = 8192;
 const MAX_DETECTION_BYTES: usize = 65_536;
-#[cfg(feature = "mp4")]
-const REGULAR_MP4_DEFERRED_MDAT_MAX_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_CONTAINER_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MEDIA_PACKET_BYTES: u32 = 128 * 1024 * 1024;
+
+fn validate_container_input_chunk(bytes: &[u8], container: &str) -> Result<(), String> {
+    if bytes.len() > MAX_CONTAINER_INPUT_CHUNK_BYTES {
+        return Err(format!(
+            "{container} input chunk exceeds the {MAX_CONTAINER_INPUT_CHUNK_BYTES} byte streaming budget"
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AudioContainer {
@@ -323,6 +332,7 @@ pub enum Mp4MediaDemuxEvent {
 pub struct Mp4MediaDemuxer {
     buffer: Vec<u8>,
     absolute_start: u64,
+    skip_remaining: u64,
     active_mdat: Option<RegularMdatRange>,
     tracks: Vec<MediaTrackConfig>,
     track_defaults: Vec<Fmp4TrackDefaults>,
@@ -442,6 +452,7 @@ impl AudioTrackDemuxer {
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<AudioDemuxEvent>, String> {
+        validate_container_input_chunk(bytes, "media container")?;
         let state = std::mem::replace(&mut self.state, DemuxerState::Finished);
         match state {
             DemuxerState::Detecting {
@@ -861,6 +872,11 @@ impl Mp4MediaIndex {
             .samples
             .get(sample_index)
             .ok_or_else(|| format!("MP4 sample index {sample_index} is out of range"))?;
+        if sample.size > MAX_MEDIA_PACKET_BYTES {
+            return Err(format!(
+                "MP4 sample exceeds the {MAX_MEDIA_PACKET_BYTES} byte packet budget"
+            ));
+        }
         if raw.len() != sample.size as usize {
             return Err(format!(
                 "MP4 track {} sample {} expected {} bytes, got {}",
@@ -1223,20 +1239,12 @@ struct RegularMdatRange {
 }
 
 #[cfg(feature = "mp4")]
-#[derive(Clone, Debug)]
-struct DeferredMdat {
-    payload_start: u64,
-    payload_end: u64,
-    data: Vec<u8>,
-}
-
-#[cfg(feature = "mp4")]
 struct RegularMp4AudioDemuxer {
     buffer: Vec<u8>,
     absolute_start: u64,
+    skip_remaining: u64,
     track: Option<RegularMp4AudioTrack>,
     active_mdat: Option<RegularMdatRange>,
-    deferred_mdats: Vec<DeferredMdat>,
     emitted_config: bool,
     next_sample_index: usize,
 }
@@ -1247,20 +1255,22 @@ impl RegularMp4AudioDemuxer {
         Self {
             buffer: Vec::with_capacity(128 * 1024),
             absolute_start: 0,
+            skip_remaining: 0,
             track: None,
             active_mdat: None,
-            deferred_mdats: Vec::new(),
             emitted_config: false,
             next_sample_index: 0,
         }
     }
 
     fn add(&mut self, bytes: &[u8]) -> Result<Vec<AudioDemuxEvent>, String> {
+        validate_container_input_chunk(bytes, "MP4")?;
         self.buffer.extend_from_slice(bytes);
         self.parse_available(false)
     }
 
     fn finish(&mut self, bytes: &[u8]) -> Result<Vec<AudioDemuxEvent>, String> {
+        validate_container_input_chunk(bytes, "MP4")?;
         self.buffer.extend_from_slice(bytes);
         self.parse_available(true)
     }
@@ -1269,6 +1279,16 @@ impl RegularMp4AudioDemuxer {
         let mut events = Vec::new();
 
         loop {
+            if self.skip_remaining > 0 {
+                let remaining = usize::try_from(self.skip_remaining).unwrap_or(usize::MAX);
+                let available = self.buffer.len().min(remaining);
+                self.drain_front(available);
+                self.skip_remaining -= available as u64;
+                if self.skip_remaining > 0 {
+                    break;
+                }
+                continue;
+            }
             if self.active_mdat.is_some() {
                 let before = self.absolute_start;
                 events.extend(self.emit_active_mdat_samples()?);
@@ -1299,28 +1319,24 @@ impl RegularMp4AudioDemuxer {
                     continue;
                 }
 
-                if header.size as u64 > REGULAR_MP4_DEFERRED_MDAT_MAX_BYTES {
-                    return Err(format!(
-                        "MP4 mdat appears before moov and is too large to buffer ({} bytes)",
-                        header.size
-                    ));
-                }
-                if self.buffer.len() < header.size {
-                    if finalizing {
-                        return Err("truncated MP4 mdat before moov".to_string());
-                    }
-                    break;
-                }
+                return Err(
+                    "MP4 mdat appears before moov; use the seekable MP4 packet API".to_string(),
+                );
+            }
 
-                self.deferred_mdats.push(DeferredMdat {
-                    payload_start,
-                    payload_end,
-                    data: self.buffer[header.header_size..header.size].to_vec(),
-                });
-                self.drain_front(header.size);
+            if header.name != *b"moov" {
+                self.drain_front(header.header_size);
+                self.skip_remaining = (header.size - header.header_size) as u64;
                 continue;
             }
 
+            let payload_size = header.size - header.header_size;
+            if payload_size as u64 > MAX_MP4_METADATA_BYTES {
+                return Err(format!(
+                    "MP4 moov metadata exceeds the {} byte budget",
+                    MAX_MP4_METADATA_BYTES
+                ));
+            }
             if self.buffer.len() < header.size {
                 if finalizing {
                     return Err(format!(
@@ -1332,17 +1348,15 @@ impl RegularMp4AudioDemuxer {
             }
 
             let payload = self.buffer[header.header_size..header.size].to_vec();
-            match &header.name {
-                b"moov" => {
-                    if let Some(track) = parse_regular_moov(&payload)? {
-                        self.track = Some(track);
-                        self.emit_config_if_needed(&mut events);
-                        events.extend(self.emit_deferred_mdat_samples()?);
-                    }
-                }
-                _ => {}
+            if let Some(track) = parse_regular_moov(&payload)? {
+                self.track = Some(track);
+                self.emit_config_if_needed(&mut events);
             }
             self.drain_front(header.size);
+        }
+
+        if finalizing && self.skip_remaining > 0 {
+            return Err("truncated MP4 top-level box".to_string());
         }
 
         Ok(events)
@@ -1422,37 +1436,6 @@ impl RegularMp4AudioDemuxer {
         }
         if self.absolute_start >= mdat.payload_end {
             self.active_mdat = None;
-        }
-
-        Ok(events)
-    }
-
-    fn emit_deferred_mdat_samples(&mut self) -> Result<Vec<AudioDemuxEvent>, String> {
-        let mut events = Vec::new();
-        if self.deferred_mdats.is_empty() {
-            return Ok(events);
-        }
-        self.emit_config_if_needed(&mut events);
-
-        let mdats = std::mem::take(&mut self.deferred_mdats);
-        for mdat in mdats {
-            while let Some(sample) = self
-                .next_sample_in_range(mdat.payload_start, mdat.payload_end)
-                .cloned()
-            {
-                let sample_end = sample.absolute_offset + sample.size as u64;
-                if sample_end > mdat.payload_end {
-                    break;
-                }
-                let start = (sample.absolute_offset - mdat.payload_start) as usize;
-                let end = start + sample.size as usize;
-                if end > mdat.data.len() {
-                    break;
-                }
-                let raw = mdat.data[start..end].to_vec();
-                self.next_sample_index += 1;
-                events.push(self.packet_event(&sample, raw));
-            }
         }
 
         Ok(events)
@@ -1697,6 +1680,7 @@ impl Mp4MediaDemuxer {
         Self {
             buffer: Vec::with_capacity(128 * 1024),
             absolute_start: 0,
+            skip_remaining: 0,
             active_mdat: None,
             tracks: Vec::new(),
             track_defaults: Vec::new(),
@@ -1706,6 +1690,7 @@ impl Mp4MediaDemuxer {
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Mp4MediaDemuxEvent>, String> {
+        validate_container_input_chunk(bytes, "fragmented MP4")?;
         self.buffer.extend_from_slice(bytes);
         self.parse_available(false)
     }
@@ -1749,6 +1734,16 @@ impl Mp4MediaDemuxer {
     fn parse_available(&mut self, finalizing: bool) -> Result<Vec<Mp4MediaDemuxEvent>, String> {
         let mut events = Vec::new();
         loop {
+            if self.skip_remaining > 0 {
+                let remaining = usize::try_from(self.skip_remaining).unwrap_or(usize::MAX);
+                let available = self.buffer.len().min(remaining);
+                self.drain_front(available);
+                self.skip_remaining -= available as u64;
+                if self.skip_remaining > 0 {
+                    break;
+                }
+                continue;
+            }
             if self.active_mdat.is_some() {
                 let before = self.absolute_start;
                 events.extend(self.emit_active_fragmented_mdat_samples()?);
@@ -1770,6 +1765,19 @@ impl Mp4MediaDemuxer {
                     payload_end,
                 });
                 continue;
+            }
+            if !matches!(&header.name, b"moov" | b"moof") {
+                self.drain_front(header.header_size);
+                self.skip_remaining = (header.size - header.header_size) as u64;
+                continue;
+            }
+            let payload_size = header.size - header.header_size;
+            if payload_size as u64 > MAX_MP4_METADATA_BYTES {
+                return Err(format!(
+                    "fragmented MP4 {} metadata exceeds the {} byte budget",
+                    String::from_utf8_lossy(&header.name),
+                    MAX_MP4_METADATA_BYTES
+                ));
             }
             if self.buffer.len() < header.size {
                 if finalizing {
@@ -1802,6 +1810,9 @@ impl Mp4MediaDemuxer {
                 "truncated fragmented MP4 box header ({} bytes remain)",
                 self.buffer.len()
             ));
+        }
+        if finalizing && self.skip_remaining > 0 {
+            return Err("truncated fragmented MP4 top-level box".to_string());
         }
         if finalizing && self.active_mdat.is_some() {
             return Err("truncated fragmented MP4 mdat".to_string());
@@ -1909,6 +1920,11 @@ impl Mp4MediaDemuxer {
                     .copied()
                     .or(default_size)
                     .ok_or_else(|| "fragmented MP4 trun sample has no size".to_string())?;
+                if size > MAX_MEDIA_PACKET_BYTES {
+                    return Err(format!(
+                        "fragmented MP4 sample exceeds the {MAX_MEDIA_PACKET_BYTES} byte packet budget"
+                    ));
+                }
                 let duration = trun
                     .sample_durations
                     .get(index)
@@ -2422,6 +2438,11 @@ fn build_regular_samples(tables: &RegularTrakTables) -> Result<Vec<RegularMp4Sam
                 break;
             }
             let size = tables.sample_sizes[sample_index];
+            if size > MAX_MEDIA_PACKET_BYTES {
+                return Err(format!(
+                    "MP4 sample exceeds the {MAX_MEDIA_PACKET_BYTES} byte packet budget"
+                ));
+            }
             let duration = stts_reader.next_duration().unwrap_or(1024);
             let rendering_offset = ctts_reader.next_offset().unwrap_or(0);
             let sample_id = sample_index as u32 + 1;
@@ -3716,6 +3737,28 @@ mod tests {
 
     #[cfg(feature = "mp4")]
     #[test]
+    fn seekable_mp4_rejects_oversized_samples_before_reading_payload() {
+        let index = Mp4MediaIndex {
+            tracks: Vec::new(),
+            samples: vec![MediaSampleIndex {
+                track_id: 1,
+                kind: MediaTrackKind::Video,
+                codec: "avc1".to_string(),
+                sample_id: 1,
+                absolute_offset: 128,
+                size: MAX_MEDIA_PACKET_BYTES + 1,
+                decode_time: 0,
+                presentation_time: 0,
+                duration: 1,
+                is_sync: true,
+            }],
+        };
+        let error = index.packet_from_sample_bytes(0, &[]).unwrap_err();
+        assert!(error.contains("packet budget"));
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
     fn parses_and_resolves_linear_mp4_edit_timeline() {
         let mut payload = vec![0, 0, 0, 0];
         payload.extend_from_slice(&2u32.to_be_bytes());
@@ -3783,35 +3826,17 @@ mod tests {
 
     #[cfg(feature = "mp4")]
     #[test]
-    fn demuxes_mp4_aac() {
+    fn tail_moov_mp4_requires_seekable_packet_api() {
         let data = fixture("mac_aac/A_Tusk_is_used_to_make_costly_gifts.m4a");
         let mut demuxer = AudioTrackDemuxer::new_with_format("mp4").unwrap();
-        let mut events = Vec::new();
+        let mut error = None;
         for chunk in data.chunks(997) {
-            events.extend(demuxer.push(chunk).unwrap());
+            if let Err(found) = demuxer.push(chunk) {
+                error = Some(found);
+                break;
+            }
         }
-        events.extend(demuxer.flush().unwrap());
-
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AudioDemuxEvent::Config(AudioTrackConfig {
-                container: AudioContainer::Mp4,
-                codec: AudioCodec::Aac,
-                sample_rate: Some(16_000),
-                channels: Some(1),
-                ..
-            })
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AudioDemuxEvent::Packet(AudioTrackPacket {
-                container: AudioContainer::Mp4,
-                codec: AudioCodec::Aac,
-                format: AudioPacketFormat::Adts,
-                data,
-                ..
-            }) if data.starts_with(&[0xff, 0xf1])
-        )));
+        assert!(error.unwrap().contains("seekable MP4 packet API"));
     }
 
     #[cfg(feature = "mp4")]
@@ -3856,6 +3881,76 @@ mod tests {
         assert_eq!(packets[1].sample_id, Some(2));
         assert_eq!(packets[1].start_time, Some(1024));
         assert_eq!(packets[1].raw_data.as_deref(), Some(&[0x44, 0x55][..]));
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn regular_mp4_rejects_mdat_before_moov_without_buffering_payload() {
+        let mut demuxer = RegularMp4AudioDemuxer::new();
+        let ftyp = mp4_box(
+            b"ftyp",
+            &[b"isom".as_slice(), &0u32.to_be_bytes(), b"isom"].concat(),
+        );
+        demuxer.add(&ftyp).unwrap();
+
+        let mut mdat_header = Vec::new();
+        mdat_header.extend_from_slice(&8_000_000u32.to_be_bytes());
+        mdat_header.extend_from_slice(b"mdat");
+        let error = demuxer.add(&mdat_header).unwrap_err();
+        assert!(error.contains("seekable MP4 packet API"));
+        assert!(demuxer.buffer.len() < 64);
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn fragmented_mp4_skips_large_unknown_boxes_incrementally() {
+        let box_size = 8 * 1024 * 1024u32;
+        let mut header = Vec::new();
+        header.extend_from_slice(&box_size.to_be_bytes());
+        header.extend_from_slice(b"free");
+        let mut demuxer = Mp4MediaDemuxer::new();
+        demuxer.push(&header).unwrap();
+        let zeros = [0u8; 1024];
+        let mut remaining = box_size as usize - header.len();
+        while remaining > 0 {
+            let count = remaining.min(zeros.len());
+            demuxer.push(&zeros[..count]).unwrap();
+            assert!(demuxer.buffer.len() <= zeros.len());
+            remaining -= count;
+        }
+        demuxer.flush().unwrap();
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn fragmented_mp4_rejects_oversized_metadata_from_header() {
+        let size = u32::try_from(MAX_MP4_METADATA_BYTES + 9).unwrap();
+        let mut header = Vec::new();
+        header.extend_from_slice(&size.to_be_bytes());
+        header.extend_from_slice(b"moof");
+        let error = Mp4MediaDemuxer::new().push(&header).unwrap_err();
+        assert!(error.contains("metadata"));
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn fragmented_mp4_rejects_oversized_samples_from_metadata() {
+        let mfhd = full_box(b"mfhd", 0, 0, &1u32.to_be_bytes());
+        let tfhd = full_box(b"tfhd", 0, 0x020000, &1u32.to_be_bytes());
+        let tfdt = full_box(b"tfdt", 0, 0, &0u32.to_be_bytes());
+        let trun_payload = [
+            &1u32.to_be_bytes()[..],
+            &1024u32.to_be_bytes(),
+            &(MAX_MEDIA_PACKET_BYTES + 1).to_be_bytes(),
+        ]
+        .concat();
+        let trun = full_box(b"trun", 0, 0x000300, &trun_payload);
+        let traf = mp4_box(b"traf", &[tfhd, tfdt, trun].concat());
+        let moof = mp4_box(b"moof", &[mfhd, traf].concat());
+        let mut demuxer = Mp4MediaDemuxer::new();
+        demuxer.push(&synthetic_init_moov()).unwrap();
+        let error = demuxer.push(&moof).unwrap_err();
+        assert!(error.contains("packet budget"));
     }
 
     #[cfg(feature = "mp4")]

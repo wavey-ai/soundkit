@@ -2,8 +2,8 @@
 
 [![CI](https://github.com/wavey-ai/soundkit/actions/workflows/ci.yml/badge.svg)](https://github.com/wavey-ai/soundkit/actions/workflows/ci.yml)
 
-Rust audio tooling for PCM conversion, WAV handling, resampling, codec wrappers,
-and a thread-based decode pipeline with automatic format detection.
+Rust media tooling for deterministic audio extraction, video decoding, PCM conversion,
+resampling, codec wrappers, and browser-safe streaming.
 
 ## At A Glance
 
@@ -14,7 +14,9 @@ and a thread-based decode pipeline with automatic format detection.
 | Resampling | `soundkit::downsample_audio`, `soundkit-rubberband` | `rubato` sinc resampling and Rubber Band wrapper. |
 | Codecs | `soundkit-*` codec crates | Small wrappers around native Rust decoders where available, with C FFI only where useful or required. |
 | Decode pipeline | `soundkit-decoder` | Ring-buffered worker thread, `access-unit` autodetection, explicit telephony paths, optional output conversion. |
-| WASM | `soundkit::wasm` | Browser-oriented WAV-to-packet and WAV-to-PCM helpers. |
+| Media demux | `soundkit-audio-demux`, `soundkit-webm` | Rust-owned MOV, MP4, fragmented MP4, WebM, Matroska, MPEG-TS, and MXF parsing. |
+| Video decode | `soundkit-video`, `soundkit-dnx` | Pure-Rust H.264, HEVC, VP9, AV1, ProRes, DNxHD, and DNxHR decoding. |
+| WASM | `soundkit-wasm` | Seekable browser media adapters and deterministic Rust audio/video decode. |
 
 ## Streaming Decode Matrix
 
@@ -29,11 +31,11 @@ the container layout can require enough metadata/media to be buffered first.
 | WAV / RIFF PCM | `soundkit::wav` | Auto | Yes | Emits complete PCM frame runs after the `data` chunk starts. |
 | MP3 | `soundkit-mp3` / `nanomp3` | Auto | Yes | Pure Rust decode; native decoder output is `f32`. |
 | AAC ADTS | `soundkit-aac` / `fdk-aac` | Auto | Yes | Frame-stream friendly; C FFI backend. `soundkit-aac-lc` is the in-progress pure Rust raw access-unit decoder path. |
-| AAC in M4A/MP4 | `soundkit-aac` / `mp4` + `fdk-aac` | Auto | Limited | MP4 sample tables make this less suitable for live chunking than ADTS. |
+| AAC in M4A/MP4 | `soundkit-aac` / Rust MP4 index + `fdk-aac` | Seekable MP4 index | Yes | Rust indexes `moov`, then reads one bounded packet range at a time. |
 | FLAC | `soundkit-flac` / `claxon` | Auto | Yes | Pure Rust decode; current wrapper keeps input history while decoding. |
 | Raw Opus stream | `soundkit-opus` / `libopus` | Auto | Yes | Soundkit `OpusHead` plus length-prefixed packets. |
 | Ogg Opus | `soundkit-ogg-opus` / Ogg parser + `libopus` | Auto | Yes | Ogg pages parsed incrementally. |
-| WebM Opus | `soundkit-webm` / EBML parser + `libopus` | Auto | Yes | WebM clusters parsed incrementally. |
+| WebM Opus | `soundkit-webm` / EBML parser + `libopus` | Auto | Yes | Known and unknown-size clusters emit bounded blocks before cluster EOF. |
 | Ogg Speex | `soundkit-speex` / `oxideav-speex` | Explicit | Yes | Pure Rust codec core and streaming Ogg packet parser. |
 | Ogg Vorbis | `soundkit-vorbis` / `lewton` | Auto or explicit | Yes | Pure Rust decode and streaming Ogg packet parser. |
 | ALAC in M4A/MP4 | `soundkit-alac` / `alac` | Seekable MP4 index | Yes | Rust reads `moov`, then decodes one ranged ALAC packet at a time. |
@@ -63,12 +65,27 @@ boundary is narrower:
 | GSM 06.10 / WAV-49 | `gsm-sys` / `libgsm` | No | Uses the native libgsm codec. |
 | Opus / Ogg Opus / WebM Opus | `soundkit-opus` pure Rust backend | Partial | Supported for the current packet path, but FEC is not implemented and the backend is not full libopus parity yet. |
 | FLAC | `claxon` in `soundkit-decoder` | Yes | The aggregate decoder selects pure Rust `claxon`; the standalone `soundkit-flac` crate defaults to libFLAC unless `claxon-decoder` is selected. |
-| Video codecs | Out of scope | No | SoundKit can demux/debox some audio containers, but it does not decode video codecs such as H.264, H.265, VPx, or AV1. |
+| H.264, HEVC, VP9, AV1, ProRes | `soundkit-video` | Yes | Rust produces bounded planar frames on native and WASM targets. |
+| DNxHD and DNxHR | `soundkit-dnx` | Yes | Rust supports progressive DNxHD and current DNxHR delivery profiles. |
 
 Everything else in the decode matrix is currently on a pure-Rust decode path.
 MP3 decode uses `nanomp3`. MP3 encode is the part that pulls in LAME.
 Rubber Band is also a native dependency, but it is a time-stretch/resampling
 tool rather than a codec decoder.
+
+## Native Media Pipeline
+
+SoundKit extracts audio and video without browser or device media decoders.
+Rust owns container validation, timestamps, codec normalization, and decoded frame validation.
+
+Browser `File` and `Blob` sources use seekable byte ranges for MOV, MP4, M4A, and CAF.
+Large `mdat` and CAF `data` extents never cross the WASM boundary as complete buffers.
+
+Fragmented MP4, WebM, Matroska, MPEG-TS, and MXF consume bounded sequential chunks.
+Malformed lengths and oversized metadata, packets, frames, or input chunks fail before allocation.
+
+The current artist-delivery matrix covers H.264, HEVC, VP9, AV1, ProRes, DNxHD, and DNxHR.
+See [`docs/media-pipeline.md`](docs/media-pipeline.md) for exact container, profile, audio, and conformance coverage.
 
 ## Decode Pipeline APIs
 

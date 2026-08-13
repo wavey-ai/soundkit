@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::MAX_CONTAINER_INPUT_CHUNK_BYTES;
+
 use soundkit_video::{inspect_dnx_frame, DnxFrameInfo};
 
 use crate::{AudioContainer, MediaTrackConfig, MediaTrackKind, MediaTrackPacket, PcmEndianness};
@@ -118,6 +120,11 @@ impl MxfMediaDemuxer {
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<MxfMediaDemuxEvent>, String> {
         if self.finished {
             return Err("MXF demuxer cannot accept bytes after flush".to_string());
+        }
+        if bytes.len() > MAX_CONTAINER_INPUT_CHUNK_BYTES {
+            return Err(format!(
+                "MXF input chunk exceeds the {MAX_CONTAINER_INPUT_CHUNK_BYTES} byte streaming budget"
+            ));
         }
         self.buffer.extend_from_slice(bytes);
         self.drain(false)

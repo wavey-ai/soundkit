@@ -738,6 +738,13 @@ for (const codec of ["h264", "hevc", "vp9", "av1", "prores", "dnxhr"]) {
 }
 
 async function inspectAudio(file, expected) {
+  const sequentialMp4 = file.includes("fragmented")
+    || file.includes("cmaf")
+    || file.includes("dash")
+    || file.includes("separate-moof");
+  if (/\.(?:mov|mp4)$/i.test(file) && !sequentialMp4) {
+    return inspectSeekableMp4Audio(file, expected);
+  }
   const demuxer = WasmAudioTrackDemuxer.newAuto();
   let config;
   let packets = 0;
@@ -763,6 +770,44 @@ async function inspectAudio(file, expected) {
   if (expected.bits) assert.equal(config.bitsPerSample, expected.bits, `${file} PCM depth`);
   assert.ok(packets > 0, `${file} audio packets`);
   console.log(`${file}: ${config.codec} ${config.sampleRate}Hz/${config.channels}ch, ${packets} packets`);
+}
+
+async function inspectSeekableMp4Audio(file, expected) {
+  const handle = await open(resolve(fixtureRoot, file), "r");
+  const { size } = await handle.stat();
+  const source = {
+    size,
+    async read(start, end) {
+      const length = end - start;
+      const bytes = new Uint8Array(length);
+      let written = 0;
+      while (written < length) {
+        const result = await handle.read(bytes, written, length - written, start + written);
+        if (result.bytesRead === 0) throw new Error(`${file} ended during a planned range read`);
+        written += result.bytesRead;
+      }
+      return bytes;
+    },
+  };
+  const media = await openSeekableMp4(source, {
+    inspectMp4TopLevelBox,
+    WasmMp4MediaIndex,
+  });
+  let packets = 0;
+  try {
+    const config = media.tracks.find((track) => track.kind === "audio");
+    assert.ok(config, `${file} audio config`);
+    assert.equal(config.codec, expected.codec, `${file} audio codec`);
+    assert.equal(config.sampleRate, 48_000, `${file} audio rate`);
+    assert.equal(config.channels, 2, `${file} audio channels`);
+    if (expected.bits) assert.equal(config.bitsPerSample, expected.bits, `${file} PCM depth`);
+    for await (const _ of media.packets({ trackId: config.trackId })) packets += 1;
+    assert.ok(packets > 0, `${file} audio packets`);
+    console.log(`${file}: ${config.codec} ${config.sampleRate}Hz/${config.channels}ch, ${packets} ranged packets`);
+  } finally {
+    media.close();
+    await handle.close();
+  }
 }
 
 await inspectAudio("h264-high-aac.mp4", { codec: "aac" });
