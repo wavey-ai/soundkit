@@ -1,6 +1,9 @@
-use alac::{Decoder as CodecDecoder, Reader as AlacReader, StreamInfo};
+#[cfg(test)]
+use alac::Reader as AlacReader;
+use alac::{Decoder as CodecDecoder, StreamInfo};
 use frame_header::{EncodingFlag, Endianness};
 use soundkit::audio_types::AudioData;
+#[cfg(test)]
 use std::io::Cursor;
 
 const MAX_ALAC_CHANNELS: u8 = 8;
@@ -393,40 +396,26 @@ fn validate_stream_info(info: &StreamInfo) -> Result<(), String> {
     Ok(())
 }
 
-/// ALAC decoder for M4A/MP4 and CAF containers.
+pub const SEEKABLE_ALAC_REQUIRED: &str =
+    "ALAC containers require the seekable M4A/MP4 or CAF packet API";
+
+/// Compatibility wrapper that rejects sequential ALAC containers.
 ///
-/// The underlying pure Rust ALAC container reader requires `Read + Seek`, so
-/// this wrapper accepts streaming chunks but decodes once EOF is signalled with
-/// an empty chunk.
-pub struct AlacDecoder {
-    buffer: Vec<u8>,
-    decoded: bool,
-}
+/// M4A/MP4 and CAF can place required metadata after a large media extent.
+/// Use the seekable packet index instead of retaining the complete source.
+pub struct AlacDecoder;
 
 impl AlacDecoder {
     pub fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
-            decoded: false,
-        }
+        Self
     }
 
     pub fn init(&mut self) -> Result<(), String> {
-        Ok(())
+        Err(SEEKABLE_ALAC_REQUIRED.to_string())
     }
 
-    pub fn add(&mut self, data: &[u8]) -> Result<Option<AudioData>, String> {
-        if self.decoded {
-            return Ok(None);
-        }
-
-        if !data.is_empty() {
-            self.buffer.extend_from_slice(data);
-            return Ok(None);
-        }
-
-        self.decoded = true;
-        decode_alac_container(&self.buffer).map(Some)
+    pub fn add(&mut self, _data: &[u8]) -> Result<Option<AudioData>, String> {
+        Err(SEEKABLE_ALAC_REQUIRED.to_string())
     }
 }
 
@@ -436,7 +425,8 @@ impl Default for AlacDecoder {
     }
 }
 
-pub fn decode_alac_container(data: &[u8]) -> Result<AudioData, String> {
+#[cfg(test)]
+fn decode_alac_container(data: &[u8]) -> Result<AudioData, String> {
     if data.is_empty() {
         return Err("ALAC input is empty".to_string());
     }
@@ -532,14 +522,6 @@ mod tests {
             .join("..")
             .join("golden")
             .join(file)
-    }
-
-    fn decode_chunks(data: &[u8], chunk_size: usize) -> AudioData {
-        let mut decoder = AlacDecoder::new();
-        for chunk in data.chunks(chunk_size) {
-            assert!(decoder.add(chunk).unwrap().is_none());
-        }
-        decoder.add(&[]).unwrap().expect("ALAC decode at EOF")
     }
 
     fn caf_index_from_file(fixture: &[u8]) -> CafAlacPacketIndex {
@@ -758,19 +740,18 @@ mod tests {
     }
 
     #[test]
-    fn chunked_decoder_matches_whole_decode() {
+    fn sequential_container_decoder_requires_seekable_ranges() {
         let fixture = fs::read(testdata_path(
             "alac/A_Tusk_is_used_to_make_costly_gifts.m4a",
         ))
         .unwrap();
         assert!(!fixture.is_empty(), "ALAC fixture missing or empty");
-
-        let whole = decode_chunks(&fixture, fixture.len());
-        let chunked = decode_chunks(&fixture, 997);
-        assert_eq!(chunked.bits_per_sample(), whole.bits_per_sample());
-        assert_eq!(chunked.channel_count(), whole.channel_count());
-        assert_eq!(chunked.sampling_rate(), whole.sampling_rate());
-        assert_eq!(chunked.data(), whole.data());
+        let mut decoder = AlacDecoder::new();
+        assert_eq!(decoder.init().unwrap_err(), SEEKABLE_ALAC_REQUIRED);
+        assert_eq!(
+            decoder.add(&fixture[..997]).unwrap_err(),
+            SEEKABLE_ALAC_REQUIRED
+        );
     }
 
     #[test]
@@ -779,7 +760,7 @@ mod tests {
             "alac/A_Tusk_is_used_to_make_costly_gifts.m4a",
         ))
         .unwrap();
-        let audio = decode_chunks(&fixture, 641);
+        let audio = decode_alac_container(&fixture).unwrap();
         assert_eq!(audio.bits_per_sample(), 16);
         assert_eq!(audio.channel_count(), 1);
         assert_eq!(audio.sampling_rate(), 8_000);
@@ -818,7 +799,7 @@ mod tests {
         assert!(status.success());
 
         let fixture = fs::read(input).unwrap();
-        let audio = decode_chunks(&fixture, 1024);
+        let audio = decode_alac_container(&fixture).unwrap();
         assert_eq!(audio.data(), &fs::read(ffmpeg_pcm).unwrap());
     }
 }

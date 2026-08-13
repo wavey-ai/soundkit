@@ -33,7 +33,8 @@ use soundkit_aac_lc::AacLcDecoder;
 use soundkit_aiff::AiffDecoder;
 #[cfg(feature = "alac")]
 use soundkit_alac::{
-    inspect_caf_chunk, validate_caf_file_header, AlacDecoder, AlacPacketDecoder, CafAlacPacketIndex,
+    inspect_caf_chunk, validate_caf_file_header, AlacPacketDecoder, CafAlacPacketIndex,
+    SEEKABLE_ALAC_REQUIRED,
 };
 #[cfg(feature = "audio-demux")]
 use soundkit_audio_demux::{
@@ -397,8 +398,6 @@ enum FormatDecoder {
     M4a(Box<AacDecoderMp4>),
     #[cfg(feature = "aiff")]
     Aiff(Box<AiffDecoder>),
-    #[cfg(feature = "alac")]
-    Alac(Box<AlacDecoder>),
     #[cfg(feature = "flac")]
     Flac(Box<FlacDecoderClaxon>),
     #[cfg(feature = "mp3")]
@@ -1668,10 +1667,6 @@ impl FormatDecoder {
             FormatDecoder::Aiff(decoder) => {
                 process_single_add_api(decoder.as_mut(), bytes, |d, data| d.add(data))
             }
-            #[cfg(feature = "alac")]
-            FormatDecoder::Alac(decoder) => {
-                process_single_add_api(decoder.as_mut(), bytes, |d, data| d.add(data))
-            }
             #[cfg(feature = "flac")]
             FormatDecoder::Flac(decoder) => {
                 decode_i32_with_drain(decoder.as_mut(), bytes, |decoder, samples, output| {
@@ -1730,10 +1725,6 @@ impl FormatDecoder {
             FormatDecoder::Aiff(decoder) => {
                 process_add_api(decoder.as_mut(), &[], |d, data| d.add(data))
             }
-            #[cfg(feature = "alac")]
-            FormatDecoder::Alac(decoder) => {
-                process_add_api(decoder.as_mut(), &[], |d, data| d.add(data))
-            }
             FormatDecoder::RawPcm(decoder) => {
                 decoder.flush().map(|frame| frame.into_iter().collect())
             }
@@ -1762,7 +1753,7 @@ where
     Ok(frames)
 }
 
-#[cfg(any(feature = "aiff", feature = "alac"))]
+#[cfg(feature = "aiff")]
 fn process_single_add_api<D, F>(
     decoder: &mut D,
     bytes: &[u8],
@@ -2231,11 +2222,7 @@ fn decoder_for_format(format: &str) -> Result<FormatDecoder, String> {
             Ok(FormatDecoder::Aiff(Box::new(decoder)))
         }
         #[cfg(feature = "alac")]
-        "alac" | "caf-alac" => {
-            let mut decoder = AlacDecoder::new();
-            decoder.init()?;
-            Ok(FormatDecoder::Alac(Box::new(decoder)))
-        }
+        "alac" | "caf-alac" => Err(SEEKABLE_ALAC_REQUIRED.to_string()),
         #[cfg(feature = "flac")]
         "flac" => {
             let mut decoder = FlacDecoderClaxon::new();
@@ -3571,13 +3558,15 @@ mod tests {
 
     #[cfg(feature = "alac")]
     #[test]
-    fn alac_flush_decodes_pcm_frames() {
-        let data = fixture("alac/A_Tusk_is_used_to_make_costly_gifts.m4a");
-        let frames = decode_all("alac", &data, 997);
-        assert!(!frames.is_empty());
-        assert_eq!(frames[0].bits_per_sample(), 16);
-        assert_eq!(frames[0].channel_count(), 1);
-        assert_eq!(frames[0].sampling_rate(), 8_000);
+    fn alac_generic_decoder_requires_seekable_ranges() {
+        assert_eq!(
+            decoder_for_format("alac").err().unwrap(),
+            SEEKABLE_ALAC_REQUIRED
+        );
+        assert_eq!(
+            decoder_for_format("caf-alac").err().unwrap(),
+            SEEKABLE_ALAC_REQUIRED
+        );
     }
 
     #[cfg(feature = "flac")]

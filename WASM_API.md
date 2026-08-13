@@ -116,7 +116,7 @@ Supported `newWithFormat` strings depend on enabled Cargo features:
 | `ogg`, `ogg-vorbis`, `vorbis` | PCM | yes |
 | `webm` | PCM from WebM/Vorbis | yes |
 | `aiff`, `aifc` | PCM | yes |
-| `alac`, `caf-alac` | PCM | yes |
+| `alac`, `caf-alac` | Rejected; use the seekable packet APIs | yes |
 | `flac` | PCM | yes |
 | `aac`, `adts` | PCM via FDK AAC | no |
 | `m4a`, `mp4`, `aac-mp4` | PCM via FDK AAC | no |
@@ -125,6 +125,9 @@ Supported `newWithFormat` strings depend on enabled Cargo features:
 
 For ADTS/M4A AAC container streams, prefer the debox APIs below. For AAC-LC raw
 access units in the SoundKit packet stream, use `WasmAacLcDecoder`.
+
+The generic decoder rejects ALAC containers. Use the seekable ALAC APIs because
+required MP4 or CAF metadata can follow a large media extent.
 
 ## AAC-LC Raw Access Unit Decoder
 

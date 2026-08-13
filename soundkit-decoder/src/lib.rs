@@ -265,7 +265,8 @@ enum FormatDecoder {
     Speex(Box<SpeexDecoder>),
     /// Ogg-wrapped Vorbis stream
     Vorbis(Box<VorbisDecoder>),
-    /// ALAC in M4A/MP4 or CAF containers
+    /// Sequential ALAC compatibility path. It rejects input because ALAC
+    /// containers require the seekable packet API.
     Alac(Box<AlacDecoder>),
     /// AIFF or AIFF-C container decoder
     Aiff(Box<AiffDecoder>),
@@ -792,12 +793,12 @@ impl DecodePipeline {
         )
     }
 
-    /// Create a pipeline for ALAC in M4A/MP4 or CAF containers.
+    /// Create a compatibility pipeline that reports the seekable ALAC requirement.
     pub fn spawn_alac() -> DecodePipelineHandle {
         Self::spawn_alac_with_options(DecodeOptions::default())
     }
 
-    /// Create an ALAC pipeline with output conversion options.
+    /// Create an ALAC compatibility pipeline with output conversion options.
     pub fn spawn_alac_with_options(options: DecodeOptions) -> DecodePipelineHandle {
         let mut decoder = AlacDecoder::new();
         let _ = decoder.init();
@@ -2116,7 +2117,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_explicit_alac_stream() {
+    fn test_explicit_alac_requires_seekable_packet_api() {
         let data = Bytes::from(
             fs::read(
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2128,26 +2129,16 @@ mod tests {
         );
 
         let mut pipeline = DecodePipeline::spawn_alac();
-        for start in (0..data.len()).step_by(997) {
-            let end = (start + 997).min(data.len());
-            pipeline.send(data.slice(start..end)).unwrap();
-        }
-        pipeline.send(Bytes::new()).unwrap();
-
-        let frames = recv_until_done(&mut pipeline);
-        assert_eq!(frames.len(), 1, "ALAC should decode once EOF is signalled");
-        assert_eq!(frames[0].bits_per_sample(), 16);
-        assert_eq!(frames[0].channel_count(), 1);
-        assert_eq!(frames[0].sampling_rate(), 8_000);
-        assert!(frames[0]
-            .data()
-            .chunks_exact(2)
-            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
-            .any(|sample| sample != 0));
+        pipeline.send(data.slice(..997)).unwrap();
+        let error = pipeline
+            .recv()
+            .expect("ALAC compatibility result")
+            .unwrap_err();
+        assert!(error.to_string().contains("seekable M4A/MP4 or CAF"));
     }
 
     #[test]
-    fn test_decode_alac_autodetect() {
+    fn test_autodetected_alac_requires_seekable_packet_api() {
         let data = Bytes::from(
             fs::read(
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2161,11 +2152,11 @@ mod tests {
         let mut pipeline = DecodePipeline::spawn();
         pipeline.send(data).unwrap();
         pipeline.send(Bytes::new()).unwrap();
-
-        let frames = recv_until_done(&mut pipeline);
-        assert_eq!(frames.len(), 1, "No autodetected ALAC frame decoded");
-        assert_eq!(frames[0].channel_count(), 1);
-        assert_eq!(frames[0].sampling_rate(), 8_000);
+        let error = pipeline
+            .recv()
+            .expect("ALAC autodetect result")
+            .unwrap_err();
+        assert!(error.to_string().contains("seekable M4A/MP4 or CAF"));
     }
 
     #[test]
