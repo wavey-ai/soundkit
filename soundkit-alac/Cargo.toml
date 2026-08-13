@@ -10,3 +10,6 @@ repository = "https://github.com/wavey-ai/soundkit"
 alac = { version = "0.5.0", features = ["caf"] }
 frame-header = "0.2.1"
 soundkit = { path = "../soundkit" }
+
+[dev-dependencies]
+soundkit-audio-demux = { path = "../soundkit-audio-demux", default-features = false, features = ["mp4"] }

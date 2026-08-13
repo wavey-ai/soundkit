@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import init, {
   WasmAacLcDecoder,
+  WasmAlacPacketDecoder,
   WasmAudioTrackDemuxer,
   WasmMp4MediaDemuxer,
   WasmMp4MediaIndex,
@@ -11,7 +12,12 @@ import init, {
   WasmOpusDecoder,
   WasmVideoDecoder,
   WasmWebmMediaDemuxer,
+  inspectMp4TopLevelBox,
 } from "../soundkit-wasm/pkg/soundkit_wasm.js";
+import {
+  decodeSeekableAlac,
+  openSeekableMp4,
+} from "../soundkit-wasm/runtime/streaming-media.mjs";
 
 const fixtureRoot = resolve(process.argv[2] ?? "testdata/video-compat/never-final");
 await init({ module_or_path: await readFile(new URL("../soundkit-wasm/pkg/soundkit_wasm_bg.wasm", import.meta.url)) });
@@ -21,8 +27,8 @@ await init({ module_or_path: await readFile(new URL("../soundkit-wasm/pkg/soundk
 function assertWasmFrameSerialization(codec, frames, expected) {
   assert.equal(frames.length, expected.frames, `${codec} frame count`);
   for (const frame of frames) {
-    assert.equal(frame.width, 640, `${codec} width`);
-    assert.equal(frame.height, 360, `${codec} height`);
+    assert.equal(frame.width, expected.width ?? 640, `${codec} width`);
+    assert.equal(frame.height, expected.height ?? 360, `${codec} height`);
     assert.equal(
       frame.colorModel,
       expected.colorModel ?? "ycbcr",
@@ -56,10 +62,69 @@ function countPcmFrames(frames) {
   }, 0);
 }
 
+async function decodeSeekableAlacFixture() {
+  const file = resolve("testdata/alac/A_Tusk_is_used_to_make_costly_gifts.m4a");
+  const handle = await open(file, "r");
+  const { size } = await handle.stat();
+  let maximumRead = 0;
+  const source = {
+    size,
+    async read(start, end) {
+      const length = end - start;
+      maximumRead = Math.max(maximumRead, length);
+      const bytes = new Uint8Array(length);
+      const { bytesRead } = await handle.read(bytes, 0, length, start);
+      assert.equal(bytesRead, length, "ALAC range read length");
+      return bytes;
+    },
+  };
+  let frames = 0;
+  let packets = 0;
+  try {
+    for await (const { frame, trim } of decodeSeekableAlac(source, {
+      inspectMp4TopLevelBox,
+      WasmAlacPacketDecoder,
+      WasmMp4MediaIndex,
+    })) {
+      assert.equal(frame.sampleRate, 8_000, "ALAC sample rate");
+      assert.equal(frame.channels, 1, "ALAC channels");
+      assert.equal(frame.bitsPerSample, 16, "ALAC depth");
+      frames += trim.frameCount;
+      packets += 1;
+    }
+    assert.ok(packets > 1, "ALAC emits multiple bounded packets");
+    assert.equal(frames, 23_680, "ALAC frame count");
+    assert.ok(maximumRead < size, "ALAC never reads the complete M4A source");
+    console.log(`ALAC M4A: Rust range-decoded ${packets} packets and ${frames} frames`);
+  } finally {
+    await handle.close();
+  }
+}
+
 
 async function decodeMp4MediaFile(file, expected) {
-  const bytes = await readFile(resolve(fixtureRoot, file));
-  const index = WasmMp4MediaIndex.fromFile(bytes);
+  const handle = await open(resolve(fixtureRoot, file), "r");
+  const { size } = await handle.stat();
+  let maximumRead = 0;
+  const source = {
+    size,
+    async read(start, end) {
+      const length = end - start;
+      maximumRead = Math.max(maximumRead, length);
+      const bytes = new Uint8Array(length);
+      let written = 0;
+      while (written < length) {
+        const result = await handle.read(bytes, written, length - written, start + written);
+        if (result.bytesRead === 0) throw new Error(`${file} ended during a planned range read`);
+        written += result.bytesRead;
+      }
+      return bytes;
+    },
+  };
+  const media = await openSeekableMp4(source, {
+    inspectMp4TopLevelBox,
+    WasmMp4MediaIndex,
+  });
   const decoder = new WasmVideoDecoder(expected.codec);
   let audioDecoder = null;
   let audioPackets = 0;
@@ -69,7 +134,7 @@ async function decodeMp4MediaFile(file, expected) {
   const videoPresentationTimes = [];
   const videoDurations = [];
   try {
-    const tracks = index.tracks();
+    const tracks = media.tracks;
     const video = tracks.find((track) => track.kind === "video");
     const audio = tracks.find((track) => track.kind === "audio");
     assert.ok(video, `${file} has a Rust-indexed video track`);
@@ -92,10 +157,7 @@ async function decodeMp4MediaFile(file, expected) {
     if (video.decoderConfiguration.byteLength > 0) {
       frames.push(...decoder.decode(video.decoderConfiguration, Number.NaN, Number.NaN));
     }
-    for (let sampleIndex = 0; sampleIndex < index.sampleCount; sampleIndex += 1) {
-      const sample = index.sample(sampleIndex);
-      const source = bytes.subarray(sample.offset, sample.offset + sample.size);
-      const packet = index.packet(sampleIndex, source);
+    for await (const { sampleIndex, packet } of media.packets()) {
       if (packet.kind === "video") {
         videoPresentationTimes.push(packet.presentationTime);
         videoDurations.push(packet.duration);
@@ -106,7 +168,7 @@ async function decodeMp4MediaFile(file, expected) {
         if (audioDecoder) {
           if (audio.codec === "aac") {
             const decodedFrames = audioDecoder.decodeInterleaved(packet.data).length / audio.channels;
-            const trim = index.pcmTrim(sampleIndex, decodedFrames);
+            const trim = media.pcmTrim(sampleIndex, decodedFrames);
             audioFrames += trim?.frameCount ?? 0;
           } else {
             audioFrames += countPcmFrames(audioDecoder.push(packet.data));
@@ -115,7 +177,7 @@ async function decodeMp4MediaFile(file, expected) {
           const bytesPerFrame = audio.channels * Math.ceil(audio.bitsPerSample / 8);
           assert.equal(packet.data.byteLength % bytesPerFrame, 0, `${file} PCM frame alignment`);
           const decodedFrames = packet.data.byteLength / bytesPerFrame;
-          const trim = index.pcmTrim(sampleIndex, decodedFrames);
+          const trim = media.pcmTrim(sampleIndex, decodedFrames);
           audioFrames += trim?.frameCount ?? 0;
         }
       }
@@ -141,11 +203,13 @@ async function decodeMp4MediaFile(file, expected) {
     assert.ok(audioPackets > 0, `${file} extracts audio packets`);
     assert.ok(audioBytes > 0, `${file} extracts audio bytes`);
     assert.equal(audioFrames, expected.audioFrames, `${file} decoded audio frame count`);
+    assert.ok(maximumRead < size, `${file} never reads the complete source`);
     console.log(`${file}: Rust decoded video plus ${audioFrames} audio frames`);
   } finally {
     audioDecoder?.free();
     decoder.free();
-    index.free();
+    media.close();
+    await handle.close();
   }
 }
 
@@ -569,6 +633,23 @@ for (const [model, colorModel] of [["gbr", "gbr"], ["yuv", "ycbcr"]]) {
     colorModel,
   });
 }
+for (const [profile, bitDepth] of [
+  ["1080p120-8bit", 8],
+  ["1080p185-8bit", 8],
+  ["1080p185-10bit", 10],
+  ["1080p36-8bit", 8],
+]) {
+  await decodeMp4MediaFile(`dnxhd-${profile}-pcm.mov`, {
+    codec: "dnxhr",
+    audioCodec: "pcm",
+    audioFrames: 3072,
+    frames: 2,
+    width: 1920,
+    height: 1080,
+    bitDepth,
+    chroma: "422",
+  });
+}
 await inspectMxfMediaFile("dnxhr-hqx-pcm.mxf", {
   videoPackets: 75,
   audioPackets: 75,
@@ -664,5 +745,6 @@ await inspectAudio("vp9-profile0-opus.webm", { codec: "opus" });
 await inspectAudio("vp9-profile2-10bit-opus.webm", { codec: "opus" });
 await inspectAudio("av1-main-opus.webm", { codec: "opus" });
 await inspectAudio("av1-main10-opus.webm", { codec: "opus" });
+await decodeSeekableAlacFixture();
 
 console.log("SoundKit WASM media conformance passed");

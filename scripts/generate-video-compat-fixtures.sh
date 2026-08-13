@@ -71,6 +71,13 @@ ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v dnx
 # models in conformance without duplicating two full three-second mezzanines.
 ffmpeg -hide_banner -loglevel error -y -i "$output_dir/h264-high-aac.mp4" -map 0:v:0 -c:v dnxhd -profile:v dnxhr_444 -pix_fmt gbrp10le -frames:v 5 -map 0:a:0 -c:a pcm_s24le -shortest "$output_dir/dnxhr-444-gbr10-pcm.mov"
 ffmpeg -hide_banner -loglevel error -y -i "$output_dir/h264-high-aac.mp4" -map 0:v:0 -c:v dnxhd -profile:v dnxhr_444 -pix_fmt yuv444p10le -frames:v 5 -map 0:a:0 -c:a pcm_s24le -shortest "$output_dir/dnxhr-444-yuv10-pcm.mov"
+# Legacy DNxHD remains common in Media Composer archives and NLE handoffs.
+# Two 1080p frames exercise every progressive table family without storing
+# large mezzanine programmes in the repository.
+ffmpeg -hide_banner -loglevel error -y -i "$output_dir/h264-high-aac.mp4" -map 0:v:0 -vf scale=1920:1080 -r 25 -frames:v 2 -c:v dnxhd -profile:v dnxhd -b:v 120M -pix_fmt yuv422p -map 0:a:0 -c:a pcm_s24le -shortest "$output_dir/dnxhd-1080p120-8bit-pcm.mov"
+ffmpeg -hide_banner -loglevel error -y -i "$output_dir/h264-high-aac.mp4" -map 0:v:0 -vf scale=1920:1080 -r 25 -frames:v 2 -c:v dnxhd -profile:v dnxhd -b:v 185M -pix_fmt yuv422p -map 0:a:0 -c:a pcm_s24le -shortest "$output_dir/dnxhd-1080p185-8bit-pcm.mov"
+ffmpeg -hide_banner -loglevel error -y -i "$output_dir/h264-high-aac.mp4" -map 0:v:0 -vf scale=1920:1080 -r 25 -frames:v 2 -c:v dnxhd -profile:v dnxhd -b:v 185M -pix_fmt yuv422p10le -map 0:a:0 -c:a pcm_s24le -shortest "$output_dir/dnxhd-1080p185-10bit-pcm.mov"
+ffmpeg -hide_banner -loglevel error -y -i "$output_dir/h264-high-aac.mp4" -map 0:v:0 -vf scale=1920:1080 -r 25 -frames:v 2 -c:v dnxhd -profile:v dnxhd -b:v 36M -pix_fmt yuv422p -map 0:a:0 -c:a pcm_s24le -shortest "$output_dir/dnxhd-1080p36-8bit-pcm.mov"
 # SMPTE OP1a MXF is a routine Resolve, Media Composer, and broadcast handoff.
 # Keep the same DNxHR HQX + 24-bit PCM programme in both QuickTime and MXF so
 # container conformance can compare identical professional essence.

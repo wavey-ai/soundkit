@@ -10,6 +10,7 @@ from pathlib import Path
 SOURCE_REVISION = "ca821e458aabe2fa211d9e94eac38cd69fe2ea09"
 TABLES = (
     ("dnxhd_1235_luma_weight", "u8"),
+    ("dnxhd_1235_chroma_weight", "u8"),
     ("dnxhd_1237_luma_weight", "u8"),
     ("dnxhd_1237_chroma_weight", "u8"),
     ("dnxhd_1238_luma_weight", "u8"),

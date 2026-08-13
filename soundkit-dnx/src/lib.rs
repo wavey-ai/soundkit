@@ -58,19 +58,24 @@ impl fmt::Display for DnxError {
 
 impl std::error::Error for DnxError {}
 
-/// Decode one complete progressive DNxHR coding unit.
+/// Decode one complete progressive DNxHD or DNxHR coding unit.
 ///
-/// DNxHR 444, HQX, HQ, SQ, and LB are supported. Interlaced legacy VC-3 and
-/// 12-bit DNxHR 444 still fail before allocating output planes.
+/// The supported legacy profiles are 1080p CIDs 1235, 1237, 1238, and 1253.
+/// DNxHR 444, HQX, HQ, SQ, and LB are also supported. Interlaced VC-3 and
+/// 12-bit DNxHR 444 fail before allocating output planes.
 pub fn decode_frame(data: &[u8]) -> Result<DnxFrame, DnxError> {
     let header = Header::parse(data)?;
     let supported = matches!(
         (header.cid, header.bit_depth, header.is_444),
-        (1270, 10, true) | (1271, 10, false) | (1272..=1274, 8, false)
+        (1235, 10, false)
+            | (1237 | 1238 | 1253, 8, false)
+            | (1270, 10, true)
+            | (1271, 10, false)
+            | (1272..=1274, 8, false)
     );
     if !supported || header.interlaced {
         return Err(DnxError::new(format!(
-            "DNx decoder supports progressive 10-bit DNxHR 444/HQX and 8-bit HQ/SQ/LB; got CID {}, {}-bit, 4:{}, interlaced={}",
+            "DNx decoder supports progressive DNxHD 1080p and DNxHR 444/HQX/HQ/SQ/LB; got CID {}, {}-bit, 4:{}, interlaced={}",
             header.cid,
             header.bit_depth,
             if header.is_444 { "4:4" } else { "2:2" },
@@ -104,6 +109,35 @@ struct Header {
     mbaff: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct LegacyProfile {
+    width: usize,
+    height: usize,
+    coding_unit_size: usize,
+    bit_depth: u8,
+    is_444: bool,
+}
+
+impl LegacyProfile {
+    fn for_cid(cid: u32) -> Option<Self> {
+        let (coding_unit_size, bit_depth, is_444) = match cid {
+            1235 => (917_504, 10, false),
+            1237 => (606_208, 8, false),
+            1238 => (917_504, 8, false),
+            1253 => (188_416, 8, false),
+            1256 => (1_835_008, 10, true),
+            _ => return None,
+        };
+        Some(Self {
+            width: 1920,
+            height: 1080,
+            coding_unit_size,
+            bit_depth,
+            is_444,
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CodecTables {
     luma_weight: &'static [u8; 64],
@@ -126,6 +160,57 @@ struct CodecTables {
 impl CodecTables {
     fn for_header(header: Header) -> Result<Self, DnxError> {
         match (header.cid, header.bit_depth) {
+            (1235, 10) => Ok(Self {
+                luma_weight: &tables::DNXHD_1235_LUMA_WEIGHT,
+                chroma_weight: &tables::DNXHD_1235_CHROMA_WEIGHT,
+                dc_codes: &tables::DNXHD_1235_DC_CODES,
+                dc_bits: &tables::DNXHD_1235_DC_BITS,
+                ac_codes: &tables::DNXHD_1235_AC_CODES,
+                ac_bits: &tables::DNXHD_1235_AC_BITS,
+                ac_info: &tables::DNXHD_1235_AC_INFO,
+                run_codes: &tables::DNXHD_1235_RUN_CODES,
+                run_bits: &tables::DNXHD_1235_RUN_BITS,
+                run_values: &tables::DNXHD_1235_RUN,
+                eob_index: 4,
+                index_bits: 6,
+                level_bias: 8,
+                level_shift: 4,
+                dc_shift: 0,
+            }),
+            (1237 | 1253, 8) => Ok(Self {
+                luma_weight: &tables::DNXHD_1237_LUMA_WEIGHT,
+                chroma_weight: &tables::DNXHD_1237_CHROMA_WEIGHT,
+                dc_codes: &tables::DNXHD_1237_DC_CODES,
+                dc_bits: &tables::DNXHD_1237_DC_BITS,
+                ac_codes: &tables::DNXHD_1237_AC_CODES,
+                ac_bits: &tables::DNXHD_1237_AC_BITS,
+                ac_info: &tables::DNXHD_1237_AC_INFO,
+                run_codes: &tables::DNXHD_1237_RUN_CODES,
+                run_bits: &tables::DNXHD_1237_RUN_BITS,
+                run_values: &tables::DNXHD_1237_RUN,
+                eob_index: 3,
+                index_bits: 4,
+                level_bias: 32,
+                level_shift: 6,
+                dc_shift: 0,
+            }),
+            (1238, 8) => Ok(Self {
+                luma_weight: &tables::DNXHD_1238_LUMA_WEIGHT,
+                chroma_weight: &tables::DNXHD_1238_CHROMA_WEIGHT,
+                dc_codes: &tables::DNXHD_1237_DC_CODES,
+                dc_bits: &tables::DNXHD_1237_DC_BITS,
+                ac_codes: &tables::DNXHD_1238_AC_CODES,
+                ac_bits: &tables::DNXHD_1238_AC_BITS,
+                ac_info: &tables::DNXHD_1238_AC_INFO,
+                run_codes: &tables::DNXHD_1235_RUN_CODES,
+                run_bits: &tables::DNXHD_1235_RUN_BITS,
+                run_values: &tables::DNXHD_1238_RUN,
+                eob_index: 4,
+                index_bits: 4,
+                level_bias: 32,
+                level_shift: 6,
+                dc_shift: 0,
+            }),
             (1270, 10) => Ok(Self {
                 luma_weight: &tables::DNXHD_1235_LUMA_WEIGHT,
                 chroma_weight: &tables::DNXHD_1235_LUMA_WEIGHT,
@@ -244,6 +329,25 @@ impl Header {
         let mb_height = read_u16(data, 0x16c)? as usize;
         let mb_width = width.div_ceil(16);
         let interlaced = data[5] & 2 != 0;
+        let is_444 = data[0x2c] >> 6 & 1 != 0;
+        if let Some(profile) = LegacyProfile::for_cid(cid) {
+            if !legacy {
+                return Err(DnxError::new(format!(
+                    "legacy DNx CID {cid} uses a DNxHR header"
+                )));
+            }
+            if (width, height) != (profile.width, profile.height)
+                || data.len() != profile.coding_unit_size
+                || bit_depth != profile.bit_depth
+                || is_444 != profile.is_444
+            {
+                return Err(DnxError::new(format!(
+                    "DNx CID {cid} contract mismatch: got {width}x{height}, {} bytes, {bit_depth}-bit, 4:{}",
+                    data.len(),
+                    if is_444 { "4:4" } else { "2:2" },
+                )));
+            }
+        }
         let data_offset = if mb_height > 68 && hr {
             0x170usize
                 .checked_add(
@@ -281,7 +385,7 @@ impl Header {
             data_offset,
             cid,
             bit_depth,
-            is_444: data[0x2c] >> 6 & 1 != 0,
+            is_444,
             adaptive_color_transform: data[0x2c] & 1 != 0,
             interlaced,
             mbaff: data[6] >> 5 & 1 != 0,
@@ -819,7 +923,8 @@ mod tests {
                 .join(file),
         )
         .unwrap();
-        let prefix = [0x00, 0x00, 0x02, 0x80, 0x03];
+        // The fifth header byte distinguishes legacy DNxHD from DNxHR.
+        let prefix = [0x00, 0x00, 0x02, 0x80];
         let start = container
             .windows(prefix.len())
             .position(|window| window == prefix)
@@ -831,7 +936,11 @@ mod tests {
         let mut digest = Sha256::new();
         for plane in &frame.planes {
             for sample in &plane.samples {
-                digest.update(sample.to_le_bytes());
+                if frame.bit_depth <= 8 {
+                    digest.update([*sample as u8]);
+                } else {
+                    digest.update(sample.to_le_bytes());
+                }
             }
         }
         format!("{:x}", digest.finalize())
@@ -931,6 +1040,53 @@ mod tests {
             }
             assert_eq!(format!("{:x}", digest.finalize()), expected_hash, "{file}");
         }
+    }
+
+    #[test]
+    fn decodes_progressive_1080p_dnxhd_profiles_byte_identically() {
+        // These hashes use FFmpeg's scalar C decoder (`-cpuflags 0`). Each CID
+        // selects a different normative table, depth, or coding-unit size.
+        let profiles = [
+            (
+                "dnxhd-1080p120-8bit-pcm.mov",
+                606_208,
+                8,
+                "6197f324d1c5120341a9b36c878ca02cda0713244d2bd81604ff6cac7bf8eab2",
+            ),
+            (
+                "dnxhd-1080p185-8bit-pcm.mov",
+                917_504,
+                8,
+                "165c0ce467bfd5400fef64662e5197208ff23b8e80ab600ed9c5d13263daff4c",
+            ),
+            (
+                "dnxhd-1080p36-8bit-pcm.mov",
+                188_416,
+                8,
+                "6197f324d1c5120341a9b36c878ca02cda0713244d2bd81604ff6cac7bf8eab2",
+            ),
+            (
+                "dnxhd-1080p185-10bit-pcm.mov",
+                917_504,
+                10,
+                "e1083f5bb6991e773c21c21cf45a8c2dbd2c5feebf50cd4484fed2b4781ca902",
+            ),
+        ];
+        for (file, coding_unit_size, bit_depth, expected_hash) in profiles {
+            let frame = decode_frame(&reference_coding_unit(file, coding_unit_size)).unwrap();
+            assert_eq!((frame.width, frame.height), (1920, 1080), "{file}");
+            assert_eq!(frame.bit_depth, bit_depth, "{file}");
+            assert_eq!(frame.color_model, DnxColorModel::Ycbcr, "{file}");
+            assert_eq!(frame_hash(&frame), expected_hash, "{file}");
+        }
+    }
+
+    #[test]
+    fn rejects_legacy_profile_contract_mismatch_before_decode() {
+        let mut unit = reference_coding_unit("dnxhd-1080p120-8bit-pcm.mov", 606_208);
+        unit[0x1a..0x1c].copy_from_slice(&1280u16.to_be_bytes());
+        let error = decode_frame(&unit).unwrap_err();
+        assert!(error.to_string().contains("contract mismatch"));
     }
 
     #[test]

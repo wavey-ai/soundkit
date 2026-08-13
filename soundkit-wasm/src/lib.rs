@@ -32,11 +32,12 @@ use soundkit_aac_lc::AacLcDecoder;
 #[cfg(feature = "aiff")]
 use soundkit_aiff::AiffDecoder;
 #[cfg(feature = "alac")]
-use soundkit_alac::AlacDecoder;
+use soundkit_alac::{AlacDecoder, AlacPacketDecoder};
 #[cfg(feature = "audio-demux")]
 use soundkit_audio_demux::{
-    AudioDemuxEvent, AudioTrackDemuxer, MediaSampleIndex, MediaTrackConfig, MediaTrackPacket,
-    Mp4MediaDemuxEvent, Mp4MediaDemuxer, Mp4MediaIndex, MxfMediaDemuxEvent, MxfMediaDemuxer,
+    inspect_mp4_top_level_box, AudioDemuxEvent, AudioTrackDemuxer, MediaSampleIndex,
+    MediaTrackConfig, MediaTrackPacket, Mp4MediaDemuxEvent, Mp4MediaDemuxer, Mp4MediaIndex,
+    MxfMediaDemuxEvent, MxfMediaDemuxer,
 };
 #[cfg(feature = "flac")]
 use soundkit_flac::{FlacDecoderClaxon, FlacEncoder};
@@ -244,6 +245,13 @@ pub struct WasmAacLcDecoder {
 #[wasm_bindgen]
 pub struct WasmAudioTrackDemuxer {
     demuxer: AudioTrackDemuxer,
+}
+
+/// Bounded ALAC access-unit decoder for seekable MP4 and CAF adapters.
+#[cfg(feature = "alac")]
+#[wasm_bindgen]
+pub struct WasmAlacPacketDecoder {
+    decoder: AlacPacketDecoder,
 }
 
 /// Seekable, Rust-validated MOV/MP4 audio-and-video sample index.
@@ -782,6 +790,78 @@ impl WasmMp4MediaIndex {
         };
         pcm_packet_trim_to_js(trim.source_frame_start, trim.frame_count)
     }
+}
+
+#[cfg(feature = "alac")]
+#[wasm_bindgen]
+impl WasmAlacPacketDecoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(magic_cookie: &[u8]) -> Result<WasmAlacPacketDecoder, JsValue> {
+        Ok(Self {
+            decoder: AlacPacketDecoder::new(magic_cookie).map_err(js_error)?,
+        })
+    }
+
+    /// Decode exactly one container-demuxed ALAC packet.
+    pub fn decode(&mut self, packet: &[u8]) -> Result<JsValue, JsValue> {
+        let frame = self.decoder.decode_packet(packet).map_err(js_error)?;
+        audio_frame_to_js(&frame)
+    }
+
+    #[wasm_bindgen(getter, js_name = sampleRate)]
+    pub fn sample_rate(&self) -> u32 {
+        self.decoder.sample_rate()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn channels(&self) -> u8 {
+        self.decoder.channels()
+    }
+
+    #[wasm_bindgen(getter, js_name = bitDepth)]
+    pub fn bit_depth(&self) -> u8 {
+        self.decoder.bit_depth()
+    }
+
+    #[wasm_bindgen(getter, js_name = maximumPcmSamples)]
+    pub fn maximum_pcm_samples(&self) -> usize {
+        self.decoder.maximum_pcm_samples()
+    }
+}
+
+/// Inspect one top-level MOV/MP4 box without reading its payload.
+///
+/// JavaScript owns only range I/O. Rust owns box sizes, extended sizes, EOF
+/// bounds, and the resulting source offsets.
+#[cfg(feature = "audio-demux")]
+#[wasm_bindgen(js_name = inspectMp4TopLevelBox)]
+pub fn inspect_mp4_top_level_box_js(
+    header: &[u8],
+    absolute_offset: f64,
+    file_size: f64,
+) -> Result<Object, JsValue> {
+    let absolute_offset = finite_u64(absolute_offset).ok_or_else(|| {
+        js_error("MOV/MP4 box offset must be a nonnegative safe integer".to_string())
+    })?;
+    let file_size = finite_u64(file_size).ok_or_else(|| {
+        js_error("MOV/MP4 file size must be a nonnegative safe integer".to_string())
+    })?;
+    let range = inspect_mp4_top_level_box(header, absolute_offset, file_size).map_err(js_error)?;
+    let object = Object::new();
+    Reflect::set(
+        &object,
+        &"boxType".into(),
+        &String::from_utf8_lossy(&range.box_type).as_ref().into(),
+    )?;
+    for (field, value) in [
+        ("offset", range.offset),
+        ("payloadOffset", range.payload_offset),
+        ("payloadSize", range.payload_size),
+        ("end", range.end),
+    ] {
+        Reflect::set(&object, &field.into(), &js_safe_u64(value, field)?)?;
+    }
+    Ok(object)
 }
 
 #[cfg(feature = "audio-demux")]

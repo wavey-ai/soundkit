@@ -1,7 +1,120 @@
-use alac::Reader as AlacReader;
+use alac::{Decoder as CodecDecoder, Reader as AlacReader, StreamInfo};
 use frame_header::{EncodingFlag, Endianness};
 use soundkit::audio_types::AudioData;
 use std::io::Cursor;
+
+const MAX_ALAC_CHANNELS: u8 = 8;
+const MAX_ALAC_FRAMES_PER_PACKET: u32 = 65_536;
+const MAX_ALAC_PACKET_BYTES: usize = 16 * 1024 * 1024;
+
+/// Bounded ALAC access-unit decoder.
+///
+/// A container demuxer supplies the magic cookie once and one encoded packet
+/// per call. The decoder retains only codec state and one maximum-size PCM
+/// packet. It never retains source-container bytes.
+pub struct AlacPacketDecoder {
+    decoder: CodecDecoder,
+    scratch: Vec<i32>,
+    sample_rate: u32,
+    channels: u8,
+    bit_depth: u8,
+}
+
+impl AlacPacketDecoder {
+    pub fn new(magic_cookie: &[u8]) -> Result<Self, String> {
+        // MP4 sample entries commonly expose the `alac` FullBox payload. Its
+        // four version/flags bytes precede the 24-byte ALACSpecificConfig.
+        let cookie = if magic_cookie.len() >= 28 && magic_cookie[..4] == [0, 0, 0, 0] {
+            &magic_cookie[4..]
+        } else {
+            magic_cookie
+        };
+        let info = StreamInfo::from_cookie(cookie).map_err(|error| error.to_string())?;
+        validate_stream_info(&info)?;
+        let scratch_len = usize::try_from(info.max_samples_per_packet())
+            .map_err(|_| "ALAC packet sample count exceeds this platform".to_string())?;
+        let sample_rate = info.sample_rate();
+        let channels = info.channels();
+        let bit_depth = info.bit_depth();
+        Ok(Self {
+            decoder: CodecDecoder::new(info),
+            scratch: vec![0; scratch_len],
+            sample_rate,
+            channels,
+            bit_depth,
+        })
+    }
+
+    pub fn decode_packet(&mut self, packet: &[u8]) -> Result<AudioData, String> {
+        if packet.is_empty() {
+            return Err("ALAC packet is empty".to_string());
+        }
+        if packet.len() > MAX_ALAC_PACKET_BYTES {
+            return Err(format!(
+                "ALAC packet exceeds the {MAX_ALAC_PACKET_BYTES} byte budget"
+            ));
+        }
+        let samples = self
+            .decoder
+            .decode_packet(packet, &mut self.scratch)
+            .map_err(|error| error.to_string())?;
+        let mut pcm = Vec::with_capacity(
+            samples
+                .len()
+                .checked_mul(usize::from(self.bit_depth.div_ceil(8)))
+                .ok_or_else(|| "ALAC PCM output size overflow".to_string())?,
+        );
+        append_left_aligned_i32_samples(samples, self.bit_depth, &mut pcm)?;
+        Ok(AudioData::new(
+            self.bit_depth,
+            self.channels,
+            self.sample_rate,
+            pcm,
+            EncodingFlag::PCMSigned,
+            Endianness::LittleEndian,
+        ))
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub fn channels(&self) -> u8 {
+        self.channels
+    }
+
+    pub fn bit_depth(&self) -> u8 {
+        self.bit_depth
+    }
+
+    pub fn maximum_pcm_samples(&self) -> usize {
+        self.scratch.len()
+    }
+}
+
+fn validate_stream_info(info: &StreamInfo) -> Result<(), String> {
+    if info.sample_rate() == 0 {
+        return Err("ALAC stream reports a zero sample rate".to_string());
+    }
+    if !(1..=MAX_ALAC_CHANNELS).contains(&info.channels()) {
+        return Err(format!(
+            "ALAC channel count {} exceeds the supported range 1-{MAX_ALAC_CHANNELS}",
+            info.channels()
+        ));
+    }
+    if !matches!(info.bit_depth(), 16 | 24 | 32) {
+        return Err(format!("Unsupported ALAC bit depth: {}", info.bit_depth()));
+    }
+    if info.max_frames_per_packet() == 0
+        || info.max_frames_per_packet() > MAX_ALAC_FRAMES_PER_PACKET
+    {
+        return Err(format!(
+            "ALAC frame length {} exceeds the 1-{MAX_ALAC_FRAMES_PER_PACKET} frame budget",
+            info.max_frames_per_packet()
+        ));
+    }
+    Ok(())
+}
 
 /// ALAC decoder for M4A/MP4 and CAF containers.
 ///
@@ -125,6 +238,7 @@ fn append_left_aligned_i32_samples(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soundkit_audio_demux::Mp4MediaIndex;
     use std::fs;
     use std::path::PathBuf;
     use std::process::Command;
@@ -149,6 +263,72 @@ mod tests {
             assert!(decoder.add(chunk).unwrap().is_none());
         }
         decoder.add(&[]).unwrap().expect("ALAC decode at EOF")
+    }
+
+    #[test]
+    fn packet_decoder_emits_each_indexed_packet_with_bounded_state() {
+        let fixture = fs::read(testdata_path(
+            "alac/A_Tusk_is_used_to_make_costly_gifts.m4a",
+        ))
+        .unwrap();
+        let index = Mp4MediaIndex::from_file(&fixture).unwrap();
+        let track = index
+            .tracks
+            .iter()
+            .find(|track| track.codec == "alac")
+            .expect("ALAC track");
+        let mut decoder = AlacPacketDecoder::new(&track.codec_private).unwrap();
+        assert!(decoder.maximum_pcm_samples() <= 65_536 * 8);
+
+        let mut streamed_pcm = Vec::new();
+        let mut packet_count = 0usize;
+        for (sample_index, sample) in index.samples.iter().enumerate() {
+            if sample.track_id != track.track_id {
+                continue;
+            }
+            let start = sample.absolute_offset as usize;
+            let end = start + sample.size as usize;
+            let packet = index
+                .packet_from_sample_bytes(sample_index, &fixture[start..end])
+                .unwrap();
+            let frame = decoder.decode_packet(&packet.data).unwrap();
+            assert!(!frame.data().is_empty());
+            streamed_pcm.extend_from_slice(frame.data());
+            packet_count += 1;
+        }
+
+        let whole = decode_alac_container(&fixture).unwrap();
+        assert!(packet_count > 1);
+        assert_eq!(streamed_pcm.as_slice(), whole.data().as_slice());
+    }
+
+    #[test]
+    fn packet_decoder_rejects_unbounded_stream_contracts() {
+        let fixture = fs::read(testdata_path(
+            "alac/A_Tusk_is_used_to_make_costly_gifts.m4a",
+        ))
+        .unwrap();
+        let index = Mp4MediaIndex::from_file(&fixture).unwrap();
+        let mut cookie = index
+            .tracks
+            .iter()
+            .find(|track| track.codec == "alac")
+            .unwrap()
+            .codec_private
+            .clone();
+        let config_start = if cookie.get(4..8) == Some(b"alac") {
+            12
+        } else if cookie.get(..4) == Some(&[0, 0, 0, 0]) {
+            4
+        } else {
+            0
+        };
+        cookie[config_start..config_start + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        let error = match AlacPacketDecoder::new(&cookie) {
+            Ok(_) => panic!("unbounded ALAC stream contract was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.contains("frame budget"));
     }
 
     #[test]

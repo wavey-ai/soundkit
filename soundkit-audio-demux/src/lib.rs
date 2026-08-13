@@ -226,6 +226,89 @@ pub struct Mp4MediaIndex {
     pub samples: Vec<MediaSampleIndex>,
 }
 
+const MAX_MP4_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A Rust-validated top-level MOV/MP4 box range.
+///
+/// Seekable adapters read at most 16 bytes at `offset`, call
+/// [`inspect_mp4_top_level_box`], and skip directly to `end`. This permits a
+/// multi-gigabyte `mdat` to remain outside WASM memory while Rust owns all
+/// container size and range validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mp4TopLevelBox {
+    pub box_type: [u8; 4],
+    pub offset: u64,
+    pub payload_offset: u64,
+    pub payload_size: u64,
+    pub end: u64,
+}
+
+/// Inspect one top-level MOV/MP4 box from its 8-byte or 16-byte header.
+///
+/// `header` must start at `absolute_offset`. A 16-byte read handles both
+/// regular and extended-size boxes. A zero box size extends to `file_size`.
+pub fn inspect_mp4_top_level_box(
+    header: &[u8],
+    absolute_offset: u64,
+    file_size: u64,
+) -> Result<Mp4TopLevelBox, String> {
+    if absolute_offset > file_size || file_size - absolute_offset < 8 {
+        return Err("MOV/MP4 source ends before a top-level box header".to_string());
+    }
+    if header.len() < 8 {
+        return Err("MOV/MP4 top-level box header needs at least 8 bytes".to_string());
+    }
+
+    let short_size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+    let box_type = [header[4], header[5], header[6], header[7]];
+    let (size, header_size) = match short_size {
+        0 => (file_size - absolute_offset, 8u64),
+        1 => {
+            if header.len() < 16 {
+                return Err("extended MOV/MP4 box header needs 16 bytes".to_string());
+            }
+            (
+                u64::from_be_bytes([
+                    header[8], header[9], header[10], header[11], header[12], header[13],
+                    header[14], header[15],
+                ]),
+                16,
+            )
+        }
+        value => (u64::from(value), 8),
+    };
+    if size < header_size {
+        return Err(format!(
+            "MOV/MP4 box {} is shorter than its header",
+            String::from_utf8_lossy(&box_type)
+        ));
+    }
+    let end = absolute_offset
+        .checked_add(size)
+        .ok_or_else(|| "MOV/MP4 top-level box range overflows u64".to_string())?;
+    if end > file_size {
+        return Err(format!(
+            "MOV/MP4 box {} exceeds the source length",
+            String::from_utf8_lossy(&box_type)
+        ));
+    }
+    let payload_offset = absolute_offset + header_size;
+    let payload_size = end - payload_offset;
+    if box_type == *b"moov" && payload_size > MAX_MP4_METADATA_BYTES {
+        return Err(format!(
+            "MOV/MP4 moov metadata exceeds the {} byte budget",
+            MAX_MP4_METADATA_BYTES
+        ));
+    }
+    Ok(Mp4TopLevelBox {
+        box_type,
+        offset: absolute_offset,
+        payload_offset,
+        payload_size,
+        end,
+    })
+}
+
 #[cfg(feature = "mp4")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mp4MediaDemuxEvent {
@@ -240,6 +323,7 @@ pub enum Mp4MediaDemuxEvent {
 pub struct Mp4MediaDemuxer {
     buffer: Vec<u8>,
     absolute_start: u64,
+    active_mdat: Option<RegularMdatRange>,
     tracks: Vec<MediaTrackConfig>,
     track_defaults: Vec<Fmp4TrackDefaults>,
     pending_fragments: Vec<Fmp4Fragment>,
@@ -715,6 +799,12 @@ impl Mp4MediaIndex {
     /// Parse a `moov` payload without reading `mdat`. All absolute sample
     /// offsets remain relative to the complete source file.
     pub fn from_moov_payload(moov: &[u8]) -> Result<Self, String> {
+        if moov.len() as u64 > MAX_MP4_METADATA_BYTES {
+            return Err(format!(
+                "MOV/MP4 moov metadata exceeds the {} byte budget",
+                MAX_MP4_METADATA_BYTES
+            ));
+        }
         let indexes = parse_mp4_media_indexes(moov)?;
         let mut samples = Vec::new();
         for track in &indexes {
@@ -1607,6 +1697,7 @@ impl Mp4MediaDemuxer {
         Self {
             buffer: Vec::with_capacity(128 * 1024),
             absolute_start: 0,
+            active_mdat: None,
             tracks: Vec::new(),
             track_defaults: Vec::new(),
             pending_fragments: Vec::new(),
@@ -1658,9 +1749,28 @@ impl Mp4MediaDemuxer {
     fn parse_available(&mut self, finalizing: bool) -> Result<Vec<Mp4MediaDemuxEvent>, String> {
         let mut events = Vec::new();
         loop {
+            if self.active_mdat.is_some() {
+                let before = self.absolute_start;
+                events.extend(self.emit_active_fragmented_mdat_samples()?);
+                if self.active_mdat.is_some() && before == self.absolute_start {
+                    break;
+                }
+                continue;
+            }
             let Some(header) = Mp4BoxHeader::read(&self.buffer) else {
                 break;
             };
+            if header.name == *b"mdat" {
+                let box_start = self.absolute_start;
+                let payload_start = box_start + header.header_size as u64;
+                let payload_end = box_start + header.size as u64;
+                self.drain_front(header.header_size);
+                self.active_mdat = Some(RegularMdatRange {
+                    payload_start,
+                    payload_end,
+                });
+                continue;
+            }
             if self.buffer.len() < header.size {
                 if finalizing {
                     return Err(format!(
@@ -1684,13 +1794,6 @@ impl Mp4MediaDemuxer {
                     self.pending_fragments.extend(fragments);
                     self.drain_front(header.size);
                 }
-                b"mdat" => {
-                    events.extend(self.emit_mdat_samples(
-                        box_start + header.header_size as u64,
-                        box_start + header.size as u64,
-                    )?);
-                    self.drain_front(header.size);
-                }
                 _ => self.drain_front(header.size),
             }
         }
@@ -1699,6 +1802,9 @@ impl Mp4MediaDemuxer {
                 "truncated fragmented MP4 box header ({} bytes remain)",
                 self.buffer.len()
             ));
+        }
+        if finalizing && self.active_mdat.is_some() {
+            return Err("truncated fragmented MP4 mdat".to_string());
         }
         if finalizing && !self.pending_fragments.is_empty() {
             return Err("fragmented MP4 ended before all indexed samples arrived".to_string());
@@ -1840,11 +1946,11 @@ impl Mp4MediaDemuxer {
         }))
     }
 
-    fn emit_mdat_samples(
-        &mut self,
-        mdat_payload_start: u64,
-        mdat_payload_end: u64,
-    ) -> Result<Vec<Mp4MediaDemuxEvent>, String> {
+    fn emit_active_fragmented_mdat_samples(&mut self) -> Result<Vec<Mp4MediaDemuxEvent>, String> {
+        let mdat = self
+            .active_mdat
+            .clone()
+            .ok_or_else(|| "fragmented MP4 has no active mdat".to_string())?;
         let mut pending = Vec::new();
         for fragment in std::mem::take(&mut self.pending_fragments) {
             for sample in fragment.samples {
@@ -1854,23 +1960,45 @@ impl Mp4MediaDemuxer {
         pending.sort_unstable_by_key(|(_, sample)| sample.absolute_offset);
 
         let mut events = Vec::new();
-        let mut unresolved = Vec::new();
-        for (track_id, sample) in pending {
-            let sample_end = sample
-                .absolute_offset
-                .checked_add(u64::from(sample.size))
-                .ok_or_else(|| "fragmented MP4 sample range overflow".to_string())?;
-            if sample.absolute_offset < mdat_payload_start || sample_end > mdat_payload_end {
-                unresolved.push(Fmp4Fragment {
-                    track_id,
-                    samples: vec![sample],
-                });
-                continue;
+        loop {
+            let next = pending.iter().position(|(_, sample)| {
+                sample.absolute_offset >= mdat.payload_start
+                    && sample
+                        .absolute_offset
+                        .checked_add(u64::from(sample.size))
+                        .is_some_and(|end| end <= mdat.payload_end)
+            });
+            let Some(next) = next else {
+                let available_end = self.absolute_start + self.buffer.len() as u64;
+                let drain_end = available_end.min(mdat.payload_end);
+                if drain_end > self.absolute_start {
+                    self.drain_front((drain_end - self.absolute_start) as usize);
+                }
+                if self.absolute_start == mdat.payload_end {
+                    self.active_mdat = None;
+                }
+                break;
+            };
+            let (track_id, sample) = &pending[next];
+            if sample.absolute_offset < self.absolute_start {
+                return Err("fragmented MP4 samples overlap or arrive out of order".to_string());
+            }
+            if sample.absolute_offset > self.absolute_start {
+                let gap = usize::try_from(sample.absolute_offset - self.absolute_start)
+                    .map_err(|_| "fragmented MP4 sample gap exceeds this platform".to_string())?;
+                if self.buffer.len() < gap {
+                    self.drain_front(self.buffer.len());
+                    break;
+                }
+                self.drain_front(gap);
+            }
+            if self.buffer.len() < sample.size as usize {
+                break;
             }
             let next_sample_id = self
                 .next_sample_ids
                 .iter_mut()
-                .find(|(candidate, _)| *candidate == u64::from(track_id))
+                .find(|(candidate, _)| *candidate == u64::from(*track_id))
                 .ok_or_else(|| format!("fragmented MP4 references unknown track {track_id}"))?;
             let sample_id = next_sample_id.1;
             next_sample_id.1 = next_sample_id
@@ -1880,21 +2008,11 @@ impl Mp4MediaDemuxer {
             let track = self
                 .tracks
                 .iter()
-                .find(|track| track.track_id == u64::from(track_id))
+                .find(|track| track.track_id == u64::from(*track_id))
                 .ok_or_else(|| format!("fragmented MP4 references unknown track {track_id}"))?;
-            let start = usize::try_from(
-                sample
-                    .absolute_offset
-                    .checked_sub(self.absolute_start)
-                    .ok_or_else(|| "fragmented MP4 sample precedes buffer".to_string())?,
-            )
-            .map_err(|_| "fragmented MP4 sample offset exceeds this platform".to_string())?;
-            let end = start
-                .checked_add(sample.size as usize)
-                .ok_or_else(|| "fragmented MP4 sample range overflow".to_string())?;
             let raw = self
                 .buffer
-                .get(start..end)
+                .get(..sample.size as usize)
                 .ok_or_else(|| "fragmented MP4 sample is outside the buffered mdat".to_string())?;
             let data = match track.nal_length_size {
                 Some(length_size) => mp4_nals_to_annex_b(raw, length_size)?,
@@ -1912,7 +2030,7 @@ impl Mp4MediaDemuxer {
             .and_then(|value| i64::try_from(value).ok())
             .ok_or_else(|| "fragmented MP4 edited presentation time overflow".to_string())?;
             events.push(Mp4MediaDemuxEvent::Packet(MediaTrackPacket {
-                track_id: u64::from(track_id),
+                track_id: u64::from(*track_id),
                 kind: track.kind,
                 codec: track.codec.clone(),
                 sample_id,
@@ -1922,8 +2040,20 @@ impl Mp4MediaDemuxer {
                 duration: sample.duration,
                 is_sync: sample.is_sync,
             }));
+            self.drain_front(sample.size as usize);
+            pending.remove(next);
+            if self.absolute_start == mdat.payload_end {
+                self.active_mdat = None;
+                break;
+            }
         }
-        self.pending_fragments = unresolved;
+        self.pending_fragments = pending
+            .into_iter()
+            .map(|(track_id, sample)| Fmp4Fragment {
+                track_id,
+                samples: vec![sample],
+            })
+            .collect();
         Ok(events)
     }
 }
@@ -3553,6 +3683,39 @@ mod tests {
 
     #[cfg(feature = "mp4")]
     #[test]
+    fn inspects_large_mp4_box_ranges_without_payload_bytes() {
+        let file_size = 8_000_000_032u64;
+        let mut extended = Vec::from(&[0, 0, 0, 1, b'm', b'd', b'a', b't'][..]);
+        extended.extend_from_slice(&8_000_000_016u64.to_be_bytes());
+        let mdat = inspect_mp4_top_level_box(&extended, 16, file_size).unwrap();
+        assert_eq!(mdat.box_type, *b"mdat");
+        assert_eq!(mdat.payload_offset, 32);
+        assert_eq!(mdat.payload_size, 8_000_000_000);
+        assert_eq!(mdat.end, file_size);
+
+        let moov = inspect_mp4_top_level_box(&[0, 0, 0, 16, b'm', b'o', b'o', b'v'], 0, file_size)
+            .unwrap();
+        assert_eq!(moov.payload_offset, 8);
+        assert_eq!(moov.payload_size, 8);
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn rejects_mp4_box_ranges_outside_the_source() {
+        assert!(
+            inspect_mp4_top_level_box(&[0, 0, 0, 32, b'm', b'o', b'o', b'v'], 90, 100,)
+                .unwrap_err()
+                .contains("exceeds")
+        );
+        assert!(
+            inspect_mp4_top_level_box(&[0, 0, 0, 4, b'f', b'r', b'e', b'e'], 0, 100,)
+                .unwrap_err()
+                .contains("shorter")
+        );
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
     fn parses_and_resolves_linear_mp4_edit_timeline() {
         let mut payload = vec![0, 0, 0, 0];
         payload.extend_from_slice(&2u32.to_be_bytes());
@@ -3799,10 +3962,23 @@ mod tests {
         let data = fixture("video-compat/never-final/h264-aac-fragmented.mp4");
         let mut demuxer = Mp4MediaDemuxer::new();
         let mut events = Vec::new();
-        for chunk in data.chunks(4093) {
-            events.extend(demuxer.push(chunk).unwrap());
+        let mut first_packet_before_eof = false;
+        for (index, chunk) in data.chunks(4093).enumerate() {
+            let emitted = demuxer.push(chunk).unwrap();
+            if (index + 1) * 4093 < data.len()
+                && emitted
+                    .iter()
+                    .any(|event| matches!(event, Mp4MediaDemuxEvent::Packet(_)))
+            {
+                first_packet_before_eof = true;
+            }
+            events.extend(emitted);
         }
         events.extend(demuxer.flush().unwrap());
+        assert!(
+            first_packet_before_eof,
+            "fragmented mdat must release samples before EOF"
+        );
 
         let configs: Vec<_> = events
             .iter()

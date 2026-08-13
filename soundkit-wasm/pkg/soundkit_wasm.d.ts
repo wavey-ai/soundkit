@@ -32,6 +32,23 @@ export class WasmAacLcDecoder {
     readonly sampleRate: number;
 }
 
+/**
+ * Bounded ALAC access-unit decoder for seekable MP4 and CAF adapters.
+ */
+export class WasmAlacPacketDecoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Decode exactly one container-demuxed ALAC packet.
+     */
+    decode(packet: Uint8Array): any;
+    constructor(magic_cookie: Uint8Array);
+    readonly bitDepth: number;
+    readonly channels: number;
+    readonly maximumPcmSamples: number;
+    readonly sampleRate: number;
+}
+
 export class WasmAudioContentCipher {
     free(): void;
     [Symbol.dispose](): void;
@@ -262,12 +279,21 @@ export function buildSoundKitFrameHeaderV2(encoding: number, payload_size: numbe
 
 export function buildSoundKitFrameV2(encoding: number, payload: Uint8Array, sample_size: number, sample_rate: number, channels: number, bits_per_sample: number, pts: number): Uint8Array;
 
+/**
+ * Inspect one top-level MOV/MP4 box without reading its payload.
+ *
+ * JavaScript owns only range I/O. Rust owns box sizes, extended sizes, EOF
+ * bounds, and the resulting source offsets.
+ */
+export function inspectMp4TopLevelBox(header: Uint8Array, absolute_offset: number, file_size: number): object;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_wasmaacdeboxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmaaclcdecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmalacpacketdecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmaudiocontentcipher_free: (a: number, b: number) => void;
     readonly __wbg_wasmaudiocontentkeyunwrapper_free: (a: number, b: number) => void;
     readonly __wbg_wasmaudiotrackdemuxer_free: (a: number, b: number) => void;
@@ -286,6 +312,7 @@ export interface InitOutput {
     readonly buildAudioGroupAssociatedData: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => [number, number, number];
     readonly buildSoundKitFrameHeaderV2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly buildSoundKitFrameV2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
+    readonly inspectMp4TopLevelBox: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly wasmaacdeboxer_flush: (a: number) => [number, number, number];
     readonly wasmaacdeboxer_new: () => number;
     readonly wasmaacdeboxer_newWithFormat: (a: number, b: number) => [number, number, number];
@@ -297,6 +324,12 @@ export interface InitOutput {
     readonly wasmaaclcdecoder_framesPerAccessUnit: (a: number) => number;
     readonly wasmaaclcdecoder_new: (a: number, b: number) => [number, number, number];
     readonly wasmaaclcdecoder_sampleRate: (a: number) => number;
+    readonly wasmalacpacketdecoder_bitDepth: (a: number) => number;
+    readonly wasmalacpacketdecoder_channels: (a: number) => number;
+    readonly wasmalacpacketdecoder_decode: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmalacpacketdecoder_maximumPcmSamples: (a: number) => number;
+    readonly wasmalacpacketdecoder_new: (a: number, b: number) => [number, number, number];
+    readonly wasmalacpacketdecoder_sampleRate: (a: number) => number;
     readonly wasmaudiocontentcipher_new: (a: number, b: number) => [number, number, number];
     readonly wasmaudiocontentcipher_open: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly wasmaudiocontentcipher_seal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];

@@ -163,6 +163,79 @@ export class WasmAacLcDecoder {
 }
 if (Symbol.dispose) WasmAacLcDecoder.prototype[Symbol.dispose] = WasmAacLcDecoder.prototype.free;
 
+/**
+ * Bounded ALAC access-unit decoder for seekable MP4 and CAF adapters.
+ */
+export class WasmAlacPacketDecoder {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmAlacPacketDecoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmalacpacketdecoder_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get bitDepth() {
+        const ret = wasm.wasmalacpacketdecoder_bitDepth(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
+    get channels() {
+        const ret = wasm.wasmalacpacketdecoder_channels(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Decode exactly one container-demuxed ALAC packet.
+     * @param {Uint8Array} packet
+     * @returns {any}
+     */
+    decode(packet) {
+        const ptr0 = passArray8ToWasm0(packet, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmalacpacketdecoder_decode(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @returns {number}
+     */
+    get maximumPcmSamples() {
+        const ret = wasm.wasmalacpacketdecoder_maximumPcmSamples(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {Uint8Array} magic_cookie
+     */
+    constructor(magic_cookie) {
+        const ptr0 = passArray8ToWasm0(magic_cookie, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmalacpacketdecoder_new(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmAlacPacketDecoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {number}
+     */
+    get sampleRate() {
+        const ret = wasm.wasmalacpacketdecoder_sampleRate(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) WasmAlacPacketDecoder.prototype[Symbol.dispose] = WasmAlacPacketDecoder.prototype.free;
+
 export class WasmAudioContentCipher {
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
@@ -1297,6 +1370,26 @@ export function buildSoundKitFrameV2(encoding, payload, sample_size, sample_rate
     }
     return takeFromExternrefTable0(ret[0]);
 }
+
+/**
+ * Inspect one top-level MOV/MP4 box without reading its payload.
+ *
+ * JavaScript owns only range I/O. Rust owns box sizes, extended sizes, EOF
+ * bounds, and the resulting source offsets.
+ * @param {Uint8Array} header
+ * @param {number} absolute_offset
+ * @param {number} file_size
+ * @returns {object}
+ */
+export function inspectMp4TopLevelBox(header, absolute_offset, file_size) {
+    const ptr0 = passArray8ToWasm0(header, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.inspectMp4TopLevelBox(ptr0, len0, absolute_offset, file_size);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -1370,6 +1463,9 @@ const WasmAacDeboxerFinalization = (typeof FinalizationRegistry === 'undefined')
 const WasmAacLcDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmaaclcdecoder_free(ptr, 1));
+const WasmAlacPacketDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmalacpacketdecoder_free(ptr, 1));
 const WasmAudioContentCipherFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmaudiocontentcipher_free(ptr, 1));

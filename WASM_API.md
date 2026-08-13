@@ -290,11 +290,39 @@ Current container coverage:
 | WebM/Matroska | Opus/Vorbis/other audio packets as raw blocks | Emits CodecPrivate in config. |
 | MPEG-TS/HLS `.ts` | AAC ADTS packets, AAC LATM payloads, MP3 payloads | Parses PAT/PMT/PES and chooses the first supported audio PID. |
 
-MP4 streaming depends on file layout. Faststart/progressive MP4 can emit after
-the header is available. MP4 files with `moov` at EOF may only emit on `flush()`.
-For CMAF/fMP4 streams, pass `fmp4`/`cmaf` explicitly when the stream starts with
-an init segment and fragments arrive later. Auto-detection can choose fMP4 only
-when a `moof` box is already present in the detection buffer.
+Use the seekable API below for each browser `File` or `Blob`. Do not send a
+complete MOV or MP4 source across the WASM boundary.
+
+Import `openSeekableMp4` from `soundkit-wasm/runtime/streaming-media.mjs`. The
+adapter reads 16-byte headers and calls Rust to validate each box range.
+
+```js
+const media = await openSeekableMp4(file, {
+  inspectMp4TopLevelBox,
+  WasmMp4MediaIndex,
+});
+
+try {
+  for await (const { sampleIndex, packet } of media.packets()) {
+    consume(packet, media.pcmTrim.bind(media), sampleIndex);
+  }
+} finally {
+  media.close();
+}
+```
+
+The adapter skips `mdat` without reading its payload. It reads `moov` once and
+then reads one Rust-indexed sample range at a time.
+
+Use `decodeSeekableAlac` from the same module for ALAC M4A files. It constructs
+`WasmAlacPacketDecoder` from Rust-owned track metadata and decodes one packet
+range per iteration.
+
+Rust limits `moov` metadata to 64 MiB. Rust validates box sizes, sample ranges,
+timestamps, edit lists, and codec normalization.
+
+Use `WasmMp4MediaDemuxer` only for fragmented MP4 and CMAF byte streams. It now
+releases complete samples before the current `mdat` reaches EOF.
 
 ## AAC In M4A/MP4 Deboxing
 

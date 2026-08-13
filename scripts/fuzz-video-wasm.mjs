@@ -255,6 +255,16 @@ const sources = [
     path: resolve(generatedRoot, "dnxhr-444-yuv10-pcm.mov"),
     framing: "mp4-video-packet",
   },
+  ...[
+    "dnxhd-1080p120-8bit-pcm.mov",
+    "dnxhd-1080p185-8bit-pcm.mov",
+    "dnxhd-1080p185-10bit-pcm.mov",
+    "dnxhd-1080p36-8bit-pcm.mov",
+  ].map((file) => ({
+    codec: "dnxhr",
+    path: resolve(generatedRoot, file),
+    framing: "mp4-video-packet",
+  })),
   { codec: "container", path: resolve(generatedRoot, "h264-high-aac.mp4"), framing: "mp4" },
   {
     codec: "container",
