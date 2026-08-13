@@ -12,6 +12,8 @@ SoundKit owns deterministic audio extraction and video decoding for native and W
 
 `Mp4MediaIndex` parses only `moov` and returns validated absolute sample ranges. This matters for camera and NLE files that store a large `mdat` before metadata. Browser code reads the ranges from the `File`; it does not parse or validate MP4. Contiguous QuickTime PCM samples are grouped into bounded 4,096-frame packets.
 
+`Mp4MediaDemuxer` incrementally parses fragmented MP4 and CMAF. It resolves `moof` sample runs for every supported audio and video track, applies the same Rust timeline and NAL normalization, and retains only incomplete boxes or fragments between pushes.
+
 MP4 edit lists are parsed and normalized in Rust. Each track exposes a linear timeline in its own timescale. Packet presentation timestamps include the edit, and `pcm_packet_trim` removes AAC preroll and tail padding exactly. Platform adapters only apply the returned source-frame slice.
 
 `WebmMediaDemuxer` streams all supported WebM video and audio tracks. It resolves cluster-relative timestamps and durations to nanoseconds, preserves keyframe state, and timestamps laced frames independently.
@@ -25,6 +27,7 @@ The deterministic `never-final.mov` matrix covers common artist delivery and upl
 | Container | Video | Audio | Native/WASM status |
 | --- | --- | --- | --- |
 | MP4 | H.264 High 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing |
+| Fragmented MP4/CMAF/DASH | H.264 High 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing across default-base, explicit-base, and separate-moof layouts |
 | MP4 VFR | H.264 High 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing, including edit timeline |
 | MP4 | H.264 High 8-bit 4:2:0 | FLAC 24-bit 48 kHz stereo | Passing |
 | MP4 | H.264 High 4:2:2 8-bit | AAC-LC 48 kHz stereo | Demux/audio passing; native video profile pending |
@@ -66,7 +69,7 @@ Build optimized WASM and decode both video and audio from each complete containe
 make media-conformance
 ```
 
-The repository stores 22 deterministic three-second container fixtures under `testdata/video-compat/never-final`. It does not store the artist source. The generator recreates the fixtures under `build/`, and `media-conformance` verifies the committed SHA-256 manifest before decoding.
+The repository stores 26 deterministic three-second container fixtures under `testdata/video-compat/never-final`. It does not store the artist source. The generator recreates the fixtures under `build/`, and `media-conformance` verifies the committed SHA-256 manifest before decoding.
 
 Fetch the pinned Chromium corpus and verify its SHA-256 values:
 
@@ -97,4 +100,4 @@ make media-fuzz
 
 ## Remaining format work
 
-DNxHD/DNxHR needs a production-quality pure-Rust decoder. H.264 and HEVC 4:2:2/4:4:4 need decoder extensions; their container and audio paths already pass. The current API rejects these gaps explicitly instead of silently invoking a device decoder. Additional corpus work should cover fragmented MP4, MXF, and broader Matroska variants.
+DNxHD/DNxHR needs a production-quality pure-Rust decoder. H.264 and HEVC 4:2:2/4:4:4 need decoder extensions; their container and audio paths already pass. The current API rejects these gaps explicitly instead of silently invoking a device decoder. Additional corpus work should cover MXF and broader Matroska variants.

@@ -101,6 +101,32 @@ async function runCase(specification) {
     if (fatalError) throw fatalError;
     return;
   }
+  if (specification.framing === "fmp4") {
+    const demuxer = new initModule.WasmMp4MediaDemuxer();
+    let fatalError;
+    try {
+      try {
+        for (let offset = 0; offset < input.length; offset += 4093) {
+          demuxer.push(input.subarray(offset, offset + 4093));
+        }
+        demuxer.flush();
+      } catch (error) {
+        const message = String(error);
+        if (
+          error instanceof WebAssembly.RuntimeError ||
+          /unreachable|out of bounds|memory access|stack overflow/i.test(message)
+        ) fatalError = error;
+      }
+    } finally {
+      try {
+        demuxer.free();
+      } catch (error) {
+        fatalError ??= error;
+      }
+    }
+    if (fatalError) throw fatalError;
+    return;
+  }
   if (specification.framing === "webm") {
     const demuxer = new initModule.WasmWebmMediaDemuxer();
     let fatalError;
@@ -179,6 +205,18 @@ const sources = [
     framing: "mp4-video-packet",
   },
   { codec: "container", path: resolve(generatedRoot, "h264-high-aac.mp4"), framing: "mp4" },
+  {
+    codec: "container",
+    path: resolve(generatedRoot, "h264-aac-fragmented.mp4"),
+    framing: "fmp4",
+  },
+  { codec: "container", path: resolve(generatedRoot, "h264-aac-cmaf.mp4"), framing: "fmp4" },
+  { codec: "container", path: resolve(generatedRoot, "h264-aac-dash.mp4"), framing: "fmp4" },
+  {
+    codec: "container",
+    path: resolve(generatedRoot, "h264-aac-separate-moof.mp4"),
+    framing: "fmp4",
+  },
   { codec: "container", path: resolve(generatedRoot, "h264-vfr-aac.mp4"), framing: "mp4" },
   { codec: "container", path: resolve(generatedRoot, "h264-high422-aac.mp4"), framing: "mp4" },
   { codec: "container", path: resolve(generatedRoot, "hevc-main10-pcm.mov"), framing: "mp4" },

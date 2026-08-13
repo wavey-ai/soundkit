@@ -15,6 +15,12 @@ common_audio="-map 0:a:0 -ar 48000 -ac 2"
 
 # shellcheck disable=SC2086
 ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v libx264 -profile:v high -pix_fmt yuv420p $common_audio -c:a aac -b:a 192k -movflags +faststart "$output_dir/h264-high-aac.mp4"
+# CMAF-style fragmented MP4 uses empty sample tables in moov and resolves both
+# tracks through moof/traf/trun records. Remuxing keeps codec output identical.
+ffmpeg -hide_banner -loglevel error -y -i "$output_dir/h264-high-aac.mp4" -map 0 -c copy -movflags +frag_keyframe+empty_moov+default_base_moof -frag_duration 1000000 "$output_dir/h264-aac-fragmented.mp4"
+ffmpeg -hide_banner -loglevel error -y -i "$output_dir/h264-high-aac.mp4" -map 0 -c copy -movflags +cmaf+frag_keyframe+empty_moov -frag_duration 1000000 "$output_dir/h264-aac-cmaf.mp4"
+ffmpeg -hide_banner -loglevel error -y -i "$output_dir/h264-high-aac.mp4" -map 0 -c copy -movflags +dash+frag_keyframe+empty_moov -frag_duration 1000000 "$output_dir/h264-aac-dash.mp4"
+ffmpeg -hide_banner -loglevel error -y -i "$output_dir/h264-high-aac.mp4" -map 0 -c copy -movflags +frag_keyframe+empty_moov+separate_moof -frag_duration 1000000 "$output_dir/h264-aac-separate-moof.mp4"
 # A two-rate presentation timeline exercises non-uniform stts/ctts entries.
 ffmpeg -hide_banner -loglevel error -y -ss 30 -t 3 -i "$source_media" -map 0:v:0 -map 0:a:0 -vf "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,select='if(lt(t,1.5),not(mod(n,2)),not(mod(n,3)))',setpts='if(lt(N,19),N*2,(38+(N-19)*3))/(25*TB)'" -fps_mode vfr -c:v libx264 -profile:v high -pix_fmt yuv420p -c:a aac -b:a 192k -movflags +faststart "$output_dir/h264-vfr-aac.mp4"
 # High 4:2:2 and 4:4:4 are less common delivery formats, but NLEs can export

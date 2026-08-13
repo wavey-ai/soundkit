@@ -443,6 +443,66 @@ export class WasmFlacEncoder {
 if (Symbol.dispose) WasmFlacEncoder.prototype[Symbol.dispose] = WasmFlacEncoder.prototype.free;
 
 /**
+ * Streaming Rust fragmented-MP4/CMAF audio-and-video demuxer.
+ */
+export class WasmMp4MediaDemuxer {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmMp4MediaDemuxerFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmmp4mediademuxer_free(ptr, 0);
+    }
+    /**
+     * @returns {Array<any>}
+     */
+    flush() {
+        const ret = wasm.wasmmp4mediademuxer_flush(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    constructor() {
+        const ret = wasm.wasmmp4mediademuxer_new();
+        this.__wbg_ptr = ret;
+        WasmMp4MediaDemuxerFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @param {number} track_id
+     * @param {number} presentation_time
+     * @param {number} packet_duration
+     * @param {number} decoded_frames
+     * @returns {any}
+     */
+    pcmTrim(track_id, presentation_time, packet_duration, decoded_frames) {
+        const ret = wasm.wasmmp4mediademuxer_pcmTrim(this.__wbg_ptr, track_id, presentation_time, packet_duration, decoded_frames);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {Uint8Array} bytes
+     * @returns {Array<any>}
+     */
+    push(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmp4mediademuxer_push(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+}
+if (Symbol.dispose) WasmMp4MediaDemuxer.prototype[Symbol.dispose] = WasmMp4MediaDemuxer.prototype.free;
+
+/**
  * Seekable, Rust-validated MOV/MP4 audio-and-video sample index.
  */
 export class WasmMp4MediaIndex {
@@ -1276,6 +1336,9 @@ const WasmAudioTrackDemuxerFinalization = (typeof FinalizationRegistry === 'unde
 const WasmFlacEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmflacencoder_free(ptr, 1));
+const WasmMp4MediaDemuxerFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmmp4mediademuxer_free(ptr, 1));
 const WasmMp4MediaIndexFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmmp4mediaindex_free(ptr, 1));

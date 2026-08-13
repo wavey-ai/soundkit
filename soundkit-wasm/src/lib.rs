@@ -36,7 +36,7 @@ use soundkit_alac::AlacDecoder;
 #[cfg(feature = "audio-demux")]
 use soundkit_audio_demux::{
     AudioDemuxEvent, AudioTrackDemuxer, MediaSampleIndex, MediaTrackConfig, MediaTrackPacket,
-    Mp4MediaIndex,
+    Mp4MediaDemuxEvent, Mp4MediaDemuxer, Mp4MediaIndex,
 };
 #[cfg(feature = "flac")]
 use soundkit_flac::{FlacDecoderClaxon, FlacEncoder};
@@ -251,6 +251,13 @@ pub struct WasmAudioTrackDemuxer {
 #[wasm_bindgen]
 pub struct WasmMp4MediaIndex {
     index: Mp4MediaIndex,
+}
+
+/// Streaming Rust fragmented-MP4/CMAF audio-and-video demuxer.
+#[cfg(feature = "audio-demux")]
+#[wasm_bindgen]
+pub struct WasmMp4MediaDemuxer {
+    demuxer: Mp4MediaDemuxer,
 }
 
 /// Streaming Rust WebM demuxer that emits both video and audio tracks.
@@ -766,18 +773,59 @@ impl WasmMp4MediaIndex {
         else {
             return Ok(JsValue::NULL);
         };
-        let object = Object::new();
-        Reflect::set(
-            &object,
-            &"sourceFrameStart".into(),
-            &JsValue::from_f64(trim.source_frame_start as f64),
-        )?;
-        Reflect::set(
-            &object,
-            &"frameCount".into(),
-            &JsValue::from_f64(trim.frame_count as f64),
-        )?;
-        Ok(object.into())
+        pcm_packet_trim_to_js(trim.source_frame_start, trim.frame_count)
+    }
+}
+
+#[cfg(feature = "audio-demux")]
+#[wasm_bindgen]
+impl WasmMp4MediaDemuxer {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            demuxer: Mp4MediaDemuxer::new(),
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Array, JsValue> {
+        mp4_media_events_to_js(self.demuxer.push(bytes).map_err(js_error)?)
+    }
+
+    pub fn flush(&mut self) -> Result<Array, JsValue> {
+        mp4_media_events_to_js(self.demuxer.flush().map_err(js_error)?)
+    }
+
+    #[wasm_bindgen(js_name = pcmTrim)]
+    pub fn pcm_trim(
+        &self,
+        track_id: u32,
+        presentation_time: f64,
+        packet_duration: u32,
+        decoded_frames: u32,
+    ) -> Result<JsValue, JsValue> {
+        let presentation_time = finite_i64(presentation_time).ok_or_else(|| {
+            js_error("fragmented MP4 presentation time must be a finite integer".to_string())
+        })?;
+        let Some(trim) = self
+            .demuxer
+            .pcm_packet_trim(
+                u64::from(track_id),
+                presentation_time,
+                packet_duration,
+                decoded_frames,
+            )
+            .map_err(js_error)?
+        else {
+            return Ok(JsValue::NULL);
+        };
+        pcm_packet_trim_to_js(trim.source_frame_start, trim.frame_count)
+    }
+}
+
+#[cfg(feature = "audio-demux")]
+impl Default for WasmMp4MediaDemuxer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2027,7 +2075,7 @@ fn audio_frames_to_js(frames: Vec<AudioData>) -> Result<Array, JsValue> {
     Ok(array)
 }
 
-#[cfg(feature = "video")]
+#[cfg(any(feature = "video", feature = "audio-demux"))]
 fn finite_i64(value: f64) -> Option<i64> {
     value.is_finite().then(|| value.round() as i64)
 }
@@ -2442,6 +2490,43 @@ fn media_track_config_to_js(track: &MediaTrackConfig) -> Result<JsValue, JsValue
     )?;
     set_optional_u8(&object, "nalLengthSize", track.nal_length_size)?;
     Ok(object.into())
+}
+
+#[cfg(feature = "audio-demux")]
+fn pcm_packet_trim_to_js(source_frame_start: u32, frame_count: u32) -> Result<JsValue, JsValue> {
+    let object = Object::new();
+    Reflect::set(
+        &object,
+        &"sourceFrameStart".into(),
+        &JsValue::from_f64(source_frame_start as f64),
+    )?;
+    Reflect::set(
+        &object,
+        &"frameCount".into(),
+        &JsValue::from_f64(frame_count as f64),
+    )?;
+    Ok(object.into())
+}
+
+#[cfg(feature = "audio-demux")]
+fn mp4_media_events_to_js(events: Vec<Mp4MediaDemuxEvent>) -> Result<Array, JsValue> {
+    let output = Array::new();
+    for event in events {
+        let value = match event {
+            Mp4MediaDemuxEvent::Config(track) => {
+                let value = media_track_config_to_js(&track)?;
+                Reflect::set(&value, &"type".into(), &"config".into())?;
+                value
+            }
+            Mp4MediaDemuxEvent::Packet(packet) => {
+                let value: JsValue = media_track_packet_to_js(&packet)?.into();
+                Reflect::set(&value, &"type".into(), &"packet".into())?;
+                value
+            }
+        };
+        output.push(&value);
+    }
+    Ok(output)
 }
 
 #[cfg(feature = "audio-demux")]

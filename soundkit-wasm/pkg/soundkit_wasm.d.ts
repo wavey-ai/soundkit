@@ -89,6 +89,18 @@ export class WasmFlacEncoder {
 }
 
 /**
+ * Streaming Rust fragmented-MP4/CMAF audio-and-video demuxer.
+ */
+export class WasmMp4MediaDemuxer {
+    free(): void;
+    [Symbol.dispose](): void;
+    flush(): Array<any>;
+    constructor();
+    pcmTrim(track_id: number, presentation_time: number, packet_duration: number, decoded_frames: number): any;
+    push(bytes: Uint8Array): Array<any>;
+}
+
+/**
  * Seekable, Rust-validated MOV/MP4 audio-and-video sample index.
  */
 export class WasmMp4MediaIndex {
@@ -249,6 +261,7 @@ export interface InitOutput {
     readonly __wbg_wasmaudiocontentkeyunwrapper_free: (a: number, b: number) => void;
     readonly __wbg_wasmaudiotrackdemuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmflacencoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmmp4mediademuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediaindex_free: (a: number, b: number) => void;
     readonly __wbg_wasmmusicdecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdeboxer_free: (a: number, b: number) => void;
@@ -287,6 +300,10 @@ export interface InitOutput {
     readonly wasmflacencoder_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly wasmflacencoder_reset: (a: number) => [number, number];
     readonly wasmflacencoder_streamHeader: (a: number) => any;
+    readonly wasmmp4mediademuxer_flush: (a: number) => [number, number, number];
+    readonly wasmmp4mediademuxer_new: () => number;
+    readonly wasmmp4mediademuxer_pcmTrim: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly wasmmp4mediademuxer_push: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmmp4mediaindex_fromFile: (a: number, b: number) => [number, number, number];
     readonly wasmmp4mediaindex_new: (a: number, b: number) => [number, number, number];
     readonly wasmmp4mediaindex_packet: (a: number, b: number, c: number, d: number) => [number, number, number];

@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import init, {
   WasmAacLcDecoder,
   WasmAudioTrackDemuxer,
+  WasmMp4MediaDemuxer,
   WasmMp4MediaIndex,
   WasmMusicDecoder,
   WasmOpusDecoder,
@@ -140,6 +141,68 @@ async function decodeMp4MediaFile(file, expected) {
     audioDecoder?.free();
     decoder.free();
     index.free();
+  }
+}
+
+async function decodeFragmentedMp4MediaFile(file, expected) {
+  const bytes = await readFile(resolve(fixtureRoot, file));
+  const demuxer = new WasmMp4MediaDemuxer();
+  const events = [];
+  let videoDecoder = null;
+  let audioDecoder = null;
+  const frames = [];
+  const videoPresentationTimes = [];
+  let audioFrames = 0;
+  try {
+    // Deliberately split across MP4 box fields and media samples. The Rust
+    // demuxer must retain incomplete input without a JavaScript parser.
+    for (let offset = 0; offset < bytes.length; offset += 4093) {
+      events.push(...demuxer.push(bytes.subarray(offset, offset + 4093)));
+    }
+    events.push(...demuxer.flush());
+
+    const video = events.find((event) => event.type === "config" && event.kind === "video");
+    const audio = events.find((event) => event.type === "config" && event.kind === "audio");
+    assert.ok(video, `${file} has a Rust-indexed fragmented video track`);
+    assert.ok(audio, `${file} has a Rust-indexed fragmented audio track`);
+    assert.equal(video.codec, expected.codec, `${file} video codec`);
+    assert.equal(audio.codec, expected.audioCodec, `${file} audio codec`);
+
+    videoDecoder = new WasmVideoDecoder(video.codec);
+    audioDecoder = new WasmAacLcDecoder(audio.decoderConfiguration);
+    if (video.decoderConfiguration.byteLength > 0) {
+      frames.push(...videoDecoder.decode(video.decoderConfiguration, Number.NaN, Number.NaN));
+    }
+    for (const event of events) {
+      if (event.type !== "packet") continue;
+      if (event.kind === "video") {
+        videoPresentationTimes.push(event.presentationTime);
+        frames.push(...videoDecoder.decode(event.data, event.presentationTime, event.duration));
+      } else {
+        const decodedFrames = audioDecoder.decodeInterleaved(event.data).length / audio.channels;
+        const trim = demuxer.pcmTrim(
+          event.trackId,
+          event.presentationTime,
+          event.duration,
+          decodedFrames,
+        );
+        audioFrames += trim?.frameCount ?? 0;
+      }
+    }
+    frames.push(...videoDecoder.flush());
+
+    assertExportedFrameContract(file, frames, expected);
+    assert.deepEqual(
+      frames.map((frame) => frame.pts).sort((left, right) => left - right),
+      videoPresentationTimes.sort((left, right) => left - right),
+      `${file} preserves fragmented MP4 presentation timestamps`,
+    );
+    assert.equal(audioFrames, expected.audioFrames, `${file} decoded audio frame count`);
+    console.log(`${file}: Rust streamed fragmented video plus ${audioFrames} audio frames`);
+  } finally {
+    audioDecoder?.free();
+    videoDecoder?.free();
+    demuxer.free();
   }
 }
 
@@ -301,6 +364,21 @@ await decodeMp4MediaFile("h264-vfr-aac.mp4", {
   chroma: "420",
   variableFrameDurations: true,
 });
+for (const file of [
+  "h264-aac-fragmented.mp4",
+  "h264-aac-cmaf.mp4",
+  "h264-aac-dash.mp4",
+  "h264-aac-separate-moof.mp4",
+]) {
+  await decodeFragmentedMp4MediaFile(file, {
+    codec: "h264",
+    audioCodec: "aac",
+    audioFrames: 145408,
+    frames: 75,
+    bitDepth: 8,
+    chroma: "420",
+  });
+}
 await decodeMp4MediaFile("h264-flac.mp4", {
   codec: "h264",
   audioCodec: "flac",
@@ -501,6 +579,14 @@ async function inspectAudio(file, expected) {
 }
 
 await inspectAudio("h264-high-aac.mp4", { codec: "aac" });
+for (const file of [
+  "h264-aac-fragmented.mp4",
+  "h264-aac-cmaf.mp4",
+  "h264-aac-dash.mp4",
+  "h264-aac-separate-moof.mp4",
+]) {
+  await inspectAudio(file, { codec: "aac" });
+}
 await inspectAudio("h264-vfr-aac.mp4", { codec: "aac" });
 await inspectAudio("h264-high422-aac.mp4", { codec: "aac" });
 await inspectAudio("h264-high444-aac.mp4", { codec: "aac" });

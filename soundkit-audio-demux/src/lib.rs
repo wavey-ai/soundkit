@@ -219,6 +219,26 @@ pub struct Mp4MediaIndex {
     pub samples: Vec<MediaSampleIndex>,
 }
 
+#[cfg(feature = "mp4")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Mp4MediaDemuxEvent {
+    Config(MediaTrackConfig),
+    Packet(MediaTrackPacket),
+}
+
+/// Incremental fragmented-MP4/CMAF demuxer for all supported audio and video
+/// tracks. Container parsing and AVC/HEVC normalization remain entirely Rust
+/// owned; callers only transport byte chunks and consume typed events.
+#[cfg(feature = "mp4")]
+pub struct Mp4MediaDemuxer {
+    buffer: Vec<u8>,
+    absolute_start: u64,
+    tracks: Vec<MediaTrackConfig>,
+    track_defaults: Vec<Fmp4TrackDefaults>,
+    pending_fragments: Vec<Fmp4Fragment>,
+    next_sample_ids: Vec<(u64, u32)>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PcmEndianness {
     Little,
@@ -544,7 +564,7 @@ fn process_state(
 #[cfg(feature = "mp4")]
 enum Mp4AudioDemuxer {
     Regular(RegularMp4AudioDemuxer),
-    Fragmented(Fmp4AacDemuxer),
+    Fragmented(FragmentedMp4AudioDemuxer),
 }
 
 #[cfg(feature = "mp4")]
@@ -554,7 +574,7 @@ impl Mp4AudioDemuxer {
     }
 
     fn fragmented() -> Self {
-        Self::Fragmented(Fmp4AacDemuxer::new())
+        Self::Fragmented(FragmentedMp4AudioDemuxer::new())
     }
 
     fn add(&mut self, bytes: &[u8]) -> Result<Vec<AudioDemuxEvent>, String> {
@@ -918,7 +938,14 @@ fn parse_mp4_media_trak(
         chunk_offsets: tables.chunk_offsets,
         sync_samples: tables.sync_samples,
     };
-    let samples = build_regular_samples(&sample_tables)?;
+    let is_fragmented_init = sample_tables.sample_sizes.is_empty()
+        && sample_tables.chunk_offsets.is_empty()
+        && sample_tables.stsc.is_empty();
+    let samples = if is_fragmented_init {
+        Vec::new()
+    } else {
+        build_regular_samples(&sample_tables)?
+    };
     let sample_count = u32::try_from(samples.len())
         .map_err(|_| format!("MP4 track {track_id} has too many samples"))?;
 
@@ -1542,17 +1569,6 @@ impl Mp4BoxHeader {
 }
 
 #[cfg(feature = "mp4")]
-#[derive(Clone, Debug)]
-struct Fmp4AacTrack {
-    track_id: u32,
-    sample_rate: u32,
-    channels: u8,
-    codec_private: Vec<u8>,
-    default_sample_duration: Option<u32>,
-    default_sample_size: Option<u32>,
-}
-
-#[cfg(feature = "mp4")]
 #[derive(Clone, Debug, Default)]
 struct Fmp4TrackDefaults {
     track_id: u32,
@@ -1579,52 +1595,69 @@ struct Fmp4Fragment {
 }
 
 #[cfg(feature = "mp4")]
-struct Fmp4AacDemuxer {
-    buffer: Vec<u8>,
-    absolute_start: u64,
-    track: Option<Fmp4AacTrack>,
-    track_defaults: Vec<Fmp4TrackDefaults>,
-    pending_fragments: Vec<Fmp4Fragment>,
-    emitted_config: bool,
-    next_sample_id: u32,
-}
-
-#[cfg(feature = "mp4")]
-impl Fmp4AacDemuxer {
-    fn new() -> Self {
+impl Mp4MediaDemuxer {
+    pub fn new() -> Self {
         Self {
             buffer: Vec::with_capacity(128 * 1024),
             absolute_start: 0,
-            track: None,
+            tracks: Vec::new(),
             track_defaults: Vec::new(),
             pending_fragments: Vec::new(),
-            emitted_config: false,
-            next_sample_id: 1,
+            next_sample_ids: Vec::new(),
         }
     }
 
-    fn add(&mut self, bytes: &[u8]) -> Result<Vec<AudioDemuxEvent>, String> {
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Mp4MediaDemuxEvent>, String> {
         self.buffer.extend_from_slice(bytes);
         self.parse_available(false)
     }
 
-    fn finish(&mut self, bytes: &[u8]) -> Result<Vec<AudioDemuxEvent>, String> {
-        self.buffer.extend_from_slice(bytes);
+    pub fn flush(&mut self) -> Result<Vec<Mp4MediaDemuxEvent>, String> {
         self.parse_available(true)
     }
 
-    fn parse_available(&mut self, finalizing: bool) -> Result<Vec<AudioDemuxEvent>, String> {
-        let mut events = Vec::new();
+    pub fn pcm_packet_trim(
+        &self,
+        track_id: u64,
+        presentation_time: i64,
+        packet_duration: u32,
+        decoded_frames: u32,
+    ) -> Result<Option<PcmPacketTrim>, String> {
+        let track = self
+            .tracks
+            .iter()
+            .find(|track| track.track_id == track_id)
+            .ok_or_else(|| format!("fragmented MP4 references unknown track {track_id}"))?;
+        if track.kind != MediaTrackKind::Audio {
+            return Err(format!("fragmented MP4 track {track_id} is not audio"));
+        }
+        match track.timeline {
+            Some(timeline) => resolve_pcm_packet_trim(
+                timeline,
+                presentation_time,
+                packet_duration,
+                decoded_frames,
+                track.timescale,
+                track.sample_rate.unwrap_or(track.timescale),
+            ),
+            None if decoded_frames == 0 => Ok(None),
+            None => Ok(Some(PcmPacketTrim {
+                source_frame_start: 0,
+                frame_count: decoded_frames,
+            })),
+        }
+    }
 
+    fn parse_available(&mut self, finalizing: bool) -> Result<Vec<Mp4MediaDemuxEvent>, String> {
+        let mut events = Vec::new();
         loop {
             let Some(header) = Mp4BoxHeader::read(&self.buffer) else {
                 break;
             };
-
             if self.buffer.len() < header.size {
                 if finalizing {
                     return Err(format!(
-                        "truncated fMP4 box {}",
+                        "truncated fragmented MP4 box {}",
                         String::from_utf8_lossy(&header.name)
                     ));
                 }
@@ -1632,32 +1665,37 @@ impl Fmp4AacDemuxer {
             }
 
             let box_start = self.absolute_start;
-            let payload_start = header.header_size;
-            let payload_end = header.size;
-            let payload = self.buffer[payload_start..payload_end].to_vec();
-
             match &header.name {
                 b"moov" => {
-                    self.parse_moov(&payload)?;
+                    let payload = self.buffer[header.header_size..header.size].to_vec();
+                    events.extend(self.parse_moov(&payload)?);
                     self.drain_front(header.size);
                 }
                 b"moof" => {
+                    let payload = self.buffer[header.header_size..header.size].to_vec();
                     let fragments = self.parse_moof(&payload, box_start)?;
                     self.pending_fragments.extend(fragments);
                     self.drain_front(header.size);
                 }
                 b"mdat" => {
-                    let mdat_payload_start = box_start + header.header_size as u64;
-                    let mdat_payload_end = box_start + header.size as u64;
-                    events.extend(self.emit_mdat_samples(mdat_payload_start, mdat_payload_end)?);
+                    events.extend(self.emit_mdat_samples(
+                        box_start + header.header_size as u64,
+                        box_start + header.size as u64,
+                    )?);
                     self.drain_front(header.size);
                 }
-                _ => {
-                    self.drain_front(header.size);
-                }
+                _ => self.drain_front(header.size),
             }
         }
-
+        if finalizing && !self.buffer.is_empty() {
+            return Err(format!(
+                "truncated fragmented MP4 box header ({} bytes remain)",
+                self.buffer.len()
+            ));
+        }
+        if finalizing && !self.pending_fragments.is_empty() {
+            return Err("fragmented MP4 ended before all indexed samples arrived".to_string());
+        }
         Ok(events)
     }
 
@@ -1666,24 +1704,21 @@ impl Fmp4AacDemuxer {
         self.absolute_start += bytes as u64;
     }
 
-    fn parse_moov(&mut self, data: &[u8]) -> Result<(), String> {
+    fn parse_moov(&mut self, data: &[u8]) -> Result<Vec<Mp4MediaDemuxEvent>, String> {
         self.track_defaults = parse_trex_defaults(data);
-        let mut selected = None;
-
-        for_each_child_box(data, |header, payload, _| {
-            if header.name == *b"trak" {
-                if let Some(track) = parse_trak(payload, &self.track_defaults) {
-                    selected = Some(track);
-                }
-            }
-            Ok(())
-        })?;
-
-        if let Some(track) = selected {
-            self.track = Some(track);
-        }
-
-        Ok(())
+        let indexes = parse_mp4_media_indexes(data)?;
+        self.tracks = indexes.into_iter().map(|index| index.config).collect();
+        self.next_sample_ids = self
+            .tracks
+            .iter()
+            .map(|track| (track.track_id, 1))
+            .collect();
+        Ok(self
+            .tracks
+            .iter()
+            .cloned()
+            .map(Mp4MediaDemuxEvent::Config)
+            .collect())
     }
 
     fn parse_moof(
@@ -1692,7 +1727,6 @@ impl Fmp4AacDemuxer {
         moof_absolute_start: u64,
     ) -> Result<Vec<Fmp4Fragment>, String> {
         let mut fragments = Vec::new();
-
         for_each_child_box(data, |header, payload, _| {
             if header.name == *b"traf" {
                 if let Some(fragment) = self.parse_traf(payload, moof_absolute_start)? {
@@ -1701,7 +1735,6 @@ impl Fmp4AacDemuxer {
             }
             Ok(())
         })?;
-
         Ok(fragments)
     }
 
@@ -1713,7 +1746,6 @@ impl Fmp4AacDemuxer {
         let mut tfhd = None;
         let mut base_decode_time = 0u64;
         let mut truns = Vec::new();
-
         for_each_child_box(data, |header, payload, _| {
             match &header.name {
                 b"tfhd" => tfhd = parse_tfhd(payload),
@@ -1727,60 +1759,49 @@ impl Fmp4AacDemuxer {
             }
             Ok(())
         })?;
-
         let Some(tfhd) = tfhd else {
             return Ok(None);
         };
-
         let Some(track) = self
-            .track
-            .as_ref()
-            .filter(|track| track.track_id == tfhd.track_id)
+            .tracks
+            .iter()
+            .find(|track| track.track_id == u64::from(tfhd.track_id))
         else {
             return Ok(None);
         };
-
-        let track_defaults = self
+        let defaults = self
             .track_defaults
             .iter()
             .find(|defaults| defaults.track_id == tfhd.track_id)
             .cloned()
             .unwrap_or_default();
-
         let default_duration = tfhd
             .default_sample_duration
-            .or(track.default_sample_duration)
-            .or(track_defaults.default_sample_duration)
-            .unwrap_or(1024);
-        let default_size = tfhd
-            .default_sample_size
-            .or(track.default_sample_size)
-            .or(track_defaults.default_sample_size);
+            .or(defaults.default_sample_duration)
+            .or_else(|| (track.kind == MediaTrackKind::Audio).then_some(1024));
+        let default_size = tfhd.default_sample_size.or(defaults.default_sample_size);
         let base_data_offset = tfhd.base_data_offset.unwrap_or(moof_absolute_start);
-
         let mut samples = Vec::new();
         let mut decode_time = base_decode_time;
         let mut fallback_data_offset = base_data_offset;
-
         for trun in truns {
-            let mut sample_offset = if let Some(data_offset) = trun.data_offset {
-                add_signed_offset(base_data_offset, data_offset)?
-            } else {
-                fallback_data_offset
+            let mut sample_offset = match trun.data_offset {
+                Some(offset) => add_signed_offset(base_data_offset, offset)?,
+                None => fallback_data_offset,
             };
-
             for index in 0..trun.sample_count as usize {
                 let size = trun
                     .sample_sizes
                     .get(index)
                     .copied()
                     .or(default_size)
-                    .ok_or_else(|| "fMP4 trun sample has no size".to_string())?;
+                    .ok_or_else(|| "fragmented MP4 trun sample has no size".to_string())?;
                 let duration = trun
                     .sample_durations
                     .get(index)
                     .copied()
-                    .unwrap_or(default_duration);
+                    .or(default_duration)
+                    .ok_or_else(|| "fragmented MP4 trun sample has no duration".to_string())?;
                 let rendering_offset = trun.sample_cts.get(index).copied().unwrap_or(0);
                 let is_sync = trun
                     .sample_flags
@@ -1789,7 +1810,6 @@ impl Fmp4AacDemuxer {
                     .or(trun.first_sample_flags.filter(|_| index == 0))
                     .map(|flags| flags & 0x0001_0000 == 0)
                     .unwrap_or(true);
-
                 samples.push(Fmp4Sample {
                     absolute_offset: sample_offset,
                     size,
@@ -1798,14 +1818,15 @@ impl Fmp4AacDemuxer {
                     rendering_offset,
                     is_sync,
                 });
-
-                sample_offset += size as u64;
-                decode_time += duration as u64;
+                sample_offset = sample_offset
+                    .checked_add(u64::from(size))
+                    .ok_or_else(|| "fragmented MP4 sample offset overflow".to_string())?;
+                decode_time = decode_time
+                    .checked_add(u64::from(duration))
+                    .ok_or_else(|| "fragmented MP4 decode time overflow".to_string())?;
             }
-
             fallback_data_offset = sample_offset;
         }
-
         Ok(Some(Fmp4Fragment {
             track_id: tfhd.track_id,
             samples,
@@ -1816,85 +1837,213 @@ impl Fmp4AacDemuxer {
         &mut self,
         mdat_payload_start: u64,
         mdat_payload_end: u64,
-    ) -> Result<Vec<AudioDemuxEvent>, String> {
-        let mut events = Vec::new();
-        let Some(track) = self.track.clone() else {
-            self.pending_fragments.clear();
-            return Ok(events);
-        };
-
-        if !self.emitted_config {
-            events.push(AudioDemuxEvent::Config(AudioTrackConfig {
-                container: AudioContainer::Mp4,
-                codec: AudioCodec::Aac,
-                packet_format: Some(AudioPacketFormat::Adts),
-                codec_id: Some("mp4a".to_string()),
-                track_id: Some(track.track_id as u64),
-                pid: None,
-                stream_type: None,
-                sample_rate: Some(track.sample_rate),
-                channels: Some(track.channels),
-                bits_per_sample: None,
-                pcm_endianness: None,
-                pcm_float: None,
-                sample_count: None,
-                codec_private: track.codec_private.clone(),
-                pre_skip: None,
-                output_gain: None,
-                mapping_family: None,
-            }));
-            self.emitted_config = true;
+    ) -> Result<Vec<Mp4MediaDemuxEvent>, String> {
+        let mut pending = Vec::new();
+        for fragment in std::mem::take(&mut self.pending_fragments) {
+            for sample in fragment.samples {
+                pending.push((fragment.track_id, sample));
+            }
         }
+        pending.sort_unstable_by_key(|(_, sample)| sample.absolute_offset);
 
-        let fragments = std::mem::take(&mut self.pending_fragments);
-        for fragment in fragments {
-            if fragment.track_id != track.track_id {
+        let mut events = Vec::new();
+        let mut unresolved = Vec::new();
+        for (track_id, sample) in pending {
+            let sample_end = sample
+                .absolute_offset
+                .checked_add(u64::from(sample.size))
+                .ok_or_else(|| "fragmented MP4 sample range overflow".to_string())?;
+            if sample.absolute_offset < mdat_payload_start || sample_end > mdat_payload_end {
+                unresolved.push(Fmp4Fragment {
+                    track_id,
+                    samples: vec![sample],
+                });
                 continue;
             }
+            let next_sample_id = self
+                .next_sample_ids
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == u64::from(track_id))
+                .ok_or_else(|| format!("fragmented MP4 references unknown track {track_id}"))?;
+            let sample_id = next_sample_id.1;
+            next_sample_id.1 = next_sample_id
+                .1
+                .checked_add(1)
+                .ok_or_else(|| "fragmented MP4 sample id overflow".to_string())?;
+            let track = self
+                .tracks
+                .iter()
+                .find(|track| track.track_id == u64::from(track_id))
+                .ok_or_else(|| format!("fragmented MP4 references unknown track {track_id}"))?;
+            let start = usize::try_from(
+                sample
+                    .absolute_offset
+                    .checked_sub(self.absolute_start)
+                    .ok_or_else(|| "fragmented MP4 sample precedes buffer".to_string())?,
+            )
+            .map_err(|_| "fragmented MP4 sample offset exceeds this platform".to_string())?;
+            let end = start
+                .checked_add(sample.size as usize)
+                .ok_or_else(|| "fragmented MP4 sample range overflow".to_string())?;
+            let raw = self
+                .buffer
+                .get(start..end)
+                .ok_or_else(|| "fragmented MP4 sample is outside the buffered mdat".to_string())?;
+            let data = match track.nal_length_size {
+                Some(length_size) => mp4_nals_to_annex_b(raw, length_size)?,
+                None => raw.to_vec(),
+            };
+            let media_presentation = i128::from(sample.start_time)
+                .checked_add(i128::from(sample.rendering_offset))
+                .ok_or_else(|| "fragmented MP4 presentation time overflow".to_string())?;
+            let presentation_time = match track.timeline {
+                Some(timeline) => media_presentation
+                    .checked_sub(i128::from(timeline.media_start))
+                    .and_then(|value| value.checked_add(i128::from(timeline.presentation_start))),
+                None => Some(media_presentation),
+            }
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| "fragmented MP4 edited presentation time overflow".to_string())?;
+            events.push(Mp4MediaDemuxEvent::Packet(MediaTrackPacket {
+                track_id: u64::from(track_id),
+                kind: track.kind,
+                codec: track.codec.clone(),
+                sample_id,
+                data,
+                decode_time: sample.start_time,
+                presentation_time,
+                duration: sample.duration,
+                is_sync: sample.is_sync,
+            }));
+        }
+        self.pending_fragments = unresolved;
+        Ok(events)
+    }
+}
 
-            for sample in fragment.samples {
-                let sample_end = sample.absolute_offset + sample.size as u64;
-                if sample.absolute_offset < mdat_payload_start || sample_end > mdat_payload_end {
-                    continue;
+#[cfg(feature = "mp4")]
+impl Default for Mp4MediaDemuxer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Compatibility adapter for the audio-only API. Fragment parsing is owned by
+/// `Mp4MediaDemuxer`; this layer only selects the AAC track and preserves the
+/// historical ADTS packet contract.
+#[cfg(feature = "mp4")]
+struct FragmentedMp4AudioDemuxer {
+    media: Mp4MediaDemuxer,
+    selected_track: Option<MediaTrackConfig>,
+}
+
+#[cfg(feature = "mp4")]
+impl FragmentedMp4AudioDemuxer {
+    fn new() -> Self {
+        Self {
+            media: Mp4MediaDemuxer::new(),
+            selected_track: None,
+        }
+    }
+
+    fn add(&mut self, bytes: &[u8]) -> Result<Vec<AudioDemuxEvent>, String> {
+        let events = self.media.push(bytes)?;
+        self.audio_events(events)
+    }
+
+    fn finish(&mut self, bytes: &[u8]) -> Result<Vec<AudioDemuxEvent>, String> {
+        let mut output = if bytes.is_empty() {
+            Vec::new()
+        } else {
+            let events = self.media.push(bytes)?;
+            self.audio_events(events)?
+        };
+        let events = self.media.flush()?;
+        output.extend(self.audio_events(events)?);
+        Ok(output)
+    }
+
+    fn audio_events(
+        &mut self,
+        events: Vec<Mp4MediaDemuxEvent>,
+    ) -> Result<Vec<AudioDemuxEvent>, String> {
+        let mut output = Vec::new();
+        for event in events {
+            match event {
+                Mp4MediaDemuxEvent::Config(track)
+                    if self.selected_track.is_none()
+                        && track.kind == MediaTrackKind::Audio
+                        && track.codec == "aac" =>
+                {
+                    output.push(AudioDemuxEvent::Config(AudioTrackConfig {
+                        container: AudioContainer::Mp4,
+                        codec: AudioCodec::Aac,
+                        packet_format: Some(AudioPacketFormat::Adts),
+                        codec_id: Some(track.codec_id.clone()),
+                        track_id: Some(track.track_id),
+                        pid: None,
+                        stream_type: None,
+                        sample_rate: track.sample_rate,
+                        channels: track.channels,
+                        bits_per_sample: None,
+                        pcm_endianness: None,
+                        pcm_float: None,
+                        sample_count: None,
+                        codec_private: track.decoder_configuration.clone(),
+                        pre_skip: None,
+                        output_gain: None,
+                        mapping_family: None,
+                    }));
+                    self.selected_track = Some(track);
                 }
-
-                let start = (sample.absolute_offset - self.absolute_start) as usize;
-                let end = start + sample.size as usize;
-                if end > self.buffer.len() {
-                    continue;
+                Mp4MediaDemuxEvent::Packet(packet)
+                    if self
+                        .selected_track
+                        .as_ref()
+                        .is_some_and(|track| track.track_id == packet.track_id) =>
+                {
+                    let track = self.selected_track.as_ref().expect("matched above");
+                    let sample_rate = track
+                        .sample_rate
+                        .ok_or_else(|| "fragmented MP4 AAC track has no sample rate".to_string())?;
+                    let channels = track.channels.ok_or_else(|| {
+                        "fragmented MP4 AAC track has no channel count".to_string()
+                    })?;
+                    let raw = packet.data;
+                    let mut data = create_adts_header(
+                        sample_rate,
+                        channels,
+                        raw.len(),
+                        &track.decoder_configuration,
+                    );
+                    data.extend_from_slice(&raw);
+                    let rendering_offset = i128::from(packet.presentation_time)
+                        .checked_sub(i128::from(packet.decode_time))
+                        .and_then(|value| i32::try_from(value).ok())
+                        .ok_or_else(|| {
+                            "fragmented MP4 AAC rendering offset exceeds i32".to_string()
+                        })?;
+                    output.push(AudioDemuxEvent::Packet(AudioTrackPacket {
+                        container: AudioContainer::Mp4,
+                        codec: AudioCodec::Aac,
+                        format: AudioPacketFormat::Adts,
+                        data,
+                        raw_data: Some(raw),
+                        track_id: Some(packet.track_id),
+                        pid: None,
+                        stream_type: None,
+                        sample_id: Some(packet.sample_id),
+                        start_time: Some(packet.decode_time),
+                        duration: Some(packet.duration),
+                        rendering_offset: Some(rendering_offset),
+                        is_sync: Some(packet.is_sync),
+                        timecode: Some(packet.presentation_time),
+                    }));
                 }
-
-                let raw = self.buffer[start..end].to_vec();
-                let mut data = create_adts_header(
-                    track.sample_rate,
-                    track.channels,
-                    raw.len(),
-                    &track.codec_private,
-                );
-                data.extend_from_slice(&raw);
-
-                let sample_id = self.next_sample_id;
-                self.next_sample_id += 1;
-                events.push(AudioDemuxEvent::Packet(AudioTrackPacket {
-                    container: AudioContainer::Mp4,
-                    codec: AudioCodec::Aac,
-                    format: AudioPacketFormat::Adts,
-                    data,
-                    raw_data: Some(raw),
-                    track_id: Some(track.track_id as u64),
-                    pid: None,
-                    stream_type: None,
-                    sample_id: Some(sample_id),
-                    start_time: Some(sample.start_time),
-                    duration: Some(sample.duration),
-                    rendering_offset: Some(sample.rendering_offset),
-                    is_sync: Some(sample.is_sync),
-                    timecode: Some(sample.start_time as i64),
-                }));
+                _ => {}
             }
         }
-
-        Ok(events)
+        Ok(output)
     }
 }
 
@@ -2253,56 +2402,6 @@ fn parse_trex_defaults(data: &[u8]) -> Vec<Fmp4TrackDefaults> {
 }
 
 #[cfg(feature = "mp4")]
-fn parse_trak(data: &[u8], defaults: &[Fmp4TrackDefaults]) -> Option<Fmp4AacTrack> {
-    let mut track_id = None;
-    let mut is_audio = false;
-    let mut sample_entry = None;
-
-    let _ = walk_boxes(data, &mut |header, payload| {
-        match &header.name {
-            b"tkhd" => track_id = parse_tkhd_track_id(payload),
-            b"hdlr" => is_audio |= parse_hdlr_is_audio(payload),
-            b"stsd" => sample_entry = parse_stsd_mp4a(payload),
-            _ => {}
-        }
-        Ok(())
-    });
-
-    if !is_audio {
-        return None;
-    }
-    let track_id = track_id?;
-    let mut sample_entry = sample_entry?;
-    let defaults = defaults
-        .iter()
-        .find(|defaults| defaults.track_id == track_id)
-        .cloned()
-        .unwrap_or_default();
-
-    if let Some((sample_rate, channels)) = parse_asc_audio_config(&sample_entry.codec_private) {
-        sample_entry.sample_rate = sample_rate;
-        sample_entry.channels = channels;
-    }
-
-    Some(Fmp4AacTrack {
-        track_id,
-        sample_rate: sample_entry.sample_rate,
-        channels: sample_entry.channels,
-        codec_private: sample_entry.codec_private,
-        default_sample_duration: defaults.default_sample_duration,
-        default_sample_size: defaults.default_sample_size,
-    })
-}
-
-#[cfg(feature = "mp4")]
-#[derive(Clone, Debug)]
-struct Mp4aSampleEntry {
-    sample_rate: u32,
-    channels: u8,
-    codec_private: Vec<u8>,
-}
-
-#[cfg(feature = "mp4")]
 #[derive(Clone, Debug)]
 struct RegularAudioSampleEntry {
     sample_rate: u32,
@@ -2448,38 +2547,6 @@ fn scale_mp4_time(value: u64, from_timescale: u32, to_timescale: u32) -> Result<
 #[cfg(feature = "mp4")]
 fn parse_hdlr_is_audio(data: &[u8]) -> bool {
     data.len() >= 12 && &data[8..12] == b"soun"
-}
-
-#[cfg(feature = "mp4")]
-fn parse_stsd_mp4a(data: &[u8]) -> Option<Mp4aSampleEntry> {
-    if data.len() < 16 {
-        return None;
-    }
-
-    let entry_count = be_u32(data, 4)?;
-    let mut pos = 8usize;
-    for _ in 0..entry_count {
-        let header = Mp4BoxHeader::read(&data[pos..])?;
-        if pos + header.size > data.len() {
-            return None;
-        }
-        let payload = &data[pos + header.header_size..pos + header.size];
-        if header.name == *b"mp4a" && payload.len() >= 28 {
-            let channels = be_u16(payload, 16).unwrap_or(2) as u8;
-            let sample_rate = be_u32(payload, 24).unwrap_or(44_100 << 16) >> 16;
-            let codec_private = find_audio_sample_entry_private(payload, b"esds")
-                .and_then(parse_esds_audio_specific_config)
-                .unwrap_or_default();
-            return Some(Mp4aSampleEntry {
-                sample_rate,
-                channels,
-                codec_private,
-            });
-        }
-        pos += header.size;
-    }
-
-    None
 }
 
 #[cfg(feature = "mp4")]
@@ -3717,6 +3784,68 @@ mod tests {
         assert_eq!(packets[1].sample_id, Some(2));
         assert_eq!(packets[1].start_time, Some(1024));
         assert_eq!(packets[1].raw_data.as_deref(), Some(&[0x44, 0x55][..]));
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn streams_fragmented_mp4_video_and_audio_from_one_rust_demuxer() {
+        let data = fixture("video-compat/never-final/h264-aac-fragmented.mp4");
+        let mut demuxer = Mp4MediaDemuxer::new();
+        let mut events = Vec::new();
+        for chunk in data.chunks(4093) {
+            events.extend(demuxer.push(chunk).unwrap());
+        }
+        events.extend(demuxer.flush().unwrap());
+
+        let configs: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Mp4MediaDemuxEvent::Config(config) => Some(config),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(configs.len(), 2);
+        assert!(configs.iter().any(|config| {
+            config.kind == MediaTrackKind::Video
+                && config.codec == "h264"
+                && !config.decoder_configuration.is_empty()
+        }));
+        assert!(configs.iter().any(|config| {
+            config.kind == MediaTrackKind::Audio
+                && config.codec == "aac"
+                && config.sample_rate == Some(48_000)
+                && config.channels == Some(2)
+        }));
+
+        let packets: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Mp4MediaDemuxEvent::Packet(packet) => Some(packet),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|packet| packet.kind == MediaTrackKind::Video)
+                .count(),
+            75
+        );
+        assert_eq!(
+            packets
+                .iter()
+                .filter(|packet| packet.kind == MediaTrackKind::Audio)
+                .count(),
+            142
+        );
+        assert!(packets.iter().all(|packet| !packet.data.is_empty()));
+        for kind in [MediaTrackKind::Video, MediaTrackKind::Audio] {
+            assert!(packets
+                .iter()
+                .filter(|packet| packet.kind == kind)
+                .enumerate()
+                .all(|(index, packet)| packet.sample_id == index as u32 + 1));
+        }
     }
 
     #[cfg(feature = "mpeg-ts")]

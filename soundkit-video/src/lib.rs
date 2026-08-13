@@ -261,7 +261,15 @@ impl VideoFrame {
     }
 }
 
+#[cfg(any(
+    feature = "h264",
+    feature = "hevc",
+    feature = "vp9",
+    feature = "av1",
+    feature = "prores"
+))]
 enum DecoderState {
+    Disabled,
     #[cfg(feature = "h264")]
     H264(rusty_h264_decoder::Decoder),
     #[cfg(feature = "hevc")]
@@ -274,11 +282,25 @@ enum DecoderState {
     ProRes,
 }
 
+#[cfg(any(
+    feature = "h264",
+    feature = "hevc",
+    feature = "vp9",
+    feature = "av1",
+    feature = "prores"
+))]
 pub struct VideoDecoder {
     codec: VideoCodec,
     state: DecoderState,
 }
 
+#[cfg(any(
+    feature = "h264",
+    feature = "hevc",
+    feature = "vp9",
+    feature = "av1",
+    feature = "prores"
+))]
 impl VideoDecoder {
     pub fn new(codec: VideoCodec) -> Result<Self, String> {
         let state = match codec {
@@ -298,13 +320,14 @@ impl VideoDecoder {
                 );
             }
             #[allow(unreachable_patterns)]
-            _ => {
-                return Err(format!(
-                    "{} decoder is disabled in this build",
-                    codec.as_str()
-                ))
-            }
+            _ => DecoderState::Disabled,
         };
+        if matches!(state, DecoderState::Disabled) {
+            return Err(format!(
+                "{} decoder is disabled in this build",
+                codec.as_str()
+            ));
+        }
         Ok(Self { codec, state })
     }
 
@@ -322,7 +345,13 @@ impl VideoDecoder {
         if access_unit.is_empty() {
             return Ok(Vec::new());
         }
-        let mut frames = match &mut self.state {
+        let mut frames: Vec<VideoFrame> = match &mut self.state {
+            DecoderState::Disabled => {
+                return Err(format!(
+                    "{} decoder is disabled in this build",
+                    self.codec.as_str()
+                ))
+            }
             #[cfg(feature = "h264")]
             DecoderState::H264(decoder) => decoder
                 .decode(access_unit)
@@ -376,6 +405,12 @@ impl VideoDecoder {
     /// [`Self::decode`] so frames can be released incrementally.
     pub fn decode_stream(&mut self, stream: &[u8]) -> Result<Vec<VideoFrame>, String> {
         let frames: Vec<VideoFrame> = match &mut self.state {
+            DecoderState::Disabled => {
+                return Err(format!(
+                    "{} decoder is disabled in this build",
+                    self.codec.as_str()
+                ))
+            }
             #[cfg(feature = "h264")]
             DecoderState::H264(decoder) => decoder
                 .decode_stream(stream)
@@ -392,7 +427,13 @@ impl VideoDecoder {
     }
 
     pub fn flush(&mut self) -> Result<Vec<VideoFrame>, String> {
-        let frames = match &mut self.state {
+        let frames: Vec<VideoFrame> = match &mut self.state {
+            DecoderState::Disabled => {
+                return Err(format!(
+                    "{} decoder is disabled in this build",
+                    self.codec.as_str()
+                ))
+            }
             #[cfg(feature = "hevc")]
             DecoderState::Hevc(decoder) => decoder
                 .flush()
@@ -410,6 +451,36 @@ impl VideoDecoder {
             frame.validate()?;
         }
         Ok(frames)
+    }
+}
+
+/// Featureless builds are used by the container crates for shared AVC/HEVC
+/// configuration parsing. Keep the decoder API available without compiling a
+/// fake state machine or pulling any codec implementation into those builds.
+#[cfg(not(any(
+    feature = "h264",
+    feature = "hevc",
+    feature = "vp9",
+    feature = "av1",
+    feature = "prores"
+)))]
+pub struct VideoDecoder {
+    _private: (),
+}
+
+#[cfg(not(any(
+    feature = "h264",
+    feature = "hevc",
+    feature = "vp9",
+    feature = "av1",
+    feature = "prores"
+)))]
+impl VideoDecoder {
+    pub fn new(codec: VideoCodec) -> Result<Self, String> {
+        Err(format!(
+            "{} decoder is disabled in this build",
+            codec.as_str()
+        ))
     }
 }
 
@@ -455,6 +526,7 @@ fn decode_av1(
     Ok(output)
 }
 
+#[cfg(any(feature = "h264", feature = "hevc", feature = "vp9"))]
 fn plane_u8(width: u32, height: u32, data: Vec<u8>) -> VideoPlane {
     VideoPlane {
         width,
@@ -464,6 +536,7 @@ fn plane_u8(width: u32, height: u32, data: Vec<u8>) -> VideoPlane {
     }
 }
 
+#[cfg(any(feature = "hevc", feature = "vp9"))]
 fn plane_u16(width: u32, height: u32, data: Vec<u16>) -> VideoPlane {
     let mut bytes = Vec::with_capacity(data.len() * 2);
     for sample in data {
