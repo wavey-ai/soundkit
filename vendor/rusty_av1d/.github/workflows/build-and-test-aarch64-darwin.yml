@@ -1,0 +1,80 @@
+name: build and test on aarch64
+on:
+  push:
+    branches:
+      - 'main'
+  pull_request:
+jobs:
+  test-on-macos-aarch64:
+    strategy:
+      matrix:
+        build: [
+          {name: "release", cargo_flags: "--release",  timeout_multiplier: 1},
+          {name: "release-no-asm", cargo_flags: "--release --no-default-features --features=bitdepth_8,bitdepth_16", timeout_multiplier: 1},
+          {name: "debug", cargo_flags: "", timeout_multiplier: 3},
+        ]
+    runs-on: macos-15
+    steps:
+      - name: install prerequisites
+        run: |
+          brew install meson
+      - name: git checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: install rust toolchain
+        id: toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable # aarch64 feature detection is stable
+          target: aarch64-apple-darwin
+          components: clippy
+      - name: cache rust dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: cargo ${{ matrix.build.name }} build for aarch64-apple-darwin
+        run:  cargo +${{ steps.toolchain.outputs.name }} build ${{ matrix.build.cargo_flags }}
+      - name: Clippy
+        run: cargo +${{ steps.toolchain.outputs.name }} clippy -- -D warnings
+      - name: test ${{ matrix.build.name }} build without frame delay
+        run: |
+          .github/workflows/test.sh \
+            -r ./target/${{ startsWith(matrix.build.name, 'release') && 'release' || matrix.build.name }}/dav1d \
+            -s ./target/${{ startsWith(matrix.build.name, 'release') && 'release' || matrix.build.name }}/seek_stress \
+            -t ${{ matrix.build.timeout_multiplier }}
+        # release tests run quickly so we test negative strides and frame delays
+      - name: test release build with negative stride
+        if: ${{ startsWith(matrix.build.name, 'release') }}
+        run: |
+          .github/workflows/test.sh \
+            -r ./target/release/dav1d \
+            -s ./target/release/seek_stress \
+            -t ${{ matrix.build.timeout_multiplier }} \
+            -n
+      - name: test release build with frame delay of 1
+        if: ${{ startsWith(matrix.build.name, 'release') }}
+        run: |
+          .github/workflows/test.sh \
+            -r ./target/release/dav1d \
+            -s ./target/release/seek_stress \
+            -t ${{ matrix.build.timeout_multiplier }} \
+            -f 1
+      - name: test release build with frame delay of 2
+        if: ${{ startsWith(matrix.build.name, 'release') }}
+        run: |
+          .github/workflows/test.sh \
+            -r ./target/release/dav1d \
+            -s ./target/release/seek_stress \
+            -t ${{ matrix.build.timeout_multiplier }} \
+            -f 2
+      - name: copy log files
+        if: ${{ !cancelled() }}
+        run: |
+          cp ${{ github.workspace }}/build/meson-logs/testlog.txt \
+              ${{ github.workspace }}/build/meson-logs/testlog-aarch64-apple-darwin-${{ matrix.build.name }}.txt
+      - name: upload build artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: meson-test-logs-aarch64-apple-darwin-${{ matrix.build.name }}
+          path: |
+            ${{ github.workspace }}/build/meson-logs/testlog-*.txt

@@ -1,0 +1,23 @@
+name: check formatting
+on:
+  push:
+    branches:
+      - 'main'
+  pull_request:
+jobs:
+  cargo-fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: git checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: cache rust dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --check

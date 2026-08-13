@@ -29,6 +29,10 @@ members = [
   "lori-asha-premix-bench",
   "aac-wasm-bench",
 ]
+exclude = ["vendor/rusty_av1d"]
+
+[patch.crates-io]
+rusty_av1d = { path = "vendor/rusty_av1d" }
 
 # LLVM 21 currently SIGBUSes while optimizing vp9dec's deeply nested scalar
 # loops at level 3 for wasm32. Level 2 preserves optimization and produces a

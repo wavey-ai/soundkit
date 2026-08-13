@@ -25,6 +25,9 @@ The deterministic `never-final.mov` matrix covers common artist delivery and upl
 | MOV | DNxHR HQX 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Audio passing; video decoder pending |
 | WebM | VP9 Profile 0 8-bit 4:2:0 | Opus 48 kHz stereo | Passing |
 | WebM | AV1 Main 8-bit 4:2:0 | Opus 48 kHz stereo | Passing |
+| IVF | AV1 Main 10-bit 4:4:4 | None | Passing |
+| IVF | AV1 Main 10-bit monochrome | None | Passing |
+| Annex B | HEVC Main10 HDR10 4:2:0 | None | Passing |
 
 FLAC decode and streaming encode are also required pipeline capabilities. Streaming encoders must call `finish()` once, then use the final `streamHeader()` metadata.
 
@@ -44,6 +47,24 @@ make media-conformance
 
 Generated fixtures stay below `build/`. The generator and assertions are committed, so the corpus is reproducible without storing artist media in Git.
 
+Fetch the pinned Chromium corpus and verify its SHA-256 values:
+
+```sh
+make media-upstream-corpus
+```
+
+Run the upstream corpus through the optimized release WASM artifact:
+
+```sh
+make media-upstream-conformance
+```
+
+Run deterministic truncation and bit-mutation cases in isolated processes:
+
+```sh
+make media-fuzz
+```
+
 ## Safety and ownership
 
 - Rust rejects zero-sized, overflowing, or larger-than-8K frame declarations.
@@ -51,7 +72,8 @@ Generated fixtures stay below `build/`. The generator and assertions are committ
 - The container demuxer reports PCM depth, endianness, and integer/float representation.
 - JavaScript performs no media validation. It only feeds bytes and consumes exported Rust values.
 - A dependency-specific release profile keeps `vp9dec` at optimization level 2 because LLVM 21 crashes at level 3 on `wasm32`.
+- The vendored `rusty_av1d` patch fixes high-bit-depth plane access and one malformed-input cleanup panic.
 
 ## Remaining format work
 
-DNxHD/DNxHR needs a production-quality pure-Rust decoder. The current API rejects it explicitly instead of silently invoking a device decoder. Additional corpus work should cover H.264 4:2:2/4:4:4, HEVC 4:2:2, AV1 10-bit, ProRes 4444/alpha, variable frame rates, edit lists, fragmented MP4, Matroska, and damaged/truncated files.
+DNxHD/DNxHR needs a production-quality pure-Rust decoder. The current API rejects it explicitly instead of silently invoking a device decoder. Additional corpus work should cover H.264 4:2:2/4:4:4, HEVC 4:2:2, ProRes 4444/alpha, variable frame rates, edit lists, fragmented MP4, and Matroska.

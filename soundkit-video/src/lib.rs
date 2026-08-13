@@ -151,10 +151,7 @@ impl VideoDecoder {
             #[cfg(feature = "vp9")]
             VideoCodec::Vp9 => DecoderState::Vp9(vp9dec::Decoder::new()),
             #[cfg(feature = "av1")]
-            VideoCodec::Av1 => DecoderState::Av1(
-                rusty_av1d::Decoder::new()
-                    .map_err(|error| format!("could not initialize AV1 decoder: {error:?}"))?,
-            ),
+            VideoCodec::Av1 => DecoderState::Av1(av1_decoder()?),
             #[cfg(feature = "prores")]
             VideoCodec::ProRes => DecoderState::ProRes,
             VideoCodec::DnxHd => {
@@ -216,17 +213,7 @@ impl VideoDecoder {
                 .map(|frame| vp9_frame(frame, pts, duration))
                 .collect(),
             #[cfg(feature = "av1")]
-            DecoderState::Av1(decoder) => {
-                decoder
-                    .send_data(
-                        access_unit.to_vec().into_boxed_slice(),
-                        None,
-                        pts,
-                        duration.and_then(|value| i64::try_from(value).ok()),
-                    )
-                    .map_err(|error| format!("AV1 decode failed: {error:?}"))?;
-                drain_av1(decoder)?
-            }
+            DecoderState::Av1(decoder) => decode_av1(decoder, access_unit, pts, duration)?,
             #[cfg(feature = "prores")]
             DecoderState::ProRes => {
                 let frame = oxideav_prores::decoder::decode_packet_with_depth(
@@ -276,8 +263,9 @@ impl VideoDecoder {
                 .unwrap_or_default(),
             #[cfg(feature = "av1")]
             DecoderState::Av1(decoder) => {
+                let frames = drain_av1(decoder)?;
                 decoder.flush();
-                drain_av1(decoder)?
+                frames
             }
             _ => Vec::new(),
         };
@@ -286,6 +274,48 @@ impl VideoDecoder {
         }
         Ok(frames)
     }
+}
+
+#[cfg(feature = "av1")]
+fn av1_decoder() -> Result<rusty_av1d::Decoder, String> {
+    let mut settings = rusty_av1d::Settings::new();
+    settings.set_n_threads(1);
+    settings.set_max_frame_delay(1);
+    settings.set_frame_size_limit(MAX_FRAME_PIXELS as u32);
+    settings.set_strict_std_compliance(true);
+    rusty_av1d::Decoder::with_settings(&settings)
+        .map_err(|error| format!("could not initialize AV1 decoder: {error:?}"))
+}
+
+#[cfg(feature = "av1")]
+fn decode_av1(
+    decoder: &mut rusty_av1d::Decoder,
+    access_unit: &[u8],
+    pts: Option<i64>,
+    duration: Option<u64>,
+) -> Result<Vec<VideoFrame>, String> {
+    use rusty_av1d::Rav1dError;
+
+    let duration = duration.and_then(|value| i64::try_from(value).ok());
+    let mut output = Vec::new();
+    match decoder.send_data(access_unit.into(), None, pts, duration) {
+        Ok(()) => {}
+        Err(Rav1dError::TryAgain) => loop {
+            let pending = drain_av1(decoder)?;
+            if pending.is_empty() {
+                return Err("AV1 decoder requested output but produced no frame".to_string());
+            }
+            output.extend(pending);
+            match decoder.send_pending_data() {
+                Ok(()) => break,
+                Err(Rav1dError::TryAgain) => continue,
+                Err(error) => return Err(format!("AV1 decode failed: {error:?}")),
+            }
+        },
+        Err(error) => return Err(format!("AV1 decode failed: {error:?}")),
+    }
+    output.extend(drain_av1(decoder)?);
+    Ok(output)
 }
 
 fn plane_u8(width: u32, height: u32, data: Vec<u8>) -> VideoPlane {
@@ -390,6 +420,7 @@ fn vp9_frame(frame: vp9dec::Frame, pts: Option<i64>, duration: Option<u64>) -> V
 #[cfg(feature = "av1")]
 fn drain_av1(decoder: &mut rusty_av1d::Decoder) -> Result<Vec<VideoFrame>, String> {
     use rusty_av1d::{PixelLayout, PlanarImageComponent, Rav1dError};
+
     let mut output = Vec::new();
     loop {
         let picture = match decoder.get_picture() {
@@ -397,43 +428,92 @@ fn drain_av1(decoder: &mut rusty_av1d::Decoder) -> Result<Vec<VideoFrame>, Strin
             Err(Rav1dError::TryAgain) => break,
             Err(error) => return Err(format!("AV1 output failed: {error:?}")),
         };
-        if picture.bit_depth() != 8 {
-            return Err("AV1 high-bit-depth output is not enabled in this WASM build".to_string());
-        }
         let width = picture.width();
         let height = picture.height();
-        let (sampling, cw, ch) = match picture.pixel_layout() {
+        let bit_depth = picture.bits_per_component().map(|bits| bits.0).unwrap_or(8);
+        let (sampling, chroma_width, chroma_height) = match picture.pixel_layout() {
             PixelLayout::I400 => (ChromaSampling::Monochrome, 0, 0),
             PixelLayout::I420 => (ChromaSampling::Cs420, width.div_ceil(2), height.div_ceil(2)),
             PixelLayout::I422 => (ChromaSampling::Cs422, width.div_ceil(2), height),
             PixelLayout::I444 => (ChromaSampling::Cs444, width, height),
         };
-        let copy_plane = |component, plane_width: u32, plane_height: u32| {
-            let stride = picture.stride(component) as usize;
-            let source = picture.plane(component);
-            let mut data = Vec::with_capacity((plane_width * plane_height) as usize);
-            for row in 0..plane_height as usize {
-                let start = row * stride;
-                data.extend_from_slice(&source[start..start + plane_width as usize]);
-            }
-            plane_u8(plane_width, plane_height, data)
-        };
-        let mut planes = vec![copy_plane(PlanarImageComponent::Y, width, height)];
+        let copy_plane =
+            |component, plane_width: u32, plane_height: u32| -> Result<VideoPlane, String> {
+                let stride = picture.stride(component) as usize;
+                let bytes_per_sample = if bit_depth <= 8 { 1 } else { 2 };
+                let mut data = Vec::with_capacity(
+                    plane_width as usize * plane_height as usize * bytes_per_sample,
+                );
+                if bit_depth <= 8 {
+                    let source = picture.plane(component);
+                    validate_source_plane(source.len(), stride, plane_width, plane_height)?;
+                    for row in 0..plane_height as usize {
+                        let start = row * stride;
+                        data.extend_from_slice(&source[start..start + plane_width as usize]);
+                    }
+                } else {
+                    let source = picture.plane16(component);
+                    validate_source_plane(source.len(), stride, plane_width, plane_height)?;
+                    for row in 0..plane_height as usize {
+                        let start = row * stride;
+                        for sample in &source[start..start + plane_width as usize] {
+                            data.extend_from_slice(&sample.to_le_bytes());
+                        }
+                    }
+                }
+                Ok(VideoPlane {
+                    width: plane_width,
+                    height: plane_height,
+                    stride: plane_width,
+                    data,
+                })
+            };
+        let mut planes = vec![copy_plane(PlanarImageComponent::Y, width, height)?];
         if sampling != ChromaSampling::Monochrome {
-            planes.push(copy_plane(PlanarImageComponent::U, cw, ch));
-            planes.push(copy_plane(PlanarImageComponent::V, cw, ch));
+            planes.push(copy_plane(
+                PlanarImageComponent::U,
+                chroma_width,
+                chroma_height,
+            )?);
+            planes.push(copy_plane(
+                PlanarImageComponent::V,
+                chroma_width,
+                chroma_height,
+            )?);
         }
         output.push(VideoFrame {
             width,
             height,
-            bit_depth: picture.bits_per_component().map(|bits| bits.0).unwrap_or(8),
+            bit_depth,
             chroma_sampling: sampling,
             pts: picture.timestamp(),
-            duration: u64::try_from(picture.duration()).ok(),
+            duration: u64::try_from(picture.duration())
+                .ok()
+                .filter(|value| *value > 0),
             planes,
         });
     }
     Ok(output)
+}
+
+#[cfg(feature = "av1")]
+fn validate_source_plane(
+    source_samples: usize,
+    stride: usize,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let required = (height as usize)
+        .saturating_sub(1)
+        .checked_mul(stride)
+        .and_then(|offset| offset.checked_add(width as usize))
+        .ok_or_else(|| "AV1 source plane size overflow".to_string())?;
+    if stride < width as usize || source_samples < required {
+        return Err(format!(
+            "AV1 source plane needs {required} samples, got {source_samples} (stride {stride}, width {width}, height {height})"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "prores")]

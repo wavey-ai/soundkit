@@ -19,3 +19,15 @@ media-fixtures:
 .PHONY: media-conformance
 media-conformance: wasm
 	node scripts/test-video-wasm.mjs
+
+.PHONY: media-upstream-corpus
+media-upstream-corpus:
+	./scripts/fetch-video-conformance-corpus.sh
+
+.PHONY: media-upstream-conformance
+media-upstream-conformance: wasm media-upstream-corpus
+	node scripts/test-video-upstream-wasm.mjs
+
+.PHONY: media-fuzz
+media-fuzz: wasm media-upstream-corpus
+	node scripts/fuzz-video-wasm.mjs
