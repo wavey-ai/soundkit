@@ -1,6 +1,11 @@
 #[cfg(feature = "webm")]
 use soundkit_webm::{WebmAudioDemuxEvent, WebmAudioDemuxer};
 
+#[cfg(feature = "mxf")]
+mod mxf;
+#[cfg(feature = "mxf")]
+pub use mxf::{MxfMediaDemuxEvent, MxfMediaDemuxer};
+
 const MIN_DETECTION_BYTES: usize = 8192;
 const MAX_DETECTION_BYTES: usize = 65_536;
 #[cfg(feature = "mp4")]
@@ -11,6 +16,7 @@ pub enum AudioContainer {
     Mp4,
     WebM,
     MpegTs,
+    Mxf,
 }
 
 impl AudioContainer {
@@ -19,6 +25,7 @@ impl AudioContainer {
             AudioContainer::Mp4 => "mp4",
             AudioContainer::WebM => "webm",
             AudioContainer::MpegTs => "mpeg-ts",
+            AudioContainer::Mxf => "mxf",
         }
     }
 }

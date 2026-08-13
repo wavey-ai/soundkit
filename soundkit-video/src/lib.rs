@@ -133,6 +133,140 @@ pub enum VideoCodec {
     DnxHd,
 }
 
+/// The profile identifier embedded in a VC-3/DNxHD or DNxHR frame.
+///
+/// DNxHR uses stable compression identifiers rather than container labels, so
+/// this is the authoritative way for MOV and MXF demuxers to distinguish LB,
+/// SQ, HQ, HQX, and 444 media.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DnxProfile {
+    DnxHd(u32),
+    DnxHr444,
+    DnxHrHqx,
+    DnxHrHq,
+    DnxHrSq,
+    DnxHrLb,
+}
+
+impl DnxProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DnxHd(_) => "dnxhd",
+            Self::DnxHr444 => "dnxhr-444",
+            Self::DnxHrHqx => "dnxhr-hqx",
+            Self::DnxHrHq => "dnxhr-hq",
+            Self::DnxHrSq => "dnxhr-sq",
+            Self::DnxHrLb => "dnxhr-lb",
+        }
+    }
+
+    pub fn compression_id(self) -> u32 {
+        match self {
+            Self::DnxHd(cid) => cid,
+            Self::DnxHr444 => 1270,
+            Self::DnxHrHqx => 1271,
+            Self::DnxHrHq => 1272,
+            Self::DnxHrSq => 1273,
+            Self::DnxHrLb => 1274,
+        }
+    }
+}
+
+/// Rust-owned structural information from one VC-3/DNx frame header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DnxFrameInfo {
+    pub profile: DnxProfile,
+    pub width: u32,
+    pub height: u32,
+    pub bit_depth: u8,
+    pub chroma_sampling: ChromaSampling,
+    pub data_offset: u16,
+    pub interlaced: bool,
+    pub macroblock_adaptive_frame_field: bool,
+    pub has_alpha: bool,
+    pub adaptive_color_transform: bool,
+}
+
+/// Inspect one complete VC-3/DNxHD or DNxHR coding unit.
+///
+/// This performs all structural and resource-budget validation in Rust. It
+/// deliberately does not accept a container's codec label as proof that the
+/// payload is DNx media.
+pub fn inspect_dnx_frame(frame: &[u8]) -> Result<DnxFrameInfo, String> {
+    const MINIMUM_HEADER_BYTES: usize = 0x2d;
+    if frame.len() < MINIMUM_HEADER_BYTES {
+        return Err(format!(
+            "DNx frame is shorter than the {MINIMUM_HEADER_BYTES}-byte identification header"
+        ));
+    }
+
+    let prefix = (u64::from(u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]])) << 16)
+        | (u64::from(frame[4]) << 8);
+    let data_offset = u16::from_be_bytes([frame[2], frame[3]]);
+    let is_legacy = prefix == 0x0000_0280_0100 || prefix == 0x0000_0280_0200;
+    let is_hr = (prefix & 0xffff_0000_ffff) == 0x0300
+        && (0x0280..=0x2170).contains(&data_offset)
+        && data_offset % 4 == 0;
+    if !is_legacy && !is_hr {
+        return Err(format!("invalid DNx frame prefix 0x{prefix:012x}"));
+    }
+    if frame.len() < usize::from(data_offset) {
+        return Err(format!(
+            "DNx frame ends before its {data_offset}-byte coding-data offset"
+        ));
+    }
+
+    let height = u32::from(u16::from_be_bytes([frame[0x18], frame[0x19]]));
+    let width = u32::from(u16::from_be_bytes([frame[0x1a], frame[0x1b]]));
+    let pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| "DNx frame dimensions overflow".to_string())?;
+    if width == 0 || height == 0 || pixels > MAX_FRAME_PIXELS {
+        return Err(format!(
+            "DNx frame {width}x{height} exceeds the SoundKit pixel budget"
+        ));
+    }
+
+    let bit_depth = match frame[0x21] >> 5 {
+        1 => 8,
+        2 => 10,
+        3 => 12,
+        indicator => return Err(format!("unsupported DNx bit-depth indicator {indicator}")),
+    };
+    let compression_id = u32::from_be_bytes([frame[0x28], frame[0x29], frame[0x2a], frame[0x2b]]);
+    let profile = match compression_id {
+        1270 => DnxProfile::DnxHr444,
+        1271 => DnxProfile::DnxHrHqx,
+        1272 => DnxProfile::DnxHrHq,
+        1273 => DnxProfile::DnxHrSq,
+        1274 => DnxProfile::DnxHrLb,
+        1235 | 1237 | 1238 | 1241 | 1242 | 1243 | 1244 | 1250 | 1251 | 1252 | 1253 | 1256
+        | 1258 | 1259 | 1260 => DnxProfile::DnxHd(compression_id),
+        _ => return Err(format!("unsupported DNx compression id {compression_id}")),
+    };
+    let is_444 = frame[0x2c] & 0x40 != 0;
+    if is_444 && bit_depth == 8 {
+        return Err("8-bit DNx 4:4:4 is not a supported VC-3 profile".to_string());
+    }
+
+    Ok(DnxFrameInfo {
+        profile,
+        width,
+        height,
+        bit_depth,
+        chroma_sampling: if is_444 {
+            ChromaSampling::Cs444
+        } else {
+            ChromaSampling::Cs422
+        },
+        data_offset,
+        interlaced: frame[5] & 0x02 != 0,
+        macroblock_adaptive_frame_field: frame[6] & 0x20 != 0,
+        has_alpha: frame[7] & 0x01 != 0,
+        adaptive_color_transform: frame[0x2c] & 0x01 != 0,
+    })
+}
+
 impl VideoCodec {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -883,6 +1017,39 @@ mod tests {
             planes: vec![],
         };
         assert!(frame.validate().unwrap_err().contains("pixel budget"));
+    }
+
+    #[test]
+    fn inspects_dnxhr_hqx_from_the_coding_unit_header() {
+        let mut frame = vec![0_u8; 0x280];
+        frame[..6].copy_from_slice(&[0x00, 0x00, 0x02, 0x80, 0x03, 0x01]);
+        frame[0x18..0x1a].copy_from_slice(&360_u16.to_be_bytes());
+        frame[0x1a..0x1c].copy_from_slice(&640_u16.to_be_bytes());
+        frame[0x21] = 2 << 5;
+        frame[0x28..0x2c].copy_from_slice(&1271_u32.to_be_bytes());
+
+        let info = inspect_dnx_frame(&frame).unwrap();
+        assert_eq!(info.profile, DnxProfile::DnxHrHqx);
+        assert_eq!(info.width, 640);
+        assert_eq!(info.height, 360);
+        assert_eq!(info.bit_depth, 10);
+        assert_eq!(info.chroma_sampling, ChromaSampling::Cs422);
+        assert_eq!(info.data_offset, 0x280);
+    }
+
+    #[test]
+    fn rejects_truncated_and_unknown_dnx_frames() {
+        assert!(inspect_dnx_frame(&[0; 32]).unwrap_err().contains("shorter"));
+
+        let mut frame = vec![0_u8; 0x280];
+        frame[..6].copy_from_slice(&[0x00, 0x00, 0x02, 0x80, 0x03, 0x01]);
+        frame[0x18..0x1a].copy_from_slice(&360_u16.to_be_bytes());
+        frame[0x1a..0x1c].copy_from_slice(&640_u16.to_be_bytes());
+        frame[0x21] = 2 << 5;
+        frame[0x28..0x2c].copy_from_slice(&9999_u32.to_be_bytes());
+        assert!(inspect_dnx_frame(&frame)
+            .unwrap_err()
+            .contains("compression id"));
     }
 
     #[test]

@@ -18,6 +18,8 @@ MP4 edit lists are parsed and normalized in Rust. Each track exposes a linear ti
 
 `WebmMediaDemuxer` streams all supported WebM video and audio tracks. It resolves cluster-relative timestamps and durations to nanoseconds, preserves keyframe state, and timestamps laced frames independently.
 
+`MxfMediaDemuxer` incrementally parses bounded KLV records, header metadata, frame-wrapped Generic Container essence, DNx coding-unit headers, and BWF/AES3 PCM in Rust. The browser only provides byte chunks. The first production profile is OP1a DNxHD/DNxHR picture essence with 16- or 24-bit PCM sound essence.
+
 The decoded video contract is planar YUV with explicit dimensions, stride, bit depth, chroma sampling, alpha presence, presentation timestamp, and duration. Planes use Y, Cb, Cr, and optional alpha order. Eight-bit samples use one byte. Deeper samples use little-endian 16-bit words.
 
 ## Compatibility baseline
@@ -43,6 +45,7 @@ The deterministic `never-final.mov` matrix covers common artist delivery and upl
 | MOV | ProRes 4444 12-bit 4:4:4 + alpha | PCM 24-bit 48 kHz stereo | Passing |
 | MOV | ProRes 4444 XQ 12-bit 4:4:4 + alpha | PCM 24-bit 48 kHz stereo | Passing |
 | MOV | DNxHR HQX 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Audio passing; video decoder pending |
+| MXF OP1a | DNxHR HQX 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Rust/WASM demux passing; video decoder pending |
 | WebM | VP9 Profile 0 8-bit 4:2:0 | Opus 48 kHz stereo | Passing |
 | WebM | VP9 Profile 2 10-bit 4:2:0 | Opus 48 kHz stereo | Passing |
 | WebM | AV1 Main 8-bit 4:2:0 | Opus 48 kHz stereo | Passing |
@@ -69,7 +72,7 @@ Build optimized WASM and decode both video and audio from each complete containe
 make media-conformance
 ```
 
-The repository stores 26 deterministic three-second container fixtures under `testdata/video-compat/never-final`. It does not store the artist source. The generator recreates the fixtures under `build/`, and `media-conformance` verifies the committed SHA-256 manifest before decoding.
+The repository stores 27 deterministic three-second container fixtures under `testdata/video-compat/never-final`. It does not store the artist source. The generator recreates the fixtures under `build/`, and `media-conformance` verifies the committed SHA-256 manifest before decoding.
 
 Fetch the pinned Chromium corpus and verify its SHA-256 values:
 
@@ -100,4 +103,4 @@ make media-fuzz
 
 ## Remaining format work
 
-DNxHD/DNxHR needs a production-quality pure-Rust decoder. H.264 and HEVC 4:2:2/4:4:4 need decoder extensions; their container and audio paths already pass. The current API rejects these gaps explicitly instead of silently invoking a device decoder. Additional corpus work should cover MXF and broader Matroska variants.
+DNxHD/DNxHR needs a production-quality pure-Rust decoder. H.264 and HEVC 4:2:2/4:4:4 need decoder extensions; their container and audio paths already pass. The current API rejects these gaps explicitly instead of silently invoking a device decoder. Additional corpus work should cover OP-Atom, clip-wrapped MXF, and broader Matroska variants.

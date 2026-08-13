@@ -58,6 +58,11 @@ ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v pro
 ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v prores_ks -profile:v 5 -pix_fmt yuva444p10le -alpha_bits 16 $common_audio -c:a pcm_s24le -movflags +faststart "$output_dir/prores-4444xq-alpha-pcm.mov"
 # shellcheck disable=SC2086
 ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v dnxhd -profile:v dnxhr_hqx -pix_fmt yuv422p10le $common_audio -c:a pcm_s24le "$output_dir/dnxhr-hqx-pcm.mov"
+# SMPTE OP1a MXF is a routine Resolve, Media Composer, and broadcast handoff.
+# Keep the same DNxHR HQX + 24-bit PCM programme in both QuickTime and MXF so
+# container conformance can compare identical professional essence.
+# shellcheck disable=SC2086
+ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v dnxhd -profile:v dnxhr_hqx -pix_fmt yuv422p10le $common_audio -c:a pcm_s24le -f mxf "$output_dir/dnxhr-hqx-pcm.mxf"
 # shellcheck disable=SC2086
 ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v libvpx-vp9 -profile:v 0 -pix_fmt yuv420p -b:v 0 -crf 31 $common_audio -c:a libopus -b:a 160k "$output_dir/vp9-profile0-opus.webm"
 # shellcheck disable=SC2086

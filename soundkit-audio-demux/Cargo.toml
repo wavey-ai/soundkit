@@ -7,10 +7,11 @@ description = "Streaming audio track demuxer for browser-safe SoundKit container
 repository = "https://github.com/wavey-ai/soundkit"
 
 [features]
-default = ["mp4", "webm", "mpeg-ts"]
+default = ["mp4", "webm", "mpeg-ts", "mxf"]
 mp4 = ["dep:soundkit-aac", "dep:soundkit-video"]
 webm = ["dep:soundkit-webm"]
 mpeg-ts = []
+mxf = ["dep:soundkit-video"]
 
 [dependencies]
 soundkit-aac = { path = "../soundkit-aac", default-features = false, features = ["mp4-demux"], optional = true }

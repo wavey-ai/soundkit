@@ -153,6 +153,32 @@ async function runCase(specification) {
     if (fatalError) throw fatalError;
     return;
   }
+  if (specification.framing === "mxf") {
+    const demuxer = new initModule.WasmMxfMediaDemuxer();
+    let fatalError;
+    try {
+      try {
+        for (let offset = 0; offset < input.length; offset += 32749) {
+          demuxer.push(input.subarray(offset, offset + 32749));
+        }
+        demuxer.flush();
+      } catch (error) {
+        const message = String(error);
+        if (
+          error instanceof WebAssembly.RuntimeError ||
+          /unreachable|out of bounds|memory access|stack overflow/i.test(message)
+        ) fatalError = error;
+      }
+    } finally {
+      try {
+        demuxer.free();
+      } catch (error) {
+        fatalError ??= error;
+      }
+    }
+    if (fatalError) throw fatalError;
+    return;
+  }
   const decoder = new initModule.WasmVideoDecoder(specification.codec);
   let fatalError;
   try {
@@ -228,6 +254,7 @@ const sources = [
   { codec: "container", path: resolve(generatedRoot, "matroska-hevc-aac.mkv"), framing: "webm" },
   { codec: "container", path: resolve(generatedRoot, "av1-main-opus.webm"), framing: "webm" },
   { codec: "container", path: resolve(generatedRoot, "av1-main10-opus.webm"), framing: "webm" },
+  { codec: "container", path: resolve(generatedRoot, "dnxhr-hqx-pcm.mxf"), framing: "mxf" },
 ];
 const mutations = [
   "empty",

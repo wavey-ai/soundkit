@@ -711,6 +711,52 @@ export class WasmMusicDecoder {
 }
 if (Symbol.dispose) WasmMusicDecoder.prototype[Symbol.dispose] = WasmMusicDecoder.prototype.free;
 
+/**
+ * Streaming Rust MXF KLV demuxer that emits both picture and sound essence.
+ */
+export class WasmMxfMediaDemuxer {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmMxfMediaDemuxerFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmmxfmediademuxer_free(ptr, 0);
+    }
+    /**
+     * @returns {Array<any>}
+     */
+    flush() {
+        const ret = wasm.wasmmxfmediademuxer_flush(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    constructor() {
+        const ret = wasm.wasmmxfmediademuxer_new();
+        this.__wbg_ptr = ret;
+        WasmMxfMediaDemuxerFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @param {Uint8Array} bytes
+     * @returns {Array<any>}
+     */
+    push(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmxfmediademuxer_push(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+}
+if (Symbol.dispose) WasmMxfMediaDemuxer.prototype[Symbol.dispose] = WasmMxfMediaDemuxer.prototype.free;
+
 export class WasmOpusDeboxer {
     static __wrap(ptr) {
         const obj = Object.create(WasmOpusDeboxer.prototype);
@@ -1345,6 +1391,9 @@ const WasmMp4MediaIndexFinalization = (typeof FinalizationRegistry === 'undefine
 const WasmMusicDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmmusicdecoder_free(ptr, 1));
+const WasmMxfMediaDemuxerFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmmxfmediademuxer_free(ptr, 1));
 const WasmOpusDeboxerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmopusdeboxer_free(ptr, 1));

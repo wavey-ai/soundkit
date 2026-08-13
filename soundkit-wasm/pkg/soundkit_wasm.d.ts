@@ -151,6 +151,17 @@ export class WasmMusicDecoder {
     push(bytes: Uint8Array): Array<any>;
 }
 
+/**
+ * Streaming Rust MXF KLV demuxer that emits both picture and sound essence.
+ */
+export class WasmMxfMediaDemuxer {
+    free(): void;
+    [Symbol.dispose](): void;
+    flush(): Array<any>;
+    constructor();
+    push(bytes: Uint8Array): Array<any>;
+}
+
 export class WasmOpusDeboxer {
     free(): void;
     [Symbol.dispose](): void;
@@ -264,6 +275,7 @@ export interface InitOutput {
     readonly __wbg_wasmmp4mediademuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediaindex_free: (a: number, b: number) => void;
     readonly __wbg_wasmmusicdecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmmxfmediademuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdeboxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdecoderesult_free: (a: number, b: number) => void;
@@ -317,6 +329,9 @@ export interface InitOutput {
     readonly wasmmusicdecoder_newRawLinear32: (a: number, b: number) => [number, number, number];
     readonly wasmmusicdecoder_newWithFormat: (a: number, b: number) => [number, number, number];
     readonly wasmmusicdecoder_push: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmmxfmediademuxer_flush: (a: number) => [number, number, number];
+    readonly wasmmxfmediademuxer_new: () => number;
+    readonly wasmmxfmediademuxer_push: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmopusdeboxer_flush: (a: number) => [number, number, number];
     readonly wasmopusdeboxer_new: () => number;
     readonly wasmopusdeboxer_newWithFormat: (a: number, b: number) => [number, number, number];

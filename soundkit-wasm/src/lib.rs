@@ -36,7 +36,7 @@ use soundkit_alac::AlacDecoder;
 #[cfg(feature = "audio-demux")]
 use soundkit_audio_demux::{
     AudioDemuxEvent, AudioTrackDemuxer, MediaSampleIndex, MediaTrackConfig, MediaTrackPacket,
-    Mp4MediaDemuxEvent, Mp4MediaDemuxer, Mp4MediaIndex,
+    Mp4MediaDemuxEvent, Mp4MediaDemuxer, Mp4MediaIndex, MxfMediaDemuxEvent, MxfMediaDemuxer,
 };
 #[cfg(feature = "flac")]
 use soundkit_flac::{FlacDecoderClaxon, FlacEncoder};
@@ -258,6 +258,13 @@ pub struct WasmMp4MediaIndex {
 #[wasm_bindgen]
 pub struct WasmMp4MediaDemuxer {
     demuxer: Mp4MediaDemuxer,
+}
+
+/// Streaming Rust MXF KLV demuxer that emits both picture and sound essence.
+#[cfg(feature = "audio-demux")]
+#[wasm_bindgen]
+pub struct WasmMxfMediaDemuxer {
+    demuxer: MxfMediaDemuxer,
 }
 
 /// Streaming Rust WebM demuxer that emits both video and audio tracks.
@@ -824,6 +831,32 @@ impl WasmMp4MediaDemuxer {
 
 #[cfg(feature = "audio-demux")]
 impl Default for WasmMp4MediaDemuxer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "audio-demux")]
+#[wasm_bindgen]
+impl WasmMxfMediaDemuxer {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            demuxer: MxfMediaDemuxer::new(),
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Array, JsValue> {
+        mxf_media_events_to_js(self.demuxer.push(bytes).map_err(js_error)?)
+    }
+
+    pub fn flush(&mut self) -> Result<Array, JsValue> {
+        mxf_media_events_to_js(self.demuxer.flush().map_err(js_error)?)
+    }
+}
+
+#[cfg(feature = "audio-demux")]
+impl Default for WasmMxfMediaDemuxer {
     fn default() -> Self {
         Self::new()
     }
@@ -2519,6 +2552,27 @@ fn mp4_media_events_to_js(events: Vec<Mp4MediaDemuxEvent>) -> Result<Array, JsVa
                 value
             }
             Mp4MediaDemuxEvent::Packet(packet) => {
+                let value: JsValue = media_track_packet_to_js(&packet)?.into();
+                Reflect::set(&value, &"type".into(), &"packet".into())?;
+                value
+            }
+        };
+        output.push(&value);
+    }
+    Ok(output)
+}
+
+#[cfg(feature = "audio-demux")]
+fn mxf_media_events_to_js(events: Vec<MxfMediaDemuxEvent>) -> Result<Array, JsValue> {
+    let output = Array::new();
+    for event in events {
+        let value = match event {
+            MxfMediaDemuxEvent::Config(track) => {
+                let value = media_track_config_to_js(&track)?;
+                Reflect::set(&value, &"type".into(), &"config".into())?;
+                value
+            }
+            MxfMediaDemuxEvent::Packet(packet) => {
                 let value: JsValue = media_track_packet_to_js(&packet)?.into();
                 Reflect::set(&value, &"type".into(), &"packet".into())?;
                 value

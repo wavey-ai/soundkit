@@ -7,6 +7,7 @@ import init, {
   WasmMp4MediaDemuxer,
   WasmMp4MediaIndex,
   WasmMusicDecoder,
+  WasmMxfMediaDemuxer,
   WasmOpusDecoder,
   WasmVideoDecoder,
   WasmWebmMediaDemuxer,
@@ -202,6 +203,59 @@ async function decodeFragmentedMp4MediaFile(file, expected) {
   } finally {
     audioDecoder?.free();
     videoDecoder?.free();
+    demuxer.free();
+  }
+}
+
+async function inspectMxfMediaFile(file, expected) {
+  const bytes = await readFile(resolve(fixtureRoot, file));
+  const demuxer = new WasmMxfMediaDemuxer();
+  const events = [];
+  try {
+    // Split KLV keys, BER lengths, metadata sets, and essence payloads. Rust
+    // owns reassembly, bounds checking, metadata resolution, and DNx headers.
+    for (let offset = 0; offset < bytes.length; offset += 32749) {
+      events.push(...demuxer.push(bytes.subarray(offset, offset + 32749)));
+    }
+    events.push(...demuxer.flush());
+
+    const video = events.find((event) => event.type === "config" && event.kind === "video");
+    const audio = events.find((event) => event.type === "config" && event.kind === "audio");
+    assert.ok(video, `${file} has a Rust-resolved picture track`);
+    assert.ok(audio, `${file} has a Rust-resolved sound track`);
+    assert.equal(video.codec, "dnxhr", `${file} video codec`);
+    assert.equal(video.codecId, "dnxhr-hqx", `${file} DNx profile`);
+    assert.equal(video.width, 640, `${file} visible width`);
+    assert.equal(video.height, 360, `${file} visible height`);
+    assert.equal(video.bitsPerSample, 10, `${file} video depth`);
+    assert.equal(audio.codec, "pcm", `${file} audio codec`);
+    assert.equal(audio.codecId, "pcm_s24le", `${file} PCM format`);
+    assert.equal(audio.sampleRate, 48_000, `${file} audio rate`);
+    assert.equal(audio.channels, 2, `${file} audio channels`);
+    assert.equal(audio.bitsPerSample, 24, `${file} audio depth`);
+
+    const videoPackets = events.filter(
+      (event) => event.type === "packet" && event.kind === "video",
+    );
+    const audioPackets = events.filter(
+      (event) => event.type === "packet" && event.kind === "audio",
+    );
+    assert.equal(videoPackets.length, expected.videoPackets, `${file} video packet count`);
+    assert.equal(audioPackets.length, expected.audioPackets, `${file} audio packet count`);
+    assert.deepEqual(
+      videoPackets.map((packet) => packet.decodeTime),
+      Array.from({ length: expected.videoPackets }, (_, index) => index),
+      `${file} video timestamps`,
+    );
+    assert.equal(
+      audioPackets.reduce((frames, packet) => frames + packet.duration, 0),
+      expected.audioFrames,
+      `${file} PCM frame count`,
+    );
+    console.log(
+      `${file}: Rust demuxed ${videoPackets.length} DNxHR frames plus ${expected.audioFrames} PCM frames`,
+    );
+  } finally {
     demuxer.free();
   }
 }
@@ -512,6 +566,11 @@ await inspectExplicitVideoGap("dnxhr-hqx-pcm.mov", {
   audioCodec: "pcm",
   audioFrames: 144000,
   videoPackets: 75,
+});
+await inspectMxfMediaFile("dnxhr-hqx-pcm.mxf", {
+  videoPackets: 75,
+  audioPackets: 75,
+  audioFrames: 144000,
 });
 await inspectExplicitProfileGap("h264-high422-aac.mp4", {
   codec: "h264",
