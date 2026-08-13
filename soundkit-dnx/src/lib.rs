@@ -24,11 +24,20 @@ pub struct DnxPlane {
     pub samples: Vec<u16>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DnxColorModel {
+    /// Planes are ordered Y, Cb, Cr.
+    Ycbcr,
+    /// Planes are ordered G, B, R, matching the VC-3 4:4:4 bitstream.
+    Gbr,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DnxFrame {
     pub width: u32,
     pub height: u32,
     pub bit_depth: u8,
+    pub color_model: DnxColorModel,
     pub planes: [DnxPlane; 3],
 }
 
@@ -49,15 +58,19 @@ impl fmt::Display for DnxError {
 
 impl std::error::Error for DnxError {}
 
-/// Decode one complete progressive 4:2:2 DNxHR coding unit.
+/// Decode one complete progressive DNxHR coding unit.
 ///
-/// HQX, HQ, SQ, and LB are supported. DNxHR 444 and interlaced legacy VC-3
-/// still fail before allocating output planes.
+/// DNxHR 444, HQX, HQ, SQ, and LB are supported. Interlaced legacy VC-3 and
+/// 12-bit DNxHR 444 still fail before allocating output planes.
 pub fn decode_frame(data: &[u8]) -> Result<DnxFrame, DnxError> {
     let header = Header::parse(data)?;
-    if !matches!(header.cid, 1271..=1274) || header.is_444 || header.interlaced {
+    let supported = matches!(
+        (header.cid, header.bit_depth, header.is_444),
+        (1270, 10, true) | (1271, 10, false) | (1272..=1274, 8, false)
+    );
+    if !supported || header.interlaced {
         return Err(DnxError::new(format!(
-            "DNx decoder supports progressive DNxHR HQX/HQ/SQ/LB 4:2:2; got CID {}, {}-bit, 4:{}, interlaced={}",
+            "DNx decoder supports progressive 10-bit DNxHR 444/HQX and 8-bit HQ/SQ/LB; got CID {}, {}-bit, 4:{}, interlaced={}",
             header.cid,
             header.bit_depth,
             if header.is_444 { "4:4" } else { "2:2" },
@@ -86,6 +99,7 @@ struct Header {
     cid: u32,
     bit_depth: u8,
     is_444: bool,
+    adaptive_color_transform: bool,
     interlaced: bool,
     mbaff: bool,
 }
@@ -112,6 +126,23 @@ struct CodecTables {
 impl CodecTables {
     fn for_header(header: Header) -> Result<Self, DnxError> {
         match (header.cid, header.bit_depth) {
+            (1270, 10) => Ok(Self {
+                luma_weight: &tables::DNXHD_1235_LUMA_WEIGHT,
+                chroma_weight: &tables::DNXHD_1235_LUMA_WEIGHT,
+                dc_codes: &tables::DNXHD_1235_DC_CODES,
+                dc_bits: &tables::DNXHD_1235_DC_BITS,
+                ac_codes: &tables::DNXHD_1235_AC_CODES,
+                ac_bits: &tables::DNXHD_1235_AC_BITS,
+                ac_info: &tables::DNXHD_1235_AC_INFO,
+                run_codes: &tables::DNXHD_1235_RUN_CODES,
+                run_bits: &tables::DNXHD_1235_RUN_BITS,
+                run_values: &tables::DNXHD_1235_RUN,
+                eob_index: 4,
+                index_bits: 6,
+                level_bias: 32,
+                level_shift: 6,
+                dc_shift: 0,
+            }),
             (1271, 10) => Ok(Self {
                 luma_weight: &tables::DNXHD_1241_LUMA_WEIGHT,
                 chroma_weight: &tables::DNXHD_1241_CHROMA_WEIGHT,
@@ -251,6 +282,7 @@ impl Header {
             cid,
             bit_depth,
             is_444: data[0x2c] >> 6 & 1 != 0,
+            adaptive_color_transform: data[0x2c] & 1 != 0,
             interlaced,
             mbaff: data[6] >> 5 & 1 != 0,
         })
@@ -262,6 +294,7 @@ struct Decoder<'a> {
     header: Header,
     tables: CodecTables,
     planes: [DnxPlane; 3],
+    color_model: Option<DnxColorModel>,
     dc: Vlc,
     ac: Vlc,
     run: Vlc,
@@ -271,7 +304,11 @@ impl<'a> Decoder<'a> {
     fn new(data: &'a [u8], header: Header) -> Result<Self, DnxError> {
         let tables = CodecTables::for_header(header)?;
         let y_stride = header.width;
-        let c_width = header.width.div_ceil(2);
+        let c_width = if header.is_444 {
+            header.width
+        } else {
+            header.width.div_ceil(2)
+        };
         let plane = |width: usize, stride: usize| -> Result<DnxPlane, DnxError> {
             let samples = stride
                 .checked_mul(header.height)
@@ -292,6 +329,7 @@ impl<'a> Decoder<'a> {
                 plane(c_width, c_width)?,
                 plane(c_width, c_width)?,
             ],
+            color_model: (!header.is_444).then_some(DnxColorModel::Ycbcr),
             dc: Vlc::new(tables.dc_codes, tables.dc_bits, None)?,
             ac: Vlc::new(tables.ac_codes, tables.ac_bits, None)?,
             run: Vlc::new(tables.run_codes, tables.run_bits, Some(tables.run_values))?,
@@ -311,6 +349,9 @@ impl<'a> Decoder<'a> {
             width: self.header.width as u32,
             height: self.header.height as u32,
             bit_depth: self.header.bit_depth,
+            color_model: self
+                .color_model
+                .ok_or_else(|| DnxError::new("DNx 4:4:4 frame has no color-model decision"))?,
             planes: self.planes,
         })
     }
@@ -337,7 +378,28 @@ impl<'a> Decoder<'a> {
         let mut last_qscale = u16::MAX;
         for x in 0..self.header.mb_width {
             let qscale = bits.read(11)? as u16;
-            let _act = bits.read(1)?;
+            let act = bits.read(1)? != 0;
+            if self.header.is_444 {
+                if act && !self.header.adaptive_color_transform {
+                    return Err(DnxError::new(
+                        "DNx macroblock enables ACT while the frame header disables it",
+                    ));
+                }
+                let color_model = if act {
+                    DnxColorModel::Ycbcr
+                } else {
+                    DnxColorModel::Gbr
+                };
+                if self
+                    .color_model
+                    .is_some_and(|current| current != color_model)
+                {
+                    return Err(DnxError::new(
+                        "variable DNx adaptive color transforms are not supported",
+                    ));
+                }
+                self.color_model = Some(color_model);
+            }
             if qscale != last_qscale {
                 for index in 0..64 {
                     scales.0[index] = i32::from(qscale) * i32::from(self.tables.luma_weight[index]);
@@ -346,8 +408,9 @@ impl<'a> Decoder<'a> {
                 }
                 last_qscale = qscale;
             }
-            let mut blocks = [[0i16; 64]; 8];
-            for (n, block) in blocks.iter_mut().enumerate() {
+            let mut blocks = [[0i16; 64]; 12];
+            let block_count = if self.header.is_444 { 12 } else { 8 };
+            for (n, block) in blocks.iter_mut().take(block_count).enumerate() {
                 self.decode_block(&mut bits, n, block, &mut last_dc, &scales)?;
             }
             self.put_macroblock(x, y, &mut blocks);
@@ -363,7 +426,14 @@ impl<'a> Decoder<'a> {
         last_dc: &mut [i32; 3],
         scales: &([i32; 64], [i32; 64]),
     ) -> Result<(), DnxError> {
-        let (component, scale, weight) = if n & 2 != 0 {
+        let (component, scale, weight) = if self.header.is_444 {
+            let component = (n >> 1) % 3;
+            if component == 0 {
+                (component, &scales.0, self.tables.luma_weight)
+            } else {
+                (component, &scales.1, self.tables.chroma_weight)
+            }
+        } else if n & 2 != 0 {
             (1 + (n & 1), &scales.1, self.tables.chroma_weight)
         } else {
             (0, &scales.0, self.tables.luma_weight)
@@ -431,19 +501,55 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    fn put_macroblock(&mut self, x: usize, y: usize, blocks: &mut [[i16; 64]; 8]) {
+    fn put_macroblock(&mut self, x: usize, y: usize, blocks: &mut [[i16; 64]; 12]) {
         let y_x = x * 16;
-        let c_x = x * 8;
         let top = y * 16;
         let depth = self.header.bit_depth;
-        put_block(&mut self.planes[0], y_x, top, &mut blocks[0], depth);
-        put_block(&mut self.planes[0], y_x + 8, top, &mut blocks[1], depth);
-        put_block(&mut self.planes[1], c_x, top, &mut blocks[2], depth);
-        put_block(&mut self.planes[2], c_x, top, &mut blocks[3], depth);
-        put_block(&mut self.planes[0], y_x, top + 8, &mut blocks[4], depth);
-        put_block(&mut self.planes[0], y_x + 8, top + 8, &mut blocks[5], depth);
-        put_block(&mut self.planes[1], c_x, top + 8, &mut blocks[6], depth);
-        put_block(&mut self.planes[2], c_x, top + 8, &mut blocks[7], depth);
+        if self.header.is_444 {
+            for (plane, block_indices) in [[0, 1, 6, 7], [2, 3, 8, 9], [4, 5, 10, 11]]
+                .into_iter()
+                .enumerate()
+            {
+                put_block(
+                    &mut self.planes[plane],
+                    y_x,
+                    top,
+                    &mut blocks[block_indices[0]],
+                    depth,
+                );
+                put_block(
+                    &mut self.planes[plane],
+                    y_x + 8,
+                    top,
+                    &mut blocks[block_indices[1]],
+                    depth,
+                );
+                put_block(
+                    &mut self.planes[plane],
+                    y_x,
+                    top + 8,
+                    &mut blocks[block_indices[2]],
+                    depth,
+                );
+                put_block(
+                    &mut self.planes[plane],
+                    y_x + 8,
+                    top + 8,
+                    &mut blocks[block_indices[3]],
+                    depth,
+                );
+            }
+        } else {
+            let c_x = x * 8;
+            put_block(&mut self.planes[0], y_x, top, &mut blocks[0], depth);
+            put_block(&mut self.planes[0], y_x + 8, top, &mut blocks[1], depth);
+            put_block(&mut self.planes[1], c_x, top, &mut blocks[2], depth);
+            put_block(&mut self.planes[2], c_x, top, &mut blocks[3], depth);
+            put_block(&mut self.planes[0], y_x, top + 8, &mut blocks[4], depth);
+            put_block(&mut self.planes[0], y_x + 8, top + 8, &mut blocks[5], depth);
+            put_block(&mut self.planes[1], c_x, top + 8, &mut blocks[6], depth);
+            put_block(&mut self.planes[2], c_x, top + 8, &mut blocks[7], depth);
+        }
     }
 }
 
@@ -721,6 +827,16 @@ mod tests {
         container[start..start + coding_unit_size].to_vec()
     }
 
+    fn frame_hash(frame: &DnxFrame) -> String {
+        let mut digest = Sha256::new();
+        for plane in &frame.planes {
+            for sample in &plane.samples {
+                digest.update(sample.to_le_bytes());
+            }
+        }
+        format!("{:x}", digest.finalize())
+    }
+
     #[test]
     fn decodes_reference_dnxhr_hqx_frame() {
         let frame = decode_hqx_frame(&reference_coding_unit("dnxhr-hqx-pcm.mov", 102_400)).unwrap();
@@ -728,16 +844,54 @@ mod tests {
         assert_eq!((frame.planes[0].width, frame.planes[0].height), (640, 360));
         assert_eq!((frame.planes[1].width, frame.planes[1].height), (320, 360));
 
-        let mut digest = Sha256::new();
-        for plane in &frame.planes {
-            for sample in &plane.samples {
-                digest.update(sample.to_le_bytes());
-            }
-        }
         assert_eq!(
-            format!("{:x}", digest.finalize()),
+            frame_hash(&frame),
             "32c0a789031d1f47b9e16c252acda863510fb71b1c1105b9a895da932448a154"
         );
+    }
+
+    #[test]
+    fn decodes_dnxhr_444_color_models_byte_identically() {
+        let profiles = [
+            (
+                "dnxhr-444-gbr10-pcm.mov",
+                DnxColorModel::Gbr,
+                "8b3d3bd87f40d4351503b4719e8f1681a8de8c107a6f0f096f81251fd5c9aedb",
+            ),
+            (
+                "dnxhr-444-yuv10-pcm.mov",
+                DnxColorModel::Ycbcr,
+                "32d6262761eb97cac6650c2ba14f301e0e0d0d103a3057be37a585ab4ff964c2",
+            ),
+        ];
+        for (file, color_model, expected_hash) in profiles {
+            let frame = decode_frame(&reference_coding_unit(file, 208_896)).unwrap();
+            assert_eq!((frame.width, frame.height, frame.bit_depth), (640, 360, 10));
+            assert_eq!(frame.color_model, color_model);
+            assert!(frame
+                .planes
+                .iter()
+                .all(|plane| (plane.width, plane.height) == (640, 360)));
+            assert_eq!(frame_hash(&frame), expected_hash, "{file}");
+        }
+    }
+
+    #[test]
+    fn rejects_444_act_that_contradicts_the_frame_header() {
+        let mut unit = reference_coding_unit("dnxhr-444-gbr10-pcm.mov", 208_896);
+        let data_offset = read_u16(&unit, 2).unwrap() as usize;
+        unit[data_offset + 1] |= 0x10;
+        let error = decode_frame(&unit).unwrap_err();
+        assert!(error.to_string().contains("header disables"));
+    }
+
+    #[test]
+    fn rejects_variable_444_color_models() {
+        let mut unit = reference_coding_unit("dnxhr-444-yuv10-pcm.mov", 208_896);
+        let data_offset = read_u16(&unit, 2).unwrap() as usize;
+        unit[data_offset + 1] &= !0x10;
+        let error = decode_frame(&unit).unwrap_err();
+        assert!(error.to_string().contains("variable"));
     }
 
     #[test]

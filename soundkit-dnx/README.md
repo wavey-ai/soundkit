@@ -10,4 +10,5 @@ source used for this port is FFmpeg commit
 `ca821e458aabe2fa211d9e94eac38cd69fe2ea09`.
 
 The public API accepts one complete coding unit and returns bounded planar
-pixels. Container parsing and all untrusted-media validation remain in Rust.
+pixels. It reports YCbCr and GBR planes explicitly for DNxHR 444. Container
+parsing and all untrusted-media validation remain in Rust.

@@ -23,6 +23,11 @@ function assertWasmFrameSerialization(codec, frames, expected) {
   for (const frame of frames) {
     assert.equal(frame.width, 640, `${codec} width`);
     assert.equal(frame.height, 360, `${codec} height`);
+    assert.equal(
+      frame.colorModel,
+      expected.colorModel ?? "ycbcr",
+      `${codec} Rust color model`,
+    );
     assert.equal(frame.hasAlpha, expected.hasAlpha ?? false, `${codec} alpha contract`);
     assert.equal(
       frame.planes.length,
@@ -40,7 +45,7 @@ function assertWasmFrameSerialization(codec, frames, expected) {
   }
   assert.equal(frames[0].bitDepth, expected.bitDepth, `${codec} bit depth`);
   assert.equal(frames[0].chromaSampling, expected.chroma, `${codec} chroma`);
-  console.log(`${codec}: ${frames.length} frames, ${frames[0].width}x${frames[0].height}, ${frames[0].bitDepth}-bit ${frames[0].chromaSampling}`);
+  console.log(`${codec}: ${frames.length} frames, ${frames[0].width}x${frames[0].height}, ${frames[0].bitDepth}-bit ${frames[0].colorModel} ${frames[0].chromaSampling}`);
 }
 
 function countPcmFrames(frames) {
@@ -551,6 +556,17 @@ for (const profile of ["hq", "sq", "lb"]) {
     frames: 75,
     bitDepth: 8,
     chroma: "422",
+  });
+}
+for (const [model, colorModel] of [["gbr", "gbr"], ["yuv", "ycbcr"]]) {
+  await decodeMp4MediaFile(`dnxhr-444-${model}10-pcm.mov`, {
+    codec: "dnxhr",
+    audioCodec: "pcm",
+    audioFrames: 9216,
+    frames: 5,
+    bitDepth: 10,
+    chroma: "444",
+    colorModel,
   });
 }
 await inspectMxfMediaFile("dnxhr-hqx-pcm.mxf", {

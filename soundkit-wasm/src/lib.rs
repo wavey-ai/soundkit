@@ -2137,6 +2137,11 @@ fn export_video_frames(frames: Vec<VideoFrame>) -> Result<Array, JsValue> {
         )?;
         Reflect::set(
             &object,
+            &"colorModel".into(),
+            &frame.color_model.as_str().into(),
+        )?;
+        Reflect::set(
+            &object,
             &"hasAlpha".into(),
             &JsValue::from_bool(frame.has_alpha),
         )?;

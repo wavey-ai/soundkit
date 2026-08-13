@@ -311,6 +311,21 @@ impl ChromaSampling {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoColorModel {
+    Ycbcr,
+    Gbr,
+}
+
+impl VideoColorModel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ycbcr => "ycbcr",
+            Self::Gbr => "gbr",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VideoPlane {
     pub width: u32,
@@ -326,9 +341,10 @@ pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
     pub bit_depth: u8,
+    pub color_model: VideoColorModel,
     pub chroma_sampling: ChromaSampling,
-    /// True when plane 3 contains full-resolution alpha. Color planes are
-    /// always ordered Y, Cb, Cr; an alpha plane, when present, follows them.
+    /// True when plane 3 contains full-resolution alpha. YCbCr planes are
+    /// ordered Y, Cb, Cr. GBR planes are ordered G, B, R. Alpha follows them.
     pub has_alpha: bool,
     pub pts: Option<i64>,
     pub duration: Option<u64>,
@@ -345,6 +361,10 @@ impl VideoFrame {
                 "decoded video frame {}x{} exceeds the SoundKit pixel budget",
                 self.width, self.height
             ));
+        }
+        if self.color_model == VideoColorModel::Gbr && self.chroma_sampling != ChromaSampling::Cs444
+        {
+            return Err("GBR video frames must use full-resolution 4:4:4 planes".to_string());
         }
         let bytes_per_sample = if self.bit_depth <= 8 { 1 } else { 2 };
         let color_planes = if self.chroma_sampling == ChromaSampling::Monochrome {
@@ -707,6 +727,7 @@ fn h264_frame(
         width,
         height,
         bit_depth: 8,
+        color_model: VideoColorModel::Ycbcr,
         chroma_sampling: ChromaSampling::Cs420,
         has_alpha: false,
         pts,
@@ -731,6 +752,7 @@ fn hevc_frame(frame: rust_h265::Frame, pts: Option<i64>, duration: Option<u64>) 
         width,
         height,
         bit_depth: frame.bit_depth,
+        color_model: VideoColorModel::Ycbcr,
         chroma_sampling: ChromaSampling::Cs420,
         has_alpha: false,
         pts,
@@ -763,6 +785,7 @@ fn vp9_frame(frame: vp9dec::Frame, pts: Option<i64>, duration: Option<u64>) -> V
         width,
         height,
         bit_depth: frame.bit_depth,
+        color_model: VideoColorModel::Ycbcr,
         chroma_sampling,
         has_alpha: false,
         pts,
@@ -843,6 +866,7 @@ fn drain_av1(decoder: &mut rusty_av1d::Decoder) -> Result<Vec<VideoFrame>, Strin
             width,
             height,
             bit_depth,
+            color_model: VideoColorModel::Ycbcr,
             chroma_sampling: sampling,
             has_alpha: false,
             pts: picture.timestamp(),
@@ -933,6 +957,7 @@ fn prores_frame(
         width,
         height,
         bit_depth,
+        color_model: VideoColorModel::Ycbcr,
         chroma_sampling,
         has_alpha,
         pts: frame.pts.or(pts),
@@ -946,6 +971,15 @@ fn dnx_frame(frame: soundkit_dnx::DnxFrame, pts: Option<i64>, duration: Option<u
     let width = frame.width;
     let height = frame.height;
     let bit_depth = frame.bit_depth;
+    let color_model = match frame.color_model {
+        soundkit_dnx::DnxColorModel::Ycbcr => VideoColorModel::Ycbcr,
+        soundkit_dnx::DnxColorModel::Gbr => VideoColorModel::Gbr,
+    };
+    let chroma_sampling = if frame.planes[1].width == width {
+        ChromaSampling::Cs444
+    } else {
+        ChromaSampling::Cs422
+    };
     let planes = frame
         .planes
         .into_iter()
@@ -975,7 +1009,8 @@ fn dnx_frame(frame: soundkit_dnx::DnxFrame, pts: Option<i64>, duration: Option<u
         width,
         height,
         bit_depth,
-        chroma_sampling: ChromaSampling::Cs422,
+        color_model,
+        chroma_sampling,
         has_alpha: false,
         pts,
         duration,
@@ -1063,6 +1098,7 @@ mod tests {
             width: 100_000,
             height: 100_000,
             bit_depth: 8,
+            color_model: VideoColorModel::Ycbcr,
             chroma_sampling: ChromaSampling::Monochrome,
             has_alpha: false,
             pts: None,

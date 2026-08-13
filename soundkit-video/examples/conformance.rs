@@ -82,12 +82,13 @@ fn main() {
         .first()
         .unwrap_or_else(|| fail("decoder emitted no frames"));
     println!(
-        "codec={} frames={} width={} height={} bitDepth={} chroma={} checksum={:016x}",
+        "codec={} frames={} width={} height={} bitDepth={} colorModel={} chroma={} checksum={:016x}",
         codec.as_str(),
         frames.len(),
         first.width,
         first.height,
         first.bit_depth,
+        first.color_model.as_str(),
         first.chroma_sampling.as_str(),
         checksum(&frames),
     );
