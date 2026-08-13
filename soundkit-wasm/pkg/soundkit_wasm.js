@@ -444,6 +444,116 @@ export class WasmAudioTrackDemuxer {
 }
 if (Symbol.dispose) WasmAudioTrackDemuxer.prototype[Symbol.dispose] = WasmAudioTrackDemuxer.prototype.free;
 
+/**
+ * Seekable, Rust-validated CAF ALAC packet index.
+ */
+export class WasmCafAlacIndex {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmCafAlacIndexFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmcafalacindex_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get bitDepth() {
+        const ret = wasm.wasmcafalacindex_bitDepth(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
+    get channels() {
+        const ret = wasm.wasmcafalacindex_channels(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    get magicCookie() {
+        const ret = wasm.wasmcafalacindex_magicCookie(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @param {Uint8Array} description
+     * @param {Uint8Array} magic_cookie
+     * @param {Uint8Array} packet_table
+     * @param {number} data_payload_offset
+     * @param {number} data_payload_size
+     */
+    constructor(description, magic_cookie, packet_table, data_payload_offset, data_payload_size) {
+        const ptr0 = passArray8ToWasm0(description, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(magic_cookie, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray8ToWasm0(packet_table, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmcafalacindex_new(ptr0, len0, ptr1, len1, ptr2, len2, data_payload_offset, data_payload_size);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmCafAlacIndexFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Validate exactly one packet range before codec decode.
+     * @param {number} index
+     * @param {Uint8Array} source_bytes
+     * @returns {Uint8Array}
+     */
+    packet(index, source_bytes) {
+        const ptr0 = passArray8ToWasm0(source_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmcafalacindex_packet(this.__wbg_ptr, index, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @returns {number}
+     */
+    get packetCount() {
+        const ret = wasm.wasmcafalacindex_packetCount(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {number} index
+     * @returns {object}
+     */
+    sample(index) {
+        const ret = wasm.wasmcafalacindex_sample(this.__wbg_ptr, index);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @returns {number}
+     */
+    get sampleRate() {
+        const ret = wasm.wasmcafalacindex_sampleRate(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {any}
+     */
+    get validFrames() {
+        const ret = wasm.wasmcafalacindex_validFrames(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+}
+if (Symbol.dispose) WasmCafAlacIndex.prototype[Symbol.dispose] = WasmCafAlacIndex.prototype.free;
+
 export class WasmFlacEncoder {
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
@@ -1372,6 +1482,23 @@ export function buildSoundKitFrameV2(encoding, payload, sample_size, sample_rate
 }
 
 /**
+ * Inspect one CAF chunk header without reading its payload.
+ * @param {Uint8Array} header
+ * @param {number} absolute_offset
+ * @param {number} file_size
+ * @returns {object}
+ */
+export function inspectCafChunk(header, absolute_offset, file_size) {
+    const ptr0 = passArray8ToWasm0(header, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.inspectCafChunk(ptr0, len0, absolute_offset, file_size);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * Inspect one top-level MOV/MP4 box without reading its payload.
  *
  * JavaScript owns only range I/O. Rust owns box sizes, extended sizes, EOF
@@ -1389,6 +1516,20 @@ export function inspectMp4TopLevelBox(header, absolute_offset, file_size) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Validate a CAF file header without reading the source payload.
+ * @param {Uint8Array} header
+ * @param {number} file_size
+ */
+export function validateCafFileHeader(header, file_size) {
+    const ptr0 = passArray8ToWasm0(header, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.validateCafFileHeader(ptr0, len0, file_size);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
 }
 function __wbg_get_imports() {
     const import0 = {
@@ -1475,6 +1616,9 @@ const WasmAudioContentKeyUnwrapperFinalization = (typeof FinalizationRegistry ==
 const WasmAudioTrackDemuxerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmaudiotrackdemuxer_free(ptr, 1));
+const WasmCafAlacIndexFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmcafalacindex_free(ptr, 1));
 const WasmFlacEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmflacencoder_free(ptr, 1));

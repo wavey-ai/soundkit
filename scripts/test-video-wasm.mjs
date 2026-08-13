@@ -7,15 +7,19 @@ import init, {
   WasmAudioTrackDemuxer,
   WasmMp4MediaDemuxer,
   WasmMp4MediaIndex,
+  WasmCafAlacIndex,
   WasmMusicDecoder,
   WasmMxfMediaDemuxer,
   WasmOpusDecoder,
   WasmVideoDecoder,
   WasmWebmMediaDemuxer,
   inspectMp4TopLevelBox,
+  inspectCafChunk,
+  validateCafFileHeader,
 } from "../soundkit-wasm/pkg/soundkit_wasm.js";
 import {
   decodeSeekableAlac,
+  decodeSeekableCafAlac,
   openSeekableMp4,
 } from "../soundkit-wasm/runtime/streaming-media.mjs";
 
@@ -96,6 +100,49 @@ async function decodeSeekableAlacFixture() {
     assert.equal(frames, 23_680, "ALAC frame count");
     assert.ok(maximumRead < size, "ALAC never reads the complete M4A source");
     console.log(`ALAC M4A: Rust range-decoded ${packets} packets and ${frames} frames`);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function decodeSeekableCafAlacFixture() {
+  const file = resolve("testdata/alac/A_Tusk_is_used_to_make_costly_gifts.caf");
+  const handle = await open(file, "r");
+  const { size } = await handle.stat();
+  let maximumRead = 0;
+  let totalRead = 0;
+  const source = {
+    size,
+    async read(start, end) {
+      const length = end - start;
+      maximumRead = Math.max(maximumRead, length);
+      totalRead += length;
+      const bytes = new Uint8Array(length);
+      const { bytesRead } = await handle.read(bytes, 0, length, start);
+      assert.equal(bytesRead, length, "CAF ALAC range read length");
+      return bytes;
+    },
+  };
+  let frames = 0;
+  let packets = 0;
+  try {
+    for await (const { frame } of decodeSeekableCafAlac(source, {
+      inspectCafChunk,
+      validateCafFileHeader,
+      WasmAlacPacketDecoder,
+      WasmCafAlacIndex,
+    })) {
+      assert.equal(frame.sampleRate, 8_000, "CAF ALAC sample rate");
+      assert.equal(frame.channels, 1, "CAF ALAC channels");
+      assert.equal(frame.bitsPerSample, 16, "CAF ALAC depth");
+      frames += frame.data.byteLength / 2;
+      packets += 1;
+    }
+    assert.equal(packets, 6, "CAF ALAC packet count");
+    assert.equal(frames, 23_680, "CAF ALAC frame count");
+    assert.ok(maximumRead < size, "CAF ALAC never reads the complete source");
+    assert.ok(totalRead < size, "CAF ALAC skips nonessential CAF payloads");
+    console.log(`ALAC CAF: Rust range-decoded ${packets} packets and ${frames} frames`);
   } finally {
     await handle.close();
   }
@@ -746,5 +793,6 @@ await inspectAudio("vp9-profile2-10bit-opus.webm", { codec: "opus" });
 await inspectAudio("av1-main-opus.webm", { codec: "opus" });
 await inspectAudio("av1-main10-opus.webm", { codec: "opus" });
 await decodeSeekableAlacFixture();
+await decodeSeekableCafAlacFixture();
 
 console.log("SoundKit WASM media conformance passed");

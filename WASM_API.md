@@ -318,6 +318,12 @@ Use `decodeSeekableAlac` from the same module for ALAC M4A files. It constructs
 `WasmAlacPacketDecoder` from Rust-owned track metadata and decodes one packet
 range per iteration.
 
+Use `openSeekableCafAlac` for CAF ALAC files. Rust validates each chunk range
+and builds the packet index from `desc`, `kuki`, `pakt`, and `data` metadata.
+
+The adapter skips the `data` extent during the metadata scan. It then reads and
+decodes one Rust-indexed ALAC packet at a time.
+
 Rust limits `moov` metadata to 64 MiB. Rust validates box sizes, sample ranges,
 timestamps, edit lists, and codec normalization.
 

@@ -32,7 +32,9 @@ use soundkit_aac_lc::AacLcDecoder;
 #[cfg(feature = "aiff")]
 use soundkit_aiff::AiffDecoder;
 #[cfg(feature = "alac")]
-use soundkit_alac::{AlacDecoder, AlacPacketDecoder};
+use soundkit_alac::{
+    inspect_caf_chunk, validate_caf_file_header, AlacDecoder, AlacPacketDecoder, CafAlacPacketIndex,
+};
 #[cfg(feature = "audio-demux")]
 use soundkit_audio_demux::{
     inspect_mp4_top_level_box, AudioDemuxEvent, AudioTrackDemuxer, MediaSampleIndex,
@@ -252,6 +254,13 @@ pub struct WasmAudioTrackDemuxer {
 #[wasm_bindgen]
 pub struct WasmAlacPacketDecoder {
     decoder: AlacPacketDecoder,
+}
+
+/// Seekable, Rust-validated CAF ALAC packet index.
+#[cfg(feature = "alac")]
+#[wasm_bindgen]
+pub struct WasmCafAlacIndex {
+    index: CafAlacPacketIndex,
 }
 
 /// Seekable, Rust-validated MOV/MP4 audio-and-video sample index.
@@ -827,6 +836,129 @@ impl WasmAlacPacketDecoder {
     pub fn maximum_pcm_samples(&self) -> usize {
         self.decoder.maximum_pcm_samples()
     }
+}
+
+#[cfg(feature = "alac")]
+#[wasm_bindgen]
+impl WasmCafAlacIndex {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        description: &[u8],
+        magic_cookie: &[u8],
+        packet_table: &[u8],
+        data_payload_offset: f64,
+        data_payload_size: f64,
+    ) -> Result<WasmCafAlacIndex, JsValue> {
+        let data_payload_offset = finite_u64(data_payload_offset).ok_or_else(|| {
+            js_error("CAF data offset must be a nonnegative safe integer".to_string())
+        })?;
+        let data_payload_size = finite_u64(data_payload_size).ok_or_else(|| {
+            js_error("CAF data size must be a nonnegative safe integer".to_string())
+        })?;
+        Ok(Self {
+            index: CafAlacPacketIndex::new(
+                description,
+                magic_cookie,
+                packet_table,
+                data_payload_offset,
+                data_payload_size,
+            )
+            .map_err(js_error)?,
+        })
+    }
+
+    #[wasm_bindgen(getter, js_name = magicCookie)]
+    pub fn magic_cookie(&self) -> Uint8Array {
+        Uint8Array::from(self.index.magic_cookie.as_slice())
+    }
+
+    #[wasm_bindgen(getter, js_name = packetCount)]
+    pub fn packet_count(&self) -> usize {
+        self.index.packets.len()
+    }
+
+    #[wasm_bindgen(getter, js_name = sampleRate)]
+    pub fn sample_rate(&self) -> u32 {
+        self.index.sample_rate
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn channels(&self) -> u8 {
+        self.index.channels
+    }
+
+    #[wasm_bindgen(getter, js_name = bitDepth)]
+    pub fn bit_depth(&self) -> u8 {
+        self.index.bit_depth
+    }
+
+    #[wasm_bindgen(getter, js_name = validFrames)]
+    pub fn valid_frames(&self) -> Result<JsValue, JsValue> {
+        js_safe_u64(self.index.valid_frames, "CAF valid frame count")
+    }
+
+    pub fn sample(&self, index: usize) -> Result<Object, JsValue> {
+        let packet = self
+            .index
+            .packets
+            .get(index)
+            .ok_or_else(|| js_error(format!("CAF packet index {index} is out of range")))?;
+        let object = Object::new();
+        Reflect::set(
+            &object,
+            &"offset".into(),
+            &js_safe_u64(packet.offset, "CAF packet offset")?,
+        )?;
+        Reflect::set(&object, &"size".into(), &packet.size.into())?;
+        Ok(object)
+    }
+
+    /// Validate exactly one packet range before codec decode.
+    pub fn packet(&self, index: usize, source_bytes: &[u8]) -> Result<Uint8Array, JsValue> {
+        self.index
+            .validate_packet_bytes(index, source_bytes)
+            .map_err(js_error)?;
+        Ok(Uint8Array::from(source_bytes))
+    }
+}
+
+/// Validate a CAF file header without reading the source payload.
+#[cfg(feature = "alac")]
+#[wasm_bindgen(js_name = validateCafFileHeader)]
+pub fn validate_caf_file_header_js(header: &[u8], file_size: f64) -> Result<(), JsValue> {
+    let file_size = finite_u64(file_size)
+        .ok_or_else(|| js_error("CAF file size must be a nonnegative safe integer".to_string()))?;
+    validate_caf_file_header(header, file_size).map_err(js_error)
+}
+
+/// Inspect one CAF chunk header without reading its payload.
+#[cfg(feature = "alac")]
+#[wasm_bindgen(js_name = inspectCafChunk)]
+pub fn inspect_caf_chunk_js(
+    header: &[u8],
+    absolute_offset: f64,
+    file_size: f64,
+) -> Result<Object, JsValue> {
+    let absolute_offset = finite_u64(absolute_offset).ok_or_else(|| {
+        js_error("CAF chunk offset must be a nonnegative safe integer".to_string())
+    })?;
+    let file_size = finite_u64(file_size)
+        .ok_or_else(|| js_error("CAF file size must be a nonnegative safe integer".to_string()))?;
+    let range = inspect_caf_chunk(header, absolute_offset, file_size).map_err(js_error)?;
+    let object = Object::new();
+    Reflect::set(
+        &object,
+        &"chunkType".into(),
+        &String::from_utf8_lossy(&range.chunk_type).as_ref().into(),
+    )?;
+    for (field, value) in [
+        ("payloadOffset", range.payload_offset),
+        ("payloadSize", range.payload_size),
+        ("end", range.end),
+    ] {
+        Reflect::set(&object, &field.into(), &js_safe_u64(value, field)?)?;
+    }
+    Ok(object)
 }
 
 /// Inspect one top-level MOV/MP4 box without reading its payload.

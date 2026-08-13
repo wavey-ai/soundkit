@@ -87,6 +87,26 @@ export class WasmAudioTrackDemuxer {
     push(bytes: Uint8Array): Array<any>;
 }
 
+/**
+ * Seekable, Rust-validated CAF ALAC packet index.
+ */
+export class WasmCafAlacIndex {
+    free(): void;
+    [Symbol.dispose](): void;
+    constructor(description: Uint8Array, magic_cookie: Uint8Array, packet_table: Uint8Array, data_payload_offset: number, data_payload_size: number);
+    /**
+     * Validate exactly one packet range before codec decode.
+     */
+    packet(index: number, source_bytes: Uint8Array): Uint8Array;
+    sample(index: number): object;
+    readonly bitDepth: number;
+    readonly channels: number;
+    readonly magicCookie: Uint8Array;
+    readonly packetCount: number;
+    readonly sampleRate: number;
+    readonly validFrames: any;
+}
+
 export class WasmFlacEncoder {
     free(): void;
     [Symbol.dispose](): void;
@@ -280,12 +300,22 @@ export function buildSoundKitFrameHeaderV2(encoding: number, payload_size: numbe
 export function buildSoundKitFrameV2(encoding: number, payload: Uint8Array, sample_size: number, sample_rate: number, channels: number, bits_per_sample: number, pts: number): Uint8Array;
 
 /**
+ * Inspect one CAF chunk header without reading its payload.
+ */
+export function inspectCafChunk(header: Uint8Array, absolute_offset: number, file_size: number): object;
+
+/**
  * Inspect one top-level MOV/MP4 box without reading its payload.
  *
  * JavaScript owns only range I/O. Rust owns box sizes, extended sizes, EOF
  * bounds, and the resulting source offsets.
  */
 export function inspectMp4TopLevelBox(header: Uint8Array, absolute_offset: number, file_size: number): object;
+
+/**
+ * Validate a CAF file header without reading the source payload.
+ */
+export function validateCafFileHeader(header: Uint8Array, file_size: number): void;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -297,6 +327,7 @@ export interface InitOutput {
     readonly __wbg_wasmaudiocontentcipher_free: (a: number, b: number) => void;
     readonly __wbg_wasmaudiocontentkeyunwrapper_free: (a: number, b: number) => void;
     readonly __wbg_wasmaudiotrackdemuxer_free: (a: number, b: number) => void;
+    readonly __wbg_wasmcafalacindex_free: (a: number, b: number) => void;
     readonly __wbg_wasmflacencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediademuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediaindex_free: (a: number, b: number) => void;
@@ -312,7 +343,9 @@ export interface InitOutput {
     readonly buildAudioGroupAssociatedData: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => [number, number, number];
     readonly buildSoundKitFrameHeaderV2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly buildSoundKitFrameV2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
+    readonly inspectCafChunk: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly inspectMp4TopLevelBox: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly validateCafFileHeader: (a: number, b: number, c: number) => [number, number];
     readonly wasmaacdeboxer_flush: (a: number) => [number, number, number];
     readonly wasmaacdeboxer_new: () => number;
     readonly wasmaacdeboxer_newWithFormat: (a: number, b: number) => [number, number, number];
@@ -340,6 +373,15 @@ export interface InitOutput {
     readonly wasmaudiotrackdemuxer_new: () => number;
     readonly wasmaudiotrackdemuxer_newWithFormat: (a: number, b: number) => [number, number, number];
     readonly wasmaudiotrackdemuxer_push: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmcafalacindex_bitDepth: (a: number) => number;
+    readonly wasmcafalacindex_channels: (a: number) => number;
+    readonly wasmcafalacindex_magicCookie: (a: number) => any;
+    readonly wasmcafalacindex_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
+    readonly wasmcafalacindex_packet: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmcafalacindex_packetCount: (a: number) => number;
+    readonly wasmcafalacindex_sample: (a: number, b: number) => [number, number, number];
+    readonly wasmcafalacindex_sampleRate: (a: number) => number;
+    readonly wasmcafalacindex_validFrames: (a: number) => [number, number, number];
     readonly wasmflacencoder_encodePlanarF32: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly wasmflacencoder_finish: (a: number) => [number, number, number];
     readonly wasmflacencoder_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
