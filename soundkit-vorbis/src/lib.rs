@@ -8,6 +8,9 @@ use memchr::memmem;
 use soundkit::audio_types::AudioData;
 use std::collections::VecDeque;
 
+const MAX_OGG_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+const MAX_OGG_PACKET_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug)]
 struct OggPageHeader {
     header_type: u8,
@@ -54,6 +57,7 @@ struct OggPacketParser {
     pos: usize,
     packet_buffer: Vec<u8>,
     pending_packets: VecDeque<OggPacket>,
+    error: Option<String>,
 }
 
 impl OggPacketParser {
@@ -63,12 +67,26 @@ impl OggPacketParser {
             pos: 0,
             packet_buffer: Vec::with_capacity(4096),
             pending_packets: VecDeque::new(),
+            error: None,
         }
     }
 
     fn push<'a>(&'a mut self, data: &[u8]) -> OggPackets<'a> {
-        self.buffer.extend_from_slice(data);
+        if data.len() > MAX_OGG_INPUT_CHUNK_BYTES {
+            self.error = Some(format!(
+                "Ogg input chunk exceeds the {MAX_OGG_INPUT_CHUNK_BYTES} byte streaming budget"
+            ));
+        } else {
+            self.buffer.extend_from_slice(data);
+        }
         OggPackets { parser: self }
+    }
+
+    fn take_error(&mut self) -> Result<(), String> {
+        match self.error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn compact(&mut self) {
@@ -93,7 +111,12 @@ impl Iterator for OggPackets<'_> {
 
         loop {
             let search_start = self.parser.pos;
-            let oggs_pos = memmem::find(&self.parser.buffer[search_start..], b"OggS")?;
+            let Some(oggs_pos) = memmem::find(&self.parser.buffer[search_start..], b"OggS") else {
+                let keep = self.parser.buffer.len().min(3);
+                self.parser.buffer.drain(..self.parser.buffer.len() - keep);
+                self.parser.pos = 0;
+                return None;
+            };
             self.parser.pos = search_start + oggs_pos;
 
             if self.parser.buffer.len() - self.parser.pos < 27 {
@@ -126,6 +149,20 @@ impl Iterator for OggPackets<'_> {
             for &seg_size in segment_table {
                 let seg_start = body_start + seg_offset;
                 let seg_end = seg_start + seg_size as usize;
+                if self
+                    .parser
+                    .packet_buffer
+                    .len()
+                    .saturating_add(seg_size as usize)
+                    > MAX_OGG_PACKET_BYTES
+                {
+                    self.parser.error = Some(format!(
+                        "Ogg packet exceeds the {MAX_OGG_PACKET_BYTES} byte packet budget"
+                    ));
+                    self.parser.packet_buffer.clear();
+                    self.parser.pos = self.parser.buffer.len();
+                    return None;
+                }
                 self.parser
                     .packet_buffer
                     .extend_from_slice(&self.parser.buffer[seg_start..seg_end]);
@@ -317,6 +354,7 @@ impl VorbisDecoder {
     /// complete packets have produced audio.
     pub fn add(&mut self, data: &[u8]) -> Result<Option<AudioData>, String> {
         let packets: Vec<_> = self.parser.push(data).collect();
+        self.parser.take_error()?;
         let mut samples = Vec::new();
 
         for packet in packets {
@@ -444,6 +482,19 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::process::Command;
+
+    #[test]
+    fn ogg_parser_bounds_garbage_and_input_chunks() {
+        let mut parser = OggPacketParser::new();
+        assert_eq!(parser.push(&vec![0x55; 65_536]).count(), 0);
+        assert!(parser.buffer.len() <= 3);
+
+        let mut decoder = VorbisDecoder::new();
+        let error = decoder
+            .add(&vec![0; MAX_OGG_INPUT_CHUNK_BYTES + 1])
+            .unwrap_err();
+        assert!(error.contains("streaming budget"));
+    }
 
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

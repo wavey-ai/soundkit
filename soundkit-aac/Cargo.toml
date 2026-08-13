@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 access-unit = { git = "https://github.com/wavey-ai/access-unit.git" }
 fdk-aac = { git = "https://github.com/wavey-ai/fdk-aac-rs.git", optional = true }
-mp4 = { version = "0.14.0", optional = true }
+soundkit-audio-demux = { path = "../soundkit-audio-demux", default-features = false, features = ["mp4"], optional = true }
 
 soundkit = { path = "../soundkit" }
 tracing = "0.1.40"
@@ -14,8 +14,9 @@ tracing = "0.1.40"
 [features]
 default = ["fdk"]
 fdk = ["fdk-aac"]
-mp4-demux = ["mp4"]
+mp4-demux = ["soundkit-audio-demux"]
 mp4-decoder = ["fdk-aac", "mp4-demux"]
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+mp4 = "0.14.0"

@@ -31,8 +31,8 @@ the container layout can require enough metadata/media to be buffered first.
 | WAV / RIFF PCM | `soundkit::wav` | Auto | Yes | Emits complete PCM frame runs after the `data` chunk starts. |
 | MP3 | `soundkit-mp3` / `nanomp3` | Auto | Yes | Pure Rust decode; native decoder output is `f32`. |
 | AAC ADTS | `soundkit-aac` / `fdk-aac` | Auto | Yes | Frame-stream friendly; C FFI backend. `soundkit-aac-lc` is the in-progress pure Rust raw access-unit decoder path. |
-| AAC in M4A/MP4 | `soundkit-aac` / Rust MP4 index + `fdk-aac` | Seekable MP4 index | Yes | Rust indexes `moov`, then reads one bounded packet range at a time. |
-| FLAC | `soundkit-flac` / `claxon` | Auto | Yes | Pure Rust decode; current wrapper keeps input history while decoding. |
+| AAC in M4A/MP4 | `soundkit-aac` / Rust MP4 demux + `fdk-aac` | Auto or seekable MP4 index | Yes | Fast-start files stream sequentially. Tail-`moov` files use one bounded packet range at a time. |
+| FLAC | `soundkit-flac` / `claxon` | Auto | Yes | Pure Rust decode retains metadata state and only the current incomplete compressed frame. |
 | Raw Opus stream | `soundkit-opus` / `libopus` | Auto | Yes | Soundkit `OpusHead` plus length-prefixed packets. |
 | Ogg Opus | `soundkit-ogg-opus` / Ogg parser + `libopus` | Auto | Yes | Ogg pages parsed incrementally. |
 | WebM Opus | `soundkit-webm` / EBML parser + `libopus` | Auto | Yes | Known and unknown-size clusters emit bounded blocks before cluster EOF. |
@@ -83,6 +83,9 @@ Large `mdat` and CAF `data` extents never cross the WASM boundary as complete bu
 
 Fragmented MP4, WebM, Matroska, MPEG-TS, and MXF consume bounded sequential chunks.
 Malformed lengths and oversized metadata, packets, frames, or input chunks fail before allocation.
+
+WAV, AIFF, FLAC, Ogg, MP3, AAC, AC-3, Opus, raw PCM, and MPEG-TS use bounded incremental parsers.
+Automatic detection retains at most 64 KiB. Browser push calls accept at most 4 MiB per chunk.
 
 The current artist-delivery matrix covers H.264, HEVC, VP9, AV1, ProRes, DNxHD, and DNxHR.
 See [`docs/media-pipeline.md`](docs/media-pipeline.md) for exact container, profile, audio, and conformance coverage.

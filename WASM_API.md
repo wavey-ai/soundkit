@@ -56,17 +56,17 @@ initSync({ module: wasmBytes });
 
 ## General Streaming Contract
 
-`push(bytes)` accepts any `Uint8Array` chunk size. A call may return zero, one,
-or many output objects depending on container buffering and codec frame
-availability.
+`push(bytes)` accepts a `Uint8Array` of at most 4 MiB. Split larger reads before
+calling WASM. A call may return zero, one, or many output objects depending on
+container buffering and codec frame availability.
 
 `flush()` performs the final EOF drain. It may return additional output objects.
 It should be called once when no more bytes are available.
 
 Errors are thrown as JavaScript exceptions.
 
-Automatic detection buffers input before choosing a format. The current detection
-path waits for at least 8192 bytes and gives up after 65536 bytes.
+Automatic detection retains at most 64 KiB before choosing a format. It begins
+detection at 8 KiB and forwards bytes beyond the retained probe immediately.
 
 ## PCM Decoder
 
@@ -346,6 +346,9 @@ blocks before Cluster EOF and bound metadata, packet, and parser-buffer sizes.
 
 Use `WasmAacDeboxer` when SoundKit should extract AAC access units from M4A/MP4
 and another JS/WASM decoder should decode AAC.
+
+This sequential API requires `moov` before `mdat`. Use `openSeekableMp4` for
+browser files so tail-`moov` exports and multi-gigabyte sources remain ranged.
 
 ```js
 const deboxer = WasmAacDeboxer.newWithFormat("m4a");

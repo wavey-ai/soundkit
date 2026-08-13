@@ -1,4 +1,6 @@
 use crate::audio_types::AudioData;
+
+const MAX_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 use frame_header::{EncodingFlag, Endianness};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,6 +148,11 @@ impl RawPcmStreamProcessor {
     }
 
     pub fn add(&mut self, chunk: &[u8]) -> Result<Option<AudioData>, String> {
+        if chunk.len() > MAX_INPUT_CHUNK_BYTES {
+            return Err(format!(
+                "raw PCM input chunk exceeds the {MAX_INPUT_CHUNK_BYTES} byte streaming budget"
+            ));
+        }
         self.buffer.extend_from_slice(chunk);
 
         let bytes_per_frame = self.format.bytes_per_frame();
@@ -263,6 +270,17 @@ mod tests {
     fn rejects_invalid_format_metadata() {
         assert!(RawPcmFormat::linear16(0, 1).is_err());
         assert!(RawPcmFormat::linear16(8_000, 0).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_input_chunks() {
+        let format = RawPcmFormat::linear16(48_000, 2).unwrap();
+        let mut processor = RawPcmStreamProcessor::new(format);
+        let oversized = vec![0_u8; MAX_INPUT_CHUNK_BYTES + 1];
+        assert!(processor
+            .add(&oversized)
+            .unwrap_err()
+            .contains("streaming budget"));
     }
 
     #[test]

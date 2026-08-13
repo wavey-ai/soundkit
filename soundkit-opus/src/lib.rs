@@ -290,6 +290,7 @@ impl Decoder for OpusDecoder {
 }
 
 const MAX_OPUS_FRAME_SAMPLES: usize = 5760; // 120 ms @ 48 kHz
+const MAX_OPUS_STREAM_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
 /// Streaming decoder for raw Opus format (OpusHead + length-prefixed packets)
 pub struct OpusStreamDecoder {
@@ -333,6 +334,11 @@ impl OpusStreamDecoder {
 
     /// Add data and return decoded AudioData if a complete packet was decoded
     pub fn add(&mut self, data: &[u8]) -> Result<Option<AudioData>, String> {
+        if self.buffer.len().saturating_add(data.len()) > MAX_OPUS_STREAM_BUFFER_BYTES {
+            return Err(format!(
+                "Opus stream exceeds the {MAX_OPUS_STREAM_BUFFER_BYTES} byte buffer budget"
+            ));
+        }
         self.buffer.extend_from_slice(data);
 
         // Parse header if not done yet
@@ -377,9 +383,12 @@ impl OpusStreamDecoder {
         // Try to decode a packet
         if self.buffer.len() >= 2 {
             let packet_len = u16::from_le_bytes([self.buffer[0], self.buffer[1]]) as usize;
+            if packet_len == 0 {
+                return Err("Opus stream contains a zero-length packet".to_string());
+            }
 
             // Check if we have the complete packet
-            if packet_len > 0 && self.buffer.len() >= 2 + packet_len {
+            if self.buffer.len() >= 2 + packet_len {
                 let packet = &self.buffer[2..2 + packet_len];
                 let (Some(decoder), Some(channels)) = (self.decoder.as_mut(), self.channels) else {
                     return Ok(None);

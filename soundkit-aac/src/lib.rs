@@ -17,6 +17,11 @@ use std::rc::Rc;
 use tracing::{debug, error, trace};
 
 #[cfg(feature = "fdk")]
+const MAX_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(feature = "fdk")]
+const MAX_AAC_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
+
+#[cfg(feature = "fdk")]
 pub struct AacEncoder {
     encoder: AacLibEncoder,
     buffer: Rc<RefCell<Vec<u8>>>,
@@ -148,7 +153,17 @@ impl Decoder for AacDecoder {
         output: &mut [i16],
         _fec: bool,
     ) -> Result<usize, String> {
+        if input.len() > MAX_INPUT_CHUNK_BYTES {
+            return Err(format!(
+                "AAC input chunk exceeds the {MAX_INPUT_CHUNK_BYTES} byte streaming budget"
+            ));
+        }
         if !input.is_empty() {
+            if self.input_buffer.len().saturating_add(input.len()) > MAX_AAC_BUFFERED_BYTES {
+                return Err(format!(
+                    "AAC decoder buffer exceeds the {MAX_AAC_BUFFERED_BYTES} byte streaming budget"
+                ));
+            }
             self.input_buffer.extend_from_slice(input);
         }
 
@@ -259,9 +274,7 @@ impl Drop for AacDecoder {
 
 #[cfg(feature = "mp4-demux")]
 mod mp4_demux {
-    use access_unit::aac::create_adts_header;
-    use mp4::{MediaType, Mp4Reader};
-    use std::io::Cursor;
+    use soundkit_audio_demux::{AudioCodec, AudioDemuxEvent, AudioTrackDemuxer};
     use tracing::debug;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -290,14 +303,9 @@ mod mp4_demux {
     }
 
     pub struct AacMp4Demuxer {
-        input_buffer: Vec<u8>,
-        track_id: Option<u32>,
-        current_sample_id: u32,
-        sample_count: u32,
+        demuxer: AudioTrackDemuxer,
         sample_rate: Option<u32>,
         channels: Option<u8>,
-        initialized: bool,
-        emitted_config: bool,
     }
 
     impl Default for AacMp4Demuxer {
@@ -309,14 +317,10 @@ mod mp4_demux {
     impl AacMp4Demuxer {
         pub fn new() -> Self {
             Self {
-                input_buffer: Vec::new(),
-                track_id: None,
-                current_sample_id: 1,
-                sample_count: 0,
+                demuxer: AudioTrackDemuxer::new_with_format("mp4")
+                    .expect("MP4 support is enabled for the AAC demuxer"),
                 sample_rate: None,
                 channels: None,
-                initialized: false,
-                emitted_config: false,
             }
         }
 
@@ -345,180 +349,87 @@ mod mp4_demux {
             input: &[u8],
             finalizing: bool,
         ) -> Result<Vec<AacMp4DemuxEvent>, String> {
-            if !input.is_empty() {
-                self.input_buffer.extend_from_slice(input);
-            }
-
-            if !self.try_initialize_mp4(finalizing)? {
-                return Ok(Vec::new());
-            }
-
-            let mut events = Vec::new();
-            if !self.emitted_config {
-                events.push(AacMp4DemuxEvent::Config(AacMp4Config {
-                    sample_rate: self.sample_rate.unwrap_or(44_100),
-                    channels: self.channels.unwrap_or(2),
-                    track_id: self.track_id.unwrap_or_default(),
-                    sample_count: self.sample_count,
-                }));
-                self.emitted_config = true;
-            }
-
-            events.extend(self.read_available_samples(finalizing)?);
-            Ok(events)
-        }
-
-        fn try_initialize_mp4(&mut self, finalizing: bool) -> Result<bool, String> {
-            if self.initialized {
-                return Ok(true);
-            }
-
-            if self.input_buffer.len() < 1024 && !finalizing {
-                return Ok(false);
-            }
-
-            let cursor = Cursor::new(self.input_buffer.clone());
-            let size = self.input_buffer.len() as u64;
-
-            let mp4 = match Mp4Reader::read_header(cursor, size) {
-                Ok(mp4) => mp4,
-                Err(error) if finalizing => {
-                    return Err(format!("Failed to parse MP4/M4A header: {error}"));
+            let events = if finalizing {
+                if !input.is_empty() {
+                    let mut events = self.demuxer.push(input)?;
+                    events.extend(self.demuxer.flush()?);
+                    events
+                } else {
+                    self.demuxer.flush()?
                 }
-                Err(_) => return Ok(false),
+            } else {
+                self.demuxer.push(input)?
             };
-
-            let mut audio_track_id = None;
-            for (track_id, track) in mp4.tracks() {
-                if track.media_type().ok() != Some(MediaType::AAC) {
-                    continue;
-                }
-
-                audio_track_id = Some(*track_id);
-                if let Ok(freq_index) = track.sample_freq_index() {
-                    self.sample_rate = Some(freq_index.freq());
-                }
-                if let Ok(channel_config) = track.channel_config() {
-                    self.channels = Some(channel_config as u8);
-                }
-                break;
-            }
-
-            let track_id =
-                audio_track_id.ok_or_else(|| "No AAC audio track found in MP4/M4A".to_string())?;
-            let sample_count = mp4
-                .sample_count(track_id)
-                .map_err(|error| format!("Failed to get AAC sample count: {error}"))?;
-
-            self.track_id = Some(track_id);
-            self.sample_count = sample_count;
-            self.initialized = true;
-
-            debug!(
-                track_id,
-                sample_count,
-                sample_rate = ?self.sample_rate,
-                channels = ?self.channels,
-                "Initialized MP4 AAC demuxer"
-            );
-
-            Ok(true)
+            self.convert_events(events)
         }
 
-        fn read_available_samples(
+        fn convert_events(
             &mut self,
-            finalizing: bool,
+            events: Vec<AudioDemuxEvent>,
         ) -> Result<Vec<AacMp4DemuxEvent>, String> {
-            let track_id = match self.track_id {
-                Some(track_id) => track_id,
-                None => return Ok(Vec::new()),
-            };
-
-            if self.current_sample_id > self.sample_count {
-                return Ok(Vec::new());
-            }
-
-            let cursor = Cursor::new(self.input_buffer.clone());
-            let size = self.input_buffer.len() as u64;
-            let mut mp4_reader = match Mp4Reader::read_header(cursor, size) {
-                Ok(reader) => reader,
-                Err(error) if finalizing => {
-                    return Err(format!("Failed to re-read MP4/M4A header: {error}"));
+            let mut output = Vec::new();
+            for event in events {
+                match event {
+                    AudioDemuxEvent::Config(config) => {
+                        if config.codec != AudioCodec::Aac {
+                            return Err("MP4/M4A audio track is not AAC".to_string());
+                        }
+                        let sample_rate = config
+                            .sample_rate
+                            .ok_or_else(|| "MP4 AAC track has no sample rate".to_string())?;
+                        let channels = config
+                            .channels
+                            .ok_or_else(|| "MP4 AAC track has no channel count".to_string())?;
+                        let track_id = u32::try_from(config.track_id.unwrap_or_default())
+                            .map_err(|_| "MP4 AAC track ID exceeds u32".to_string())?;
+                        self.sample_rate = Some(sample_rate);
+                        self.channels = Some(channels);
+                        output.push(AacMp4DemuxEvent::Config(AacMp4Config {
+                            sample_rate,
+                            channels,
+                            track_id,
+                            sample_count: config.sample_count.unwrap_or_default(),
+                        }));
+                    }
+                    AudioDemuxEvent::Packet(packet) => {
+                        if packet.codec != AudioCodec::Aac {
+                            return Err("MP4/M4A packet is not AAC".to_string());
+                        }
+                        let raw = packet
+                            .raw_data
+                            .ok_or_else(|| "MP4 AAC packet has no raw access unit".to_string())?;
+                        output.push(AacMp4DemuxEvent::Frame(AacMp4Frame {
+                            sample_id: packet.sample_id.unwrap_or_default(),
+                            start_time: packet.start_time.unwrap_or_default(),
+                            duration: packet.duration.unwrap_or_default(),
+                            rendering_offset: packet.rendering_offset.unwrap_or_default(),
+                            is_sync: packet.is_sync.unwrap_or(true),
+                            adts: packet.data,
+                            raw,
+                        }));
+                    }
                 }
-                Err(_) => return Ok(Vec::new()),
-            };
-
-            let mut events = Vec::new();
-            while self.current_sample_id <= self.sample_count {
-                let sample_id = self.current_sample_id;
-                let sample = match mp4_reader.read_sample(track_id, sample_id) {
-                    Ok(Some(sample)) => sample,
-                    Ok(None) => break,
-                    Err(error) if !finalizing && is_incomplete_mp4_error(&error.to_string()) => {
-                        break;
-                    }
-                    Err(error) => {
-                        return Err(format!("Failed to read AAC sample {sample_id}: {error}"));
-                    }
-                };
-
-                self.current_sample_id += 1;
-
-                let raw = sample.bytes.to_vec();
-                let adts_header = create_adts_header(
-                    0x66,
-                    self.channels.unwrap_or(2),
-                    self.sample_rate.unwrap_or(44_100),
-                    raw.len(),
-                    false,
-                );
-                let mut adts = Vec::with_capacity(adts_header.len() + raw.len());
-                adts.extend_from_slice(&adts_header);
-                adts.extend_from_slice(&raw);
-
-                events.push(AacMp4DemuxEvent::Frame(AacMp4Frame {
-                    sample_id,
-                    start_time: sample.start_time,
-                    duration: sample.duration,
-                    rendering_offset: sample.rendering_offset,
-                    is_sync: sample.is_sync,
-                    adts,
-                    raw,
-                }));
             }
-
-            Ok(events)
+            debug!(events = output.len(), "streamed MP4 AAC demux events");
+            Ok(output)
         }
-    }
-
-    fn is_incomplete_mp4_error(error: &str) -> bool {
-        let error = error.to_ascii_lowercase();
-        error.contains("unexpected")
-            || error.contains("eof")
-            || error.contains("failed to fill whole buffer")
     }
 }
 
 #[cfg(feature = "mp4-decoder")]
 mod mp4_decoder {
-    use access_unit::aac::create_adts_header;
-    use fdk_aac::dec::{Decoder as AacLibDecoder, Transport as DecoderTransport};
-    use mp4::{MediaType, Mp4Reader};
+    use super::{AacDecoder, AacMp4DemuxEvent, AacMp4Demuxer, MAX_AAC_BUFFERED_BYTES};
     use soundkit::audio_packet::Decoder;
-    use std::io::Cursor;
-    use tracing::{debug, error, trace};
+    use std::collections::VecDeque;
 
     pub struct AacDecoderMp4 {
-        input_buffer: Vec<u8>,
-        mp4_reader: Option<Mp4Reader<Cursor<Vec<u8>>>>,
-        fdk_decoder: AacLibDecoder,
-        track_id: Option<u32>,
-        current_sample_id: u32,
-        sample_count: u32,
+        demuxer: AacMp4Demuxer,
+        decoder: AacDecoder,
+        pending_adts: VecDeque<Vec<u8>>,
+        pending_bytes: usize,
         sample_rate: Option<u32>,
         channels: Option<u8>,
-        initialized: bool,
-        adts_buffer: Vec<u8>, // Buffer of ADTS frames ready for decoding
+        demux_finished: bool,
     }
 
     impl Default for AacDecoderMp4 {
@@ -529,105 +440,76 @@ mod mp4_decoder {
 
     impl AacDecoderMp4 {
         pub fn new() -> Self {
-            // Initialize FDK decoder in ADTS mode
-            // We'll add ADTS headers to raw MP4 samples
-            let decoder = AacLibDecoder::new(DecoderTransport::Adts);
-
-            AacDecoderMp4 {
-                input_buffer: Vec::new(),
-                mp4_reader: None,
-                fdk_decoder: decoder,
-                track_id: None,
-                current_sample_id: 1,
-                sample_count: 0,
+            Self {
+                demuxer: AacMp4Demuxer::new(),
+                decoder: AacDecoder::new(),
+                pending_adts: VecDeque::new(),
+                pending_bytes: 0,
                 sample_rate: None,
                 channels: None,
-                initialized: false,
-                adts_buffer: Vec::new(),
+                demux_finished: false,
             }
         }
 
         pub fn init(&mut self) -> Result<(), String> {
-            Ok(())
+            self.demuxer.init()?;
+            self.decoder.init()
         }
 
         pub fn sample_rate(&self) -> Option<u32> {
-            self.sample_rate
+            self.sample_rate.or_else(|| self.decoder.sample_rate())
         }
 
         pub fn channels(&self) -> Option<u8> {
-            self.channels
+            self.channels.or_else(|| self.decoder.channels())
         }
 
-        fn try_initialize_mp4(&mut self) -> Result<bool, String> {
-            if self.initialized {
-                return Ok(true);
+        pub fn finish_i16(&mut self, output: &mut [i16]) -> Result<usize, String> {
+            if !self.demux_finished {
+                let events = self.demuxer.finish()?;
+                self.enqueue(events)?;
+                self.demux_finished = true;
             }
+            self.decode_pending(output)
+        }
 
-            // Need at least some data to parse MP4 header
-            if self.input_buffer.len() < 1024 {
-                return Ok(false);
-            }
-
-            let cursor = Cursor::new(self.input_buffer.clone());
-            let size = self.input_buffer.len() as u64;
-
-            match Mp4Reader::read_header(cursor, size) {
-                Ok(mp4) => {
-                    // Find the first audio track
-                    let mut audio_track_id = None;
-                    for (track_id, track) in mp4.tracks() {
-                        if let Ok(media_type) = track.media_type() {
-                            if media_type == MediaType::AAC {
-                                audio_track_id = Some(*track_id);
-
-                                // Extract sample rate and channels from track
-                                if let Ok(freq_index) = track.sample_freq_index() {
-                                    self.sample_rate = Some(freq_index.freq());
-                                }
-                                if let Ok(channel_config) = track.channel_config() {
-                                    self.channels = Some(channel_config as u8);
-                                }
-
-                                break;
-                            }
+        fn enqueue(&mut self, events: Vec<AacMp4DemuxEvent>) -> Result<(), String> {
+            for event in events {
+                match event {
+                    AacMp4DemuxEvent::Config(config) => {
+                        self.sample_rate = Some(config.sample_rate);
+                        self.channels = Some(config.channels);
+                    }
+                    AacMp4DemuxEvent::Frame(frame) => {
+                        let next_bytes = self.pending_bytes.saturating_add(frame.adts.len());
+                        if next_bytes > MAX_AAC_BUFFERED_BYTES {
+                            return Err(format!(
+                                "MP4 AAC packet queue exceeds the {MAX_AAC_BUFFERED_BYTES} byte streaming budget"
+                            ));
                         }
-                    }
-
-                    if let Some(track_id) = audio_track_id {
-                        let sample_count = mp4
-                            .sample_count(track_id)
-                            .map_err(|e| format!("Failed to get sample count: {}", e))?;
-
-                        self.track_id = Some(track_id);
-                        self.sample_count = sample_count;
-                        self.mp4_reader = Some(mp4);
-                        self.initialized = true;
-
-                        debug!(
-                            track_id,
-                            sample_count,
-                            sample_rate = ?self.sample_rate,
-                            channels = ?self.channels,
-                            "Initialized MP4 AAC decoder"
-                        );
-
-                        Ok(true)
-                    } else {
-                        Err("No AAC audio track found in MP4".to_string())
-                    }
-                }
-                Err(e) => {
-                    // Not enough data yet, or invalid MP4
-                    if self.input_buffer.len() > 1024 * 1024 {
-                        // If we have > 1MB and still can't parse, it's probably not valid MP4
-                        Err(format!("Failed to parse MP4 after buffering 1MB: {}", e))
-                    } else {
-                        // Need more data
-                        Ok(false)
+                        self.pending_bytes = next_bytes;
+                        self.pending_adts.push_back(frame.adts);
                     }
                 }
             }
+            Ok(())
+        }
+
+        fn decode_pending(&mut self, output: &mut [i16]) -> Result<usize, String> {
+            let mut written = 0usize;
+            while written < output.len() {
+                let Some(packet) = self.pending_adts.pop_front() else {
+                    break;
+                };
+                self.pending_bytes = self.pending_bytes.saturating_sub(packet.len());
+                let samples = self
+                    .decoder
+                    .decode_i16(&packet, &mut output[written..], false)?;
+                written += samples;
+            }
+            self.sample_rate = self.decoder.sample_rate().or(self.sample_rate);
+            self.channels = self.decoder.channels().or(self.channels);
+            Ok(written)
         }
     }
 
@@ -638,165 +520,14 @@ mod mp4_decoder {
             output: &mut [i16],
             _fec: bool,
         ) -> Result<usize, String> {
-            // Accumulate input data
+            if self.demux_finished && !input.is_empty() {
+                return Err("MP4 AAC decoder is already finished".to_string());
+            }
             if !input.is_empty() {
-                self.input_buffer.extend_from_slice(input);
+                let events = self.demuxer.add(input)?;
+                self.enqueue(events)?;
             }
-
-            // Try to initialize MP4 reader if not done yet
-            if !self.initialized {
-                match self.try_initialize_mp4() {
-                    Ok(true) => {
-                        // Successfully initialized
-                    }
-                    Ok(false) => {
-                        // Need more data
-                        return Ok(0);
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
-            }
-
-            let track_id = match self.track_id {
-                Some(id) => id,
-                None => return Ok(0),
-            };
-
-            // If we've read all samples, we're done
-            if self.current_sample_id > self.sample_count {
-                return Ok(0);
-            }
-
-            //  First, extract all remaining MP4 samples and convert to ADTS frames
-            let samples_before = self.current_sample_id;
-            while self.current_sample_id <= self.sample_count {
-                let mp4_reader = match &mut self.mp4_reader {
-                    Some(reader) => reader,
-                    None => break,
-                };
-
-                // Read the sample from MP4
-                let sample = match mp4_reader.read_sample(track_id, self.current_sample_id) {
-                    Ok(Some(sample)) => sample,
-                    Ok(None) => break,
-                    Err(e) => {
-                        if e.to_string().contains("UnexpectedEof") {
-                            break;
-                        }
-                        return Err(format!("Failed to read MP4 sample: {}", e));
-                    }
-                };
-
-                self.current_sample_id += 1;
-
-                // Create ADTS header for this sample using access-unit function
-                // codec_id 0x66 = AAC-LC
-                let adts_header = create_adts_header(
-                    0x66, // AAC-LC
-                    self.channels.unwrap_or(2),
-                    self.sample_rate.unwrap_or(44100),
-                    sample.bytes.len(),
-                    false, // no CRC
-                );
-
-                // Combine ADTS header + raw AAC data and add to buffer
-                self.adts_buffer.extend_from_slice(&adts_header);
-                self.adts_buffer.extend_from_slice(&sample.bytes);
-            }
-
-            trace!(
-                samples_extracted = self.current_sample_id - samples_before,
-                adts_buffer_len = self.adts_buffer.len(),
-                "extracted MP4 samples to ADTS buffer"
-            );
-
-            // Now decode from the ADTS buffer using the same pattern as AacDecoder
-            let mut written = 0usize;
-            let mut total_consumed = 0usize;
-
-            trace!("starting decode loop");
-
-            loop {
-                // Fill FDK with data from ADTS buffer
-                let consumed = if self.adts_buffer.is_empty() {
-                    trace!("ADTS buffer empty");
-                    0
-                } else {
-                    match self.fdk_decoder.fill(&self.adts_buffer) {
-                        Ok(bytes) => {
-                            trace!(consumed = bytes, "FDK fill successful");
-                            bytes
-                        }
-                        Err(err) => return Err(format!("Error filling decoder: {}", err)),
-                    }
-                };
-
-                if consumed > 0 {
-                    total_consumed += consumed;
-                    self.adts_buffer.drain(..consumed);
-                }
-
-                let remaining = output.len().saturating_sub(written);
-                if remaining == 0 {
-                    trace!("output buffer full");
-                    break;
-                }
-
-                trace!("attempting decode_frame");
-                match self.fdk_decoder.decode_frame(&mut output[written..]) {
-                    Ok(()) => {
-                        let info = self.fdk_decoder.stream_info();
-                        let frame_samples = info.numChannels as usize * info.frameSize as usize;
-
-                        if frame_samples == 0 {
-                            break;
-                        }
-
-                        if remaining < frame_samples {
-                            return Err(format!(
-                                "Output buffer too small for decoded frame (needed {}, had {})",
-                                frame_samples, remaining
-                            ));
-                        }
-
-                        let first_frame = written == 0;
-                        self.sample_rate = Some(info.sampleRate as u32);
-                        self.channels = Some(info.numChannels as u8);
-                        written += frame_samples;
-
-                        if first_frame {
-                            debug!(
-                                sample_rate_hz = info.sampleRate,
-                                channels = info.numChannels,
-                                frame_samples,
-                                bytes_consumed = total_consumed,
-                                "decoded MP4 AAC frame"
-                            );
-                        } else {
-                            trace!(
-                                sample_rate_hz = info.sampleRate,
-                                channels = info.numChannels,
-                                frame_samples,
-                                bytes_consumed = total_consumed,
-                                "decoded MP4 AAC frame"
-                            );
-                        }
-                    }
-                    Err(fdk_aac::dec::DecoderError::NOT_ENOUGH_BITS) => {
-                        trace!("FDK needs more bits");
-                        // need more data
-                        break;
-                    }
-                    Err(err) => {
-                        error!("FDK decoding error: {:?}", err);
-                        return Err(format!("Decoding error: {}", err));
-                    }
-                }
-            }
-
-            Ok(written)
+            self.decode_pending(output)
         }
 
         fn decode_i32(
@@ -816,16 +547,13 @@ mod mp4_decoder {
         ) -> Result<usize, String> {
             let mut i16_buf = vec![0i16; output.len()];
             let samples = self.decode_i16(input, &mut i16_buf, fec)?;
-
-            for i in 0..samples {
-                output[i] = (i16_buf[i] as f32) / 32768.0;
+            for index in 0..samples {
+                output[index] = f32::from(i16_buf[index]) / 32768.0;
             }
-
             Ok(samples)
         }
     }
 }
-
 #[cfg(feature = "mp4-decoder")]
 pub use mp4_decoder::AacDecoderMp4;
 #[cfg(feature = "mp4-demux")]
@@ -857,8 +585,6 @@ mod tests {
     use tracing::trace;
 
     #[cfg(any(feature = "fdk", feature = "mp4-decoder"))]
-    const TEST_FILE: &str = "A_Tusk_is_used_to_make_costly_gifts";
-
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -898,7 +624,7 @@ mod tests {
     fn test_aac_decode_waveform() {
         use crate::AacDecoderMp4;
 
-        let input_path = testdata_path(&format!("mac_aac/{}.m4a", TEST_FILE));
+        let input_path = testdata_path("itag139/yt_itag_139_he_aac.mp4");
         let m4a_bytes = fs::read(&input_path).unwrap();
         assert!(!m4a_bytes.is_empty(), "fixture m4a missing or empty");
 
@@ -1070,7 +796,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "mp4-decoder")]
-    fn test_mp4_aac_decoder() {
+    fn test_tail_moov_aac_requires_seekable_ranges() {
         use crate::AacDecoderMp4;
 
         let input_path = testdata_path("mac_aac/A_Tusk_is_used_to_make_costly_gifts.m4a");
@@ -1082,38 +808,11 @@ mod tests {
         let mut decoder = AacDecoderMp4::new();
         decoder.init().expect("Decoder initialization failed");
 
-        let mut decoded = Vec::new();
         let mut scratch = vec![0i16; 16384];
-
-        // Feed all data at once for testing
-        match decoder.decode_i16(&m4a_bytes, &mut scratch, false) {
-            Ok(written) => {
-                trace!(samples_written = written, "first decode pass");
-                decoded.extend_from_slice(&scratch[..written]);
-            }
-            Err(e) => {
-                panic!("Decode failed: {}", e);
-            }
-        }
-
-        // Drain any remaining
-        loop {
-            let written = decoder.decode_i16(&[], &mut scratch, false).unwrap();
-            trace!(samples_written = written, "drain decode pass");
-            if written == 0 {
-                break;
-            }
-            decoded.extend_from_slice(&scratch[..written]);
-        }
-
-        trace!(
-            total_samples = decoded.len(),
-            sample_rate = ?decoder.sample_rate(),
-            channels = ?decoder.channels(),
-            "decoding complete"
-        );
-
-        assert!(!decoded.is_empty(), "decoder produced no PCM samples");
+        let error = decoder
+            .decode_i16(&m4a_bytes, &mut scratch, false)
+            .unwrap_err();
+        assert!(error.contains("seekable MP4 packet API"));
     }
 
     #[test]
@@ -1180,7 +879,7 @@ mod tests {
     fn test_mp4_aac_demux_to_adts_frames() {
         use crate::{AacMp4DemuxEvent, AacMp4Demuxer};
 
-        let input_path = testdata_path("mac_aac/A_Tusk_is_used_to_make_costly_gifts.m4a");
+        let input_path = testdata_path("itag139/yt_itag_139_he_aac.mp4");
         let m4a_bytes = fs::read(&input_path).unwrap();
         assert!(!m4a_bytes.is_empty(), "fixture m4a missing or empty");
 
@@ -1200,8 +899,8 @@ mod tests {
                 _ => None,
             })
             .expect("config event");
-        assert_eq!(config.sample_rate, 16_000);
-        assert_eq!(config.channels, 1);
+        assert_eq!(config.sample_rate, 11_025);
+        assert_eq!(config.channels, 2);
 
         let frames: Vec<_> = events
             .iter()

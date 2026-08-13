@@ -6,6 +6,7 @@ use std::io::Cursor;
 
 const MAX_CHANNELS: u8 = 32;
 const MAX_COMM_BYTES: usize = 4096;
+const MAX_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ContainerKind {
@@ -127,6 +128,11 @@ impl AiffDecoder {
     pub fn add(&mut self, data: &[u8]) -> Result<Option<AudioData>, String> {
         if self.finished {
             return Ok(None);
+        }
+        if data.len() > MAX_INPUT_CHUNK_BYTES {
+            return Err(format!(
+                "AIFF input chunk exceeds the {MAX_INPUT_CHUNK_BYTES} byte streaming budget"
+            ));
         }
         let finalizing = data.is_empty();
         self.buffer.extend_from_slice(data);
@@ -854,5 +860,15 @@ mod tests {
             let audio = decode_chunks(&fixture, 1024);
             assert_eq!(audio.data(), &fs::read(ffmpeg_pcm).unwrap());
         }
+    }
+
+    #[test]
+    fn rejects_oversized_input_chunks() {
+        let mut decoder = AiffDecoder::new();
+        let oversized = vec![0_u8; MAX_INPUT_CHUNK_BYTES + 1];
+        assert!(decoder
+            .add(&oversized)
+            .unwrap_err()
+            .contains("streaming budget"));
     }
 }

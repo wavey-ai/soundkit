@@ -676,10 +676,25 @@ unsafe extern "C" fn error_callback_decode(
 
 #[cfg(feature = "claxon-decoder")]
 mod claxon_decoder {
-    use claxon::{Block, FlacReader};
+    use claxon::{frame::FrameReader, Block};
     use soundkit::audio_packet::Decoder;
     use std::io::Cursor;
     use tracing::debug;
+
+    const MAX_FLAC_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+    const MAX_FLAC_FRAME_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+
+    enum FlacStreamState {
+        Magic,
+        MetadataHeader,
+        MetadataPayload {
+            block_type: u8,
+            is_last: bool,
+            remaining: usize,
+            payload: Vec<u8>,
+        },
+        Frames,
+    }
 
     pub struct FlacDecoderClaxon {
         input_buffer: Vec<u8>,
@@ -687,11 +702,7 @@ mod claxon_decoder {
         sample_rate: Option<u32>,
         channels: Option<u8>,
         bits_per_sample: Option<u8>,
-        /// Interleaved samples already decoded from complete FLAC frames.
-        /// The current Claxon adapter reparses its bounded input prefix when
-        /// more bytes arrive, so this prevents completed frames being queued
-        /// twice while pending output drains in smaller chunks.
-        samples_decoded: usize,
+        state: FlacStreamState,
     }
 
     impl Default for FlacDecoderClaxon {
@@ -708,7 +719,7 @@ mod claxon_decoder {
                 sample_rate: None,
                 channels: None,
                 bits_per_sample: None,
-                samples_decoded: 0,
+                state: FlacStreamState::Magic,
             }
         }
 
@@ -728,87 +739,159 @@ mod claxon_decoder {
             self.bits_per_sample
         }
 
-        /// Decode all available FLAC frames from the input buffer into pending_samples_i32
-        fn decode_all_available(&mut self) -> Result<(), String> {
-            if self.input_buffer.is_empty() {
-                return Ok(());
+        pub fn buffered_bytes(&self) -> usize {
+            self.input_buffer.len()
+        }
+
+        fn append_input(&mut self, input: &[u8]) -> Result<(), String> {
+            if input.len() > MAX_FLAC_INPUT_CHUNK_BYTES {
+                return Err(format!(
+                    "FLAC input chunk exceeds the {MAX_FLAC_INPUT_CHUNK_BYTES} byte streaming budget"
+                ));
             }
-
-            let cursor = Cursor::new(&self.input_buffer[..]);
-            let mut reader = match FlacReader::new(cursor) {
-                Ok(r) => r,
-                Err(_) => return Ok(()), // Need more data for header
-            };
-
-            // Extract metadata on first successful parse
-            if self.sample_rate.is_none() {
-                let streaminfo = reader.streaminfo();
-                self.sample_rate = Some(streaminfo.sample_rate);
-                self.channels = Some(streaminfo.channels as u8);
-                self.bits_per_sample = Some(streaminfo.bits_per_sample as u8);
-
-                debug!(
-                    sample_rate_hz = streaminfo.sample_rate,
-                    channels = streaminfo.channels,
-                    bits_per_sample = streaminfo.bits_per_sample,
-                    "initialized Claxon FLAC decoder"
-                );
+            if self.input_buffer.len().saturating_add(input.len()) > MAX_FLAC_FRAME_BUFFER_BYTES {
+                return Err(format!(
+                    "FLAC frame exceeds the {MAX_FLAC_FRAME_BUFFER_BYTES} byte buffer budget"
+                ));
             }
+            self.input_buffer.extend_from_slice(input);
+            Ok(())
+        }
 
-            let channels = self.channels.unwrap() as usize;
-            let mut blocks = reader.blocks();
-            let mut current_block = Block::empty();
-
-            // Skip complete samples already queued during an earlier parse.
-            let mut samples_to_skip = self.samples_decoded;
-            let mut newly_decoded = 0usize;
-
+        fn consume_metadata(&mut self) -> Result<(), String> {
             loop {
-                match blocks.read_next_or_eof(current_block.into_buffer()) {
-                    Ok(Some(block)) => {
-                        current_block = block;
-                        let duration = current_block.duration() as usize;
-                        let frame_samples = duration * channels;
-
-                        // If we've already returned these samples, skip them
-                        if samples_to_skip >= frame_samples {
-                            samples_to_skip -= frame_samples;
-                            continue;
+                let state = std::mem::replace(&mut self.state, FlacStreamState::Frames);
+                match state {
+                    FlacStreamState::Magic => {
+                        if self.input_buffer.len() < 4 {
+                            self.state = FlacStreamState::Magic;
+                            return Ok(());
                         }
-
-                        // Interleave samples
-                        for i in 0..duration {
-                            for ch in 0..channels {
-                                let sample_idx = i * channels + ch;
-                                if sample_idx >= samples_to_skip {
-                                    self.pending_samples_i32
-                                        .push(current_block.sample(ch as u32, i as u32));
-                                    newly_decoded += 1;
-                                }
-                            }
+                        if &self.input_buffer[..4] != b"fLaC" {
+                            return Err("FLAC stream has no fLaC marker".to_string());
                         }
-                        samples_to_skip = 0;
+                        self.input_buffer.drain(..4);
+                        self.state = FlacStreamState::MetadataHeader;
                     }
-                    Ok(None) => {
-                        // The decoder API is streaming and has no EOF flag. An
-                        // empty block iterator can mean that only STREAMINFO is
-                        // buffered, as it does for FLAC carried in MP4. Keep the
-                        // decoder open so later container packets can extend it.
-                        break;
+                    FlacStreamState::MetadataHeader => {
+                        if self.input_buffer.len() < 4 {
+                            self.state = FlacStreamState::MetadataHeader;
+                            return Ok(());
+                        }
+                        let header = [
+                            self.input_buffer[0],
+                            self.input_buffer[1],
+                            self.input_buffer[2],
+                            self.input_buffer[3],
+                        ];
+                        self.input_buffer.drain(..4);
+                        let block_type = header[0] & 0x7f;
+                        let is_last = header[0] & 0x80 != 0;
+                        let remaining = ((header[1] as usize) << 16)
+                            | ((header[2] as usize) << 8)
+                            | header[3] as usize;
+                        if block_type == 0 && remaining != 34 {
+                            return Err("FLAC STREAMINFO must contain 34 bytes".to_string());
+                        }
+                        self.state = FlacStreamState::MetadataPayload {
+                            block_type,
+                            is_last,
+                            remaining,
+                            payload: Vec::with_capacity(if block_type == 0 { 34 } else { 0 }),
+                        };
                     }
-                    Err(_e) => {
-                        // Incomplete frame - need more data or reached partial end
-                        break;
+                    FlacStreamState::MetadataPayload {
+                        block_type,
+                        is_last,
+                        mut remaining,
+                        mut payload,
+                    } => {
+                        let consumed = remaining.min(self.input_buffer.len());
+                        if block_type == 0 {
+                            payload.extend_from_slice(&self.input_buffer[..consumed]);
+                        }
+                        self.input_buffer.drain(..consumed);
+                        remaining -= consumed;
+                        if remaining > 0 {
+                            self.state = FlacStreamState::MetadataPayload {
+                                block_type,
+                                is_last,
+                                remaining,
+                                payload,
+                            };
+                            return Ok(());
+                        }
+                        if block_type == 0 {
+                            self.install_streaminfo(&payload)?;
+                        }
+                        self.state = if is_last {
+                            FlacStreamState::Frames
+                        } else {
+                            FlacStreamState::MetadataHeader
+                        };
+                    }
+                    FlacStreamState::Frames => {
+                        self.state = FlacStreamState::Frames;
+                        return Ok(());
                     }
                 }
             }
+        }
 
-            self.samples_decoded = self
-                .samples_decoded
-                .checked_add(newly_decoded)
-                .ok_or_else(|| "decoded FLAC sample count overflow".to_string())?;
-
+        fn install_streaminfo(&mut self, payload: &[u8]) -> Result<(), String> {
+            let packed = u64::from_be_bytes(
+                payload[10..18]
+                    .try_into()
+                    .map_err(|_| "FLAC STREAMINFO is truncated".to_string())?,
+            );
+            let sample_rate = (packed >> 44) as u32;
+            let channels = ((packed >> 41) & 0x07) as u8 + 1;
+            let bits_per_sample = ((packed >> 36) & 0x1f) as u8 + 1;
+            if sample_rate == 0 || channels == 0 || bits_per_sample == 0 {
+                return Err("FLAC STREAMINFO contains invalid audio geometry".to_string());
+            }
+            self.sample_rate = Some(sample_rate);
+            self.channels = Some(channels);
+            self.bits_per_sample = Some(bits_per_sample);
+            debug!(
+                sample_rate_hz = sample_rate,
+                channels, bits_per_sample, "initialized streaming Claxon FLAC decoder"
+            );
             Ok(())
+        }
+
+        fn decode_available(&mut self, target_samples: usize) -> Result<bool, String> {
+            self.consume_metadata()?;
+            if !matches!(self.state, FlacStreamState::Frames) || self.input_buffer.is_empty() {
+                return Ok(false);
+            }
+            let channels = self
+                .channels
+                .ok_or_else(|| "FLAC stream has no STREAMINFO block".to_string())?
+                as usize;
+            let mut made_progress = false;
+            while self.pending_samples_i32.len() < target_samples && !self.input_buffer.is_empty() {
+                let cursor = Cursor::new(&self.input_buffer[..]);
+                let mut reader = FrameReader::new(cursor);
+                let block = match reader.read_next_or_eof(Block::empty().into_buffer()) {
+                    Ok(Some(block)) => block,
+                    Ok(None) | Err(_) => break,
+                };
+                let consumed = reader.into_inner().position() as usize;
+                if consumed == 0 || consumed > self.input_buffer.len() {
+                    return Err("FLAC decoder reported an invalid consumed range".to_string());
+                }
+                let duration = block.duration() as usize;
+                for frame in 0..duration {
+                    for channel in 0..channels {
+                        self.pending_samples_i32
+                            .push(block.sample(channel as u32, frame as u32));
+                    }
+                }
+                self.input_buffer.drain(..consumed);
+                made_progress = true;
+            }
+            Ok(made_progress)
         }
     }
 
@@ -828,13 +911,8 @@ mod claxon_decoder {
             output: &mut [i32],
             _fec: bool,
         ) -> Result<usize, String> {
-            // Append new input data
-            if !input.is_empty() {
-                self.input_buffer.extend_from_slice(input);
-            }
-
-            // Try to decode more frames
-            self.decode_all_available()?;
+            self.append_input(input)?;
+            self.decode_available(output.len())?;
 
             // Return samples from pending buffer
             let to_copy = self.pending_samples_i32.len().min(output.len());
@@ -1171,7 +1249,7 @@ mod tests {
             let mut decoded = Vec::new();
             let mut scratch = vec![0i32; 8192];
 
-            // Feed all data at once (claxon works best this way)
+            // Feed one bounded source chunk.
             let written = decoder.decode_i32(flac_bytes, &mut scratch, false).unwrap();
             decoded.extend_from_slice(&scratch[..written]);
 
@@ -1279,6 +1357,37 @@ mod tests {
             }
             drain_claxon(&mut decoder, &[], &mut scratch, &mut actual);
             assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn claxon_skips_large_metadata_without_retaining_it() {
+            let input_path = testdata_path(&format!("flac/{}.flac", TEST_FILE));
+            let flac_bytes = fs::read(&input_path).unwrap();
+            assert_eq!(&flac_bytes[..4], b"fLaC");
+            assert_eq!(flac_bytes[4] & 0x7f, 0);
+
+            let mut decoder = FlacDecoderClaxon::new();
+            let mut scratch = [0i32; 64];
+            let mut prefix = Vec::from(&b"fLaC"[..]);
+            prefix.extend_from_slice(&[4, 0x80, 0, 0]);
+            assert_eq!(decoder.decode_i32(&prefix, &mut scratch, false).unwrap(), 0);
+
+            let zeros = [0u8; 64 * 1024];
+            for _ in 0..128 {
+                assert_eq!(decoder.decode_i32(&zeros, &mut scratch, false).unwrap(), 0);
+                assert!(decoder.buffered_bytes() <= 4);
+            }
+
+            let mut streaminfo = vec![0x80, 0, 0, 34];
+            streaminfo.extend_from_slice(&flac_bytes[8..42]);
+            assert_eq!(
+                decoder
+                    .decode_i32(&streaminfo, &mut scratch, false)
+                    .unwrap(),
+                0
+            );
+            assert_eq!(decoder.sample_rate(), Some(16_000));
+            assert!(decoder.buffered_bytes() <= 4);
         }
 
         fn drain_claxon(

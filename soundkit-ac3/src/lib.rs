@@ -7,6 +7,8 @@ use oxideav_core::{
 use soundkit::audio_types::AudioData;
 use std::collections::VecDeque;
 
+const MAX_AC3_STREAM_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
 /// Streaming raw AC-3 syncframe decoder.
 ///
 /// This accepts elementary AC-3 streams, not MP4/Matroska containerized AC-3.
@@ -47,6 +49,11 @@ impl Ac3Decoder {
 
     pub fn add(&mut self, data: &[u8]) -> Result<Option<AudioData>, String> {
         if !data.is_empty() {
+            if self.buffer.len().saturating_add(data.len()) > MAX_AC3_STREAM_BUFFER_BYTES {
+                return Err(format!(
+                    "AC-3 stream exceeds the {MAX_AC3_STREAM_BUFFER_BYTES} byte buffer budget"
+                ));
+            }
             self.buffer.extend_from_slice(data);
         }
 

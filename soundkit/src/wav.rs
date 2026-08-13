@@ -4,17 +4,25 @@ use std::io::Write;
 
 enum StreamWavState {
     Initial,
-    ReadToFmt,
-    ReadingFmt,
-    ReadToData,
-    ReadingData,
+    ChunkHeader,
+    ChunkPayload {
+        kind: [u8; 4],
+        remaining: usize,
+        padding: bool,
+        payload: Vec<u8>,
+    },
+    ReadingData {
+        remaining: usize,
+    },
     Finished,
 }
+
+const MAX_WAV_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+const MAX_WAV_FMT_BYTES: usize = 4096;
 
 pub struct WavStreamProcessor {
     state: StreamWavState,
     buffer: Vec<u8>,
-    idx: usize,
     bits_per_sample: usize,
     channel_count: usize,
     sampling_rate: usize,
@@ -35,7 +43,6 @@ impl WavStreamProcessor {
         Self {
             state: StreamWavState::Initial,
             buffer: Vec::new(),
-            idx: 0,
             bits_per_sample: 0,
             channel_count: 0,
             sampling_rate: 0,
@@ -66,13 +73,24 @@ impl WavStreamProcessor {
         self.endianness
     }
 
+    pub fn buffered_len(&self) -> usize {
+        self.buffer.len()
+    }
+
     pub fn add(&mut self, chunk: &[u8]) -> Result<Option<AudioData>, String> {
+        if chunk.len() > MAX_WAV_INPUT_CHUNK_BYTES {
+            return Err(format!(
+                "WAV input chunk exceeds the {MAX_WAV_INPUT_CHUNK_BYTES} byte streaming budget"
+            ));
+        }
         self.buffer.extend(chunk);
 
         loop {
-            match &self.state {
+            let state = std::mem::replace(&mut self.state, StreamWavState::Finished);
+            match state {
                 StreamWavState::Initial => {
                     if self.buffer.len() < 12 {
+                        self.state = StreamWavState::Initial;
                         return Ok(None);
                     }
 
@@ -80,102 +98,115 @@ impl WavStreamProcessor {
                         return Err("Not a WAV file".to_string());
                     }
 
-                    self.state = StreamWavState::ReadToFmt;
-                    self.idx = 12;
+                    self.buffer.drain(..12);
+                    self.state = StreamWavState::ChunkHeader;
                 }
-
-                StreamWavState::ReadToFmt => {
-                    if self.buffer.len() < self.idx + 4 {
+                StreamWavState::ChunkHeader => {
+                    if self.buffer.len() < 8 {
+                        self.state = StreamWavState::ChunkHeader;
                         return Ok(None);
                     }
-
-                    while &self.buffer[self.idx..self.idx + 4] != b"fmt " {
-                        let chunk_size = u32::from_le_bytes(
-                            self.buffer[self.idx + 4..self.idx + 8].try_into().unwrap(),
-                        ) as usize;
-                        self.idx += chunk_size + 8;
-
-                        if self.buffer.len() < self.idx + 8 {
-                            return Ok(None);
+                    let kind: [u8; 4] = self.buffer[..4]
+                        .try_into()
+                        .map_err(|_| "WAV chunk header is truncated".to_string())?;
+                    let size = u32::from_le_bytes(
+                        self.buffer[4..8]
+                            .try_into()
+                            .map_err(|_| "WAV chunk size is truncated".to_string())?,
+                    ) as usize;
+                    self.buffer.drain(..8);
+                    if &kind == b"data" {
+                        if self.bits_per_sample == 0
+                            || self.channel_count == 0
+                            || self.sampling_rate == 0
+                        {
+                            return Err("WAV data appears before a valid fmt chunk".to_string());
                         }
-                    }
-
-                    self.state = StreamWavState::ReadingFmt;
-                }
-
-                StreamWavState::ReadingFmt => {
-                    if self.buffer.len() < self.idx + 24 {
-                        return Ok(None);
-                    }
-
-                    let fmt_chunk = &self.buffer[self.idx..self.idx + 24];
-                    self.sampling_rate =
-                        u32::from_le_bytes(fmt_chunk[12..16].try_into().unwrap()) as usize;
-                    self.bits_per_sample =
-                        u16::from_le_bytes(fmt_chunk[22..24].try_into().unwrap()) as usize;
-                    self.channel_count =
-                        u16::from_le_bytes(fmt_chunk[10..12].try_into().unwrap()) as usize;
-
-                    self.audio_format =
-                        match u16::from_le_bytes(fmt_chunk[8..10].try_into().unwrap()) {
-                            1 => EncodingFlag::PCMSigned,
-                            3 => EncodingFlag::PCMFloat,
-                            _ => EncodingFlag::PCMFloat,
+                        self.data_chunk_size = size;
+                        self.data_chunk_collected = 0;
+                        self.state = if size == 0 {
+                            StreamWavState::Finished
+                        } else {
+                            StreamWavState::ReadingData { remaining: size }
                         };
-
-                    self.endianness = Endianness::LittleEndian;
-                    self.state = StreamWavState::ReadToData;
-
-                    let chunk_size = u32::from_le_bytes(
-                        self.buffer[self.idx + 4..self.idx + 8].try_into().unwrap(),
-                    ) as usize;
-                    self.idx += chunk_size + 8;
+                    } else {
+                        if &kind == b"fmt " && size > MAX_WAV_FMT_BYTES {
+                            return Err(format!(
+                                "WAV fmt chunk exceeds the {MAX_WAV_FMT_BYTES} byte metadata budget"
+                            ));
+                        }
+                        self.state = StreamWavState::ChunkPayload {
+                            kind,
+                            remaining: size,
+                            padding: size & 1 != 0,
+                            payload: Vec::with_capacity(if &kind == b"fmt " { size } else { 0 }),
+                        };
+                    }
                 }
-
-                StreamWavState::ReadToData => {
-                    if self.buffer.len() < self.idx + 4 {
+                StreamWavState::ChunkPayload {
+                    kind,
+                    mut remaining,
+                    mut padding,
+                    mut payload,
+                } => {
+                    let consumed = remaining.min(self.buffer.len());
+                    if &kind == b"fmt " {
+                        payload.extend_from_slice(&self.buffer[..consumed]);
+                    }
+                    self.buffer.drain(..consumed);
+                    remaining -= consumed;
+                    if remaining > 0 {
+                        self.state = StreamWavState::ChunkPayload {
+                            kind,
+                            remaining,
+                            padding,
+                            payload,
+                        };
                         return Ok(None);
                     }
-
-                    while &self.buffer[self.idx..self.idx + 4] != b"data" {
-                        let chunk_size = u32::from_le_bytes(
-                            self.buffer[self.idx + 4..self.idx + 8].try_into().unwrap(),
-                        ) as usize;
-                        self.idx += chunk_size + 8;
-
-                        if self.buffer.len() < self.idx + 8 {
+                    if padding {
+                        if self.buffer.is_empty() {
+                            self.state = StreamWavState::ChunkPayload {
+                                kind,
+                                remaining: 0,
+                                padding,
+                                payload,
+                            };
                             return Ok(None);
                         }
+                        self.buffer.drain(..1);
+                        padding = false;
                     }
-
-                    let chunk_size = u32::from_le_bytes(
-                        self.buffer[self.idx + 4..self.idx + 8].try_into().unwrap(),
-                    ) as usize;
-
-                    self.data_chunk_size = chunk_size;
-
-                    self.state = StreamWavState::ReadingData;
-
-                    self.buffer = self.buffer.split_off(self.idx + 8);
+                    if &kind == b"fmt " {
+                        self.install_fmt(&payload)?;
+                    }
+                    debug_assert!(!padding);
+                    self.state = StreamWavState::ChunkHeader;
                 }
-
-                StreamWavState::ReadingData => {
+                StreamWavState::ReadingData { mut remaining } => {
                     let bytes_per_sample = self.bits_per_sample / 8;
                     let bytes_per_frame = bytes_per_sample * self.channel_count;
+                    if bytes_per_frame == 0 {
+                        return Err("WAV fmt has zero bytes per frame".to_string());
+                    }
 
-                    if self.buffer.len() < bytes_per_frame {
+                    let available = remaining.min(self.buffer.len());
+                    let len = (available / bytes_per_frame) * bytes_per_frame;
+                    if len == 0 {
+                        if self.buffer.len() >= remaining && remaining > 0 {
+                            return Err("WAV data chunk is not frame-aligned".to_string());
+                        }
+                        self.state = StreamWavState::ReadingData { remaining };
                         return Ok(None); // Wait for more data.
                     }
-
-                    let frames_in_buffer = self.buffer.len() / bytes_per_frame;
-                    let len = frames_in_buffer * bytes_per_frame;
-                    let data_chunk = self.buffer[..len].to_vec();
-                    self.buffer = self.buffer.split_off(len);
-
+                    let data_chunk: Vec<u8> = self.buffer.drain(..len).collect();
+                    remaining -= len;
                     self.data_chunk_collected += len;
-                    if self.data_chunk_collected == self.data_chunk_size {
-                        self.state = StreamWavState::Finished;
-                    }
+                    self.state = if remaining == 0 {
+                        StreamWavState::Finished
+                    } else {
+                        StreamWavState::ReadingData { remaining }
+                    };
 
                     let result = AudioData::new(
                         self.bits_per_sample as u8,
@@ -190,11 +221,42 @@ impl WavStreamProcessor {
                 }
 
                 StreamWavState::Finished => {
+                    self.state = StreamWavState::Finished;
                     // Gracefully return None when finished - no more data available
                     return Ok(None);
                 }
             }
         }
+    }
+
+    fn install_fmt(&mut self, payload: &[u8]) -> Result<(), String> {
+        if payload.len() < 16 {
+            return Err("WAV fmt chunk must contain at least 16 bytes".to_string());
+        }
+        let mut format = u16::from_le_bytes([payload[0], payload[1]]);
+        if format == 0xfffe {
+            if payload.len() < 40 {
+                return Err("WAVE_FORMAT_EXTENSIBLE fmt chunk is truncated".to_string());
+            }
+            format = u16::from_le_bytes([payload[24], payload[25]]);
+        }
+        self.channel_count = u16::from_le_bytes([payload[2], payload[3]]) as usize;
+        self.sampling_rate =
+            u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
+        self.bits_per_sample = u16::from_le_bytes([payload[14], payload[15]]) as usize;
+        self.audio_format = match format {
+            1 => EncodingFlag::PCMSigned,
+            3 => EncodingFlag::PCMFloat,
+            other => return Err(format!("unsupported WAV format tag {other}")),
+        };
+        if self.channel_count == 0 || self.sampling_rate == 0 || self.bits_per_sample == 0 {
+            return Err("WAV fmt contains invalid audio geometry".to_string());
+        }
+        if self.bits_per_sample % 8 != 0 {
+            return Err("WAV sample width must be byte-aligned".to_string());
+        }
+        self.endianness = Endianness::LittleEndian;
+        Ok(())
     }
 }
 
@@ -339,5 +401,48 @@ mod tests {
         assert_eq!(out.channel_count(), 1);
         assert_eq!(out.sampling_rate(), 48_000);
         assert_eq!(out.data(), &vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn wav_skips_large_unknown_chunks_incrementally() {
+        let junk_size = 8 * 1024 * 1024u32;
+        let mut processor = WavStreamProcessor::new();
+        let mut prefix = Vec::new();
+        prefix.extend_from_slice(b"RIFF");
+        prefix.extend_from_slice(&(junk_size + 48).to_le_bytes());
+        prefix.extend_from_slice(b"WAVEJUNK");
+        prefix.extend_from_slice(&junk_size.to_le_bytes());
+        assert!(processor.add(&prefix).unwrap().is_none());
+
+        let zeros = [0u8; 64 * 1024];
+        for _ in 0..128 {
+            assert!(processor.add(&zeros).unwrap().is_none());
+            assert!(processor.buffered_len() <= 8);
+        }
+
+        let mut tail = Vec::new();
+        tail.extend_from_slice(b"fmt ");
+        tail.extend_from_slice(&16u32.to_le_bytes());
+        tail.extend_from_slice(&1u16.to_le_bytes());
+        tail.extend_from_slice(&1u16.to_le_bytes());
+        tail.extend_from_slice(&48_000u32.to_le_bytes());
+        tail.extend_from_slice(&96_000u32.to_le_bytes());
+        tail.extend_from_slice(&2u16.to_le_bytes());
+        tail.extend_from_slice(&16u16.to_le_bytes());
+        tail.extend_from_slice(b"data");
+        tail.extend_from_slice(&2u32.to_le_bytes());
+        tail.extend_from_slice(&123i16.to_le_bytes());
+        let audio = processor.add(&tail).unwrap().unwrap();
+        assert_eq!(audio.data(), &123i16.to_le_bytes());
+    }
+
+    #[test]
+    fn wav_chunk_headers_are_safe_at_every_split() {
+        let bytes = b"RIFF\x24\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\xbb\0\0\0w\x01\0\x02\0\x10\0data\0\0\0\0";
+        for split in 0..bytes.len() {
+            let mut processor = WavStreamProcessor::new();
+            processor.add(&bytes[..split]).unwrap();
+            processor.add(&bytes[split..]).unwrap();
+        }
     }
 }

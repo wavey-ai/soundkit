@@ -13,6 +13,8 @@ use tracing::{debug, trace};
 
 #[cfg(feature = "decode")]
 const MAX_OPUS_FRAME_SAMPLES: usize = 5760; // 120 ms @ 48 kHz
+const MAX_OGG_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+const MAX_OGG_PACKET_BYTES: usize = 16 * 1024 * 1024;
 
 // Zero-copy Ogg page header
 #[derive(Debug)]
@@ -60,6 +62,7 @@ struct FastOggParser {
     pos: usize,
     packet_buffer: Vec<u8>,
     pending_packets: VecDeque<Packet>,
+    error: Option<String>,
 }
 
 impl FastOggParser {
@@ -69,12 +72,26 @@ impl FastOggParser {
             pos: 0,
             packet_buffer: Vec::with_capacity(4096),
             pending_packets: VecDeque::new(),
+            error: None,
         }
     }
 
     fn push<'a>(&'a mut self, data: &[u8]) -> FastOggPackets<'a> {
-        self.buffer.extend_from_slice(data);
+        if data.len() > MAX_OGG_INPUT_CHUNK_BYTES {
+            self.error = Some(format!(
+                "Ogg input chunk exceeds the {MAX_OGG_INPUT_CHUNK_BYTES} byte streaming budget"
+            ));
+        } else {
+            self.buffer.extend_from_slice(data);
+        }
         FastOggPackets { parser: self }
+    }
+
+    fn take_error(&mut self) -> Result<(), String> {
+        match self.error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     fn compact(&mut self) {
@@ -100,7 +117,12 @@ impl<'a> Iterator for FastOggPackets<'a> {
         loop {
             // Find next OggS
             let search_start = self.parser.pos;
-            let oggs_pos = memmem::find(&self.parser.buffer[search_start..], b"OggS")?;
+            let Some(oggs_pos) = memmem::find(&self.parser.buffer[search_start..], b"OggS") else {
+                let keep = self.parser.buffer.len().min(3);
+                self.parser.buffer.drain(..self.parser.buffer.len() - keep);
+                self.parser.pos = 0;
+                return None;
+            };
             self.parser.pos = search_start + oggs_pos;
 
             // Need at least 27 bytes for header
@@ -136,6 +158,20 @@ impl<'a> Iterator for FastOggPackets<'a> {
             for &seg_size in segment_table.iter() {
                 let seg_start = body_start + seg_offset;
                 let seg_end = seg_start + seg_size as usize;
+                if self
+                    .parser
+                    .packet_buffer
+                    .len()
+                    .saturating_add(seg_size as usize)
+                    > MAX_OGG_PACKET_BYTES
+                {
+                    self.parser.error = Some(format!(
+                        "Ogg packet exceeds the {MAX_OGG_PACKET_BYTES} byte packet budget"
+                    ));
+                    self.parser.packet_buffer.clear();
+                    self.parser.pos = self.parser.buffer.len();
+                    return None;
+                }
                 self.parser
                     .packet_buffer
                     .extend_from_slice(&self.parser.buffer[seg_start..seg_end]);
@@ -252,6 +288,7 @@ impl OggOpusDemuxer {
 
             events.push(OggOpusDemuxEvent::Packet(packet.data));
         }
+        self.parser.take_error()?;
 
         Ok(events)
     }
@@ -399,6 +436,7 @@ impl OggOpusDecoder {
 
             self.logged_first_audio = true;
         }
+        self.parser.take_error()?;
 
         if pcm_bytes.is_empty() {
             return Ok(None);
@@ -463,6 +501,28 @@ mod tests {
     use std::path::PathBuf;
     #[cfg(feature = "decode")]
     use std::sync::Once;
+
+    #[test]
+    fn ogg_parser_bounds_garbage_and_input_chunks() {
+        let mut parser = FastOggParser::new();
+        assert_eq!(parser.push(&vec![0x55; 65_536]).count(), 0);
+        assert!(parser.buffer.len() <= 3);
+
+        let mut demuxer = OggOpusDemuxer::new();
+        let error = demuxer
+            .add(&vec![0; MAX_OGG_INPUT_CHUNK_BYTES + 1])
+            .unwrap_err();
+        assert!(error.contains("streaming budget"));
+
+        let mut parser = FastOggParser::new();
+        parser.packet_buffer = vec![0; MAX_OGG_PACKET_BYTES];
+        let mut page = vec![0; 29];
+        page[..4].copy_from_slice(b"OggS");
+        page[26] = 1;
+        page[27] = 1;
+        assert_eq!(parser.push(&page).count(), 0);
+        assert!(parser.take_error().unwrap_err().contains("packet budget"));
+    }
 
     #[cfg(feature = "decode")]
     fn init_tracing() {

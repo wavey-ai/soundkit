@@ -440,11 +440,11 @@ export interface InitOutput {
     readonly wasmwebmmediademuxer_flush: (a: number) => [number, number, number];
     readonly wasmwebmmediademuxer_new: () => number;
     readonly wasmwebmmediademuxer_push: (a: number, b: number, c: number) => [number, number, number];
-    readonly wasmmusicdecoder_newAuto: () => number;
     readonly wasmaacdeboxer_newAuto: () => number;
     readonly wasmaudiotrackdemuxer_newAuto: () => number;
     readonly wasmopusdeboxer_newAuto: () => number;
     readonly wasmsoundkitframedecoder_newUnencrypted: () => number;
+    readonly wasmmusicdecoder_newAuto: () => number;
     readonly dav1d_set_cpu_flags_mask: (a: number) => void;
     readonly dav1d_apply_grain: (a: number, b: number, c: number) => number;
     readonly dav1d_close: (a: number) => void;

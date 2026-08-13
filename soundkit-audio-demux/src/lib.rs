@@ -10,6 +10,8 @@ const MIN_DETECTION_BYTES: usize = 8192;
 const MAX_DETECTION_BYTES: usize = 65_536;
 pub(crate) const MAX_CONTAINER_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MEDIA_PACKET_BYTES: u32 = 128 * 1024 * 1024;
+#[cfg(feature = "mpeg-ts")]
+const MAX_MPEG_TS_PES_BYTES: usize = 1024 * 1024;
 
 fn validate_container_input_chunk(bytes: &[u8], container: &str) -> Result<(), String> {
     if bytes.len() > MAX_CONTAINER_INPUT_CHUNK_BYTES {
@@ -424,7 +426,6 @@ pub struct AudioTrackDemuxer {
 enum DemuxerState {
     Detecting {
         buffer: Vec<u8>,
-        bytes_collected: usize,
     },
     #[cfg(feature = "mp4")]
     Mp4(Mp4AudioDemuxer),
@@ -438,10 +439,7 @@ enum DemuxerState {
 impl AudioTrackDemuxer {
     pub fn new_auto() -> Self {
         Self {
-            state: DemuxerState::Detecting {
-                buffer: Vec::new(),
-                bytes_collected: 0,
-            },
+            state: DemuxerState::Detecting { buffer: Vec::new() },
         }
     }
 
@@ -455,32 +453,31 @@ impl AudioTrackDemuxer {
         validate_container_input_chunk(bytes, "media container")?;
         let state = std::mem::replace(&mut self.state, DemuxerState::Finished);
         match state {
-            DemuxerState::Detecting {
-                mut buffer,
-                bytes_collected,
-            } => {
-                buffer.extend_from_slice(bytes);
-                let new_bytes_collected = bytes_collected + bytes.len();
+            DemuxerState::Detecting { mut buffer } => {
+                let probe_bytes = (MAX_DETECTION_BYTES - buffer.len()).min(bytes.len());
+                buffer.extend_from_slice(&bytes[..probe_bytes]);
+                let new_bytes_collected = buffer.len();
 
                 if new_bytes_collected < MIN_DETECTION_BYTES {
-                    self.state = DemuxerState::Detecting {
-                        buffer,
-                        bytes_collected: new_bytes_collected,
-                    };
+                    self.state = DemuxerState::Detecting { buffer };
                     return Ok(Vec::new());
                 }
 
                 match detect_and_init_demuxer(&buffer) {
                     Ok(mut demuxer) => {
-                        let events = process_state(&mut demuxer, &buffer, false)?;
+                        let mut events = process_state(&mut demuxer, &buffer, false)?;
+                        if probe_bytes < bytes.len() {
+                            events.extend(process_state(
+                                &mut demuxer,
+                                &bytes[probe_bytes..],
+                                false,
+                            )?);
+                        }
                         self.state = demuxer;
                         Ok(events)
                     }
                     Err(error) if new_bytes_collected < MAX_DETECTION_BYTES => {
-                        self.state = DemuxerState::Detecting {
-                            buffer,
-                            bytes_collected: new_bytes_collected,
-                        };
+                        self.state = DemuxerState::Detecting { buffer };
                         if bytes.is_empty() {
                             self.state = DemuxerState::Finished;
                             Err(error)
@@ -547,7 +544,7 @@ impl AudioTrackDemuxer {
     pub fn flush(&mut self) -> Result<Vec<AudioDemuxEvent>, String> {
         let state = std::mem::replace(&mut self.state, DemuxerState::Finished);
         match state {
-            DemuxerState::Detecting { buffer, .. } => {
+            DemuxerState::Detecting { buffer } => {
                 let mut demuxer = detect_and_init_demuxer(&buffer)?;
                 process_state(&mut demuxer, &buffer, true)
             }
@@ -3320,11 +3317,13 @@ impl MpegTsAudioDemuxer {
     }
 
     fn add(&mut self, data: &[u8]) -> Result<Vec<AudioDemuxEvent>, String> {
+        validate_container_input_chunk(data, "MPEG-TS")?;
         self.buffer.extend_from_slice(data);
         self.parse_available_packets()
     }
 
     fn finish(&mut self, data: &[u8]) -> Result<Vec<AudioDemuxEvent>, String> {
+        validate_container_input_chunk(data, "MPEG-TS")?;
         self.buffer.extend_from_slice(data);
         let mut events = self.parse_available_packets()?;
         events.extend(self.flush_current_pes()?);
@@ -3395,6 +3394,11 @@ impl MpegTsAudioDemuxer {
             if payload_unit_start {
                 events.extend(self.flush_current_pes()?);
                 self.current_pes.clear();
+            }
+            if self.current_pes.len().saturating_add(payload.len()) > MAX_MPEG_TS_PES_BYTES {
+                return Err(format!(
+                    "MPEG-TS PES exceeds the {MAX_MPEG_TS_PES_BYTES} byte packet budget"
+                ));
             }
             self.current_pes.extend_from_slice(payload);
         }
@@ -4160,6 +4164,17 @@ mod tests {
                 ..
             }) if data.starts_with(&[0xff, 0xf1])
         )));
+    }
+
+    #[cfg(feature = "mpeg-ts")]
+    #[test]
+    fn mpeg_ts_rejects_unterminated_oversized_pes() {
+        let mut demuxer = MpegTsAudioDemuxer::new();
+        demuxer.audio_pid = Some(0x0101);
+        demuxer.current_pes = vec![0; MAX_MPEG_TS_PES_BYTES];
+        let packet = ts_packet(0x0101, false, &[0x11]);
+        let error = demuxer.add(&packet).unwrap_err();
+        assert!(error.contains("packet budget"));
     }
 
     #[cfg(feature = "mp4")]

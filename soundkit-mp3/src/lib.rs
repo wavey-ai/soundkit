@@ -152,6 +152,8 @@ pub struct Mp3Decoder {
     channels: Option<u8>,
 }
 
+const MAX_MP3_STREAM_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
 impl Mp3Decoder {
     pub fn new() -> Self {
         Self {
@@ -212,6 +214,16 @@ impl Mp3Decoder {
         );
     }
 
+    fn append_input(&mut self, input: &[u8]) -> Result<(), String> {
+        if self.buffer.len().saturating_add(input.len()) > MAX_MP3_STREAM_BUFFER_BYTES {
+            return Err(format!(
+                "MP3 stream exceeds the {MAX_MP3_STREAM_BUFFER_BYTES} byte buffer budget"
+            ));
+        }
+        self.buffer.extend_from_slice(input);
+        Ok(())
+    }
+
     fn write_frame_i16(&self, info: &FrameInfo, output: &mut [i16]) -> Result<usize, String> {
         let channels = info.channels.num() as usize;
         let frame_samples = info.samples_produced * channels;
@@ -265,7 +277,7 @@ impl Default for Mp3Decoder {
 
 impl Decoder for Mp3Decoder {
     fn decode_i16(&mut self, input: &[u8], out: &mut [i16], _fec: bool) -> Result<usize, String> {
-        self.buffer.extend_from_slice(input);
+        self.append_input(input)?;
 
         let mut written = 0;
         while !self.buffer.is_empty() {
@@ -293,7 +305,7 @@ impl Decoder for Mp3Decoder {
     }
 
     fn decode_i32(&mut self, input: &[u8], out: &mut [i32], _fec: bool) -> Result<usize, String> {
-        self.buffer.extend_from_slice(input);
+        self.append_input(input)?;
 
         let mut written = 0;
         while !self.buffer.is_empty() {
@@ -321,7 +333,7 @@ impl Decoder for Mp3Decoder {
     }
 
     fn decode_f32(&mut self, input: &[u8], out: &mut [f32], _fec: bool) -> Result<usize, String> {
-        self.buffer.extend_from_slice(input);
+        self.append_input(input)?;
 
         let mut written = 0;
         while !self.buffer.is_empty() {

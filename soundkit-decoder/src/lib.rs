@@ -51,6 +51,7 @@ const MAX_DETECTION_BYTES: usize = 65_536;
 const DEFAULT_INPUT_BUFFER: usize = 128;
 const DEFAULT_OUTPUT_BUFFER: usize = 128;
 const RESAMPLE_CHUNK_SIZE: usize = 4096;
+const MAX_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
 /// Error types for decode pipeline
 #[derive(Debug, Clone)]
@@ -59,6 +60,7 @@ pub enum DecodeError {
     DecoderInitFailed(String),
     DecodingFailed(String),
     InputBufferFull,
+    InputChunkTooLarge(usize),
     UnsupportedFormat(AudioType),
     InvalidInputFormat(String),
 }
@@ -72,6 +74,10 @@ impl std::fmt::Display for DecodeError {
             }
             DecodeError::DecodingFailed(msg) => write!(f, "Decoding failed: {}", msg),
             DecodeError::InputBufferFull => write!(f, "Input buffer full"),
+            DecodeError::InputChunkTooLarge(bytes) => write!(
+                f,
+                "Input chunk is {bytes} bytes; the streaming limit is {MAX_INPUT_CHUNK_BYTES} bytes"
+            ),
             DecodeError::UnsupportedFormat(fmt) => write!(f, "Unsupported format: {:?}", fmt),
             DecodeError::InvalidInputFormat(msg) => write!(f, "Invalid input format: {}", msg),
         }
@@ -219,13 +225,8 @@ impl StreamingResampler {
 
 /// Internal state machine for the pipeline
 enum PipelineState {
-    Detecting {
-        buffer: BytesMut,
-        bytes_collected: usize,
-    },
-    Decoding {
-        decoder: FormatDecoder,
-    },
+    Detecting { buffer: BytesMut },
+    Decoding { decoder: FormatDecoder },
 }
 
 /// Wrapper enum for different decoder types.
@@ -373,6 +374,17 @@ where
     Ok(results)
 }
 
+fn process_single_add_api<D, F>(
+    decoder: &mut D,
+    chunk: &[u8],
+    add_fn: F,
+) -> Result<Vec<AudioData>, String>
+where
+    F: Fn(&mut D, &[u8]) -> Result<Option<AudioData>, String>,
+{
+    Ok(add_fn(decoder, chunk)?.into_iter().collect())
+}
+
 impl StreamingDecoder for FormatDecoder {
     fn process(&mut self, chunk: &[u8]) -> Result<Vec<AudioData>, String> {
         match self {
@@ -497,7 +509,7 @@ impl StreamingDecoder for FormatDecoder {
                 process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
             }
             FormatDecoder::Aiff(dec) => {
-                process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
+                process_single_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
             }
             FormatDecoder::Ac3(dec) => {
                 process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
@@ -507,6 +519,25 @@ impl StreamingDecoder for FormatDecoder {
 
     fn flush(&mut self) -> Result<Vec<AudioData>, String> {
         match self {
+            FormatDecoder::M4a(decoder) => {
+                let mut results = Vec::new();
+                let mut output = vec![0_i16; 262_144];
+                loop {
+                    let samples = decoder.finish_i16(&mut output)?;
+                    if samples == 0 {
+                        break;
+                    }
+                    let (sample_rate, channels) = (decoder.sample_rate(), decoder.channels());
+                    if let (Some(sample_rate), Some(channels)) = (sample_rate, channels) {
+                        results.push(create_audio_data_i16(
+                            sample_rate,
+                            channels,
+                            &output[..samples],
+                        ));
+                    }
+                }
+                Ok(results)
+            }
             FormatDecoder::RawPcm(dec) => dec.flush().map(|frame| frame.into_iter().collect()),
             FormatDecoder::AmrNb(dec) => {
                 dec.flush()?;
@@ -882,6 +913,9 @@ impl DecodePipelineHandle {
     ///
     /// Returns `Err` if the ring buffer is full (backpressure)
     pub fn send(&mut self, data: Bytes) -> Result<(), DecodeError> {
+        if data.len() > MAX_INPUT_CHUNK_BYTES {
+            return Err(DecodeError::InputChunkTooLarge(data.len()));
+        }
         self.input_tx
             .push(data)
             .map_err(|_| DecodeError::InputBufferFull)
@@ -932,7 +966,6 @@ fn pipeline_worker(
         Some(decoder) => PipelineState::Decoding { decoder },
         None => PipelineState::Detecting {
             buffer: BytesMut::new(),
-            bytes_collected: 0,
         },
     };
 
@@ -951,10 +984,7 @@ fn pipeline_worker(
         let is_eof = chunk.is_empty();
 
         let next_state = match state {
-            PipelineState::Detecting {
-                mut buffer,
-                bytes_collected,
-            } => {
+            PipelineState::Detecting { mut buffer } => {
                 if is_eof {
                     // EOF during detection - try to decode with whatever we have
                     // Some formats (like Opus) can be detected with very little data
@@ -975,8 +1005,9 @@ fn pipeline_worker(
                     }
                     None
                 } else {
-                    buffer.extend_from_slice(&chunk);
-                    let new_bytes_collected = bytes_collected + chunk.len();
+                    let probe_bytes = (MAX_DETECTION_BYTES - buffer.len()).min(chunk.len());
+                    buffer.extend_from_slice(&chunk[..probe_bytes]);
+                    let new_bytes_collected = buffer.len();
 
                     // Try early detection for formats with clear magic bytes
                     // This allows smaller files (like short Opus) to be processed
@@ -992,14 +1023,20 @@ fn pipeline_worker(
                                     &options,
                                     &mut resampler,
                                 );
+                                if probe_bytes < chunk.len() {
+                                    process_with_decoder(
+                                        &mut decoder,
+                                        &chunk[probe_bytes..],
+                                        &mut output_tx,
+                                        &options,
+                                        &mut resampler,
+                                    );
+                                }
                                 Some(PipelineState::Decoding { decoder })
                             }
                             Err(_e) if new_bytes_collected < MAX_DETECTION_BYTES => {
                                 // Need more data
-                                Some(PipelineState::Detecting {
-                                    buffer,
-                                    bytes_collected: new_bytes_collected,
-                                })
+                                Some(PipelineState::Detecting { buffer })
                             }
                             Err(e) => {
                                 // Failed detection
@@ -1008,10 +1045,7 @@ fn pipeline_worker(
                             }
                         }
                     } else {
-                        Some(PipelineState::Detecting {
-                            buffer,
-                            bytes_collected: new_bytes_collected,
-                        })
+                        Some(PipelineState::Detecting { buffer })
                     }
                 }
             }
@@ -1759,6 +1793,18 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_rejects_oversized_input_chunks() {
+        let format = RawPcmFormat::linear16(48_000, 2).unwrap();
+        let mut pipeline = DecodePipeline::spawn_raw_pcm(format);
+        let oversized = Bytes::from(vec![0_u8; MAX_INPUT_CHUNK_BYTES + 1]);
+        assert!(matches!(
+            pipeline.send(oversized),
+            Err(DecodeError::InputChunkTooLarge(bytes))
+                if bytes == MAX_INPUT_CHUNK_BYTES + 1
+        ));
+    }
+
+    #[test]
     fn test_decode_explicit_g711_mulaw_stream() {
         let samples = [-12000i16, -1024, 0, 1024, 12000];
         let mut encoded = vec![0u8; samples.len()];
@@ -2251,13 +2297,13 @@ mod tests {
             pipeline.send(Bytes::new()).unwrap();
 
             let frames = recv_until_done(&mut pipeline);
-            assert_eq!(frames.len(), 1, "{fixture_name} should decode at EOF");
-            assert_eq!(frames[0].bits_per_sample(), 16);
-            assert_eq!(frames[0].channel_count(), 1);
-            assert_eq!(frames[0].sampling_rate(), 8_000);
-            assert!(frames[0]
-                .data()
-                .chunks_exact(2)
+            assert!(!frames.is_empty(), "{fixture_name} should stream PCM");
+            assert!(frames.iter().all(|frame| frame.bits_per_sample() == 16));
+            assert!(frames.iter().all(|frame| frame.channel_count() == 1));
+            assert!(frames.iter().all(|frame| frame.sampling_rate() == 8_000));
+            assert!(frames
+                .iter()
+                .flat_map(|frame| frame.data().chunks_exact(2))
                 .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
                 .any(|sample| sample != 0));
         }

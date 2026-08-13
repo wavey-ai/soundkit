@@ -63,8 +63,18 @@ use soundkit_webm::{WebmOpusDemuxEvent, WebmOpusDemuxer};
 
 const MIN_DETECTION_BYTES: usize = 8192;
 const MAX_DETECTION_BYTES: usize = 65_536;
+const MAX_STREAM_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 #[cfg(any(feature = "aac", feature = "m4a", feature = "mp3", feature = "flac"))]
 const DEFAULT_SCRATCH_SAMPLES: usize = 262_144;
+
+fn validate_stream_input_chunk(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > MAX_STREAM_INPUT_CHUNK_BYTES {
+        return Err(format!(
+            "input chunk exceeds the {MAX_STREAM_INPUT_CHUNK_BYTES} byte streaming budget"
+        ));
+    }
+    Ok(())
+}
 
 #[wasm_bindgen]
 pub struct WasmAudioContentCipher {
@@ -381,13 +391,8 @@ pub struct WasmOpusDecodeResult {
 }
 
 enum DecoderState {
-    Detecting {
-        buffer: Vec<u8>,
-        bytes_collected: usize,
-    },
-    Decoding {
-        decoder: FormatDecoder,
-    },
+    Detecting { buffer: Vec<u8> },
+    Decoding { decoder: FormatDecoder },
     Finished,
 }
 
@@ -416,10 +421,7 @@ enum FormatDecoder {
 
 #[cfg(feature = "opus-debox")]
 enum OpusDeboxState {
-    Detecting {
-        buffer: Vec<u8>,
-        bytes_collected: usize,
-    },
+    Detecting { buffer: Vec<u8> },
     Ogg(OggOpusDemuxer),
     Raw(RawOpusDeboxer),
     WebM(WebmOpusDemuxer),
@@ -428,10 +430,7 @@ enum OpusDeboxState {
 
 #[cfg(feature = "aac-debox")]
 enum AacDeboxState {
-    Detecting {
-        buffer: Vec<u8>,
-        bytes_collected: usize,
-    },
+    Detecting { buffer: Vec<u8> },
     Mp4(AacMp4Demuxer),
     Finished,
 }
@@ -446,10 +445,7 @@ impl WasmMusicDecoder {
     #[wasm_bindgen(js_name = newAuto)]
     pub fn new_auto() -> Self {
         Self {
-            state: DecoderState::Detecting {
-                buffer: Vec::new(),
-                bytes_collected: 0,
-            },
+            state: DecoderState::Detecting { buffer: Vec::new() },
         }
     }
 
@@ -508,10 +504,7 @@ impl WasmOpusDeboxer {
     #[wasm_bindgen(js_name = newAuto)]
     pub fn new_auto() -> Self {
         Self {
-            state: OpusDeboxState::Detecting {
-                buffer: Vec::new(),
-                bytes_collected: 0,
-            },
+            state: OpusDeboxState::Detecting { buffer: Vec::new() },
         }
     }
 
@@ -549,10 +542,7 @@ impl WasmAacDeboxer {
     #[wasm_bindgen(js_name = newAuto)]
     pub fn new_auto() -> Self {
         Self {
-            state: AacDeboxState::Detecting {
-                buffer: Vec::new(),
-                bytes_collected: 0,
-            },
+            state: AacDeboxState::Detecting { buffer: Vec::new() },
         }
     }
 
@@ -1445,34 +1435,30 @@ impl WasmSoundKitFrameDecoder {
 
 impl WasmMusicDecoder {
     fn push_frames(&mut self, bytes: &[u8]) -> Result<Vec<AudioData>, String> {
+        validate_stream_input_chunk(bytes)?;
         let state = std::mem::replace(&mut self.state, DecoderState::Finished);
         match state {
-            DecoderState::Detecting {
-                mut buffer,
-                bytes_collected,
-            } => {
-                buffer.extend_from_slice(bytes);
-                let new_bytes_collected = bytes_collected + bytes.len();
+            DecoderState::Detecting { mut buffer } => {
+                let probe_bytes = (MAX_DETECTION_BYTES - buffer.len()).min(bytes.len());
+                buffer.extend_from_slice(&bytes[..probe_bytes]);
+                let new_bytes_collected = buffer.len();
 
                 if new_bytes_collected < MIN_DETECTION_BYTES {
-                    self.state = DecoderState::Detecting {
-                        buffer,
-                        bytes_collected: new_bytes_collected,
-                    };
+                    self.state = DecoderState::Detecting { buffer };
                     return Ok(Vec::new());
                 }
 
                 match detect_and_init_decoder(&buffer) {
                     Ok(mut decoder) => {
-                        let frames = decoder.process(&buffer)?;
+                        let mut frames = decoder.process(&buffer)?;
+                        if probe_bytes < bytes.len() {
+                            frames.extend(decoder.process(&bytes[probe_bytes..])?);
+                        }
                         self.state = DecoderState::Decoding { decoder };
                         Ok(frames)
                     }
                     Err(error) if new_bytes_collected < MAX_DETECTION_BYTES => {
-                        self.state = DecoderState::Detecting {
-                            buffer,
-                            bytes_collected: new_bytes_collected,
-                        };
+                        self.state = DecoderState::Detecting { buffer };
                         if bytes.is_empty() {
                             self.state = DecoderState::Finished;
                             Err(error)
@@ -1498,7 +1484,7 @@ impl WasmMusicDecoder {
     fn flush_frames(&mut self) -> Result<Vec<AudioData>, String> {
         let state = std::mem::replace(&mut self.state, DecoderState::Finished);
         match state {
-            DecoderState::Detecting { buffer, .. } => {
+            DecoderState::Detecting { buffer } => {
                 let mut decoder = detect_and_init_decoder(&buffer)?;
                 let mut frames = decoder.process(&buffer)?;
                 frames.extend(decoder.flush()?);
@@ -1513,34 +1499,33 @@ impl WasmMusicDecoder {
 #[cfg(feature = "opus-debox")]
 impl WasmOpusDeboxer {
     fn push_events(&mut self, bytes: &[u8]) -> Result<Vec<OpusDeboxEvent>, String> {
+        validate_stream_input_chunk(bytes)?;
         let state = std::mem::replace(&mut self.state, OpusDeboxState::Finished);
         match state {
-            OpusDeboxState::Detecting {
-                mut buffer,
-                bytes_collected,
-            } => {
-                buffer.extend_from_slice(bytes);
-                let new_bytes_collected = bytes_collected + bytes.len();
+            OpusDeboxState::Detecting { mut buffer } => {
+                let probe_bytes = (MAX_DETECTION_BYTES - buffer.len()).min(bytes.len());
+                buffer.extend_from_slice(&bytes[..probe_bytes]);
+                let new_bytes_collected = buffer.len();
 
                 if new_bytes_collected < MIN_DETECTION_BYTES {
-                    self.state = OpusDeboxState::Detecting {
-                        buffer,
-                        bytes_collected: new_bytes_collected,
-                    };
+                    self.state = OpusDeboxState::Detecting { buffer };
                     return Ok(Vec::new());
                 }
 
                 match detect_and_init_opus_deboxer(&buffer) {
                     Ok(mut deboxer) => {
-                        let events = process_opus_debox_state(&mut deboxer, &buffer)?;
+                        let mut events = process_opus_debox_state(&mut deboxer, &buffer)?;
+                        if probe_bytes < bytes.len() {
+                            events.extend(process_opus_debox_state(
+                                &mut deboxer,
+                                &bytes[probe_bytes..],
+                            )?);
+                        }
                         self.state = deboxer;
                         Ok(events)
                     }
                     Err(error) if new_bytes_collected < MAX_DETECTION_BYTES => {
-                        self.state = OpusDeboxState::Detecting {
-                            buffer,
-                            bytes_collected: new_bytes_collected,
-                        };
+                        self.state = OpusDeboxState::Detecting { buffer };
                         if bytes.is_empty() {
                             self.state = OpusDeboxState::Finished;
                             Err(error)
@@ -1568,7 +1553,7 @@ impl WasmOpusDeboxer {
     fn flush_events(&mut self) -> Result<Vec<OpusDeboxEvent>, String> {
         let state = std::mem::replace(&mut self.state, OpusDeboxState::Finished);
         match state {
-            OpusDeboxState::Detecting { buffer, .. } => {
+            OpusDeboxState::Detecting { buffer } => {
                 let mut deboxer = detect_and_init_opus_deboxer(&buffer)?;
                 process_opus_debox_state(&mut deboxer, &buffer)
             }
@@ -1583,34 +1568,34 @@ impl WasmOpusDeboxer {
 #[cfg(feature = "aac-debox")]
 impl WasmAacDeboxer {
     fn push_events(&mut self, bytes: &[u8]) -> Result<Vec<AacDeboxEvent>, String> {
+        validate_stream_input_chunk(bytes)?;
         let state = std::mem::replace(&mut self.state, AacDeboxState::Finished);
         match state {
-            AacDeboxState::Detecting {
-                mut buffer,
-                bytes_collected,
-            } => {
-                buffer.extend_from_slice(bytes);
-                let new_bytes_collected = bytes_collected + bytes.len();
+            AacDeboxState::Detecting { mut buffer } => {
+                let probe_bytes = (MAX_DETECTION_BYTES - buffer.len()).min(bytes.len());
+                buffer.extend_from_slice(&bytes[..probe_bytes]);
+                let new_bytes_collected = buffer.len();
 
                 if new_bytes_collected < MIN_DETECTION_BYTES {
-                    self.state = AacDeboxState::Detecting {
-                        buffer,
-                        bytes_collected: new_bytes_collected,
-                    };
+                    self.state = AacDeboxState::Detecting { buffer };
                     return Ok(Vec::new());
                 }
 
                 match detect_and_init_aac_deboxer(&buffer) {
                     Ok(mut deboxer) => {
-                        let events = process_aac_debox_state(&mut deboxer, &buffer, false)?;
+                        let mut events = process_aac_debox_state(&mut deboxer, &buffer, false)?;
+                        if probe_bytes < bytes.len() {
+                            events.extend(process_aac_debox_state(
+                                &mut deboxer,
+                                &bytes[probe_bytes..],
+                                false,
+                            )?);
+                        }
                         self.state = deboxer;
                         Ok(events)
                     }
                     Err(error) if new_bytes_collected < MAX_DETECTION_BYTES => {
-                        self.state = AacDeboxState::Detecting {
-                            buffer,
-                            bytes_collected: new_bytes_collected,
-                        };
+                        self.state = AacDeboxState::Detecting { buffer };
                         if bytes.is_empty() {
                             self.state = AacDeboxState::Finished;
                             Err(error)
@@ -1636,7 +1621,7 @@ impl WasmAacDeboxer {
     fn flush_events(&mut self) -> Result<Vec<AacDeboxEvent>, String> {
         let state = std::mem::replace(&mut self.state, AacDeboxState::Finished);
         match state {
-            AacDeboxState::Detecting { buffer, .. } => {
+            AacDeboxState::Detecting { buffer } => {
                 let mut deboxer = detect_and_init_aac_deboxer(&buffer)?;
                 process_aac_debox_state(&mut deboxer, &buffer, true)
             }
@@ -3536,6 +3521,41 @@ mod tests {
         frames
     }
 
+    #[test]
+    fn streaming_entry_points_reject_oversized_chunks() {
+        let oversized = vec![0_u8; MAX_STREAM_INPUT_CHUNK_BYTES + 1];
+        let mut decoder = WasmMusicDecoder::new_auto();
+        let error = decoder.push_frames(&oversized).unwrap_err();
+        assert!(error.contains("streaming budget"));
+
+        #[cfg(feature = "opus-debox")]
+        {
+            let mut deboxer = WasmOpusDeboxer::new_auto();
+            let error = deboxer.push_events(&oversized).unwrap_err();
+            assert!(error.contains("streaming budget"));
+        }
+
+        #[cfg(feature = "aac-debox")]
+        {
+            let mut deboxer = WasmAacDeboxer::new_auto();
+            let error = deboxer.push_events(&oversized).unwrap_err();
+            assert!(error.contains("streaming budget"));
+        }
+    }
+
+    #[test]
+    fn automatic_detection_never_retains_more_than_64_kib() {
+        let undecidable = vec![0_u8; MAX_DETECTION_BYTES];
+        let mut decoder = WasmMusicDecoder::new_auto();
+        let error = decoder.push_frames(&undecidable).unwrap_err();
+        assert!(!error.is_empty());
+
+        match decoder.state {
+            DecoderState::Finished => {}
+            _ => panic!("the detector must finish after its bounded probe"),
+        }
+    }
+
     #[cfg(feature = "aiff")]
     #[test]
     fn aiff_push_drains_pcm_frames() {
@@ -3655,7 +3675,7 @@ mod tests {
     #[cfg(feature = "aac-debox")]
     #[test]
     fn aac_debox_m4a_emits_config_and_adts_packets() {
-        let data = fixture("mac_aac/A_Tusk_is_used_to_make_costly_gifts.m4a");
+        let data = fixture("itag139/yt_itag_139_he_aac.mp4");
         let mut deboxer = WasmAacDeboxer::new_with_format("m4a").unwrap();
         let mut events = Vec::new();
 
@@ -3668,8 +3688,8 @@ mod tests {
             event,
             AacDeboxEvent::Config {
                 container: "mp4",
-                sample_rate: 16_000,
-                channels: 1,
+                sample_rate: 11_025,
+                channels: 2,
                 ..
             }
         )));
