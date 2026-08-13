@@ -34,6 +34,8 @@ ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v dnx
 ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v libvpx-vp9 -profile:v 0 -pix_fmt yuv420p -b:v 0 -crf 31 $common_audio -c:a libopus -b:a 160k "$output_dir/vp9-profile0-opus.webm"
 # shellcheck disable=SC2086
 ffmpeg -hide_banner -loglevel error -y -i "$source_media" $common_video -c:v libsvtav1 -preset 10 -pix_fmt yuv420p -crf 35 $common_audio -c:a libopus -b:a 160k "$output_dir/av1-main-opus.webm"
+ffmpeg -hide_banner -loglevel error -y -i "$output_dir/h264-high-aac.mp4" -map 0 -c copy "$output_dir/matroska-h264-aac.mkv"
+ffmpeg -hide_banner -loglevel error -y -i "$output_dir/hevc-main-aac.mov" -map 0 -c copy "$output_dir/matroska-hevc-aac.mkv"
 
 ffmpeg -hide_banner -loglevel error -y -i "$output_dir/h264-high-aac.mp4" -map 0:v:0 -c copy -bsf:v h264_mp4toannexb -f h264 "$output_dir/h264-high.264"
 ffmpeg -hide_banner -loglevel error -y -i "$output_dir/hevc-main-aac.mov" -map 0:v:0 -c copy -bsf:v hevc_mp4toannexb -f hevc "$output_dir/hevc-main.265"

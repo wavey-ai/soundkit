@@ -177,6 +177,8 @@ const sources = [
   { codec: "container", path: resolve(generatedRoot, "hevc-main10-pcm.mov"), framing: "mp4" },
   { codec: "container", path: resolve(generatedRoot, "prores-4444-alpha-pcm.mov"), framing: "mp4" },
   { codec: "container", path: resolve(generatedRoot, "vp9-profile0-opus.webm"), framing: "webm" },
+  { codec: "container", path: resolve(generatedRoot, "matroska-h264-aac.mkv"), framing: "webm" },
+  { codec: "container", path: resolve(generatedRoot, "matroska-hevc-aac.mkv"), framing: "webm" },
   { codec: "container", path: resolve(generatedRoot, "av1-main-opus.webm"), framing: "webm" },
 ];
 const mutations = [

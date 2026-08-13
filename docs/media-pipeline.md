@@ -31,6 +31,8 @@ The deterministic `never-final.mov` matrix covers common artist delivery and upl
 | MOV | DNxHR HQX 10-bit 4:2:2 | PCM 24-bit 48 kHz stereo | Audio passing; video decoder pending |
 | WebM | VP9 Profile 0 8-bit 4:2:0 | Opus 48 kHz stereo | Passing |
 | WebM | AV1 Main 8-bit 4:2:0 | Opus 48 kHz stereo | Passing |
+| Matroska | H.264 High 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing |
+| Matroska | HEVC Main 8-bit 4:2:0 | AAC-LC 48 kHz stereo | Passing |
 | IVF | AV1 Main 10-bit 4:4:4 | None | Passing |
 | IVF | AV1 Main 10-bit monochrome | None | Passing |
 | Annex B | HEVC Main10 HDR10 4:2:0 | None | Passing |
@@ -51,7 +53,7 @@ Build optimized WASM and decode both video and audio from each complete containe
 make media-conformance
 ```
 
-The repository stores nine deterministic three-second container fixtures under `testdata/video-compat/never-final`. It does not store the artist source. The generator recreates the fixtures under `build/`, and `media-conformance` verifies the committed SHA-256 manifest before decoding.
+The repository stores eleven deterministic three-second container fixtures under `testdata/video-compat/never-final`. It does not store the artist source. The generator recreates the fixtures under `build/`, and `media-conformance` verifies the committed SHA-256 manifest before decoding.
 
 Fetch the pinned Chromium corpus and verify its SHA-256 values:
 

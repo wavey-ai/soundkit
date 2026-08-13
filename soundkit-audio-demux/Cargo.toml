@@ -8,10 +8,11 @@ repository = "https://github.com/wavey-ai/soundkit"
 
 [features]
 default = ["mp4", "webm", "mpeg-ts"]
-mp4 = ["dep:soundkit-aac"]
+mp4 = ["dep:soundkit-aac", "dep:soundkit-video"]
 webm = ["dep:soundkit-webm"]
 mpeg-ts = []
 
 [dependencies]
 soundkit-aac = { path = "../soundkit-aac", default-features = false, features = ["mp4-demux"], optional = true }
+soundkit-video = { path = "../soundkit-video", default-features = false, optional = true }
 soundkit-webm = { path = "../soundkit-webm", default-features = false, features = ["vorbis"], optional = true }

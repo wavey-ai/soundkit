@@ -2566,6 +2566,19 @@ fn set_webm_media_track(object: &Object, track: &WebmMediaTrackConfig) -> Result
         &"codecPrivate".into(),
         &Uint8Array::from(track.codec_private.as_slice()).into(),
     )?;
+    Reflect::set(
+        object,
+        &"decoderConfiguration".into(),
+        &Uint8Array::from(track.decoder_configuration.as_slice()).into(),
+    )?;
+    Reflect::set(
+        object,
+        &"nalLengthSize".into(),
+        &track
+            .nal_length_size
+            .map(|value| JsValue::from_f64(value as f64))
+            .unwrap_or(JsValue::NULL),
+    )?;
     for (key, value) in [
         ("width", track.width),
         ("height", track.height),

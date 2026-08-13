@@ -368,6 +368,11 @@ pub struct WebmMediaTrackConfig {
     pub kind: WebmTrackKind,
     pub codec_id: String,
     pub codec_private: Vec<u8>,
+    /// Decoder-ready codec initialization bytes. AVC and HEVC parameter sets
+    /// are normalized to Annex B in Rust.
+    pub decoder_configuration: Vec<u8>,
+    /// Length-field width for AVC or HEVC blocks stored in Matroska.
+    pub nal_length_size: Option<u8>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub sample_rate: Option<u32>,
@@ -730,11 +735,17 @@ impl WebmMediaDemuxer {
                     }
                     None => timestamp_ns,
                 };
+                let data = match track.nal_length_size {
+                    Some(length_size) => {
+                        soundkit_video::length_prefixed_nals_to_annex_b(&frame, length_size)?
+                    }
+                    None => frame,
+                };
                 self.pending_events.push_back(WebmMediaDemuxEvent::Packet {
                     track_number,
                     kind: track.kind,
                     codec_id: track.codec_id.clone(),
-                    data: frame,
+                    data,
                     timestamp_ns: frame_timestamp_ns,
                     duration_ns: frame_duration_ns,
                     is_keyframe,
@@ -831,11 +842,24 @@ fn parse_media_track_entry(data: &[u8]) -> Result<Option<WebmMediaTrackConfig>, 
     if !supported {
         return Ok(None);
     }
+    let (decoder_configuration, nal_length_size) = match codec_id.as_str() {
+        "V_MPEG4/ISO/AVC" => {
+            let config = soundkit_video::parse_avc_decoder_configuration(&codec_private)?;
+            (config.annex_b, Some(config.length_size))
+        }
+        "V_MPEGH/ISO/HEVC" => {
+            let config = soundkit_video::parse_hevc_decoder_configuration(&codec_private)?;
+            (config.annex_b, Some(config.length_size))
+        }
+        _ => (codec_private.clone(), None),
+    };
     Ok(Some(WebmMediaTrackConfig {
         track_number,
         kind,
         codec_id,
         codec_private,
+        decoder_configuration,
+        nal_length_size,
         width,
         height,
         sample_rate,
@@ -2364,6 +2388,40 @@ mod tests {
         assert_eq!(track.width, Some(640));
         assert_eq!(track.height, Some(360));
         assert_eq!(track.default_duration_ns, Some(33_333_333));
+    }
+
+    #[test]
+    fn normalizes_matroska_avc_configuration_and_blocks_in_rust() {
+        let avcc = [1, 100, 0, 31, 0xff, 0xe1, 0, 2, 0x67, 0x64, 1, 0, 1, 0x68];
+        let mut entry = vec![
+            0xD7, 0x81, 0x01, // TrackNumber = 1
+            0x83, 0x81, 0x01, // TrackType = video
+            0x86, 0x8F, b'V', b'_', b'M', b'P', b'E', b'G', b'4', b'/', b'I', b'S', b'O', b'/',
+            b'A', b'V', b'C', 0x63, 0xA2, 0x8E,
+        ];
+        entry.extend_from_slice(&avcc);
+        let track = parse_media_track_entry(&entry).unwrap().unwrap();
+        assert_eq!(track.nal_length_size, Some(4));
+        assert_eq!(
+            track.decoder_configuration,
+            [0, 0, 0, 1, 0x67, 0x64, 0, 0, 0, 1, 0x68]
+        );
+
+        let mut demuxer = WebmMediaDemuxer::new();
+        demuxer.tracks.push(track);
+        demuxer
+            .emit_media_block(
+                &[0x81, 0, 0, 0x80, 0, 0, 0, 2, 0x65, 0x88],
+                true,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            demuxer.pending_events.pop_front(),
+            Some(WebmMediaDemuxEvent::Packet { data, .. })
+                if data == [0, 0, 0, 1, 0x65, 0x88]
+        ));
     }
 
     #[cfg(feature = "opus")]

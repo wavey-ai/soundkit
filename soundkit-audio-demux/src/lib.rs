@@ -911,14 +911,16 @@ fn parse_stsd_video(data: &[u8]) -> Option<Mp4VideoSampleEntry> {
                 codec_private = child_payload.to_vec();
                 match &child.name {
                     b"avcC" => {
-                        let (length_size, annex_b) = parse_avcc(child_payload)?;
-                        nal_length_size = Some(length_size);
-                        decoder_configuration = annex_b;
+                        let config =
+                            soundkit_video::parse_avc_decoder_configuration(child_payload)?;
+                        nal_length_size = Some(config.length_size);
+                        decoder_configuration = config.annex_b;
                     }
                     b"hvcC" => {
-                        let (length_size, annex_b) = parse_hvcc(child_payload)?;
-                        nal_length_size = Some(length_size);
-                        decoder_configuration = annex_b;
+                        let config =
+                            soundkit_video::parse_hevc_decoder_configuration(child_payload)?;
+                        nal_length_size = Some(config.length_size);
+                        decoder_configuration = config.annex_b;
                     }
                     _ => decoder_configuration = child_payload.to_vec(),
                 }
@@ -939,105 +941,8 @@ fn parse_stsd_video(data: &[u8]) -> Option<Mp4VideoSampleEntry> {
 }
 
 #[cfg(feature = "mp4")]
-fn parse_avcc(data: &[u8]) -> Result<(u8, Vec<u8>), String> {
-    if data.len() < 7 || data[0] != 1 {
-        return Err("invalid avcC decoder configuration".to_string());
-    }
-    let length_size = (data[4] & 0x03) + 1;
-    let mut pos = 6usize;
-    let mut output = Vec::new();
-    let sps_count = data[5] & 0x1f;
-    for _ in 0..sps_count {
-        append_length_prefixed_configuration_nal(data, &mut pos, &mut output)?;
-    }
-    let pps_count = *data
-        .get(pos)
-        .ok_or_else(|| "truncated avcC PPS count".to_string())?;
-    pos += 1;
-    for _ in 0..pps_count {
-        append_length_prefixed_configuration_nal(data, &mut pos, &mut output)?;
-    }
-    Ok((length_size, output))
-}
-
-#[cfg(feature = "mp4")]
-fn parse_hvcc(data: &[u8]) -> Result<(u8, Vec<u8>), String> {
-    if data.len() < 23 || data[0] != 1 {
-        return Err("invalid hvcC decoder configuration".to_string());
-    }
-    let length_size = (data[21] & 0x03) + 1;
-    let array_count = data[22] as usize;
-    let mut pos = 23usize;
-    let mut output = Vec::new();
-    for _ in 0..array_count {
-        pos = pos
-            .checked_add(1)
-            .ok_or_else(|| "hvcC array offset overflow".to_string())?;
-        let nal_count = be_u16(data, pos).ok_or_else(|| "truncated hvcC array".to_string())?;
-        pos += 2;
-        for _ in 0..nal_count {
-            append_length_prefixed_configuration_nal(data, &mut pos, &mut output)?;
-        }
-    }
-    Ok((length_size, output))
-}
-
-#[cfg(feature = "mp4")]
-fn append_length_prefixed_configuration_nal(
-    data: &[u8],
-    pos: &mut usize,
-    output: &mut Vec<u8>,
-) -> Result<(), String> {
-    let size =
-        be_u16(data, *pos).ok_or_else(|| "truncated codec configuration".to_string())? as usize;
-    *pos += 2;
-    let end = pos
-        .checked_add(size)
-        .ok_or_else(|| "codec configuration NAL size overflow".to_string())?;
-    let nal = data
-        .get(*pos..end)
-        .ok_or_else(|| "truncated codec configuration NAL".to_string())?;
-    output.extend_from_slice(&[0, 0, 0, 1]);
-    output.extend_from_slice(nal);
-    *pos = end;
-    Ok(())
-}
-
-#[cfg(feature = "mp4")]
 fn mp4_nals_to_annex_b(data: &[u8], length_size: u8) -> Result<Vec<u8>, String> {
-    if !(1..=4).contains(&length_size) {
-        return Err(format!("invalid MP4 NAL length size {length_size}"));
-    }
-    let mut output = Vec::with_capacity(data.len().saturating_add(16));
-    let mut pos = 0usize;
-    while pos < data.len() {
-        let header_end = pos
-            .checked_add(length_size as usize)
-            .ok_or_else(|| "MP4 NAL header overflow".to_string())?;
-        let header = data
-            .get(pos..header_end)
-            .ok_or_else(|| "truncated MP4 NAL length".to_string())?;
-        let mut size = 0usize;
-        for byte in header {
-            size = size
-                .checked_mul(256)
-                .and_then(|value| value.checked_add(*byte as usize))
-                .ok_or_else(|| "MP4 NAL size overflow".to_string())?;
-        }
-        if size == 0 {
-            return Err("MP4 sample contains an empty NAL unit".to_string());
-        }
-        let nal_end = header_end
-            .checked_add(size)
-            .ok_or_else(|| "MP4 NAL byte range overflow".to_string())?;
-        let nal = data
-            .get(header_end..nal_end)
-            .ok_or_else(|| "MP4 NAL extends past its sample".to_string())?;
-        output.extend_from_slice(&[0, 0, 0, 1]);
-        output.extend_from_slice(nal);
-        pos = nal_end;
-    }
-    Ok(output)
+    soundkit_video::length_prefixed_nals_to_annex_b(data, length_size)
 }
 
 #[cfg(feature = "mp4")]

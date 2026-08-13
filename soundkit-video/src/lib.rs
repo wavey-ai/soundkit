@@ -6,6 +6,123 @@
 
 const MAX_FRAME_PIXELS: usize = 7680 * 4320;
 
+/// Decoder-ready parameter sets and the source container's NAL length width.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NalDecoderConfiguration {
+    pub length_size: u8,
+    pub annex_b: Vec<u8>,
+}
+
+/// Parse ISO/IEC 14496-15 AVCDecoderConfigurationRecord (`avcC`) bytes.
+pub fn parse_avc_decoder_configuration(data: &[u8]) -> Result<NalDecoderConfiguration, String> {
+    if data.len() < 7 || data[0] != 1 {
+        return Err("invalid avcC decoder configuration".to_string());
+    }
+    let length_size = (data[4] & 0x03) + 1;
+    let mut pos = 6usize;
+    let mut annex_b = Vec::new();
+    let sps_count = data[5] & 0x1f;
+    for _ in 0..sps_count {
+        append_configuration_nal(data, &mut pos, &mut annex_b, "avcC")?;
+    }
+    let pps_count = *data
+        .get(pos)
+        .ok_or_else(|| "truncated avcC PPS count".to_string())?;
+    pos += 1;
+    for _ in 0..pps_count {
+        append_configuration_nal(data, &mut pos, &mut annex_b, "avcC")?;
+    }
+    Ok(NalDecoderConfiguration {
+        length_size,
+        annex_b,
+    })
+}
+
+/// Parse ISO/IEC 14496-15 HEVCDecoderConfigurationRecord (`hvcC`) bytes.
+pub fn parse_hevc_decoder_configuration(data: &[u8]) -> Result<NalDecoderConfiguration, String> {
+    if data.len() < 23 || data[0] != 1 {
+        return Err("invalid hvcC decoder configuration".to_string());
+    }
+    let length_size = (data[21] & 0x03) + 1;
+    let array_count = data[22] as usize;
+    let mut pos = 23usize;
+    let mut annex_b = Vec::new();
+    for _ in 0..array_count {
+        pos = pos
+            .checked_add(1)
+            .ok_or_else(|| "hvcC array offset overflow".to_string())?;
+        let nal_count = read_be_u16(data, pos).ok_or_else(|| "truncated hvcC array".to_string())?;
+        pos += 2;
+        for _ in 0..nal_count {
+            append_configuration_nal(data, &mut pos, &mut annex_b, "hvcC")?;
+        }
+    }
+    Ok(NalDecoderConfiguration {
+        length_size,
+        annex_b,
+    })
+}
+
+/// Convert one container sample containing length-prefixed NAL units to Annex B.
+pub fn length_prefixed_nals_to_annex_b(data: &[u8], length_size: u8) -> Result<Vec<u8>, String> {
+    if !(1..=4).contains(&length_size) {
+        return Err(format!("invalid NAL length size {length_size}"));
+    }
+    let mut output = Vec::with_capacity(data.len().saturating_add(16));
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let header_end = pos
+            .checked_add(length_size as usize)
+            .ok_or_else(|| "NAL header offset overflow".to_string())?;
+        let header = data
+            .get(pos..header_end)
+            .ok_or_else(|| "truncated NAL length".to_string())?;
+        let size = header.iter().try_fold(0usize, |size, byte| {
+            size.checked_mul(256)
+                .and_then(|value| value.checked_add(*byte as usize))
+                .ok_or_else(|| "NAL size overflow".to_string())
+        })?;
+        if size == 0 {
+            return Err("container sample contains an empty NAL unit".to_string());
+        }
+        let nal_end = header_end
+            .checked_add(size)
+            .ok_or_else(|| "NAL byte range overflow".to_string())?;
+        let nal = data
+            .get(header_end..nal_end)
+            .ok_or_else(|| "NAL extends past its container sample".to_string())?;
+        output.extend_from_slice(&[0, 0, 0, 1]);
+        output.extend_from_slice(nal);
+        pos = nal_end;
+    }
+    Ok(output)
+}
+
+fn append_configuration_nal(
+    data: &[u8],
+    pos: &mut usize,
+    output: &mut Vec<u8>,
+    format: &str,
+) -> Result<(), String> {
+    let size = read_be_u16(data, *pos)
+        .ok_or_else(|| format!("truncated {format} codec configuration"))? as usize;
+    *pos += 2;
+    let end = pos
+        .checked_add(size)
+        .ok_or_else(|| format!("{format} NAL size overflow"))?;
+    let nal = data
+        .get(*pos..end)
+        .ok_or_else(|| format!("truncated {format} configuration NAL"))?;
+    output.extend_from_slice(&[0, 0, 0, 1]);
+    output.extend_from_slice(nal);
+    *pos = end;
+    Ok(())
+}
+
+fn read_be_u16(data: &[u8], pos: usize) -> Option<u16> {
+    Some(u16::from_be_bytes([*data.get(pos)?, *data.get(pos + 1)?]))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VideoCodec {
     H264,
@@ -653,6 +770,31 @@ mod tests {
         assert_eq!(VideoCodec::parse("av01"), Some(VideoCodec::Av1));
         assert_eq!(VideoCodec::parse("apch"), Some(VideoCodec::ProRes));
         assert_eq!(VideoCodec::parse("AVdn"), Some(VideoCodec::DnxHd));
+    }
+
+    #[test]
+    fn parses_avcc_and_normalizes_length_prefixed_nals() {
+        let avcc = [1, 100, 0, 31, 0xff, 0xe1, 0, 2, 0x67, 0x64, 1, 0, 1, 0x68];
+        let config = parse_avc_decoder_configuration(&avcc).unwrap();
+        assert_eq!(config.length_size, 4);
+        assert_eq!(config.annex_b, [0, 0, 0, 1, 0x67, 0x64, 0, 0, 0, 1, 0x68]);
+        assert_eq!(
+            length_prefixed_nals_to_annex_b(&[0, 0, 0, 2, 0x65, 0x88], 4).unwrap(),
+            [0, 0, 0, 1, 0x65, 0x88]
+        );
+    }
+
+    #[test]
+    fn parses_hvcc_and_rejects_truncated_nals() {
+        let mut hvcc = vec![0; 23];
+        hvcc[0] = 1;
+        hvcc[21] = 3;
+        hvcc[22] = 1;
+        hvcc.extend_from_slice(&[0x20, 0, 1, 0, 2, 0x40, 0x01]);
+        let config = parse_hevc_decoder_configuration(&hvcc).unwrap();
+        assert_eq!(config.length_size, 4);
+        assert_eq!(config.annex_b, [0, 0, 0, 1, 0x40, 0x01]);
+        assert!(length_prefixed_nals_to_annex_b(&[0, 0, 0, 2, 0x65], 4).is_err());
     }
 
     #[test]

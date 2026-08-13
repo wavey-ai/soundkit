@@ -131,11 +131,19 @@ async function decodeWebmMediaFile(file, expected) {
     events.push(...demuxer.flush());
     for (const event of events) {
       if (event.type === "config") {
-        if (event.kind === "video") videoConfig = event;
+        if (event.kind === "video") {
+          videoConfig = event;
+          if (event.decoderConfiguration.byteLength > 0 &&
+              ["V_MPEG4/ISO/AVC", "V_MPEGH/ISO/HEVC"].includes(event.codecId)) {
+            frames.push(...decoder.decode(event.decoderConfiguration, Number.NaN, Number.NaN));
+          }
+        }
         if (event.kind === "audio") {
           audioConfig = event;
           if (event.codecId === "A_OPUS") {
             audioDecoder = new WasmOpusDecoder(event.channels, event.sampleRate, 5760);
+          } else if (event.codecId === "A_AAC") {
+            audioDecoder = new WasmAacLcDecoder(event.decoderConfiguration);
           }
         }
         continue;
@@ -144,7 +152,11 @@ async function decodeWebmMediaFile(file, expected) {
         frames.push(...decoder.decode(event.data, event.timestampNs, Number.NaN));
       } else {
         audioPackets += 1;
-        audioFrames += audioDecoder?.dec_frame_reuse(event.data) ?? 0;
+        if (audioConfig.codecId === "A_OPUS") {
+          audioFrames += audioDecoder?.dec_frame_reuse(event.data) ?? 0;
+        } else if (audioConfig.codecId === "A_AAC") {
+          audioFrames += audioDecoder.decodeInterleaved(event.data).length / audioConfig.channels;
+        }
       }
     }
     frames.push(...decoder.flush());
@@ -263,6 +275,24 @@ await decodeWebmMediaFile("av1-main-opus.webm", {
   codecId: "V_AV1",
   audioCodecId: "A_OPUS",
   audioFrames: 144960,
+  frames: 75,
+  bitDepth: 8,
+  chroma: "420",
+});
+await decodeWebmMediaFile("matroska-h264-aac.mkv", {
+  codec: "h264",
+  codecId: "V_MPEG4/ISO/AVC",
+  audioCodecId: "A_AAC",
+  audioFrames: 145408,
+  frames: 75,
+  bitDepth: 8,
+  chroma: "420",
+});
+await decodeWebmMediaFile("matroska-hevc-aac.mkv", {
+  codec: "hevc",
+  codecId: "V_MPEGH/ISO/HEVC",
+  audioCodecId: "A_AAC",
+  audioFrames: 145408,
   frames: 75,
   bitDepth: 8,
   chroma: "420",
