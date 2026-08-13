@@ -1364,6 +1364,117 @@ export class WasmVideoDecoder {
 if (Symbol.dispose) WasmVideoDecoder.prototype[Symbol.dispose] = WasmVideoDecoder.prototype.free;
 
 /**
+ * Incremental RIFF/RF64 PCM writer. The final frame count makes the first
+ * emitted header exact, so browser streams never need a complete WAV buffer.
+ */
+export class WasmWavEncoder {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmWavEncoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmwavencoder_free(ptr, 0);
+    }
+    /**
+     * @param {Float32Array} planar
+     * @param {number} frames_per_channel
+     * @returns {Uint8Array}
+     */
+    encodePlanarF32(planar, frames_per_channel) {
+        const ptr0 = passArrayF32ToWasm0(planar, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmwavencoder_encodePlanarF32(this.__wbg_ptr, ptr0, len0, frames_per_channel);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {Int16Array} planar
+     * @param {number} frames_per_channel
+     * @returns {Uint8Array}
+     */
+    encodePlanarI16(planar, frames_per_channel) {
+        const ptr0 = passArray16ToWasm0(planar, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmwavencoder_encodePlanarI16(this.__wbg_ptr, ptr0, len0, frames_per_channel);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {Int32Array} planar
+     * @param {number} frames_per_channel
+     * @returns {Uint8Array}
+     */
+    encodePlanarI32(planar, frames_per_channel) {
+        const ptr0 = passArray32ToWasm0(planar, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmwavencoder_encodePlanarI32(this.__wbg_ptr, ptr0, len0, frames_per_channel);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    finish() {
+        const ret = wasm.wasmwavencoder_finish(this.__wbg_ptr);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * @returns {number}
+     */
+    get framesWritten() {
+        const ret = wasm.wasmwavencoder_framesWritten(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    header() {
+        const ret = wasm.wasmwavencoder_header(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {boolean}
+     */
+    get isRf64() {
+        const ret = wasm.wasmwavencoder_isRf64(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * @param {number} sample_rate
+     * @param {number} channels
+     * @param {string} sample_format
+     * @param {number} total_frames
+     */
+    constructor(sample_rate, channels, sample_format, total_frames) {
+        const ptr0 = passStringToWasm0(sample_format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmwavencoder_new(sample_rate, channels, ptr0, len0, total_frames);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmWavEncoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {number}
+     */
+    get totalFrames() {
+        const ret = wasm.wasmwavencoder_totalFrames(this.__wbg_ptr);
+        return ret;
+    }
+}
+if (Symbol.dispose) WasmWavEncoder.prototype[Symbol.dispose] = WasmWavEncoder.prototype.free;
+
+/**
  * Streaming Rust WebM demuxer that emits both video and audio tracks.
  */
 export class WasmWebmMediaDemuxer {
@@ -1652,6 +1763,9 @@ const WasmSoundKitFrameDecoderFinalization = (typeof FinalizationRegistry === 'u
 const WasmVideoDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmvideodecoder_free(ptr, 1));
+const WasmWavEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmwavencoder_free(ptr, 1));
 const WasmWebmMediaDemuxerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmwebmmediademuxer_free(ptr, 1));
@@ -1705,6 +1819,14 @@ function getUint16ArrayMemory0() {
     return cachedUint16ArrayMemory0;
 }
 
+let cachedUint32ArrayMemory0 = null;
+function getUint32ArrayMemory0() {
+    if (cachedUint32ArrayMemory0 === null || cachedUint32ArrayMemory0.byteLength === 0) {
+        cachedUint32ArrayMemory0 = new Uint32Array(wasm.memory.buffer);
+    }
+    return cachedUint32ArrayMemory0;
+}
+
 let cachedUint8ArrayMemory0 = null;
 function getUint8ArrayMemory0() {
     if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.byteLength === 0) {
@@ -1725,6 +1847,13 @@ function handleError(f, args) {
 function passArray16ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 2, 2) >>> 0;
     getUint16ArrayMemory0().set(arg, ptr / 2);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArray32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getUint32ArrayMemory0().set(arg, ptr / 4);
     WASM_VECTOR_LEN = arg.length;
     return ptr;
 }
@@ -1823,6 +1952,7 @@ function __wbg_finalize_init(instance, module) {
     cachedFloat32ArrayMemory0 = null;
     cachedInt16ArrayMemory0 = null;
     cachedUint16ArrayMemory0 = null;
+    cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

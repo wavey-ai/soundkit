@@ -16,7 +16,7 @@ use soundkit::audio_types::AudioData;
 use soundkit::crypto::ChaCha20Poly1305PacketCipher;
 use soundkit::frame_stream::{SoundKitFrame, SoundKitFrameStream, SoundKitFrameStreamOptions};
 use soundkit::raw_pcm::{RawPcmFormat, RawPcmStreamProcessor};
-use soundkit::wav::WavStreamProcessor;
+use soundkit::wav::{WavSampleFormat, WavStreamEncoder, WavStreamProcessor};
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "detect")]
@@ -233,6 +233,13 @@ pub fn build_audio_group_associated_data(
 #[wasm_bindgen]
 pub struct WasmMusicDecoder {
     state: DecoderState,
+}
+
+/// Incremental RIFF/RF64 PCM writer. The final frame count makes the first
+/// emitted header exact, so browser streams never need a complete WAV buffer.
+#[wasm_bindgen]
+pub struct WasmWavEncoder {
+    encoder: WavStreamEncoder,
 }
 
 #[cfg(feature = "opus-debox")]
@@ -1210,6 +1217,114 @@ pub fn build_soundkit_frame_v2(
         .map_err(|error| js_error(format!("encode SoundKit v2 header failed: {error}")))?;
     output.extend_from_slice(payload);
     Ok(Uint8Array::from(output.as_slice()))
+}
+
+#[wasm_bindgen]
+impl WasmWavEncoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        sample_rate: u32,
+        channels: u16,
+        sample_format: &str,
+        total_frames: f64,
+    ) -> Result<WasmWavEncoder, JsValue> {
+        if !total_frames.is_finite()
+            || total_frames < 0.0
+            || total_frames.fract() != 0.0
+            || total_frames > 9_007_199_254_740_991.0
+        {
+            return Err(js_error(
+                "WAV totalFrames must be an exact non-negative JavaScript integer".to_string(),
+            ));
+        }
+        let format = match sample_format.trim().to_ascii_lowercase().as_str() {
+            "i16" | "s16" | "pcm16" => WavSampleFormat::I16,
+            "i32" | "s32" | "pcm32" => WavSampleFormat::I32,
+            "f32" | "float32" => WavSampleFormat::F32,
+            other => return Err(js_error(format!("unsupported WAV sample format: {other}"))),
+        };
+        let encoder =
+            WavStreamEncoder::new(format, sample_rate, channels as usize, total_frames as u64)
+                .map_err(js_error)?;
+        Ok(Self { encoder })
+    }
+
+    pub fn header(&self) -> Uint8Array {
+        Uint8Array::from(self.encoder.header())
+    }
+
+    #[wasm_bindgen(js_name = encodePlanarI16)]
+    pub fn encode_planar_i16(
+        &mut self,
+        planar: &[i16],
+        frames_per_channel: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        validate_wav_encode_chunk(planar.len(), std::mem::size_of::<i16>())?;
+        let output = self
+            .encoder
+            .push_planar_i16(planar, frames_per_channel as usize)
+            .map_err(js_error)?;
+        Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    #[wasm_bindgen(js_name = encodePlanarI32)]
+    pub fn encode_planar_i32(
+        &mut self,
+        planar: &[i32],
+        frames_per_channel: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        validate_wav_encode_chunk(planar.len(), std::mem::size_of::<i32>())?;
+        let output = self
+            .encoder
+            .push_planar_i32(planar, frames_per_channel as usize)
+            .map_err(js_error)?;
+        Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    #[wasm_bindgen(js_name = encodePlanarF32)]
+    pub fn encode_planar_f32(
+        &mut self,
+        planar: &[f32],
+        frames_per_channel: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        validate_wav_encode_chunk(planar.len(), std::mem::size_of::<f32>())?;
+        let output = self
+            .encoder
+            .push_planar_f32(planar, frames_per_channel as usize)
+            .map_err(js_error)?;
+        Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    pub fn finish(&mut self) -> Result<(), JsValue> {
+        self.encoder.finish().map_err(js_error)
+    }
+
+    #[wasm_bindgen(getter, js_name = framesWritten)]
+    pub fn frames_written(&self) -> f64 {
+        self.encoder.frames_written() as f64
+    }
+
+    #[wasm_bindgen(getter, js_name = totalFrames)]
+    pub fn total_frames(&self) -> f64 {
+        self.encoder.total_frames() as f64
+    }
+
+    #[wasm_bindgen(getter, js_name = isRf64)]
+    pub fn is_rf64(&self) -> bool {
+        self.encoder.is_rf64()
+    }
+}
+
+fn validate_wav_encode_chunk(samples: usize, bytes_per_sample: usize) -> Result<(), JsValue> {
+    let bytes = samples
+        .checked_mul(bytes_per_sample)
+        .ok_or_else(|| js_error("WAV encode input size overflows".to_string()))?;
+    if bytes > MAX_STREAM_INPUT_CHUNK_BYTES {
+        return Err(js_error(format!(
+            "WAV encode input chunk exceeds the {MAX_STREAM_INPUT_CHUNK_BYTES} byte streaming budget"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "flac")]

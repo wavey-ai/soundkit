@@ -283,6 +283,24 @@ export class WasmVideoDecoder {
 }
 
 /**
+ * Incremental RIFF/RF64 PCM writer. The final frame count makes the first
+ * emitted header exact, so browser streams never need a complete WAV buffer.
+ */
+export class WasmWavEncoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    encodePlanarF32(planar: Float32Array, frames_per_channel: number): Uint8Array;
+    encodePlanarI16(planar: Int16Array, frames_per_channel: number): Uint8Array;
+    encodePlanarI32(planar: Int32Array, frames_per_channel: number): Uint8Array;
+    finish(): void;
+    header(): Uint8Array;
+    constructor(sample_rate: number, channels: number, sample_format: string, total_frames: number);
+    readonly framesWritten: number;
+    readonly isRf64: boolean;
+    readonly totalFrames: number;
+}
+
+/**
  * Streaming Rust WebM demuxer that emits both video and audio tracks.
  */
 export class WasmWebmMediaDemuxer {
@@ -339,6 +357,7 @@ export interface InitOutput {
     readonly __wbg_wasmopusencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmsoundkitframedecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmvideodecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmwavencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmwebmmediademuxer_free: (a: number, b: number) => void;
     readonly buildAudioGroupAssociatedData: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => [number, number, number];
     readonly buildSoundKitFrameHeaderV2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
@@ -437,6 +456,15 @@ export interface InitOutput {
     readonly wasmvideodecoder_decodeStream: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmvideodecoder_flush: (a: number) => [number, number, number];
     readonly wasmvideodecoder_new: (a: number, b: number) => [number, number, number];
+    readonly wasmwavencoder_encodePlanarF32: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmwavencoder_encodePlanarI16: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmwavencoder_encodePlanarI32: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmwavencoder_finish: (a: number) => [number, number];
+    readonly wasmwavencoder_framesWritten: (a: number) => number;
+    readonly wasmwavencoder_header: (a: number) => any;
+    readonly wasmwavencoder_isRf64: (a: number) => number;
+    readonly wasmwavencoder_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly wasmwavencoder_totalFrames: (a: number) => number;
     readonly wasmwebmmediademuxer_flush: (a: number) => [number, number, number];
     readonly wasmwebmmediademuxer_new: () => number;
     readonly wasmwebmmediademuxer_push: (a: number, b: number, c: number) => [number, number, number];

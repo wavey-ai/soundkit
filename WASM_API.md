@@ -293,6 +293,25 @@ Current container coverage:
 | WebM/Matroska | Opus/Vorbis/other audio packets as raw blocks | Emits CodecPrivate in config. |
 | MPEG-TS/HLS `.ts` | AAC ADTS packets, AAC LATM payloads, MP3 payloads | Parses PAT/PMT/PES and chooses the first supported audio PID. |
 
+### Streaming WAV output
+
+`WasmWavEncoder` writes RIFF or RF64 without assembling a complete WAV in
+JavaScript or WASM memory. Supply the final frame count, emit `header()` once,
+then forward each bounded result from `encodePlanarI16`, `encodePlanarI32`, or
+`encodePlanarF32`. Call `finish()` to verify the exact frame count.
+
+```js
+const writer = new WasmWavEncoder(48_000, 2, "f32", totalFrames);
+await sink.write(writer.header());
+for (const { planar, frames } of pcmChunks) {
+  await sink.write(writer.encodePlanarF32(planar, frames));
+}
+writer.finish();
+```
+
+Each input call is limited to 4 MiB. Outputs beyond RIFF's size range receive
+an exact RF64 `ds64` header before the first PCM chunk.
+
 Use the seekable API below for each browser `File` or `Blob`. Do not send a
 complete MOV or MP4 source across the WASM boundary.
 

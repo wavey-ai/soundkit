@@ -1,6 +1,5 @@
 use crate::audio_types::{AudioData, PcmData};
 use frame_header::{EncodingFlag, Endianness};
-use std::io::Write;
 
 enum StreamWavState {
     Initial,
@@ -12,7 +11,7 @@ enum StreamWavState {
         payload: Vec<u8>,
     },
     ReadingData {
-        remaining: usize,
+        remaining: u64,
     },
     Finished,
 }
@@ -29,7 +28,9 @@ pub struct WavStreamProcessor {
     audio_format: EncodingFlag,
     endianness: Endianness, // New field to track endianness
     data_chunk_size: usize,
-    data_chunk_collected: usize,
+    data_chunk_collected: u64,
+    rf64: bool,
+    rf64_data_size: Option<u64>,
 }
 
 impl Default for WavStreamProcessor {
@@ -50,6 +51,8 @@ impl WavStreamProcessor {
             endianness: Endianness::LittleEndian, // Default to little-endian
             data_chunk_size: 0,
             data_chunk_collected: 0,
+            rf64: false,
+            rf64_data_size: None,
         }
     }
 
@@ -94,7 +97,10 @@ impl WavStreamProcessor {
                         return Ok(None);
                     }
 
-                    if &self.buffer[..4] != b"RIFF" || &self.buffer[8..12] != b"WAVE" {
+                    self.rf64 = &self.buffer[..4] == b"RF64";
+                    if (!self.rf64 && &self.buffer[..4] != b"RIFF")
+                        || &self.buffer[8..12] != b"WAVE"
+                    {
                         return Err("Not a WAV file".to_string());
                     }
 
@@ -122,15 +128,24 @@ impl WavStreamProcessor {
                         {
                             return Err("WAV data appears before a valid fmt chunk".to_string());
                         }
-                        self.data_chunk_size = size;
+                        let data_size = if self.rf64 && size == u32::MAX as usize {
+                            self.rf64_data_size.ok_or_else(|| {
+                                "RF64 data chunk appears before a valid ds64 chunk".to_string()
+                            })?
+                        } else {
+                            size as u64
+                        };
+                        self.data_chunk_size = usize::try_from(data_size).unwrap_or(usize::MAX);
                         self.data_chunk_collected = 0;
-                        self.state = if size == 0 {
+                        self.state = if data_size == 0 {
                             StreamWavState::Finished
                         } else {
-                            StreamWavState::ReadingData { remaining: size }
+                            StreamWavState::ReadingData {
+                                remaining: data_size,
+                            }
                         };
                     } else {
-                        if &kind == b"fmt " && size > MAX_WAV_FMT_BYTES {
+                        if (&kind == b"fmt " || &kind == b"ds64") && size > MAX_WAV_FMT_BYTES {
                             return Err(format!(
                                 "WAV fmt chunk exceeds the {MAX_WAV_FMT_BYTES} byte metadata budget"
                             ));
@@ -139,7 +154,11 @@ impl WavStreamProcessor {
                             kind,
                             remaining: size,
                             padding: size & 1 != 0,
-                            payload: Vec::with_capacity(if &kind == b"fmt " { size } else { 0 }),
+                            payload: Vec::with_capacity(if &kind == b"fmt " || &kind == b"ds64" {
+                                size
+                            } else {
+                                0
+                            }),
                         };
                     }
                 }
@@ -150,7 +169,7 @@ impl WavStreamProcessor {
                     mut payload,
                 } => {
                     let consumed = remaining.min(self.buffer.len());
-                    if &kind == b"fmt " {
+                    if &kind == b"fmt " || &kind == b"ds64" {
                         payload.extend_from_slice(&self.buffer[..consumed]);
                     }
                     self.buffer.drain(..consumed);
@@ -179,6 +198,8 @@ impl WavStreamProcessor {
                     }
                     if &kind == b"fmt " {
                         self.install_fmt(&payload)?;
+                    } else if &kind == b"ds64" {
+                        self.install_ds64(&payload)?;
                     }
                     debug_assert!(!padding);
                     self.state = StreamWavState::ChunkHeader;
@@ -190,18 +211,18 @@ impl WavStreamProcessor {
                         return Err("WAV fmt has zero bytes per frame".to_string());
                     }
 
-                    let available = remaining.min(self.buffer.len());
+                    let available = remaining.min(self.buffer.len() as u64) as usize;
                     let len = (available / bytes_per_frame) * bytes_per_frame;
                     if len == 0 {
-                        if self.buffer.len() >= remaining && remaining > 0 {
+                        if (self.buffer.len() as u64) >= remaining && remaining > 0 {
                             return Err("WAV data chunk is not frame-aligned".to_string());
                         }
                         self.state = StreamWavState::ReadingData { remaining };
                         return Ok(None); // Wait for more data.
                     }
                     let data_chunk: Vec<u8> = self.buffer.drain(..len).collect();
-                    remaining -= len;
-                    self.data_chunk_collected += len;
+                    remaining -= len as u64;
+                    self.data_chunk_collected += len as u64;
                     self.state = if remaining == 0 {
                         StreamWavState::Finished
                     } else {
@@ -258,77 +279,400 @@ impl WavStreamProcessor {
         self.endianness = Endianness::LittleEndian;
         Ok(())
     }
+
+    fn install_ds64(&mut self, payload: &[u8]) -> Result<(), String> {
+        if !self.rf64 {
+            return Err("ds64 chunk requires an RF64 header".to_string());
+        }
+        if payload.len() < 28 {
+            return Err("RF64 ds64 chunk is truncated".to_string());
+        }
+        let data_size = u64::from_le_bytes(
+            payload[8..16]
+                .try_into()
+                .map_err(|_| "RF64 data size is truncated".to_string())?,
+        );
+        let table_length = u32::from_le_bytes(
+            payload[24..28]
+                .try_into()
+                .map_err(|_| "RF64 table length is truncated".to_string())?,
+        ) as usize;
+        let required = 28usize
+            .checked_add(
+                table_length
+                    .checked_mul(12)
+                    .ok_or_else(|| "RF64 ds64 table length overflows".to_string())?,
+            )
+            .ok_or_else(|| "RF64 ds64 size overflows".to_string())?;
+        if payload.len() < required {
+            return Err("RF64 ds64 table is truncated".to_string());
+        }
+        self.rf64_data_size = Some(data_size);
+        Ok(())
+    }
 }
 
-pub fn generate_wav_buffer(pcm_data: &PcmData, sampling_rate: u32) -> Result<Vec<u8>, String> {
-    let mut cursor = Vec::new();
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WavSampleFormat {
+    I16,
+    I32,
+    F32,
+}
 
-    let bits_per_sample = match pcm_data {
-        PcmData::I16(_) => 16,
-        PcmData::I32(_) => 32,
-        PcmData::F32(_) => 32,
-    };
+impl WavSampleFormat {
+    fn bits_per_sample(self) -> u16 {
+        match self {
+            Self::I16 => 16,
+            Self::I32 | Self::F32 => 32,
+        }
+    }
 
-    let channel_count = match pcm_data {
-        PcmData::I16(data) => data.len(),
-        PcmData::I32(data) => data.len(),
-        PcmData::F32(data) => data.len(),
-    };
+    fn format_tag(self) -> u16 {
+        match self {
+            Self::I16 | Self::I32 => 1,
+            Self::F32 => 3,
+        }
+    }
+}
 
-    let sample_count = match pcm_data {
-        PcmData::I16(data) => data[0].len(),
-        PcmData::I32(data) => data[0].len(),
-        PcmData::F32(data) => data[0].len(),
-    };
+/// Incremental PCM-to-WAV encoder with an exact RIFF or RF64 header.
+///
+/// The caller supplies the final frame count, writes `header()` once, then
+/// forwards each bounded result from a `push_*` call. No complete PCM or WAV
+/// allocation is required. Files beyond RIFF's 4 GiB limit use RF64.
+pub struct WavStreamEncoder {
+    format: WavSampleFormat,
+    sampling_rate: u32,
+    channel_count: usize,
+    total_frames: u64,
+    frames_written: u64,
+    data_bytes: u64,
+    header: Vec<u8>,
+    finished: bool,
+}
 
-    let audio_format = match pcm_data {
-        PcmData::I16(_) => 1u16, // PCM
-        PcmData::I32(_) => 1u16, // PCM
-        PcmData::F32(_) => 3u16, // IEEE float
-    };
+impl WavStreamEncoder {
+    pub fn new(
+        format: WavSampleFormat,
+        sampling_rate: u32,
+        channel_count: usize,
+        total_frames: u64,
+    ) -> Result<Self, String> {
+        if sampling_rate == 0 {
+            return Err("WAV sampling rate must be greater than zero".to_string());
+        }
+        if channel_count == 0 || channel_count > u16::MAX as usize {
+            return Err("WAV channel count is outside the RIFF field range".to_string());
+        }
+        let bytes_per_sample = u64::from(format.bits_per_sample() / 8);
+        let block_align = bytes_per_sample
+            .checked_mul(channel_count as u64)
+            .ok_or_else(|| "WAV block alignment overflows".to_string())?;
+        if block_align > u16::MAX as u64 {
+            return Err("WAV block alignment exceeds the RIFF field range".to_string());
+        }
+        let byte_rate = u64::from(sampling_rate)
+            .checked_mul(block_align)
+            .ok_or_else(|| "WAV byte rate overflows".to_string())?;
+        if byte_rate > u32::MAX as u64 {
+            return Err("WAV byte rate exceeds the RIFF field range".to_string());
+        }
+        let data_bytes = total_frames
+            .checked_mul(block_align)
+            .ok_or_else(|| "WAV data size overflows".to_string())?;
+        let header = wav_header(
+            format,
+            sampling_rate,
+            channel_count as u16,
+            total_frames,
+            data_bytes,
+            block_align as u16,
+            byte_rate as u32,
+        )?;
+        Ok(Self {
+            format,
+            sampling_rate,
+            channel_count,
+            total_frames,
+            frames_written: 0,
+            data_bytes,
+            header,
+            finished: false,
+        })
+    }
 
-    let bytes_per_sample = (bits_per_sample / 8) as usize;
-    let byte_rate = sampling_rate as usize * bytes_per_sample * channel_count;
-    let block_align = bytes_per_sample * channel_count;
-    let sub_chunk_2_size = sample_count * bytes_per_sample * channel_count;
+    pub fn header(&self) -> &[u8] {
+        &self.header
+    }
 
-    cursor.write_all(b"RIFF").unwrap();
-    cursor
-        .write_all(&(36 + sub_chunk_2_size as u32).to_le_bytes())
-        .unwrap();
-    cursor.write_all(b"WAVE").unwrap();
+    pub fn is_rf64(&self) -> bool {
+        self.header.starts_with(b"RF64")
+    }
 
-    cursor.write_all(b"fmt ").unwrap();
-    cursor.write_all(&16u32.to_le_bytes()).unwrap(); // fmt chunk size
-    cursor.write_all(&audio_format.to_le_bytes()).unwrap(); // PCM or IEEE float
-    cursor
-        .write_all(&(channel_count as u16).to_le_bytes())
-        .unwrap(); // Number of channels
-    cursor.write_all(&sampling_rate.to_le_bytes()).unwrap(); // Sample rate
-    cursor.write_all(&(byte_rate as u32).to_le_bytes()).unwrap(); // Byte rate
-    cursor
-        .write_all(&(block_align as u16).to_le_bytes())
-        .unwrap(); // Block align
-    cursor
-        .write_all(&(bits_per_sample as u16).to_le_bytes())
-        .unwrap(); // Bits per sample
+    pub fn frames_written(&self) -> u64 {
+        self.frames_written
+    }
 
-    cursor.write_all(b"data").unwrap();
-    cursor
-        .write_all(&(sub_chunk_2_size as u32).to_le_bytes())
-        .unwrap();
+    pub fn total_frames(&self) -> u64 {
+        self.total_frames
+    }
 
-    for i in 0..sample_count {
-        for ch in 0..channel_count {
-            match pcm_data {
-                PcmData::I16(data) => cursor.write_all(&data[ch][i].to_le_bytes()).unwrap(),
-                PcmData::I32(data) => cursor.write_all(&data[ch][i].to_le_bytes()).unwrap(),
-                PcmData::F32(data) => cursor.write_all(&f32::to_le_bytes(data[ch][i])).unwrap(),
+    pub fn data_bytes(&self) -> u64 {
+        self.data_bytes
+    }
+
+    pub fn sampling_rate(&self) -> u32 {
+        self.sampling_rate
+    }
+
+    pub fn channel_count(&self) -> usize {
+        self.channel_count
+    }
+
+    pub fn push_planar_i16(
+        &mut self,
+        planar: &[i16],
+        frames_per_channel: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.require_format(WavSampleFormat::I16)?;
+        self.reserve_chunk(planar.len(), frames_per_channel)?;
+        let mut output = Vec::with_capacity(planar.len() * 2);
+        for frame in 0..frames_per_channel {
+            for channel in 0..self.channel_count {
+                output
+                    .extend_from_slice(&planar[channel * frames_per_channel + frame].to_le_bytes());
+            }
+        }
+        self.frames_written += frames_per_channel as u64;
+        Ok(output)
+    }
+
+    pub fn push_planar_i32(
+        &mut self,
+        planar: &[i32],
+        frames_per_channel: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.require_format(WavSampleFormat::I32)?;
+        self.reserve_chunk(planar.len(), frames_per_channel)?;
+        let mut output = Vec::with_capacity(planar.len() * 4);
+        for frame in 0..frames_per_channel {
+            for channel in 0..self.channel_count {
+                output
+                    .extend_from_slice(&planar[channel * frames_per_channel + frame].to_le_bytes());
+            }
+        }
+        self.frames_written += frames_per_channel as u64;
+        Ok(output)
+    }
+
+    pub fn push_planar_f32(
+        &mut self,
+        planar: &[f32],
+        frames_per_channel: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.require_format(WavSampleFormat::F32)?;
+        self.reserve_chunk(planar.len(), frames_per_channel)?;
+        let mut output = Vec::with_capacity(planar.len() * 4);
+        for frame in 0..frames_per_channel {
+            for channel in 0..self.channel_count {
+                output
+                    .extend_from_slice(&planar[channel * frames_per_channel + frame].to_le_bytes());
+            }
+        }
+        self.frames_written += frames_per_channel as u64;
+        Ok(output)
+    }
+
+    pub fn push(&mut self, pcm_data: &PcmData) -> Result<Vec<u8>, String> {
+        match pcm_data {
+            PcmData::I16(channels) => {
+                let frames = validate_planar_channels(channels, self.channel_count)?;
+                self.require_format(WavSampleFormat::I16)?;
+                self.reserve_chunk(frames * self.channel_count, frames)?;
+                let mut output = Vec::with_capacity(frames * self.channel_count * 2);
+                for frame in 0..frames {
+                    for channel in channels {
+                        output.extend_from_slice(&channel[frame].to_le_bytes());
+                    }
+                }
+                self.frames_written += frames as u64;
+                Ok(output)
+            }
+            PcmData::I32(channels) => {
+                let frames = validate_planar_channels(channels, self.channel_count)?;
+                self.require_format(WavSampleFormat::I32)?;
+                self.reserve_chunk(frames * self.channel_count, frames)?;
+                let mut output = Vec::with_capacity(frames * self.channel_count * 4);
+                for frame in 0..frames {
+                    for channel in channels {
+                        output.extend_from_slice(&channel[frame].to_le_bytes());
+                    }
+                }
+                self.frames_written += frames as u64;
+                Ok(output)
+            }
+            PcmData::F32(channels) => {
+                let frames = validate_planar_channels(channels, self.channel_count)?;
+                self.require_format(WavSampleFormat::F32)?;
+                self.reserve_chunk(frames * self.channel_count, frames)?;
+                let mut output = Vec::with_capacity(frames * self.channel_count * 4);
+                for frame in 0..frames {
+                    for channel in channels {
+                        output.extend_from_slice(&channel[frame].to_le_bytes());
+                    }
+                }
+                self.frames_written += frames as u64;
+                Ok(output)
             }
         }
     }
 
-    Ok(cursor)
+    pub fn finish(&mut self) -> Result<(), String> {
+        if self.finished {
+            return Err("WAV encoder is already finished".to_string());
+        }
+        if self.frames_written != self.total_frames {
+            return Err(format!(
+                "WAV encoder expected {} frames but received {}",
+                self.total_frames, self.frames_written
+            ));
+        }
+        self.finished = true;
+        Ok(())
+    }
+
+    fn require_format(&self, format: WavSampleFormat) -> Result<(), String> {
+        if self.finished {
+            return Err("WAV encoder is already finished".to_string());
+        }
+        if self.format != format {
+            return Err(format!(
+                "WAV encoder expects {:?} PCM, not {:?}",
+                self.format, format
+            ));
+        }
+        Ok(())
+    }
+
+    fn reserve_chunk(&self, sample_count: usize, frames_per_channel: usize) -> Result<(), String> {
+        let expected = self
+            .channel_count
+            .checked_mul(frames_per_channel)
+            .ok_or_else(|| "WAV input chunk geometry overflows".to_string())?;
+        if sample_count != expected {
+            return Err(format!(
+                "WAV planar chunk needs {expected} samples, got {sample_count}"
+            ));
+        }
+        let end = self
+            .frames_written
+            .checked_add(frames_per_channel as u64)
+            .ok_or_else(|| "WAV frame count overflows".to_string())?;
+        if end > self.total_frames {
+            return Err(format!(
+                "WAV chunk ends at frame {end}, beyond the declared {} frames",
+                self.total_frames
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_planar_channels<T>(
+    channels: &[Vec<T>],
+    expected_channels: usize,
+) -> Result<usize, String> {
+    if channels.len() != expected_channels {
+        return Err(format!(
+            "WAV encoder expects {expected_channels} channels, got {}",
+            channels.len()
+        ));
+    }
+    let frames = channels.first().map_or(0, Vec::len);
+    if channels.iter().any(|channel| channel.len() != frames) {
+        return Err("WAV planar channels have different frame counts".to_string());
+    }
+    Ok(frames)
+}
+
+fn wav_header(
+    format: WavSampleFormat,
+    sampling_rate: u32,
+    channel_count: u16,
+    total_frames: u64,
+    data_bytes: u64,
+    block_align: u16,
+    byte_rate: u32,
+) -> Result<Vec<u8>, String> {
+    let classic_riff_size = 36u64
+        .checked_add(data_bytes)
+        .ok_or_else(|| "WAV RIFF size overflows".to_string())?;
+    let use_rf64 = classic_riff_size > u32::MAX as u64;
+    let mut output = Vec::with_capacity(if use_rf64 { 80 } else { 44 });
+    if use_rf64 {
+        let riff_size = 72u64
+            .checked_add(data_bytes)
+            .ok_or_else(|| "RF64 RIFF size overflows".to_string())?;
+        output.extend_from_slice(b"RF64");
+        output.extend_from_slice(&u32::MAX.to_le_bytes());
+        output.extend_from_slice(b"WAVE");
+        output.extend_from_slice(b"ds64");
+        output.extend_from_slice(&28u32.to_le_bytes());
+        output.extend_from_slice(&riff_size.to_le_bytes());
+        output.extend_from_slice(&data_bytes.to_le_bytes());
+        output.extend_from_slice(&total_frames.to_le_bytes());
+        output.extend_from_slice(&0u32.to_le_bytes());
+    } else {
+        output.extend_from_slice(b"RIFF");
+        output.extend_from_slice(&(classic_riff_size as u32).to_le_bytes());
+        output.extend_from_slice(b"WAVE");
+    }
+    output.extend_from_slice(b"fmt ");
+    output.extend_from_slice(&16u32.to_le_bytes());
+    output.extend_from_slice(&format.format_tag().to_le_bytes());
+    output.extend_from_slice(&channel_count.to_le_bytes());
+    output.extend_from_slice(&sampling_rate.to_le_bytes());
+    output.extend_from_slice(&byte_rate.to_le_bytes());
+    output.extend_from_slice(&block_align.to_le_bytes());
+    output.extend_from_slice(&format.bits_per_sample().to_le_bytes());
+    output.extend_from_slice(b"data");
+    output.extend_from_slice(
+        &if use_rf64 {
+            u32::MAX
+        } else {
+            data_bytes as u32
+        }
+        .to_le_bytes(),
+    );
+    Ok(output)
+}
+
+/// Convenience wrapper for callers that already own complete planar PCM.
+/// Streaming callers should use `WavStreamEncoder` directly.
+pub fn generate_wav_buffer(pcm_data: &PcmData, sampling_rate: u32) -> Result<Vec<u8>, String> {
+    let (format, channel_count, frame_count) = match pcm_data {
+        PcmData::I16(channels) => (
+            WavSampleFormat::I16,
+            channels.len(),
+            channels.first().map_or(0, Vec::len),
+        ),
+        PcmData::I32(channels) => (
+            WavSampleFormat::I32,
+            channels.len(),
+            channels.first().map_or(0, Vec::len),
+        ),
+        PcmData::F32(channels) => (
+            WavSampleFormat::F32,
+            channels.len(),
+            channels.first().map_or(0, Vec::len),
+        ),
+    };
+    let mut encoder =
+        WavStreamEncoder::new(format, sampling_rate, channel_count, frame_count as u64)?;
+    let mut output = encoder.header().to_vec();
+    output.extend_from_slice(&encoder.push(pcm_data)?);
+    encoder.finish()?;
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -444,5 +788,98 @@ mod tests {
             processor.add(&bytes[..split]).unwrap();
             processor.add(&bytes[split..]).unwrap();
         }
+    }
+
+    #[test]
+    fn wav_encoder_streams_exact_chunks_without_changing_output() {
+        let complete = PcmData::I16(vec![vec![1, 2, 3, 4], vec![-1, -2, -3, -4]]);
+        let expected = generate_wav_buffer(&complete, 48_000).unwrap();
+
+        let mut encoder = WavStreamEncoder::new(WavSampleFormat::I16, 48_000, 2, 4).unwrap();
+        let mut streamed = encoder.header().to_vec();
+        streamed.extend_from_slice(&encoder.push_planar_i16(&[1, 2, -1, -2], 2).unwrap());
+        streamed.extend_from_slice(&encoder.push_planar_i16(&[3, 4, -3, -4], 2).unwrap());
+        encoder.finish().unwrap();
+
+        assert_eq!(streamed, expected);
+        assert_eq!(encoder.frames_written(), 4);
+        assert!(!encoder.is_rf64());
+    }
+
+    #[test]
+    fn wav_encoder_uses_exact_rf64_sizes_beyond_four_gibibytes() {
+        let frames = (u32::MAX as u64 / 8) + 1;
+        let encoder = WavStreamEncoder::new(WavSampleFormat::F32, 48_000, 2, frames).unwrap();
+        let header = encoder.header();
+        assert_eq!(&header[..4], b"RF64");
+        assert_eq!(header.len(), 80);
+        assert_eq!(
+            u32::from_le_bytes(header[4..8].try_into().unwrap()),
+            u32::MAX
+        );
+        assert_eq!(
+            u64::from_le_bytes(header[28..36].try_into().unwrap()),
+            frames * 8
+        );
+        assert_eq!(
+            u64::from_le_bytes(header[36..44].try_into().unwrap()),
+            frames
+        );
+        assert_eq!(&header[72..76], b"data");
+        assert_eq!(
+            u32::from_le_bytes(header[76..80].try_into().unwrap()),
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn wav_decoder_streams_rf64_data() {
+        let samples = [123i16, -456i16];
+        let data_bytes = (samples.len() * 2) as u64;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RF64");
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEds64");
+        bytes.extend_from_slice(&28u32.to_le_bytes());
+        bytes.extend_from_slice(&(72 + data_bytes).to_le_bytes());
+        bytes.extend_from_slice(&data_bytes.to_le_bytes());
+        bytes.extend_from_slice(&(samples.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&48_000u32.to_le_bytes());
+        bytes.extend_from_slice(&96_000u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        let mut decoder = WavStreamProcessor::new();
+        let mut decoded = Vec::new();
+        for chunk in bytes.chunks(7) {
+            if let Some(frame) = decoder.add(chunk).unwrap() {
+                decoded.extend_from_slice(frame.data());
+            }
+        }
+        assert_eq!(
+            decoded,
+            [123i16.to_le_bytes(), (-456i16).to_le_bytes()].concat()
+        );
+    }
+
+    #[test]
+    fn wav_encoder_rejects_geometry_and_incomplete_streams() {
+        let mut encoder = WavStreamEncoder::new(WavSampleFormat::I16, 48_000, 2, 2).unwrap();
+        assert!(encoder.push_planar_i16(&[1, 2, 3], 2).is_err());
+        assert!(encoder.push_planar_f32(&[0.0; 4], 2).is_err());
+        assert!(encoder.finish().is_err());
+        encoder.push_planar_i16(&[1, 2, 3, 4], 2).unwrap();
+        encoder.finish().unwrap();
+        assert!(encoder.push_planar_i16(&[], 0).is_err());
     }
 }

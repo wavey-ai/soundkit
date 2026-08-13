@@ -120,6 +120,7 @@ make media-fuzz
 - WebM and fragmented MP4 emit complete packets before their enclosing media extent ends.
 - Audio autodetection retains at most 64 KiB and forwards later bytes to the selected decoder.
 - WAV, AIFF, FLAC, Ogg, MP3, AAC, AC-3, Opus, raw PCM, and MPEG-TS release consumed input incrementally.
+- WAV output emits an exact RIFF or RF64 header followed by bounded PCM chunks.
 - Browser push calls reject chunks larger than 4 MiB so JavaScript cannot force an unbounded WASM copy.
 - A dependency-specific release profile keeps `vp9dec` at optimization level 2 because LLVM 21 crashes at level 3 on `wasm32`.
 - The vendored `rusty_av1d` patch fixes high-bit-depth plane access and one malformed-input cleanup panic.

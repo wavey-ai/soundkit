@@ -10,7 +10,7 @@ resampling, codec wrappers, and browser-safe streaming.
 | Area | Crates / APIs | Notes |
 | --- | --- | --- |
 | PCM utilities | `soundkit::audio_bytes`, `soundkit::raw_pcm` | Sample-width conversion, endian conversion, interleave/deinterleave, headerless PCM streams. |
-| WAV | `soundkit::wav` | Incremental RIFF/WAVE PCM parser plus `generate_wav_buffer`. |
+| WAV / RF64 | `soundkit::wav` | Incremental PCM parser and bounded `WavStreamEncoder`; `generate_wav_buffer` remains a convenience wrapper. |
 | Resampling | `soundkit::downsample_audio`, `soundkit-rubberband` | `rubato` sinc resampling and Rubber Band wrapper. |
 | Codecs | `soundkit-*` codec crates | Small wrappers around native Rust decoders where available, with C FFI only where useful or required. |
 | Decode pipeline | `soundkit-decoder` | Ring-buffered worker thread, `access-unit` autodetection, explicit telephony paths, optional output conversion. |
@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Format | Encoder | Streaming-friendly | Notes |
 | --- | --- | --- | --- |
 | Raw PCM | Core byte helpers | Yes | Headerless PCM is just framed bytes. |
-| WAV | `generate_wav_buffer` | No | Writes a complete WAV buffer. |
+| WAV / RF64 | `WavStreamEncoder` / `WasmWavEncoder` | Yes | Emits an exact header, then bounded interleaved PCM chunks. Uses RF64 beyond 4 GiB. |
 | MP3 | `mp3lame` | Yes | Feature-gated encoder path. |
 | AAC ADTS | `fdk-aac` | Yes | ADTS output. |
 | FLAC | `libFLAC` | Yes | Reference encoder. |

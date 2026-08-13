@@ -12,6 +12,7 @@ import init, {
   WasmMxfMediaDemuxer,
   WasmOpusDecoder,
   WasmVideoDecoder,
+  WasmWavEncoder,
   WasmWebmMediaDemuxer,
   inspectMp4TopLevelBox,
   inspectCafChunk,
@@ -25,6 +26,31 @@ import {
 
 const fixtureRoot = resolve(process.argv[2] ?? "testdata/video-compat/never-final");
 await init({ module_or_path: await readFile(new URL("../soundkit-wasm/pkg/soundkit_wasm_bg.wasm", import.meta.url)) });
+
+function assertStreamingWavOutput() {
+  const encoder = new WasmWavEncoder(48_000, 2, "i16", 2);
+  try {
+    const header = encoder.header();
+    assert.equal(new TextDecoder().decode(header.subarray(0, 4)), "RIFF");
+    const pcm = encoder.encodePlanarI16(new Int16Array([1, 2, -1, -2]), 2);
+    assert.deepEqual(Array.from(pcm), [1, 0, 255, 255, 2, 0, 254, 255]);
+    encoder.finish();
+    assert.equal(encoder.framesWritten, 2);
+  } finally {
+    encoder.free();
+  }
+
+  const rf64 = new WasmWavEncoder(48_000, 2, "f32", 536_870_912);
+  try {
+    assert.equal(new TextDecoder().decode(rf64.header().subarray(0, 4)), "RF64");
+    assert.equal(rf64.isRf64, true);
+  } finally {
+    rf64.free();
+  }
+  console.log("WAV: bounded RIFF chunks and exact RF64 header");
+}
+
+assertStreamingWavOutput();
 
 // Test only: confirm that Rust-owned, Rust-validated frames retain their values
 // after WASM serialization. This is not production media validation.
