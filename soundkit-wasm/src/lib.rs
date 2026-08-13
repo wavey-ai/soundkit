@@ -45,6 +45,8 @@ use soundkit_ogg_opus::OggOpusDecoder;
 use soundkit_ogg_opus::{OggOpusDemuxEvent, OggOpusDemuxer};
 #[cfg(feature = "opus")]
 use soundkit_opus::{OpusDecoder, OpusEncoder, OpusStreamDecoder};
+#[cfg(feature = "video")]
+use soundkit_video::{VideoDecoder, VideoFrame};
 #[cfg(feature = "vorbis")]
 use soundkit_vorbis::VorbisDecoder;
 #[cfg(feature = "webm")]
@@ -241,6 +243,53 @@ pub struct WasmAudioTrackDemuxer {
     demuxer: AudioTrackDemuxer,
 }
 
+/// Pure-Rust video access-unit decoder shared by browser and native imports.
+#[cfg(feature = "video")]
+#[wasm_bindgen]
+pub struct WasmVideoDecoder {
+    decoder: VideoDecoder,
+}
+
+#[cfg(feature = "video")]
+#[wasm_bindgen]
+impl WasmVideoDecoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(codec: &str) -> Result<WasmVideoDecoder, JsValue> {
+        let codec = soundkit_video::VideoCodec::parse(codec)
+            .ok_or_else(|| js_error(format!("unsupported video codec: {codec}")))?;
+        let decoder = VideoDecoder::new(codec).map_err(js_error)?;
+        Ok(Self { decoder })
+    }
+
+    /// Decode one complete codec access unit. Non-finite timestamps mean
+    /// unknown and avoid JavaScript BigInt conversion at this boundary.
+    pub fn decode(
+        &mut self,
+        access_unit: &[u8],
+        pts: f64,
+        duration: f64,
+    ) -> Result<Array, JsValue> {
+        let pts = finite_i64(pts);
+        let duration = finite_u64(duration);
+        export_video_frames(
+            self.decoder
+                .decode(access_unit, pts, duration)
+                .map_err(js_error)?,
+        )
+    }
+
+    /// Decode a complete Annex-B elementary stream. This is intended for
+    /// import validation; normal playback should use access-unit decoding.
+    #[wasm_bindgen(js_name = decodeStream)]
+    pub fn decode_stream(&mut self, stream: &[u8]) -> Result<Array, JsValue> {
+        export_video_frames(self.decoder.decode_stream(stream).map_err(js_error)?)
+    }
+
+    pub fn flush(&mut self) -> Result<Array, JsValue> {
+        export_video_frames(self.decoder.flush().map_err(js_error)?)
+    }
+}
+
 #[wasm_bindgen]
 pub struct WasmSoundKitFrameDecoder {
     stream: SoundKitFrameStream,
@@ -252,6 +301,7 @@ pub struct WasmFlacEncoder {
     encoder: FlacEncoder,
     channels: u8,
     bits_per_sample: u32,
+    frame_size: u32,
 }
 
 // Opus encoder backed by soundkit-opus -> libopus-rs (Rust), so both the player
@@ -781,6 +831,7 @@ impl WasmFlacEncoder {
             encoder,
             channels,
             bits_per_sample,
+            frame_size,
         })
     }
 
@@ -815,6 +866,27 @@ impl WasmFlacEncoder {
             .map_err(js_error)?;
         output.truncate(encoded);
         Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    /// Signal EOF and drain the final FLAC packet. OxideAV deliberately
+    /// buffers a short final block until this call.
+    #[wasm_bindgen(js_name = finish)]
+    pub fn finish(&mut self) -> Result<Uint8Array, JsValue> {
+        let capacity = (self.frame_size as usize)
+            .saturating_mul(self.channels as usize)
+            .saturating_mul(8)
+            .saturating_add(4096);
+        let mut output = vec![0u8; capacity];
+        let encoded = self.encoder.finish(&mut output).map_err(js_error)?;
+        output.truncate(encoded);
+        Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    /// Return the current STREAMINFO metadata block. After finish() this
+    /// contains the final sample count and PCM MD5.
+    #[wasm_bindgen(js_name = streamHeader)]
+    pub fn stream_header(&self) -> Uint8Array {
+        Uint8Array::from(self.encoder.stream_header())
     }
 
     pub fn reset(&mut self) -> Result<(), JsValue> {
@@ -1833,6 +1905,76 @@ fn audio_frames_to_js(frames: Vec<AudioData>) -> Result<Array, JsValue> {
     Ok(array)
 }
 
+#[cfg(feature = "video")]
+fn finite_i64(value: f64) -> Option<i64> {
+    value.is_finite().then(|| value.round() as i64)
+}
+
+#[cfg(feature = "video")]
+fn finite_u64(value: f64) -> Option<u64> {
+    (value.is_finite() && value >= 0.0).then(|| value.round() as u64)
+}
+
+#[cfg(feature = "video")]
+fn export_video_frames(frames: Vec<VideoFrame>) -> Result<Array, JsValue> {
+    let output = Array::new();
+    for frame in frames {
+        let object = Object::new();
+        Reflect::set(&object, &"width".into(), &(frame.width as f64).into())?;
+        Reflect::set(&object, &"height".into(), &(frame.height as f64).into())?;
+        Reflect::set(
+            &object,
+            &"bitDepth".into(),
+            &(frame.bit_depth as f64).into(),
+        )?;
+        Reflect::set(
+            &object,
+            &"chromaSampling".into(),
+            &frame.chroma_sampling.as_str().into(),
+        )?;
+        Reflect::set(
+            &object,
+            &"pts".into(),
+            &frame
+                .pts
+                .map(|value| JsValue::from_f64(value as f64))
+                .unwrap_or(JsValue::NULL),
+        )?;
+        Reflect::set(
+            &object,
+            &"duration".into(),
+            &frame
+                .duration
+                .map(|value| JsValue::from_f64(value as f64))
+                .unwrap_or(JsValue::NULL),
+        )?;
+        let planes = Array::new();
+        for plane in frame.planes {
+            let plane_object = Object::new();
+            Reflect::set(&plane_object, &"width".into(), &(plane.width as f64).into())?;
+            Reflect::set(
+                &plane_object,
+                &"height".into(),
+                &(plane.height as f64).into(),
+            )?;
+            Reflect::set(
+                &plane_object,
+                &"stride".into(),
+                &(plane.stride as f64).into(),
+            )?;
+            Reflect::set(
+                &plane_object,
+                &"data".into(),
+                &Uint8Array::from(plane.data.as_slice()).into(),
+            )?;
+            planes.push(&plane_object);
+        }
+        Reflect::set(&object, &"planes".into(), &planes)?;
+        output.push(&object);
+    }
+    Ok(output)
+}
+
 fn audio_frame_to_js(frame: &AudioData) -> Result<JsValue, JsValue> {
     let object = Object::new();
     Reflect::set(
@@ -2108,6 +2250,21 @@ fn audio_demux_event_to_js(event: AudioDemuxEvent) -> Result<JsValue, JsValue> {
             set_optional_u8(&object, "streamType", config.stream_type)?;
             set_optional_u32(&object, "sampleRate", config.sample_rate)?;
             set_optional_u8(&object, "channels", config.channels)?;
+            set_optional_u8(&object, "bitsPerSample", config.bits_per_sample)?;
+            if let Some(endianness) = config.pcm_endianness {
+                Reflect::set(
+                    &object,
+                    &JsValue::from_str("pcmEndianness"),
+                    &JsValue::from_str(endianness.as_str()),
+                )?;
+            }
+            if let Some(float) = config.pcm_float {
+                Reflect::set(
+                    &object,
+                    &JsValue::from_str("pcmFloat"),
+                    &JsValue::from_bool(float),
+                )?;
+            }
             set_optional_u32(&object, "sampleCount", config.sample_count)?;
             Reflect::set(
                 &object,

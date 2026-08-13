@@ -112,10 +112,13 @@ impl FlacEncoder {
     }
 
     fn copy_next_packet(&mut self, output: &mut [u8]) -> Result<usize, String> {
-        let packet = self
-            .pending_packets
-            .pop_front()
-            .ok_or_else(|| "FLAC encoder produced no packet".to_string())?;
+        let Some(packet) = self.pending_packets.pop_front() else {
+            // OxideAV buffers a trailing block shorter than its configured
+            // block size until EOF. An empty packet is therefore a normal
+            // streaming result; callers must finish() once after the final
+            // input block to drain it.
+            return Ok(0);
+        };
         if output.len() < packet.len() {
             return Err(format!(
                 "Output buffer of len {} too small for FLAC packet of len {}",
@@ -125,6 +128,23 @@ impl FlacEncoder {
         }
         output[..packet.len()].copy_from_slice(&packet);
         Ok(packet.len())
+    }
+
+    /// Signal EOF and return the next packet produced by the encoder.
+    ///
+    /// The Wasm streaming wrapper feeds complete blocks as they arrive and
+    /// calls this once at the end to recover a final short block.
+    pub fn finish(&mut self, output: &mut [u8]) -> Result<usize, String> {
+        self.inner
+            .flush()
+            .map_err(|error| format!("Failed to finish FLAC stream: {error}"))?;
+        self.stream_header = self.inner.output_params().extradata.clone();
+        self.queue_ready_packets()?;
+        self.copy_next_packet(output)
+    }
+
+    pub fn stream_header(&self) -> &[u8] {
+        &self.stream_header
     }
 }
 
@@ -176,9 +196,21 @@ impl Encoder for FlacEncoder {
         }
 
         if self.pending_packets.is_empty() {
-            let mut audio_bytes = Vec::with_capacity(input.len() * std::mem::size_of::<i32>());
-            for sample in input {
-                audio_bytes.extend_from_slice(&sample.to_le_bytes());
+            let bytes_per_sample = match self.bits_per_sample {
+                1..=16 => 2,
+                17..=24 => 3,
+                25..=32 => 4,
+                _ => {
+                    return Err(format!(
+                        "Unsupported FLAC bits per sample: {}",
+                        self.bits_per_sample
+                    ));
+                }
+            };
+            let mut audio_bytes = Vec::with_capacity(input.len() * bytes_per_sample);
+            for &sample in input {
+                let bytes = sample.to_le_bytes();
+                audio_bytes.extend_from_slice(&bytes[..bytes_per_sample]);
             }
 
             let frame = OxideFrame::Audio(OxideAudioFrame {

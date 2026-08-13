@@ -25,9 +25,11 @@ default = [
   "aac-debox",
   "aac-lc",
   "audio-demux",
+  "video",
 ]
 detect = ["dep:access-unit"]
 audio-demux = ["dep:soundkit-audio-demux"]
+video = ["dep:soundkit-video"]
 raw-pcm = []
 wav = []
 mp3 = ["dep:soundkit-mp3"]
@@ -58,6 +60,7 @@ js-sys = "0.3"
 wasm-bindgen = "0.2"
 
 soundkit-audio-demux = { path = "../soundkit-audio-demux", optional = true }
+soundkit-video = { path = "../soundkit-video", optional = true }
 soundkit-aac = { path = "../soundkit-aac", default-features = false, optional = true }
 soundkit-aac-lc = { path = "../soundkit-aac-lc", optional = true }
 soundkit-aiff = { path = "../soundkit-aiff", optional = true }

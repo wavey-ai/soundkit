@@ -1,5 +1,168 @@
 /* @ts-self-types="./soundkit_wasm.d.ts" */
 
+export class WasmAacDeboxer {
+    static __wrap(ptr) {
+        const obj = Object.create(WasmAacDeboxer.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmAacDeboxerFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmAacDeboxerFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmaacdeboxer_free(ptr, 0);
+    }
+    /**
+     * Final drain call. The deboxer should not be reused after this.
+     * @returns {Array<any>}
+     */
+    flush() {
+        const ret = wasm.wasmaacdeboxer_flush(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    constructor() {
+        const ret = wasm.wasmaacdeboxer_new();
+        this.__wbg_ptr = ret;
+        WasmAacDeboxerFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {WasmAacDeboxer}
+     */
+    static newAuto() {
+        const ret = wasm.wasmaacdeboxer_newAuto();
+        return WasmAacDeboxer.__wrap(ret);
+    }
+    /**
+     * @param {string} format
+     * @returns {WasmAacDeboxer}
+     */
+    static newWithFormat(format) {
+        const ptr0 = passStringToWasm0(format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmaacdeboxer_newWithFormat(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmAacDeboxer.__wrap(ret[0]);
+    }
+    /**
+     * Push arbitrary MP4/M4A bytes and receive AAC config/packet events.
+     *
+     * Packet events contain ADTS AAC frames in `data` and the original MP4
+     * access unit in `rawData`.
+     * @param {Uint8Array} bytes
+     * @returns {Array<any>}
+     */
+    push(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmaacdeboxer_push(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+}
+if (Symbol.dispose) WasmAacDeboxer.prototype[Symbol.dispose] = WasmAacDeboxer.prototype.free;
+
+export class WasmAacLcDecoder {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmAacLcDecoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmaaclcdecoder_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get channels() {
+        const ret = wasm.wasmaaclcdecoder_channels(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {Uint8Array} access_unit
+     * @returns {Float32Array}
+     */
+    decodeInterleaved(access_unit) {
+        const ptr0 = passArray8ToWasm0(access_unit, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmaaclcdecoder_decodeInterleaved(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {Uint8Array} access_unit
+     * @param {Float32Array} output
+     * @returns {number}
+     */
+    decodeInterleavedInto(access_unit, output) {
+        const ptr0 = passArray8ToWasm0(access_unit, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmaaclcdecoder_decodeInterleavedInto(this.__wbg_ptr, ptr0, len0, output);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * @param {Uint8Array} access_unit
+     * @returns {Array<any>}
+     */
+    decodePlanar(access_unit) {
+        const ptr0 = passArray8ToWasm0(access_unit, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmaaclcdecoder_decodePlanar(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @returns {number}
+     */
+    get framesPerAccessUnit() {
+        const ret = wasm.wasmaaclcdecoder_framesPerAccessUnit(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {Uint8Array} audio_specific_config
+     */
+    constructor(audio_specific_config) {
+        const ptr0 = passArray8ToWasm0(audio_specific_config, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmaaclcdecoder_new(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmAacLcDecoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {number}
+     */
+    get sampleRate() {
+        const ret = wasm.wasmaaclcdecoder_sampleRate(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) WasmAacLcDecoder.prototype[Symbol.dispose] = WasmAacLcDecoder.prototype.free;
+
 export class WasmAudioContentCipher {
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
@@ -137,6 +300,148 @@ export class WasmAudioContentKeyUnwrapper {
 }
 if (Symbol.dispose) WasmAudioContentKeyUnwrapper.prototype[Symbol.dispose] = WasmAudioContentKeyUnwrapper.prototype.free;
 
+export class WasmAudioTrackDemuxer {
+    static __wrap(ptr) {
+        const obj = Object.create(WasmAudioTrackDemuxer.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmAudioTrackDemuxerFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmAudioTrackDemuxerFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmaudiotrackdemuxer_free(ptr, 0);
+    }
+    /**
+     * Final drain call. The demuxer should not be reused after this.
+     * @returns {Array<any>}
+     */
+    flush() {
+        const ret = wasm.wasmaudiotrackdemuxer_flush(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    constructor() {
+        const ret = wasm.wasmaudiotrackdemuxer_new();
+        this.__wbg_ptr = ret;
+        WasmAudioTrackDemuxerFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {WasmAudioTrackDemuxer}
+     */
+    static newAuto() {
+        const ret = wasm.wasmaudiotrackdemuxer_newAuto();
+        return WasmAudioTrackDemuxer.__wrap(ret);
+    }
+    /**
+     * @param {string} format
+     * @returns {WasmAudioTrackDemuxer}
+     */
+    static newWithFormat(format) {
+        const ptr0 = passStringToWasm0(format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmaudiotrackdemuxer_newWithFormat(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmAudioTrackDemuxer.__wrap(ret[0]);
+    }
+    /**
+     * Push arbitrary container bytes and receive audio-track config/packet events.
+     * @param {Uint8Array} bytes
+     * @returns {Array<any>}
+     */
+    push(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmaudiotrackdemuxer_push(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+}
+if (Symbol.dispose) WasmAudioTrackDemuxer.prototype[Symbol.dispose] = WasmAudioTrackDemuxer.prototype.free;
+
+export class WasmFlacEncoder {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmFlacEncoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmflacencoder_free(ptr, 0);
+    }
+    /**
+     * @param {Float32Array} planar
+     * @param {number} frames_per_channel
+     * @returns {Uint8Array}
+     */
+    encodePlanarF32(planar, frames_per_channel) {
+        const ptr0 = passArrayF32ToWasm0(planar, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmflacencoder_encodePlanarF32(this.__wbg_ptr, ptr0, len0, frames_per_channel);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Signal EOF and drain the final FLAC packet. OxideAV deliberately
+     * buffers a short final block until this call.
+     * @returns {Uint8Array}
+     */
+    finish() {
+        const ret = wasm.wasmflacencoder_finish(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {number} sample_rate
+     * @param {number} channels
+     * @param {number} bits_per_sample
+     * @param {number} frame_size
+     * @param {number} compression_level
+     */
+    constructor(sample_rate, channels, bits_per_sample, frame_size, compression_level) {
+        const ret = wasm.wasmflacencoder_new(sample_rate, channels, bits_per_sample, frame_size, compression_level);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmFlacEncoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    reset() {
+        const ret = wasm.wasmflacencoder_reset(this.__wbg_ptr);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Return the current STREAMINFO metadata block. After finish() this
+     * contains the final sample count and PCM MD5.
+     * @returns {Uint8Array}
+     */
+    streamHeader() {
+        const ret = wasm.wasmflacencoder_streamHeader(this.__wbg_ptr);
+        return ret;
+    }
+}
+if (Symbol.dispose) WasmFlacEncoder.prototype[Symbol.dispose] = WasmFlacEncoder.prototype.free;
+
 export class WasmMusicDecoder {
     static __wrap(ptr) {
         const obj = Object.create(WasmMusicDecoder.prototype);
@@ -234,6 +539,80 @@ export class WasmMusicDecoder {
     }
 }
 if (Symbol.dispose) WasmMusicDecoder.prototype[Symbol.dispose] = WasmMusicDecoder.prototype.free;
+
+export class WasmOpusDeboxer {
+    static __wrap(ptr) {
+        const obj = Object.create(WasmOpusDeboxer.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmOpusDeboxerFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmOpusDeboxerFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmopusdeboxer_free(ptr, 0);
+    }
+    /**
+     * Final drain call. The deboxer should not be reused after this.
+     * @returns {Array<any>}
+     */
+    flush() {
+        const ret = wasm.wasmopusdeboxer_flush(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    constructor() {
+        const ret = wasm.wasmopusdeboxer_new();
+        this.__wbg_ptr = ret;
+        WasmOpusDeboxerFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {WasmOpusDeboxer}
+     */
+    static newAuto() {
+        const ret = wasm.wasmopusdeboxer_newAuto();
+        return WasmOpusDeboxer.__wrap(ret);
+    }
+    /**
+     * @param {string} format
+     * @returns {WasmOpusDeboxer}
+     */
+    static newWithFormat(format) {
+        const ptr0 = passStringToWasm0(format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmopusdeboxer_newWithFormat(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmOpusDeboxer.__wrap(ret[0]);
+    }
+    /**
+     * Push arbitrary container bytes and receive Opus config/packet events.
+     *
+     * Packet events contain encoded Opus packet bytes suitable for a JS Opus
+     * decoder. Config events carry channel/sample-rate/pre-skip metadata.
+     * @param {Uint8Array} bytes
+     * @returns {Array<any>}
+     */
+    push(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmopusdeboxer_push(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+}
+if (Symbol.dispose) WasmOpusDeboxer.prototype[Symbol.dispose] = WasmOpusDeboxer.prototype.free;
 
 export class WasmOpusDecodeResult {
     static __wrap(ptr) {
@@ -512,6 +891,79 @@ export class WasmSoundKitFrameDecoder {
 if (Symbol.dispose) WasmSoundKitFrameDecoder.prototype[Symbol.dispose] = WasmSoundKitFrameDecoder.prototype.free;
 
 /**
+ * Pure-Rust video access-unit decoder shared by browser and native imports.
+ */
+export class WasmVideoDecoder {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmVideoDecoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmvideodecoder_free(ptr, 0);
+    }
+    /**
+     * Decode one complete codec access unit. Non-finite timestamps mean
+     * unknown and avoid JavaScript BigInt conversion at this boundary.
+     * @param {Uint8Array} access_unit
+     * @param {number} pts
+     * @param {number} duration
+     * @returns {Array<any>}
+     */
+    decode(access_unit, pts, duration) {
+        const ptr0 = passArray8ToWasm0(access_unit, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmvideodecoder_decode(this.__wbg_ptr, ptr0, len0, pts, duration);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Decode a complete Annex-B elementary stream. This is intended for
+     * import validation; normal playback should use access-unit decoding.
+     * @param {Uint8Array} stream
+     * @returns {Array<any>}
+     */
+    decodeStream(stream) {
+        const ptr0 = passArray8ToWasm0(stream, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmvideodecoder_decodeStream(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @returns {Array<any>}
+     */
+    flush() {
+        const ret = wasm.wasmvideodecoder_flush(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {string} codec
+     */
+    constructor(codec) {
+        const ptr0 = passStringToWasm0(codec, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmvideodecoder_new(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmVideoDecoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+}
+if (Symbol.dispose) WasmVideoDecoder.prototype[Symbol.dispose] = WasmVideoDecoder.prototype.free;
+
+/**
  * @param {string} session_context
  * @param {string} transport_session_id
  * @param {number} config_generation
@@ -588,6 +1040,10 @@ function __wbg_get_imports() {
         __wbg___wbindgen_throw_344f42d3211c4765: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
+        __wbg_length_98f10d1e2f4ea968: function(arg0) {
+            const ret = arg0.length;
+            return ret;
+        },
         __wbg_new_32b398fb48b6d94a: function() {
             const ret = new Array();
             return ret;
@@ -600,14 +1056,25 @@ function __wbg_get_imports() {
             const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
             return ret;
         },
+        __wbg_new_from_slice_ddf8b82c4d6af38e: function(arg0, arg1) {
+            const ret = new Float32Array(getArrayF32FromWasm0(arg0, arg1));
+            return ret;
+        },
         __wbg_push_d2ae3af0c1217ae6: function(arg0, arg1) {
             const ret = arg0.push(arg1);
             return ret;
+        },
+        __wbg_set_1e016b6a1b5f7cb3: function(arg0, arg1, arg2) {
+            arg0.set(getArrayF32FromWasm0(arg1, arg2));
         },
         __wbg_set_8535240470bf2500: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = Reflect.set(arg0, arg1, arg2);
             return ret;
         }, arguments); },
+        __wbg_subarray_9c4c11e61a1051bd: function(arg0, arg1, arg2) {
+            const ret = arg0.subarray(arg1 >>> 0, arg2 >>> 0);
+            return ret;
+        },
         __wbindgen_cast_0000000000000001: function(arg0) {
             // Cast intrinsic for `F64 -> Externref`.
             const ret = arg0;
@@ -634,15 +1101,30 @@ function __wbg_get_imports() {
     };
 }
 
+const WasmAacDeboxerFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmaacdeboxer_free(ptr, 1));
+const WasmAacLcDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmaaclcdecoder_free(ptr, 1));
 const WasmAudioContentCipherFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmaudiocontentcipher_free(ptr, 1));
 const WasmAudioContentKeyUnwrapperFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmaudiocontentkeyunwrapper_free(ptr, 1));
+const WasmAudioTrackDemuxerFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmaudiotrackdemuxer_free(ptr, 1));
+const WasmFlacEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmflacencoder_free(ptr, 1));
 const WasmMusicDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmmusicdecoder_free(ptr, 1));
+const WasmOpusDeboxerFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmopusdeboxer_free(ptr, 1));
 const WasmOpusDecodeResultFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmopusdecoderesult_free(ptr, 1));
@@ -655,11 +1137,19 @@ const WasmOpusEncoderFinalization = (typeof FinalizationRegistry === 'undefined'
 const WasmSoundKitFrameDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmsoundkitframedecoder_free(ptr, 1));
+const WasmVideoDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmvideodecoder_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
     wasm.__wbindgen_externrefs.set(idx, obj);
     return idx;
+}
+
+function getArrayF32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
 }
 
 function getArrayI16FromWasm0(ptr, len) {
@@ -670,6 +1160,14 @@ function getArrayI16FromWasm0(ptr, len) {
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
+
+let cachedFloat32ArrayMemory0 = null;
+function getFloat32ArrayMemory0() {
+    if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
+        cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
+    }
+    return cachedFloat32ArrayMemory0;
 }
 
 let cachedInt16ArrayMemory0 = null;
@@ -719,6 +1217,13 @@ function passArray16ToWasm0(arg, malloc) {
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
     getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArrayF32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getFloat32ArrayMemory0().set(arg, ptr / 4);
     WASM_VECTOR_LEN = arg.length;
     return ptr;
 }
@@ -800,6 +1305,7 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedFloat32ArrayMemory0 = null;
     cachedInt16ArrayMemory0 = null;
     cachedUint16ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;

@@ -1,0 +1,24 @@
+[package]
+name = "soundkit-video"
+version = "0.12.3"
+edition = "2021"
+license = "MIT"
+description = "Pure-Rust video decoders and canonical frame surfaces for SoundKit."
+repository = "https://github.com/wavey-ai/soundkit"
+
+[features]
+default = ["h264", "hevc", "vp9", "av1", "prores"]
+h264 = ["dep:rusty_h264-common", "dep:rusty_h264-decoder"]
+hevc = ["dep:rust_h265"]
+vp9 = ["dep:vp9dec"]
+av1 = ["dep:rusty_av1d"]
+prores = ["dep:oxideav-core", "dep:oxideav-prores"]
+
+[dependencies]
+rusty_h264-decoder = { version = "0.10.0", default-features = false, optional = true }
+rusty_h264-common = { version = "0.10.0", optional = true }
+rust_h265 = { version = "0.1.0", optional = true }
+vp9dec = { version = "0.1.1", optional = true }
+rusty_av1d = { version = "1.2.0", default-features = false, features = ["bitdepth_8"], optional = true }
+oxideav-core = { version = "0.1.31", optional = true }
+oxideav-prores = { version = "0.1.1", optional = true }

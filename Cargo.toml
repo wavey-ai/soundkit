@@ -21,6 +21,7 @@ members = [
   "soundkit-ogg-opus",
   "soundkit-webm",
   "soundkit-audio-demux",
+  "soundkit-video",
   "soundkit-wasm",
   "soundkit-decoder",
   "soundkit-rubberband-sys",
@@ -28,3 +29,9 @@ members = [
   "lori-asha-premix-bench",
   "aac-wasm-bench",
 ]
+
+# LLVM 21 currently SIGBUSes while optimizing vp9dec's deeply nested scalar
+# loops at level 3 for wasm32. Level 2 preserves optimization and produces a
+# stable browser build until that upstream compiler defect is resolved.
+[profile.release.package.vp9dec]
+opt-level = 2

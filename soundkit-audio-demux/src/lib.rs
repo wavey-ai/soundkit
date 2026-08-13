@@ -26,6 +26,7 @@ impl AudioContainer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AudioCodec {
     Aac,
+    Pcm,
     Opus,
     Vorbis,
     Mp3,
@@ -37,11 +38,27 @@ impl AudioCodec {
     pub fn as_str(&self) -> &str {
         match self {
             AudioCodec::Aac => "aac",
+            AudioCodec::Pcm => "pcm",
             AudioCodec::Opus => "opus",
             AudioCodec::Vorbis => "vorbis",
             AudioCodec::Mp3 => "mp3",
             AudioCodec::Ac3 => "ac3",
             AudioCodec::Unknown(codec) => codec.as_str(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PcmEndianness {
+    Little,
+    Big,
+}
+
+impl PcmEndianness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Little => "little",
+            Self::Big => "big",
         }
     }
 }
@@ -74,6 +91,9 @@ pub struct AudioTrackConfig {
     pub stream_type: Option<u8>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u8>,
+    pub bits_per_sample: Option<u8>,
+    pub pcm_endianness: Option<PcmEndianness>,
+    pub pcm_float: Option<bool>,
     pub sample_count: Option<u32>,
     pub codec_private: Vec<u8>,
     pub pre_skip: Option<u16>,
@@ -352,14 +372,14 @@ fn process_state(
 
 #[cfg(feature = "mp4")]
 enum Mp4AudioDemuxer {
-    Regular(RegularMp4AacDemuxer),
+    Regular(RegularMp4AudioDemuxer),
     Fragmented(Fmp4AacDemuxer),
 }
 
 #[cfg(feature = "mp4")]
 impl Mp4AudioDemuxer {
     fn regular() -> Result<Self, String> {
-        Ok(Self::Regular(RegularMp4AacDemuxer::new()))
+        Ok(Self::Regular(RegularMp4AudioDemuxer::new()))
     }
 
     fn fragmented() -> Self {
@@ -383,10 +403,16 @@ impl Mp4AudioDemuxer {
 
 #[cfg(feature = "mp4")]
 #[derive(Clone, Debug)]
-struct RegularMp4AacTrack {
+struct RegularMp4AudioTrack {
     track_id: u32,
     sample_rate: u32,
     channels: u8,
+    bits_per_sample: Option<u8>,
+    codec: AudioCodec,
+    codec_id: String,
+    packet_format: AudioPacketFormat,
+    pcm_endianness: Option<PcmEndianness>,
+    pcm_float: Option<bool>,
     codec_private: Vec<u8>,
     samples: Vec<RegularMp4Sample>,
 }
@@ -419,10 +445,10 @@ struct DeferredMdat {
 }
 
 #[cfg(feature = "mp4")]
-struct RegularMp4AacDemuxer {
+struct RegularMp4AudioDemuxer {
     buffer: Vec<u8>,
     absolute_start: u64,
-    track: Option<RegularMp4AacTrack>,
+    track: Option<RegularMp4AudioTrack>,
     active_mdat: Option<RegularMdatRange>,
     deferred_mdats: Vec<DeferredMdat>,
     emitted_config: bool,
@@ -430,7 +456,7 @@ struct RegularMp4AacDemuxer {
 }
 
 #[cfg(feature = "mp4")]
-impl RegularMp4AacDemuxer {
+impl RegularMp4AudioDemuxer {
     fn new() -> Self {
         Self {
             buffer: Vec::with_capacity(128 * 1024),
@@ -550,14 +576,17 @@ impl RegularMp4AacDemuxer {
         };
         events.push(AudioDemuxEvent::Config(AudioTrackConfig {
             container: AudioContainer::Mp4,
-            codec: AudioCodec::Aac,
-            packet_format: Some(AudioPacketFormat::Adts),
-            codec_id: Some("mp4a".to_string()),
+            codec: track.codec.clone(),
+            packet_format: Some(track.packet_format.clone()),
+            codec_id: Some(track.codec_id.clone()),
             track_id: Some(track.track_id as u64),
             pid: None,
             stream_type: None,
             sample_rate: Some(track.sample_rate),
             channels: Some(track.channels),
+            bits_per_sample: track.bits_per_sample,
+            pcm_endianness: track.pcm_endianness,
+            pcm_float: track.pcm_float,
             sample_count: Some(track.samples.len() as u32),
             codec_private: track.codec_private.clone(),
             pre_skip: None,
@@ -679,17 +708,22 @@ impl RegularMp4AacDemuxer {
             .track
             .as_ref()
             .expect("track is set before emitting samples");
-        let mut data = create_adts_header(
-            track.sample_rate,
-            track.channels,
-            raw.len(),
-            &track.codec_private,
-        );
-        data.extend_from_slice(&raw);
+        let data = if track.codec == AudioCodec::Aac {
+            let mut data = create_adts_header(
+                track.sample_rate,
+                track.channels,
+                raw.len(),
+                &track.codec_private,
+            );
+            data.extend_from_slice(&raw);
+            data
+        } else {
+            raw.clone()
+        };
         AudioDemuxEvent::Packet(AudioTrackPacket {
             container: AudioContainer::Mp4,
-            codec: AudioCodec::Aac,
-            format: AudioPacketFormat::Adts,
+            codec: track.codec.clone(),
+            format: track.packet_format.clone(),
             data,
             raw_data: Some(raw),
             track_id: Some(track.track_id as u64),
@@ -722,6 +756,9 @@ fn convert_webm_events(events: Vec<WebmAudioDemuxEvent>) -> Result<Vec<AudioDemu
                     stream_type: None,
                     sample_rate: Some(config.sample_rate),
                     channels: Some(config.channels),
+                    bits_per_sample: None,
+                    pcm_endianness: None,
+                    pcm_float: None,
                     sample_count: None,
                     codec_private: config.codec_private,
                     pre_skip: config.pre_skip,
@@ -1135,6 +1172,9 @@ impl Fmp4AacDemuxer {
                 stream_type: None,
                 sample_rate: Some(track.sample_rate),
                 channels: Some(track.channels),
+                bits_per_sample: None,
+                pcm_endianness: None,
+                pcm_float: None,
                 sample_count: None,
                 codec_private: track.codec_private.clone(),
                 pre_skip: None,
@@ -1244,7 +1284,7 @@ struct RegularTrakTables {
     track_id: Option<u32>,
     is_audio: bool,
     timescale: Option<u32>,
-    sample_entry: Option<Mp4aSampleEntry>,
+    sample_entry: Option<RegularAudioSampleEntry>,
     stts: Vec<SttsEntry>,
     ctts: Vec<CttsEntry>,
     stsc: Vec<StscEntry>,
@@ -1275,7 +1315,7 @@ struct StscEntry {
 }
 
 #[cfg(feature = "mp4")]
-fn parse_regular_moov(data: &[u8]) -> Result<Option<RegularMp4AacTrack>, String> {
+fn parse_regular_moov(data: &[u8]) -> Result<Option<RegularMp4AudioTrack>, String> {
     let mut selected = None;
 
     for_each_child_box(data, |header, payload, _| {
@@ -1291,7 +1331,7 @@ fn parse_regular_moov(data: &[u8]) -> Result<Option<RegularMp4AacTrack>, String>
 }
 
 #[cfg(feature = "mp4")]
-fn parse_regular_trak(data: &[u8]) -> Result<Option<RegularMp4AacTrack>, String> {
+fn parse_regular_trak(data: &[u8]) -> Result<Option<RegularMp4AudioTrack>, String> {
     let mut tables = RegularTrakTables::default();
 
     walk_boxes(data, &mut |header, payload| {
@@ -1299,7 +1339,7 @@ fn parse_regular_trak(data: &[u8]) -> Result<Option<RegularMp4AacTrack>, String>
             b"tkhd" => tables.track_id = parse_tkhd_track_id(payload),
             b"mdhd" => tables.timescale = parse_mdhd_timescale(payload),
             b"hdlr" => tables.is_audio |= parse_hdlr_is_audio(payload),
-            b"stsd" => tables.sample_entry = parse_stsd_mp4a(payload),
+            b"stsd" => tables.sample_entry = parse_stsd_audio(payload),
             b"stts" => tables.stts = parse_stts(payload),
             b"ctts" => tables.ctts = parse_ctts(payload),
             b"stsc" => tables.stsc = parse_stsc(payload),
@@ -1326,16 +1366,24 @@ fn parse_regular_trak(data: &[u8]) -> Result<Option<RegularMp4AacTrack>, String>
 
     let mut sample_entry = tables
         .sample_entry
-        .ok_or_else(|| "MP4 audio track is missing mp4a sample entry".to_string())?;
-    if let Some((sample_rate, channels)) = parse_asc_audio_config(&sample_entry.codec_private) {
-        sample_entry.sample_rate = sample_rate;
-        sample_entry.channels = channels;
+        .ok_or_else(|| "MP4 audio track has no supported sample entry".to_string())?;
+    if sample_entry.codec == AudioCodec::Aac {
+        if let Some((sample_rate, channels)) = parse_asc_audio_config(&sample_entry.codec_private) {
+            sample_entry.sample_rate = sample_rate;
+            sample_entry.channels = channels;
+        }
     }
 
-    Ok(Some(RegularMp4AacTrack {
+    Ok(Some(RegularMp4AudioTrack {
         track_id,
         sample_rate: sample_entry.sample_rate,
         channels: sample_entry.channels,
+        bits_per_sample: sample_entry.bits_per_sample,
+        codec: sample_entry.codec,
+        codec_id: sample_entry.codec_id,
+        packet_format: sample_entry.packet_format,
+        pcm_endianness: sample_entry.pcm_endianness,
+        pcm_float: sample_entry.pcm_float,
         codec_private: sample_entry.codec_private,
         samples,
     }))
@@ -1542,6 +1590,20 @@ struct Mp4aSampleEntry {
 }
 
 #[cfg(feature = "mp4")]
+#[derive(Clone, Debug)]
+struct RegularAudioSampleEntry {
+    sample_rate: u32,
+    channels: u8,
+    bits_per_sample: Option<u8>,
+    codec: AudioCodec,
+    codec_id: String,
+    packet_format: AudioPacketFormat,
+    pcm_endianness: Option<PcmEndianness>,
+    pcm_float: Option<bool>,
+    codec_private: Vec<u8>,
+}
+
+#[cfg(feature = "mp4")]
 fn parse_tkhd_track_id(data: &[u8]) -> Option<u32> {
     let version = *data.first()?;
     let offset = if version == 1 { 20 } else { 12 };
@@ -1594,6 +1656,73 @@ fn parse_stsd_mp4a(data: &[u8]) -> Option<Mp4aSampleEntry> {
         pos += header.size;
     }
 
+    None
+}
+
+#[cfg(feature = "mp4")]
+fn parse_stsd_audio(data: &[u8]) -> Option<RegularAudioSampleEntry> {
+    if data.len() < 16 {
+        return None;
+    }
+    let entry_count = be_u32(data, 4)?;
+    let mut pos = 8usize;
+    for _ in 0..entry_count {
+        let header = Mp4BoxHeader::read(data.get(pos..)?)?;
+        if pos + header.size > data.len() {
+            return None;
+        }
+        let payload = &data[pos + header.header_size..pos + header.size];
+        if payload.len() >= 28 {
+            let channels = be_u16(payload, 16).unwrap_or(2) as u8;
+            let declared_bits = be_u16(payload, 18).and_then(|value| u8::try_from(value).ok());
+            let sample_rate = be_u32(payload, 24).unwrap_or(44_100 << 16) >> 16;
+            if header.name == *b"mp4a" {
+                let mut codec_private = Vec::new();
+                let _ = for_each_child_box(&payload[28..], |child, child_payload, _| {
+                    if child.name == *b"esds" {
+                        codec_private =
+                            parse_esds_audio_specific_config(child_payload).unwrap_or_default();
+                    }
+                    Ok(())
+                });
+                return Some(RegularAudioSampleEntry {
+                    sample_rate,
+                    channels,
+                    bits_per_sample: None,
+                    codec: AudioCodec::Aac,
+                    codec_id: "mp4a".to_string(),
+                    packet_format: AudioPacketFormat::Adts,
+                    pcm_endianness: None,
+                    pcm_float: None,
+                    codec_private,
+                });
+            }
+            let (endianness, float, bits_per_sample) = match &header.name {
+                b"sowt" => (PcmEndianness::Little, false, declared_bits),
+                b"in24" => (PcmEndianness::Little, false, Some(24)),
+                b"in32" => (PcmEndianness::Little, false, Some(32)),
+                b"twos" => (PcmEndianness::Big, false, declared_bits),
+                b"fl32" => (PcmEndianness::Big, true, Some(32)),
+                b"fl64" => (PcmEndianness::Big, true, Some(64)),
+                _ => {
+                    pos += header.size;
+                    continue;
+                }
+            };
+            return Some(RegularAudioSampleEntry {
+                sample_rate,
+                channels,
+                bits_per_sample,
+                codec: AudioCodec::Pcm,
+                codec_id: String::from_utf8_lossy(&header.name).into_owned(),
+                packet_format: AudioPacketFormat::Raw,
+                pcm_endianness: Some(endianness),
+                pcm_float: Some(float),
+                codec_private: Vec::new(),
+            });
+        }
+        pos += header.size;
+    }
     None
 }
 
@@ -2337,6 +2466,9 @@ impl MpegTsAudioDemuxer {
             stream_type: self.stream_type,
             sample_rate: self.sample_rate,
             channels: self.channels,
+            bits_per_sample: None,
+            pcm_endianness: None,
+            pcm_float: None,
             sample_count: None,
             codec_private: Vec::new(),
             pre_skip: None,
