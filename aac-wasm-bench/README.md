@@ -3,7 +3,7 @@
 Native AAC-LC correctness and speed harness for SoundKit.
 
 This crate is intentionally not the browser wasm path. Browser/worker wasm is
-built from `soundkit-wasm-decoder` with Rust `wasm32-unknown-unknown` and
+builds from `soundkit-wasm` with Rust `wasm32-unknown-unknown` and
 `wasm-bindgen`.
 
 The default native build includes benchmark comparators:
@@ -40,7 +40,7 @@ cargo run -p aac-wasm-bench --no-default-features --features soundkit-lc --relea
 Native SoundKit-vs-FDK conformance:
 
 ```sh
-cargo test -p aac-wasm-bench --no-default-features --features fdk,soundkit-lc -- --nocapture
+cargo test -p aac-wasm-bench --release --no-default-features --features fdk,soundkit-lc -- --nocapture
 ```
 
 Full native comparison:
@@ -126,10 +126,10 @@ AAC frame audio.
 
 | Decoder | Iterations | Decoded frames | Elapsed | RTF | Frames/sec | RMS | Peak |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `fdk-aac-sys` | 5 | 45,855 | 2,045.506 ms | 0.002091 | 22,417.4 | 0.162843351 | 0.918304443 |
-| `soundkit-aac-lc` | 5 | 45,855 | 1,250.680 ms | 0.001278 | 36,664.1 | 0.162846547 | 0.918334007 |
-| `soundkit-lc-reuse` | 5 | 45,855 | 1,355.441 ms | 0.001386 | 33,830.3 | 0.162846547 | 0.918334007 |
-| `symphonia-aac` | 5 | 45,855 | 743.409 ms | 0.000760 | 61,682.1 | 0.162845552 | 1.001383424 |
+| `fdk-aac-sys` | 5 | 45,855 | 4,011.400 ms | 0.004101 | 11,431.2 | 0.162843351 | 0.918304443 |
+| `soundkit-aac-lc` | 5 | 45,855 | 2,473.709 ms | 0.002529 | 18,536.9 | 0.162846589 | 0.918334007 |
+| `soundkit-lc-reuse` | 5 | 45,855 | 1,466.030 ms | 0.001499 | 31,278.3 | 0.162846589 | 0.918334007 |
+| `symphonia-aac` | 5 | 45,855 | 875.048 ms | 0.000895 | 52,402.8 | 0.162845552 | 1.001383424 |
 
 Decoder-oracle checks:
 
@@ -154,27 +154,21 @@ quality checks rather than clean decoder-only failures.
 
 ## Wasm Checkpoint
 
-Browser/worker wasm is exercised through the `soundkit-wasm-decoder`
+Browser/worker WASM is exercised through the `soundkit-wasm`
 `wasm-bindgen` facade. Use this as an integration checkpoint, not for the inner
 decoder loop:
 
 ```sh
-wasm-pack test --node --release soundkit-wasm-decoder --no-default-features --features aac-lc-bench -- --nocapture
+wasm-pack test --node --release soundkit-wasm --no-default-features --features aac-lc-bench -- --nocapture
 ```
 
-Current Node release quality result on the WESTSIDE fixture decodes AAC-LC to
-PCM in Rust wasm and compares that PCM directly to the source WAV:
-
-| Comparison | Source | Compared samples | Offset | RMSE | Mean abs | Max abs | p99 abs | p999 abs | SNR |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `saved-source-vs-fdk` | saved native | - | - | 0.006896303 | 0.004594121 | 0.334225774 | 0.023480892 | 0.038754225 | 27.510 dB |
-| `saved-source-vs-symphonia` | saved native | - | - | 0.006894503 | 0.004592889 | 0.363226533 | 0.023478046 | 0.038671419 | 27.511 dB |
-| `wasm-source-vs-sk` | computed in wasm | 18,779,958 | 2,048 samples | 0.006919222 | 0.004613361 | 0.383684535 | 0.023648679 | 0.038796104 | 27.480 dB |
+The Node quality test checks the complete PCM checksum, RMS, and peak. The
+native gate compares the same fixture directly with FDK AAC.
 
 Current Node release speed result on the WESTSIDE fixture:
 
 | Path | Iterations | Decoded frames | Elapsed | RTF | Frames/sec | Checksum |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| `wasm-core-raw` | 5 | 45,855 | 1,476.331 ms | 0.001509 | 31,060.1 | `24eb18ebd8fc27e4` |
-| `wasm-js-interleaved` | 5 | 45,855 | 1,642.932 ms | 0.001679 | 27,910.5 | `8c2d7264b07abe0a` |
-| `wasm-js-into` | 5 | 45,855 | 1,605.535 ms | 0.001641 | 28,560.6 | `0d4a1cec5595b60a` |
+| `wasm-core-raw` | 5 | 45,855 | 1,565.339 ms | 0.001600 | 29,294.0 | `24eb18ebd8fc27e4` |
+| `wasm-js-interleaved` | 5 | 45,855 | 1,854.675 ms | 0.001896 | 24,724.0 | `8c2d7264b07abe0a` |
+| `wasm-js-into` | 5 | 45,855 | 2,382.752 ms | 0.002436 | 19,244.6 | `0d4a1cec5595b60a` |

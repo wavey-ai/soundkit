@@ -19,6 +19,7 @@ import init, {
   validateCafFileHeader,
 } from "../soundkit-wasm/pkg/soundkit_wasm.js";
 import {
+  decodeSeekableStereoAacLc,
   decodeSeekableAlac,
   decodeSeekableCafAlac,
   openSeekableMp4,
@@ -131,6 +132,71 @@ async function decodeSeekableAlacFixture() {
   }
 }
 
+async function decodeSeekableAacMusicFixture(file, expected) {
+  const handle = await open(resolve(file), "r");
+  const { size } = await handle.stat();
+  let maximumRead = 0;
+  const source = {
+    size,
+    async read(start, end) {
+      const length = end - start;
+      maximumRead = Math.max(maximumRead, length);
+      const bytes = new Uint8Array(length);
+      let written = 0;
+      while (written < length) {
+        const result = await handle.read(bytes, written, length - written, start + written);
+        if (result.bytesRead === 0) throw new Error(`${file} ended during a planned range read`);
+        written += result.bytesRead;
+      }
+      return bytes;
+    },
+  };
+  const wasm = {
+    inspectMp4TopLevelBox,
+    WasmMp4MediaIndex,
+    WasmAacLcDecoder,
+  };
+  let packets = 0;
+  let frames = 0;
+  try {
+    let output = null;
+    for await (const decoded of decodeSeekableStereoAacLc(source, wasm)) {
+      assert.equal(decoded.track.sampleRate, expected.sampleRate, `${file} sample rate`);
+      assert.equal(decoded.track.channels, 2, `${file} stereo channels`);
+      if (output !== null) assert.equal(decoded.pcm, output, `${file} reuses its PCM buffer`);
+      output = decoded.pcm;
+      const { trim } = decoded;
+      frames += trim?.frameCount ?? 0;
+      packets += 1;
+    }
+    assert.ok(packets > 100, `${file} decodes a complete music packet run`);
+    assert.ok(frames >= expected.minimumFrames, `${file} decodes the expected music duration`);
+    assert.ok(maximumRead < size, `${file} uses bounded MP4 range reads`);
+    console.log(`${file}: Rust range-decoded ${packets} AAC-LC packets and ${frames} stereo frames`);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function rejectUnsupportedAacFixture(file, expectedMessage) {
+  const bytes = await readFile(resolve(file));
+  const source = new Blob([bytes]);
+  await assert.rejects(
+    async () => {
+      for await (const _ of decodeSeekableStereoAacLc(source, {
+        inspectMp4TopLevelBox,
+        WasmMp4MediaIndex,
+        WasmAacLcDecoder,
+      })) {
+        // The profile must fail before it emits PCM.
+      }
+    },
+    (error) => String(error).includes(expectedMessage),
+    `${file} reports an explicit AAC fallback reason`,
+  );
+  console.log(`${file}: rejected for AAC fallback`);
+}
+
 async function decodeSeekableCafAlacFixture() {
   const file = resolve("testdata/alac/A_Tusk_is_used_to_make_costly_gifts.caf");
   const handle = await open(file, "r");
@@ -200,6 +266,7 @@ async function decodeMp4MediaFile(file, expected) {
   });
   const decoder = new WasmVideoDecoder(expected.codec);
   let audioDecoder = null;
+  let audioOutput = null;
   let audioPackets = 0;
   let audioBytes = 0;
   let audioFrames = 0;
@@ -222,6 +289,7 @@ async function decodeMp4MediaFile(file, expected) {
     }
     if (audio.codec === "aac") {
       audioDecoder = new WasmAacLcDecoder(audio.decoderConfiguration);
+      audioOutput = new Float32Array(audio.channels * 1024);
     } else if (audio.codec === "flac") {
       audioDecoder = WasmMusicDecoder.newWithFormat("flac");
       audioFrames += countPcmFrames(audioDecoder.push(audio.decoderConfiguration));
@@ -240,7 +308,8 @@ async function decodeMp4MediaFile(file, expected) {
         audioBytes += packet.data.byteLength;
         if (audioDecoder) {
           if (audio.codec === "aac") {
-            const decodedFrames = audioDecoder.decodeInterleaved(packet.data).length / audio.channels;
+            const decodedFrames = audioDecoder.decodeInterleavedInto(packet.data, audioOutput)
+              / audio.channels;
             const trim = media.pcmTrim(sampleIndex, decodedFrames);
             audioFrames += trim?.frameCount ?? 0;
           } else {
@@ -292,6 +361,7 @@ async function decodeFragmentedMp4MediaFile(file, expected) {
   const events = [];
   let videoDecoder = null;
   let audioDecoder = null;
+  let audioOutput = null;
   const frames = [];
   const videoPresentationTimes = [];
   let audioFrames = 0;
@@ -312,6 +382,7 @@ async function decodeFragmentedMp4MediaFile(file, expected) {
 
     videoDecoder = new WasmVideoDecoder(video.codec);
     audioDecoder = new WasmAacLcDecoder(audio.decoderConfiguration);
+    audioOutput = new Float32Array(audio.channels * 1024);
     if (video.decoderConfiguration.byteLength > 0) {
       frames.push(...videoDecoder.decode(video.decoderConfiguration, Number.NaN, Number.NaN));
     }
@@ -321,7 +392,8 @@ async function decodeFragmentedMp4MediaFile(file, expected) {
         videoPresentationTimes.push(event.presentationTime);
         frames.push(...videoDecoder.decode(event.data, event.presentationTime, event.duration));
       } else {
-        const decodedFrames = audioDecoder.decodeInterleaved(event.data).length / audio.channels;
+        const decodedFrames = audioDecoder.decodeInterleavedInto(event.data, audioOutput)
+          / audio.channels;
         const trim = demuxer.pcmTrim(
           event.trackId,
           event.presentationTime,
@@ -423,6 +495,7 @@ async function decodeWebmMediaFile(file, expected) {
   let audioPackets = 0;
   let audioFrames = 0;
   let audioDecoder = null;
+  let audioOutput = null;
   try {
     const events = [];
     for (let offset = 0; offset < bytes.length; offset += 64 * 1024) {
@@ -444,6 +517,7 @@ async function decodeWebmMediaFile(file, expected) {
             audioDecoder = new WasmOpusDecoder(event.channels, event.sampleRate, 5760);
           } else if (event.codecId === "A_AAC") {
             audioDecoder = new WasmAacLcDecoder(event.decoderConfiguration);
+            audioOutput = new Float32Array(event.channels * 1024);
           }
         }
         continue;
@@ -455,7 +529,8 @@ async function decodeWebmMediaFile(file, expected) {
         if (audioConfig.codecId === "A_OPUS") {
           audioFrames += audioDecoder?.dec_frame_reuse(event.data) ?? 0;
         } else if (audioConfig.codecId === "A_AAC") {
-          audioFrames += audioDecoder.decodeInterleaved(event.data).length / audioConfig.channels;
+          audioFrames += audioDecoder.decodeInterleavedInto(event.data, audioOutput)
+            / audioConfig.channels;
         }
       }
     }
@@ -863,6 +938,14 @@ await inspectAudio("vp9-profile0-opus.webm", { codec: "opus" });
 await inspectAudio("vp9-profile2-10bit-opus.webm", { codec: "opus" });
 await inspectAudio("av1-main-opus.webm", { codec: "opus" });
 await inspectAudio("av1-main10-opus.webm", { codec: "opus" });
+await decodeSeekableAacMusicFixture("golden/aac/stereo-music-44100-192k.m4a", {
+  sampleRate: 44_100,
+  minimumFrames: 130_000,
+});
+await rejectUnsupportedAacFixture(
+  "testdata/itag139/yt_itag_139_he_aac.mp4",
+  "production AAC-LC requires 44.1 or 48 kHz",
+);
 await decodeSeekableAlacFixture();
 await decodeSeekableCafAlacFixture();
 

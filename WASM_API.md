@@ -1,7 +1,7 @@
 # SoundKit WASM Streaming API
 
 This document describes the browser-facing WASM API exposed by
-`soundkit-wasm-decoder`.
+`soundkit-wasm`.
 
 The WASM package is designed around push-based streaming:
 
@@ -15,13 +15,13 @@ After `flush()`, the instance is drained and should not be reused.
 ## Build
 
 ```sh
-wasm-pack build soundkit-wasm-decoder --target web --out-dir pkg -- --offline
+wasm-pack build soundkit-wasm --target web --out-dir pkg -- --offline
 ```
 
 The generated browser package is written to:
 
 ```text
-soundkit-wasm-decoder/pkg/
+soundkit-wasm/pkg/
 ```
 
 The default feature set is intended for the browser and avoids the known C
@@ -41,7 +41,7 @@ import init, {
   WasmAacDeboxer,
   WasmAacLcDecoder,
   WasmOpusDeboxer,
-} from "./soundkit-wasm-decoder/pkg/soundkit_wasm_decoder.js";
+} from "./soundkit-wasm/pkg/soundkit_wasm.js";
 
 await init();
 ```
@@ -49,7 +49,7 @@ await init();
 For synchronous initialization with already-loaded wasm bytes:
 
 ```js
-import { initSync } from "./soundkit-wasm-decoder/pkg/soundkit_wasm_decoder.js";
+import { initSync } from "./soundkit-wasm/pkg/soundkit_wasm.js";
 
 initSync({ module: wasmBytes });
 ```
@@ -170,6 +170,21 @@ decodePlanar(accessUnit: Uint8Array): Float32Array[]
 `Float32Array` per channel. `decodeInterleavedInto` writes interleaved `f32` PCM
 into a caller-owned `Float32Array` and returns the number of samples written,
 allowing worker/player code to reuse output buffers.
+
+Use `decodeSeekableStereoAacLc` for the controlled production profile in
+seekable M4A/MP4 files. The profile requires stereo AAC-LC at 44.1 or 48 kHz.
+The helper rejects all other AAC inputs so the caller can use a fallback.
+
+```js
+import { decodeSeekableStereoAacLc } from "./runtime/streaming-media.mjs";
+
+for await (const { pcm, trim } of decodeSeekableStereoAacLc(file, wasm)) {
+  audioWorklet.enqueue(pcm, trim);
+}
+```
+
+The helper reuses the `pcm` array. Consume or copy the data before you request
+the next packet.
 
 Current AAC-LC wasm support is raw access-unit only. MP4/M4A deboxing is handled
 by `WasmAacDeboxer` / `WasmAudioTrackDemuxer`; raw-block `END`/`FIL` elements

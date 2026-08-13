@@ -10,6 +10,9 @@ golden/*
 !golden/aac/
 golden/aac/*
 !golden/aac/A_Tusk_is_used_to_make_costly_gifts_encoded.aac
+!golden/aac/WESTSIDE_MIX_4_CONFIRMATION_130323_256k.aac
+!golden/aac/stereo-music-44100-192k.aac
+!golden/aac/stereo-music-44100-192k.m4a
 !golden/flac/
 golden/flac/*
 !golden/flac/A_Tusk_is_used_to_make_costly_gifts_16bit.flac

@@ -4,6 +4,8 @@ version = "0.12.3"
 edition = "2021"
 license = "MIT"
 description = "WASM AAC decoder benchmark for SoundKit AAC-LC, FDK AAC, Symphonia, and OxideAV status."
+readme = "README.md"
+repository = "https://github.com/wavey-ai/soundkit"
 
 [features]
 default = ["fdk", "symphonia", "soundkit-lc"]

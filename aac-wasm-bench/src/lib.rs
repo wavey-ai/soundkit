@@ -1,6 +1,9 @@
 pub const FIXTURE_NAME: &str = "WESTSIDE_MIX_4_CONFIRMATION_130323_256k.aac";
 pub const FIXTURE: &[u8] =
     include_bytes!("../../golden/aac/WESTSIDE_MIX_4_CONFIRMATION_130323_256k.aac");
+pub const STEREO_MUSIC_44100_FIXTURE_NAME: &str = "stereo-music-44100-192k.aac";
+pub const STEREO_MUSIC_44100_FIXTURE: &[u8] =
+    include_bytes!("../../golden/aac/stereo-music-44100-192k.aac");
 pub const SOURCE_WAV_ENV: &str = "SOUNDKIT_AAC_SOURCE_WAV";
 pub const DEFAULT_SOURCE_WAV_PATH: &str =
     "../../bitneedle/apps/press/testdata/audio-regression/WESTSIDE_MIX 4 CONFIRMATION_130323.wav";
@@ -19,6 +22,10 @@ pub struct AacFixture {
 pub const DEFAULT_FIXTURE: AacFixture = AacFixture {
     name: FIXTURE_NAME,
     data: FIXTURE,
+};
+pub const STEREO_MUSIC_44100: AacFixture = AacFixture {
+    name: STEREO_MUSIC_44100_FIXTURE_NAME,
+    data: STEREO_MUSIC_44100_FIXTURE,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -734,10 +741,21 @@ pub fn source_symphonia_frame_hotspots(limit: usize) -> Result<Vec<FrameQualityH
 
 #[cfg(feature = "soundkit-lc")]
 pub fn soundkit_lc_frame_features(frame_index: usize) -> Result<AacFrameFeatures, String> {
-    let frames = parse_adts_frames(FIXTURE)?;
-    let frame = frames
-        .get(frame_index)
-        .ok_or_else(|| format!("frame index {frame_index} exceeds fixture frame count"))?;
+    soundkit_lc_frame_features_for(DEFAULT_FIXTURE, frame_index)
+}
+
+#[cfg(feature = "soundkit-lc")]
+pub fn soundkit_lc_frame_features_for(
+    fixture: AacFixture,
+    frame_index: usize,
+) -> Result<AacFrameFeatures, String> {
+    let frames = parse_adts_frames(fixture.data)?;
+    let frame = frames.get(frame_index).ok_or_else(|| {
+        format!(
+            "frame index {frame_index} exceeds {} frame count",
+            fixture.name
+        )
+    })?;
     parse_soundkit_lc_frame_features(frame_index, frame)
 }
 
@@ -754,8 +772,15 @@ fn parse_soundkit_lc_frame_features(
     let config = AudioSpecificConfig::parse(&frame.audio_specific_config())
         .map_err(|err| format!("parse ASC for frame {frame_index} failed: {err}"))?;
     let mut reader = BitReader::new(frame.raw);
-    let header = RawElementHeader::read(&mut reader)
-        .map_err(|err| format!("parse element header for frame {frame_index} failed: {err}"))?;
+    let header = loop {
+        let header = RawElementHeader::read(&mut reader)
+            .map_err(|err| format!("parse element header for frame {frame_index} failed: {err}"))?;
+        if header.id != ElementId::Fill {
+            break header;
+        }
+        skip_feature_fill_element(&mut reader)
+            .map_err(|err| format!("skip fill element for frame {frame_index} failed: {err}"))?;
+    };
 
     match header.id {
         ElementId::SingleChannel => {
@@ -828,6 +853,29 @@ fn parse_soundkit_lc_frame_features(
             header.id
         )),
     }
+}
+
+#[cfg(feature = "soundkit-lc")]
+fn skip_feature_fill_element(reader: &mut soundkit_aac_lc::BitReader<'_>) -> Result<(), String> {
+    let mut count = reader.read_u8(4).map_err(|err| err.to_string())? as usize;
+    if count == 15 {
+        let extended = reader.read_u8(8).map_err(|err| err.to_string())?;
+        if extended == 0 {
+            return Err("invalid fill element length".to_string());
+        }
+        count += usize::from(extended - 1);
+    }
+    if reader.remaining_bits() < count * 8 {
+        return Err("truncated fill element".to_string());
+    }
+    if count > 0 {
+        let extension_type = reader.peek_u32(4).map_err(|err| err.to_string())? as u8;
+        if matches!(extension_type, 13 | 14) {
+            return Err("SBR/HE-AAC extension payload".to_string());
+        }
+        reader.skip_bits(count * 8).map_err(|err| err.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "soundkit-lc")]
@@ -1840,6 +1888,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_hq_stereo_aac_lc_rates() {
+        for (fixture, sample_rate) in [(DEFAULT_FIXTURE, 48_000), (STEREO_MUSIC_44100, 44_100)] {
+            let frames = parse_adts_frames(fixture.data).unwrap();
+            assert!(!frames.is_empty(), "{} has no ADTS frames", fixture.name);
+            assert!(frames.iter().all(|frame| frame.audio_object_type == 2));
+            assert!(frames.iter().all(|frame| frame.sample_rate == sample_rate));
+            assert!(frames.iter().all(|frame| frame.channels == 2));
+        }
+    }
+
+    #[test]
     fn parses_24_bit_stereo_pcm_wav() {
         let wav = tiny_wav_24_stereo(&[
             -8_388_608, 8_388_607, //
@@ -1874,15 +1933,60 @@ mod tests {
     #[cfg(all(feature = "fdk", feature = "soundkit-lc"))]
     #[test]
     fn soundkit_lc_matches_fdk_fixture_tolerance() {
-        let comparison = compare_soundkit_lc_to_fdk().unwrap();
+        for fixture in [DEFAULT_FIXTURE, STEREO_MUSIC_44100] {
+            let frames = parse_adts_frames(fixture.data).unwrap();
+            let comparison = compare_soundkit_lc_to_fdk_for(fixture).unwrap();
+            eprintln!("{}", format_quality_comparison(fixture.name, &comparison));
 
-        assert!(
-            comparison.passes_default_thresholds(),
-            "{}",
-            format_quality_comparison("fdk-vs-soundkit", &comparison)
-        );
-        assert_eq!(comparison.length_delta, 0);
-        assert!(comparison.compared_samples >= 9171 * 1024 * 2 - 4096 * 2);
+            assert!(
+                comparison.passes_default_thresholds(),
+                "{}",
+                format_quality_comparison(fixture.name, &comparison)
+            );
+            assert_eq!(comparison.length_delta, 0);
+            assert!(
+                comparison.compared_samples >= frames.len().saturating_sub(8) * 1024 * 2,
+                "{} comparison covered too few samples",
+                fixture.name
+            );
+        }
+    }
+
+    #[cfg(feature = "soundkit-lc")]
+    #[test]
+    fn hq_music_fixtures_cover_aac_lc_tools() {
+        let mut short_windows = false;
+        let mut tns = false;
+        let mut pns = false;
+        let mut intensity = false;
+        let mut pulse = false;
+        let mut mid_side = false;
+
+        for fixture in [DEFAULT_FIXTURE, STEREO_MUSIC_44100] {
+            let frames = parse_adts_frames(fixture.data).unwrap();
+            for frame_index in 0..frames.len() {
+                let features = soundkit_lc_frame_features_for(fixture, frame_index).unwrap();
+                for channel in [Some(&features.left), features.right.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    short_windows |=
+                        channel.window_sequence == soundkit_aac_lc::WindowSequence::EightShort;
+                    tns |= channel.tns_filters > 0;
+                    pns |= channel.noise_bands > 0;
+                    intensity |= channel.intensity_bands > 0;
+                    pulse |= channel.pulse_count > 0;
+                }
+                mid_side |= features.mid_side_bands > 0;
+            }
+        }
+
+        assert!(short_windows, "fixtures do not cover AAC short windows");
+        assert!(tns, "fixtures do not cover temporal noise shaping");
+        assert!(pns, "fixtures do not cover perceptual noise substitution");
+        assert!(intensity, "fixtures do not cover intensity stereo");
+        assert!(mid_side, "fixtures do not cover mid-side stereo");
+        eprintln!("AAC pulse-data coverage present: {pulse}");
     }
 
     fn tiny_wav_24_stereo(samples: &[i32]) -> Vec<u8> {

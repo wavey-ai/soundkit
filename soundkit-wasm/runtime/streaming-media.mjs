@@ -95,6 +95,56 @@ export async function* decodeSeekableAlac(source, wasm) {
 }
 
 /**
+ * Decode the production stereo AAC-LC profile from a seekable M4A/MP4 source.
+ *
+ * The yielded `pcm` array is reused. Consume or copy it before requesting the
+ * next packet. Other AAC profiles must use the caller's fallback decoder.
+ */
+export async function* decodeSeekableStereoAacLc(source, wasm) {
+  const media = await openSeekableMp4(source, wasm);
+  const track = media.tracks.find(
+    (candidate) => candidate.kind === "audio" && candidate.codec === "aac",
+  );
+  if (!track) {
+    media.close();
+    throw new Error("MOV/MP4 source has no AAC audio track");
+  }
+  if (track.channels !== 2) {
+    media.close();
+    throw new Error(`production AAC-LC requires stereo; source has ${track.channels} channels`);
+  }
+  if (![44_100, 48_000].includes(track.sampleRate)) {
+    media.close();
+    throw new Error(
+      `production AAC-LC requires 44.1 or 48 kHz; source has ${track.sampleRate} Hz`,
+    );
+  }
+
+  let decoder;
+  try {
+    decoder = new wasm.WasmAacLcDecoder(track.decoderConfiguration);
+  } catch (error) {
+    media.close();
+    throw error;
+  }
+
+  const pcm = new Float32Array(decoder.framesPerAccessUnit * track.channels);
+  try {
+    for await (const { sampleIndex, packet } of media.packets({
+      trackId: track.trackId,
+    })) {
+      const samples = decoder.decodeInterleavedInto(packet.data, pcm);
+      const frames = samples / track.channels;
+      const trim = media.pcmTrim(sampleIndex, frames);
+      yield { packet, pcm, frames, trim, track };
+    }
+  } finally {
+    decoder.free();
+    media.close();
+  }
+}
+
+/**
  * Open seekable CAF ALAC through a Rust-owned packet index.
  *
  * The adapter reads only the file header, chunk headers, bounded metadata, and

@@ -140,42 +140,57 @@ fn main() {
     }
 
     #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
-    println!("source_wav={}", aac_wasm_bench::source_wav_path().display());
+    let source_wav_available = {
+        let source_wav = aac_wasm_bench::source_wav_path();
+        let available = source_wav.is_file();
+        println!(
+            "source_wav={} status={}",
+            source_wav.display(),
+            if available { "available" } else { "skipped" }
+        );
+        available
+    };
 
     #[cfg(all(
         feature = "fdk",
         not(any(target_arch = "wasm32", target_arch = "wasm64"))
     ))]
-    match aac_wasm_bench::compare_fdk_to_source_wav() {
-        Ok(comparison) => println!(
-            "{}",
-            format_quality_measurement("source-vs-fdk", &comparison)
-        ),
-        Err(error) => println!("source-vs-fdk     error={error}"),
+    if source_wav_available {
+        match aac_wasm_bench::compare_fdk_to_source_wav() {
+            Ok(comparison) => println!(
+                "{}",
+                format_quality_measurement("source-vs-fdk", &comparison)
+            ),
+            Err(error) => println!("source-vs-fdk     error={error}"),
+        }
     }
 
     #[cfg(all(
         feature = "soundkit-lc",
         not(any(target_arch = "wasm32", target_arch = "wasm64"))
     ))]
-    match aac_wasm_bench::compare_soundkit_lc_to_source_wav() {
-        Ok(comparison) => println!(
-            "{}",
-            format_quality_measurement("source-vs-soundkit", &comparison)
-        ),
-        Err(error) => println!("source-vs-soundkit error={error}"),
+    if source_wav_available {
+        match aac_wasm_bench::compare_soundkit_lc_to_source_wav() {
+            Ok(comparison) => println!(
+                "{}",
+                format_quality_measurement("source-vs-soundkit", &comparison)
+            ),
+            Err(error) => println!("source-vs-soundkit error={error}"),
+        }
     }
 
     #[cfg(all(
         feature = "symphonia",
         not(any(target_arch = "wasm32", target_arch = "wasm64"))
     ))]
-    match aac_wasm_bench::compare_symphonia_to_source_wav() {
-        Ok(comparison) => println!(
-            "{}",
-            format_quality_measurement("source-vs-symphonia", &comparison)
-        ),
-        Err(error) => println!("source-vs-symphonia error={error}"),
+    if source_wav_available {
+        match aac_wasm_bench::compare_symphonia_to_source_wav() {
+            Ok(comparison) => println!(
+                "{}",
+                format_quality_measurement("source-vs-symphonia", &comparison)
+            ),
+            Err(error) => println!("source-vs-symphonia error={error}"),
+        }
     }
 
     #[cfg(feature = "oxideav")]

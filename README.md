@@ -30,7 +30,7 @@ the container layout can require enough metadata/media to be buffered first.
 | Raw PCM (`linear16`, `linear32`, `s16le`, `f32le`, `L16`) | `soundkit::raw_pcm` | Explicit | Yes | Caller supplies sample rate, channels, sample format. |
 | WAV / RIFF PCM | `soundkit::wav` | Auto | Yes | Emits complete PCM frame runs after the `data` chunk starts. |
 | MP3 | `soundkit-mp3` / `nanomp3` | Auto | Yes | Pure Rust decode; native decoder output is `f32`. |
-| AAC ADTS | `soundkit-aac` / `fdk-aac` | Auto | Yes | Frame-stream friendly; C FFI backend. `soundkit-aac-lc` is the in-progress pure Rust raw access-unit decoder path. |
+| AAC ADTS | `soundkit-aac` / `fdk-aac` | Auto | Yes | Frame-stream friendly C FFI path. Use `soundkit-aac-lc` for the controlled pure Rust stereo profile. |
 | AAC in M4A/MP4 | `soundkit-aac` / Rust MP4 demux + `fdk-aac` | Auto or seekable MP4 index | Yes | Fast-start files stream sequentially. Tail-`moov` files use one bounded packet range at a time. |
 | FLAC | `soundkit-flac` / `claxon` | Auto | Yes | Pure Rust decode retains metadata state and only the current incomplete compressed frame. |
 | Raw Opus stream | `soundkit-opus` / `libopus` | Auto | Yes | Soundkit `OpusHead` plus length-prefixed packets. |
@@ -58,7 +58,7 @@ boundary is narrower:
 | Format / area | Current decode path | Pure Rust decode? | Notes |
 | --- | --- | --- | --- |
 | AAC ADTS | `soundkit-aac` / `fdk-aac` | No | Frame streaming is supported, but the production AAC codec decode is FDK-AAC C FFI. |
-| AAC-LC raw access units | `soundkit-aac-lc` + `soundkit-wasm-decoder` | In progress | SoundKit-owned pure Rust decoder crate for mono/stereo AAC-LC raw access units, with explicit fallback errors for unsupported AAC tools. Detailed status, benchmark, and quality notes live in [`soundkit-aac-lc/README.md`](soundkit-aac-lc/README.md). |
+| AAC-LC raw access units | `soundkit-aac-lc` + `soundkit-wasm` | Controlled production profile | Pure Rust decoding supports stereo AAC-LC at 44.1 and 48 kHz. Other profiles return explicit fallback errors. See [`AAC_LC_PRODUCTION_STATUS.md`](AAC_LC_PRODUCTION_STATUS.md). |
 | AAC in M4A/MP4 | `mp4` demux + `fdk-aac` | No | MP4 demux/debox can be Rust, but production AAC frame decode still uses FDK-AAC. |
 | AMR-NB | OpenCORE AMR-NB | No | Requires the native `opencore-amrnb` library via `pkg-config`. |
 | G.729 | `g729-sys` | No | Uses a native codec binding. |

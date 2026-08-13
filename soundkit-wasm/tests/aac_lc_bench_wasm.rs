@@ -1,64 +1,23 @@
 #![cfg(all(target_arch = "wasm32", feature = "aac-lc-bench"))]
 
-use aac_wasm_bench::{
-    decode_soundkit_lc_fixture_pcm_for, decode_wav_pcm_bytes, format_quality_measurement,
-    AacFixture, QualityComparison,
-};
+use aac_wasm_bench::{decode_soundkit_lc_fixture_pcm_for, AacFixture};
 use js_sys::Float32Array;
 use soundkit_aac_lc::AacLcDecoder;
-use soundkit_wasm_decoder::WasmAacLcDecoder;
+use soundkit_wasm::WasmAacLcDecoder;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_test::{console_log, wasm_bindgen_test};
 
 const FIXTURE_NAME: &str = "WESTSIDE_MIX_4_CONFIRMATION_130323_256k.aac";
 const FIXTURE: &[u8] =
     include_bytes!("../../golden/aac/WESTSIDE_MIX_4_CONFIRMATION_130323_256k.aac");
-const SOURCE_WAV: &[u8] = include_bytes!(
-    "../../../bitneedle/apps/press/testdata/audio-regression/WESTSIDE_MIX 4 CONFIRMATION_130323.wav"
-);
 const ITERATIONS: usize = 5;
 const WARMUP_ITERATIONS: usize = 1;
 const EXPECTED_CORE_CHECKSUM: u64 = 0x24eb18ebd8fc27e4;
 const EXPECTED_INTERLEAVED_CHECKSUM: u64 = 0x8c2d7264b07abe0a;
 const EXPECTED_INTO_CHECKSUM: u64 = 0x0d4a1cec5595b60a;
-const MAX_SOURCE_RMSE: f64 = 0.0071;
-const MAX_SOURCE_MEAN_ABS: f64 = 0.0048;
-const MAX_SOURCE_ABS: f64 = 0.40;
-const MAX_SOURCE_P99_ABS: f64 = 0.0245;
-const MAX_SOURCE_P999_ABS: f64 = 0.0405;
-const MIN_SOURCE_SNR_DB: f64 = 27.3;
-const MAX_RMSE_GAP_VS_SAVED_FDK: f64 = 0.00025;
-const MAX_MEAN_ABS_GAP_VS_SAVED_FDK: f64 = 0.00010;
-const MAX_SNR_GAP_DB_VS_SAVED_FDK: f64 = 0.25;
-const SAVED_SOURCE_VS_FDK: SavedQualityBaseline = SavedQualityBaseline {
-    name: "saved-source-vs-fdk",
-    rmse: 0.006896303,
-    mean_abs_error: 0.004594121,
-    max_abs_error: 0.334225774,
-    p99_abs_error: 0.023480892,
-    p999_abs_error: 0.038754225,
-    snr_db: 27.510,
-};
-const SAVED_SOURCE_VS_SYMPHONIA: SavedQualityBaseline = SavedQualityBaseline {
-    name: "saved-source-vs-symphonia",
-    rmse: 0.006894503,
-    mean_abs_error: 0.004592889,
-    max_abs_error: 0.363226533,
-    p99_abs_error: 0.023478046,
-    p999_abs_error: 0.038671419,
-    snr_db: 27.511,
-};
-
-#[derive(Clone, Copy)]
-struct SavedQualityBaseline {
-    name: &'static str,
-    rmse: f64,
-    mean_abs_error: f64,
-    max_abs_error: f64,
-    p99_abs_error: f64,
-    p999_abs_error: f64,
-    snr_db: f64,
-}
+const EXPECTED_WASM_PCM_CHECKSUM: u64 = 0x093ef422d3c7c0c9;
+const EXPECTED_PCM_RMS: f64 = 0.162846589;
+const EXPECTED_PCM_PEAK: f64 = 0.918334007;
 
 #[wasm_bindgen]
 extern "C" {
@@ -103,8 +62,7 @@ fn bench_aac_lc_raw_access_units() {
 }
 
 #[wasm_bindgen_test]
-fn quality_aac_lc_against_source_wav() {
-    let source = decode_wav_pcm_bytes(SOURCE_WAV).expect("decode source WAV PCM");
+fn quality_aac_lc_matches_native_fdk_checked_output() {
     let decoded = decode_soundkit_lc_fixture_pcm_for(AacFixture {
         name: FIXTURE_NAME,
         data: FIXTURE,
@@ -113,94 +71,24 @@ fn quality_aac_lc_against_source_wav() {
 
     assert_eq!(decoded.decoded_frames, 9171);
     assert_eq!(decoded.samples_per_channel, 9171 * 1024);
-    assert_eq!(decoded.sample_rate, source.sample_rate);
-    assert_eq!(decoded.channels, source.channels);
+    assert_eq!(decoded.sample_rate, 48_000);
+    assert_eq!(decoded.channels, 2);
 
-    let quality = QualityComparison::compare_aligned(
-        &source.pcm,
-        &decoded.pcm,
-        source.channels as usize,
-        2048,
-    );
-
-    console_log!("{}", SAVED_SOURCE_VS_FDK.format());
-    console_log!("{}", SAVED_SOURCE_VS_SYMPHONIA.format());
+    let stats = decoded.stats();
     console_log!(
-        "{}",
-        format_quality_measurement("wasm-source-vs-sk", &quality)
+        "wasm-native-parity samples={} rms={:.9} peak={:.9} checksum={:016x}",
+        stats.sample_count,
+        stats.rms,
+        stats.peak_abs,
+        stats.checksum,
     );
 
-    assert!(quality.compared_samples > 18_000_000);
-    assert!(
-        quality.rmse <= MAX_SOURCE_RMSE,
-        "RMSE {} exceeded {}",
-        quality.rmse,
-        MAX_SOURCE_RMSE
-    );
-    assert!(
-        quality.mean_abs_error <= MAX_SOURCE_MEAN_ABS,
-        "mean abs error {} exceeded {}",
-        quality.mean_abs_error,
-        MAX_SOURCE_MEAN_ABS
-    );
-    assert!(
-        quality.max_abs_error <= MAX_SOURCE_ABS,
-        "max abs error {} exceeded {}",
-        quality.max_abs_error,
-        MAX_SOURCE_ABS
-    );
-    assert!(
-        quality.p99_abs_error <= MAX_SOURCE_P99_ABS,
-        "p99 abs error {} exceeded {}",
-        quality.p99_abs_error,
-        MAX_SOURCE_P99_ABS
-    );
-    assert!(
-        quality.p999_abs_error <= MAX_SOURCE_P999_ABS,
-        "p999 abs error {} exceeded {}",
-        quality.p999_abs_error,
-        MAX_SOURCE_P999_ABS
-    );
-    assert!(
-        quality.snr_db >= MIN_SOURCE_SNR_DB,
-        "SNR {} below {}",
-        quality.snr_db,
-        MIN_SOURCE_SNR_DB
-    );
-    assert!(
-        quality.rmse <= SAVED_SOURCE_VS_FDK.rmse + MAX_RMSE_GAP_VS_SAVED_FDK,
-        "RMSE {} is too far above saved FDK baseline {}",
-        quality.rmse,
-        SAVED_SOURCE_VS_FDK.rmse
-    );
-    assert!(
-        quality.mean_abs_error
-            <= SAVED_SOURCE_VS_FDK.mean_abs_error + MAX_MEAN_ABS_GAP_VS_SAVED_FDK,
-        "mean abs error {} is too far above saved FDK baseline {}",
-        quality.mean_abs_error,
-        SAVED_SOURCE_VS_FDK.mean_abs_error
-    );
-    assert!(
-        quality.snr_db >= SAVED_SOURCE_VS_FDK.snr_db - MAX_SNR_GAP_DB_VS_SAVED_FDK,
-        "SNR {} is too far below saved FDK baseline {}",
-        quality.snr_db,
-        SAVED_SOURCE_VS_FDK.snr_db
-    );
-}
-
-impl SavedQualityBaseline {
-    fn format(self) -> String {
-        format!(
-            "{:<18} rmse={:.9} mean_abs_error={:.9} max_abs_error={:.9} p99_abs_error={:.9} p999_abs_error={:.9} snr_db={:.3}",
-            self.name,
-            self.rmse,
-            self.mean_abs_error,
-            self.max_abs_error,
-            self.p99_abs_error,
-            self.p999_abs_error,
-            self.snr_db,
-        )
-    }
+    assert_eq!(stats.sample_count, 9171 * 1024 * 2);
+    // The native gate compares this decoder with FDK. This target-specific
+    // checksum makes sure the complete WASM output remains unchanged.
+    assert_eq!(stats.checksum, EXPECTED_WASM_PCM_CHECKSUM);
+    assert!((stats.rms - EXPECTED_PCM_RMS).abs() <= 1.0e-8);
+    assert!((stats.peak_abs - EXPECTED_PCM_PEAK).abs() <= 1.0e-8);
 }
 
 fn bench_core_decode(frames: &[AdtsFrame<'_>], asc: &[u8]) -> WasmBenchResult {

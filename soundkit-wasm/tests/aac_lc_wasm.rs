@@ -2,7 +2,7 @@
 
 use frame_header::{EncodingFlag, Endianness, FrameHeaderV2};
 use js_sys::{Float32Array, Reflect, Uint8Array};
-use soundkit_wasm_decoder::{WasmAacLcDecoder, WasmSoundKitFrameDecoder};
+use soundkit_wasm::{WasmAacLcDecoder, WasmSoundKitFrameDecoder};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_test::wasm_bindgen_test;
 
@@ -41,6 +41,28 @@ fn decodes_silent_single_channel_access_unit() {
 
     let channel: Float32Array = planar.get(0).unchecked_into();
     assert_eq!(channel.length(), 1024);
+}
+
+#[wasm_bindgen_test]
+fn decodes_hq_stereo_rates_into_reusable_output() {
+    let access_unit = silent_stereo_access_unit();
+    for (audio_specific_config, sample_rate) in [([0x12, 0x10], 44_100), ([0x11, 0x90], 48_000)] {
+        let mut decoder = WasmAacLcDecoder::new(&audio_specific_config).unwrap();
+        assert_eq!(decoder.sample_rate(), sample_rate);
+        assert_eq!(decoder.channels(), 2);
+
+        let output = Float32Array::new_with_length(2048);
+        for _ in 0..3 {
+            let written = decoder
+                .decode_interleaved_into(&access_unit, &output)
+                .unwrap();
+            assert_eq!(written, 2048);
+        }
+
+        let mut samples = vec![1.0; output.length() as usize];
+        output.copy_to(&mut samples);
+        assert!(samples.iter().all(|sample| *sample == 0.0));
+    }
 }
 
 #[wasm_bindgen_test]
@@ -164,6 +186,32 @@ fn silent_mono_access_unit() -> Vec<u8> {
         (0, 1),   // pulse_data_present
         (0, 1),   // tns_data_present
         (0, 1),   // gain_control_data_present
+    ])
+}
+
+fn silent_stereo_access_unit() -> Vec<u8> {
+    build_bits(&[
+        (1, 3),   // CPE
+        (0, 4),   // tag
+        (1, 1),   // common_window
+        (0, 1),   // reserved
+        (0, 2),   // only long
+        (0, 1),   // sine window
+        (1, 6),   // max_sfb
+        (0, 1),   // predictor
+        (0, 2),   // no mid-side stereo
+        (100, 8), // left global gain
+        (0, 4),   // left zero codebook
+        (1, 5),   // left section length
+        (0, 1),   // left pulse
+        (0, 1),   // left TNS
+        (0, 1),   // left gain control
+        (100, 8), // right global gain
+        (0, 4),   // right zero codebook
+        (1, 5),   // right section length
+        (0, 1),   // right pulse
+        (0, 1),   // right TNS
+        (0, 1),   // right gain control
     ])
 }
 

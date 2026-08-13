@@ -5,6 +5,7 @@ edition = "2021"
 license = "MIT"
 description = "Browser WASM streaming music decoder facade for SoundKit codecs."
 repository = "https://github.com/wavey-ai/soundkit"
+readme = "README.md"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

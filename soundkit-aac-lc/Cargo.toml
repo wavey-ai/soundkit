@@ -4,6 +4,8 @@ version = "0.12.3"
 edition = "2021"
 license = "MIT"
 description = "SoundKit-owned pure Rust AAC-LC decoder core for wasm and worker targets."
+readme = "README.md"
+repository = "https://github.com/wavey-ai/soundkit"
 
 [lib]
 name = "soundkit_aac_lc"
