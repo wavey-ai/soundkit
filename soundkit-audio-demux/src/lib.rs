@@ -60,6 +60,84 @@ pub enum MediaTrackKind {
     Video,
 }
 
+/// The single linear presentation edit applied to a media track. Values use
+/// the track timescale. Samples before `media_start` are decoder preroll;
+/// samples after `media_start + duration` are decoder padding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MediaTrackTimeline {
+    pub presentation_start: u64,
+    pub media_start: u64,
+    pub duration: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PcmPacketTrim {
+    pub source_frame_start: u32,
+    pub frame_count: u32,
+}
+
+/// Resolve the exact decoded-frame intersection between one packet and the
+/// Rust-validated presentation timeline. This removes codec preroll and tail
+/// padding without asking a platform adapter to interpret MP4 edit lists.
+pub fn resolve_pcm_packet_trim(
+    timeline: MediaTrackTimeline,
+    packet_presentation_time: i64,
+    packet_duration: u32,
+    decoded_frames: u32,
+    track_timescale: u32,
+    sample_rate: u32,
+) -> Result<Option<PcmPacketTrim>, String> {
+    if packet_duration == 0 {
+        return Err("PCM trim packet duration is zero".to_string());
+    }
+    if track_timescale == 0 || sample_rate == 0 {
+        return Err("PCM trim requires non-zero track and sample rates".to_string());
+    }
+    if decoded_frames == 0 || timeline.duration == 0 {
+        return Ok(None);
+    }
+    let packet_start = i128::from(packet_presentation_time);
+    let packet_end = packet_start
+        .checked_add(i128::from(packet_duration))
+        .ok_or_else(|| "PCM trim packet time overflow".to_string())?;
+    let timeline_start = i128::from(timeline.presentation_start);
+    let timeline_end = timeline_start
+        .checked_add(i128::from(timeline.duration))
+        .ok_or_else(|| "PCM trim timeline overflow".to_string())?;
+    let intersection_start = packet_start.max(timeline_start);
+    let intersection_end = packet_end.min(timeline_end);
+    if intersection_end <= intersection_start {
+        return Ok(None);
+    }
+
+    let timescale = u128::from(track_timescale);
+    let rate = u128::from(sample_rate);
+    let relative_start = u128::try_from(intersection_start - packet_start)
+        .map_err(|_| "PCM trim start precedes packet".to_string())?;
+    let relative_end = u128::try_from(intersection_end - packet_start)
+        .map_err(|_| "PCM trim end precedes packet".to_string())?;
+    let source_start = relative_start
+        .checked_mul(rate)
+        .and_then(|value| value.checked_add(timescale - 1))
+        .ok_or_else(|| "PCM trim start overflow".to_string())?
+        / timescale;
+    let source_end = relative_end
+        .checked_mul(rate)
+        .ok_or_else(|| "PCM trim end overflow".to_string())?
+        / timescale;
+    let source_start = source_start.min(u128::from(decoded_frames));
+    let source_end = source_end.min(u128::from(decoded_frames));
+    if source_end <= source_start {
+        return Ok(None);
+    }
+    Ok(Some(PcmPacketTrim {
+        source_frame_start: u32::try_from(source_start)
+            .map_err(|_| "PCM trim start exceeds u32".to_string())?,
+        frame_count: u32::try_from(source_end - source_start)
+            .map_err(|_| "PCM trim frame count exceeds u32".to_string())?,
+    }))
+}
+
 impl MediaTrackKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -80,6 +158,7 @@ pub struct MediaTrackConfig {
     /// The exact container sample-entry identifier, such as `hvc1` or `ap4h`.
     pub codec_id: String,
     pub timescale: u32,
+    pub timeline: Option<MediaTrackTimeline>,
     pub sample_count: u32,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -546,6 +625,7 @@ struct Mp4MediaTrakTables {
     track_id: Option<u32>,
     kind: Option<MediaTrackKind>,
     timescale: Option<u32>,
+    edit_list: Vec<Mp4EditListEntry>,
     audio_entry: Option<RegularAudioSampleEntry>,
     video_entry: Option<Mp4VideoSampleEntry>,
     stts: Vec<SttsEntry>,
@@ -554,6 +634,15 @@ struct Mp4MediaTrakTables {
     sample_sizes: Vec<u32>,
     chunk_offsets: Vec<u64>,
     sync_samples: Vec<u32>,
+}
+
+#[cfg(feature = "mp4")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Mp4EditListEntry {
+    segment_duration: u64,
+    media_time: i64,
+    media_rate_integer: i16,
+    media_rate_fraction: i16,
 }
 
 /// Demux every supported audio and video track from a complete MOV or MP4
@@ -609,10 +698,19 @@ impl Mp4MediaIndex {
             };
             let mut track_samples = Vec::with_capacity(source_samples.len());
             for sample in &source_samples {
-                let presentation_time = i128::from(sample.start_time)
+                let media_presentation_time = i128::from(sample.start_time)
                     .checked_add(i128::from(sample.rendering_offset))
-                    .and_then(|value| i64::try_from(value).ok())
                     .ok_or_else(|| "MP4 presentation timestamp overflow".to_string())?;
+                let presentation_time = match track.config.timeline {
+                    Some(timeline) => media_presentation_time
+                        .checked_sub(i128::from(timeline.media_start))
+                        .and_then(|value| {
+                            value.checked_add(i128::from(timeline.presentation_start))
+                        })
+                        .and_then(|value| i64::try_from(value).ok()),
+                    None => i64::try_from(media_presentation_time).ok(),
+                }
+                .ok_or_else(|| "MP4 edited presentation timestamp overflow".to_string())?;
                 track_samples.push(MediaSampleIndex {
                     track_id: track.config.track_id,
                     kind: track.config.kind,
@@ -676,14 +774,55 @@ impl Mp4MediaIndex {
             is_sync: sample.is_sync,
         })
     }
+
+    pub fn pcm_packet_trim(
+        &self,
+        sample_index: usize,
+        decoded_frames: u32,
+    ) -> Result<Option<PcmPacketTrim>, String> {
+        let sample = self
+            .samples
+            .get(sample_index)
+            .ok_or_else(|| format!("MP4 sample index {sample_index} is out of range"))?;
+        if sample.kind != MediaTrackKind::Audio {
+            return Err(format!("MP4 sample {sample_index} is not an audio packet"));
+        }
+        let track = self
+            .tracks
+            .iter()
+            .find(|track| track.track_id == sample.track_id)
+            .ok_or_else(|| format!("MP4 sample references unknown track {}", sample.track_id))?;
+        match track.timeline {
+            Some(timeline) => resolve_pcm_packet_trim(
+                timeline,
+                sample.presentation_time,
+                sample.duration,
+                decoded_frames,
+                track.timescale,
+                track.sample_rate.unwrap_or(track.timescale),
+            ),
+            None if decoded_frames == 0 => Ok(None),
+            None => Ok(Some(PcmPacketTrim {
+                source_frame_start: 0,
+                frame_count: decoded_frames,
+            })),
+        }
+    }
 }
 
 #[cfg(feature = "mp4")]
 fn parse_mp4_media_indexes(moov: &[u8]) -> Result<Vec<Mp4MediaTrackIndex>, String> {
+    let mut movie_timescale = None;
+    for_each_child_box(moov, |header, payload, _| {
+        if header.name == *b"mvhd" {
+            movie_timescale = parse_mdhd_timescale(payload);
+        }
+        Ok(())
+    })?;
     let mut indexes = Vec::new();
     for_each_child_box(moov, |header, payload, _| {
         if header.name == *b"trak" {
-            if let Some(track) = parse_mp4_media_trak(payload)? {
+            if let Some(track) = parse_mp4_media_trak(payload, movie_timescale)? {
                 indexes.push(track);
             }
         }
@@ -722,12 +861,16 @@ fn find_top_level_mp4_box<'a>(
 }
 
 #[cfg(feature = "mp4")]
-fn parse_mp4_media_trak(data: &[u8]) -> Result<Option<Mp4MediaTrackIndex>, String> {
+fn parse_mp4_media_trak(
+    data: &[u8],
+    movie_timescale: Option<u32>,
+) -> Result<Option<Mp4MediaTrackIndex>, String> {
     let mut tables = Mp4MediaTrakTables::default();
     walk_boxes(data, &mut |header, payload| {
         match &header.name {
             b"tkhd" => tables.track_id = parse_tkhd_track_id(payload),
             b"mdhd" => tables.timescale = parse_mdhd_timescale(payload),
+            b"elst" => tables.edit_list = parse_elst(payload)?,
             b"hdlr" => {
                 if let Some(kind) = parse_media_track_kind(payload) {
                     tables.kind = Some(kind);
@@ -762,6 +905,7 @@ fn parse_mp4_media_trak(data: &[u8]) -> Result<Option<Mp4MediaTrackIndex>, Strin
     if timescale == 0 {
         return Err(format!("MP4 track {track_id} has zero timescale"));
     }
+    let timeline = resolve_media_timeline(&tables.edit_list, movie_timescale, timescale)?;
     let sample_tables = RegularTrakTables {
         track_id: tables.track_id,
         is_audio: kind == MediaTrackKind::Audio,
@@ -794,6 +938,7 @@ fn parse_mp4_media_trak(data: &[u8]) -> Result<Option<Mp4MediaTrackIndex>, Strin
                 codec: entry.codec.as_str().to_string(),
                 codec_id: entry.codec_id,
                 timescale,
+                timeline,
                 sample_count,
                 width: None,
                 height: None,
@@ -818,6 +963,7 @@ fn parse_mp4_media_trak(data: &[u8]) -> Result<Option<Mp4MediaTrackIndex>, Strin
                 codec: entry.codec,
                 codec_id: entry.codec_id,
                 timescale,
+                timeline,
                 sample_count,
                 width: Some(entry.width),
                 height: Some(entry.height),
@@ -2185,6 +2331,121 @@ fn parse_mdhd_timescale(data: &[u8]) -> Option<u32> {
 }
 
 #[cfg(feature = "mp4")]
+fn parse_elst(data: &[u8]) -> Result<Vec<Mp4EditListEntry>, String> {
+    let version = *data
+        .first()
+        .ok_or_else(|| "MP4 elst box is truncated".to_string())?;
+    let entry_count =
+        be_u32(data, 4).ok_or_else(|| "MP4 elst entry count is truncated".to_string())?;
+    let entry_size = match version {
+        0 => 12usize,
+        1 => 20usize,
+        _ => return Err(format!("unsupported MP4 elst version {version}")),
+    };
+    let required = 8usize
+        .checked_add(
+            (entry_count as usize)
+                .checked_mul(entry_size)
+                .ok_or_else(|| "MP4 elst entry size overflow".to_string())?,
+        )
+        .ok_or_else(|| "MP4 elst size overflow".to_string())?;
+    if data.len() < required {
+        return Err(format!(
+            "MP4 elst expected {required} bytes, got {}",
+            data.len()
+        ));
+    }
+
+    let mut entries = Vec::with_capacity(entry_count as usize);
+    let mut pos = 8usize;
+    for _ in 0..entry_count {
+        let (segment_duration, media_time) = if version == 1 {
+            (
+                be_u64(data, pos).expect("elst bounds checked"),
+                be_u64(data, pos + 8).expect("elst bounds checked") as i64,
+            )
+        } else {
+            (
+                u64::from(be_u32(data, pos).expect("elst bounds checked")),
+                i64::from(be_i32(data, pos + 4).expect("elst bounds checked")),
+            )
+        };
+        let rate_pos = pos + if version == 1 { 16 } else { 8 };
+        entries.push(Mp4EditListEntry {
+            segment_duration,
+            media_time,
+            media_rate_integer: be_u16(data, rate_pos).expect("elst bounds checked") as i16,
+            media_rate_fraction: be_u16(data, rate_pos + 2).expect("elst bounds checked") as i16,
+        });
+        pos += entry_size;
+    }
+    Ok(entries)
+}
+
+#[cfg(feature = "mp4")]
+fn resolve_media_timeline(
+    entries: &[Mp4EditListEntry],
+    movie_timescale: Option<u32>,
+    track_timescale: u32,
+) -> Result<Option<MediaTrackTimeline>, String> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let movie_timescale = movie_timescale
+        .filter(|value| *value > 0)
+        .ok_or_else(|| "MP4 edit list requires a non-zero movie timescale".to_string())?;
+    let mut presentation_start = 0u64;
+    let mut timeline = None;
+    for entry in entries {
+        if entry.media_rate_integer != 1 || entry.media_rate_fraction != 0 {
+            return Err(format!(
+                "unsupported MP4 edit rate {}+{}/65536",
+                entry.media_rate_integer, entry.media_rate_fraction
+            ));
+        }
+        let duration = scale_mp4_time(entry.segment_duration, movie_timescale, track_timescale)?;
+        if entry.media_time == -1 {
+            if timeline.is_some() {
+                return Err("unsupported MP4 empty edit after a media edit".to_string());
+            }
+            presentation_start = presentation_start
+                .checked_add(duration)
+                .ok_or_else(|| "MP4 edit presentation time overflow".to_string())?;
+            continue;
+        }
+        if entry.media_time < 0 {
+            return Err(format!(
+                "unsupported MP4 edit media time {}",
+                entry.media_time
+            ));
+        }
+        if timeline.is_some() {
+            return Err("multiple MP4 media edits are not yet supported".to_string());
+        }
+        timeline = Some(MediaTrackTimeline {
+            presentation_start,
+            media_start: entry.media_time as u64,
+            duration,
+        });
+    }
+    timeline
+        .map(Some)
+        .ok_or_else(|| "MP4 edit list contains no media edit".to_string())
+}
+
+#[cfg(feature = "mp4")]
+fn scale_mp4_time(value: u64, from_timescale: u32, to_timescale: u32) -> Result<u64, String> {
+    let numerator = u128::from(value)
+        .checked_mul(u128::from(to_timescale))
+        .ok_or_else(|| "MP4 edit duration overflow".to_string())?;
+    let rounded = numerator
+        .checked_add(u128::from(from_timescale / 2))
+        .ok_or_else(|| "MP4 edit duration overflow".to_string())?
+        / u128::from(from_timescale);
+    u64::try_from(rounded).map_err(|_| "MP4 edit duration exceeds u64".to_string())
+}
+
+#[cfg(feature = "mp4")]
 fn parse_hdlr_is_audio(data: &[u8]) -> bool {
     data.len() >= 12 && &data[8..12] == b"soun"
 }
@@ -2637,7 +2898,7 @@ where
 fn is_mp4_container_box(name: &[u8; 4]) -> bool {
     matches!(
         name,
-        b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"mvex"
+        b"moov" | b"trak" | b"edts" | b"mdia" | b"minf" | b"stbl" | b"mvex"
     )
 }
 
@@ -3214,6 +3475,73 @@ mod tests {
                 .join(path),
         )
         .unwrap()
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn parses_and_resolves_linear_mp4_edit_timeline() {
+        let mut payload = vec![0, 0, 0, 0];
+        payload.extend_from_slice(&2u32.to_be_bytes());
+        payload.extend_from_slice(&500u32.to_be_bytes());
+        payload.extend_from_slice(&(-1i32).to_be_bytes());
+        payload.extend_from_slice(&1i16.to_be_bytes());
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&3_000u32.to_be_bytes());
+        payload.extend_from_slice(&1_024i32.to_be_bytes());
+        payload.extend_from_slice(&1i16.to_be_bytes());
+        payload.extend_from_slice(&0i16.to_be_bytes());
+
+        let entries = parse_elst(&payload).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            resolve_media_timeline(&entries, Some(1_000), 48_000).unwrap(),
+            Some(MediaTrackTimeline {
+                presentation_start: 24_000,
+                media_start: 1_024,
+                duration: 144_000,
+            })
+        );
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn rejects_non_linear_mp4_edit_rate() {
+        let entries = [Mp4EditListEntry {
+            segment_duration: 1_000,
+            media_time: 0,
+            media_rate_integer: 0,
+            media_rate_fraction: 16_384,
+        }];
+        assert!(resolve_media_timeline(&entries, Some(1_000), 48_000)
+            .unwrap_err()
+            .contains("unsupported MP4 edit rate"));
+    }
+
+    #[test]
+    fn trims_pcm_preroll_and_tail_to_the_rust_timeline() {
+        let timeline = MediaTrackTimeline {
+            presentation_start: 0,
+            media_start: 1_024,
+            duration: 144_000,
+        };
+        assert_eq!(
+            resolve_pcm_packet_trim(timeline, -1_024, 1_024, 1_024, 48_000, 48_000).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_pcm_packet_trim(timeline, 0, 1_024, 1_024, 48_000, 48_000).unwrap(),
+            Some(PcmPacketTrim {
+                source_frame_start: 0,
+                frame_count: 1_024,
+            })
+        );
+        assert_eq!(
+            resolve_pcm_packet_trim(timeline, 143_360, 640, 1_024, 48_000, 48_000).unwrap(),
+            Some(PcmPacketTrim {
+                source_frame_start: 0,
+                frame_count: 640,
+            })
+        );
     }
 
     #[cfg(feature = "mp4")]

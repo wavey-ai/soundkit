@@ -509,6 +509,20 @@ export class WasmMp4MediaIndex {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
+     * Return the Rust-owned slice of decoded PCM that belongs to the edited
+     * programme. `null` means the whole packet is codec preroll or padding.
+     * @param {number} index
+     * @param {number} decoded_frames
+     * @returns {any}
+     */
+    pcmTrim(index, decoded_frames) {
+        const ret = wasm.wasmmp4mediaindex_pcmTrim(this.__wbg_ptr, index, decoded_frames);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * @param {number} index
      * @returns {object}
      */

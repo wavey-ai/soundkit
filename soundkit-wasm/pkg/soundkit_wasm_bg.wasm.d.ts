@@ -48,6 +48,7 @@ export const wasmflacencoder_streamHeader: (a: number) => any;
 export const wasmmp4mediaindex_fromFile: (a: number, b: number) => [number, number, number];
 export const wasmmp4mediaindex_new: (a: number, b: number) => [number, number, number];
 export const wasmmp4mediaindex_packet: (a: number, b: number, c: number, d: number) => [number, number, number];
+export const wasmmp4mediaindex_pcmTrim: (a: number, b: number, c: number) => [number, number, number];
 export const wasmmp4mediaindex_sample: (a: number, b: number) => [number, number, number];
 export const wasmmp4mediaindex_sampleCount: (a: number) => number;
 export const wasmmp4mediaindex_tracks: (a: number) => [number, number, number];

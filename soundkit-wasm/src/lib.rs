@@ -754,6 +754,31 @@ impl WasmMp4MediaIndex {
             .map_err(js_error)?;
         media_track_packet_to_js(&packet)
     }
+
+    /// Return the Rust-owned slice of decoded PCM that belongs to the edited
+    /// programme. `null` means the whole packet is codec preroll or padding.
+    #[wasm_bindgen(js_name = pcmTrim)]
+    pub fn pcm_trim(&self, index: usize, decoded_frames: u32) -> Result<JsValue, JsValue> {
+        let Some(trim) = self
+            .index
+            .pcm_packet_trim(index, decoded_frames)
+            .map_err(js_error)?
+        else {
+            return Ok(JsValue::NULL);
+        };
+        let object = Object::new();
+        Reflect::set(
+            &object,
+            &"sourceFrameStart".into(),
+            &JsValue::from_f64(trim.source_frame_start as f64),
+        )?;
+        Reflect::set(
+            &object,
+            &"frameCount".into(),
+            &JsValue::from_f64(trim.frame_count as f64),
+        )?;
+        Ok(object.into())
+    }
 }
 
 #[cfg(feature = "webm")]
@@ -2361,6 +2386,29 @@ fn media_track_config_to_js(track: &MediaTrackConfig) -> Result<JsValue, JsValue
         &"sampleCount".into(),
         &JsValue::from_f64(track.sample_count as f64),
     )?;
+    let timeline = match track.timeline {
+        Some(timeline) => {
+            let value = Object::new();
+            Reflect::set(
+                &value,
+                &"presentationStart".into(),
+                &js_safe_u64(timeline.presentation_start, "timeline.presentationStart")?,
+            )?;
+            Reflect::set(
+                &value,
+                &"mediaStart".into(),
+                &js_safe_u64(timeline.media_start, "timeline.mediaStart")?,
+            )?;
+            Reflect::set(
+                &value,
+                &"duration".into(),
+                &js_safe_u64(timeline.duration, "timeline.duration")?,
+            )?;
+            value.into()
+        }
+        None => JsValue::NULL,
+    };
+    Reflect::set(&object, &"timeline".into(), &timeline)?;
     set_optional_u32(&object, "width", track.width)?;
     set_optional_u32(&object, "height", track.height)?;
     set_optional_u32(&object, "sampleRate", track.sample_rate)?;

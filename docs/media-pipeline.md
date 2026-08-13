@@ -12,6 +12,8 @@ SoundKit owns deterministic audio extraction and video decoding for native and W
 
 `Mp4MediaIndex` parses only `moov` and returns validated absolute sample ranges. This matters for camera and NLE files that store a large `mdat` before metadata. Browser code reads the ranges from the `File`; it does not parse or validate MP4. Contiguous QuickTime PCM samples are grouped into bounded 4,096-frame packets.
 
+MP4 edit lists are parsed and normalized in Rust. Each track exposes a linear timeline in its own timescale. Packet presentation timestamps include the edit, and `pcm_packet_trim` removes AAC preroll and tail padding exactly. Platform adapters only apply the returned source-frame slice.
+
 `WebmMediaDemuxer` streams all supported WebM video and audio tracks. It resolves cluster-relative timestamps and durations to nanoseconds, preserves keyframe state, and timestamps laced frames independently.
 
 The decoded video contract is planar YUV with explicit dimensions, stride, bit depth, chroma sampling, alpha presence, presentation timestamp, and duration. Planes use Y, Cb, Cr, and optional alpha order. Eight-bit samples use one byte. Deeper samples use little-endian 16-bit words.

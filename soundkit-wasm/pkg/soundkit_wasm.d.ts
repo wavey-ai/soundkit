@@ -108,6 +108,11 @@ export class WasmMp4MediaIndex {
      * Validate and normalize exactly one indexed source range.
      */
     packet(index: number, source_bytes: Uint8Array): object;
+    /**
+     * Return the Rust-owned slice of decoded PCM that belongs to the edited
+     * programme. `null` means the whole packet is codec preroll or padding.
+     */
+    pcmTrim(index: number, decoded_frames: number): any;
     sample(index: number): object;
     tracks(): Array<any>;
     readonly sampleCount: number;
@@ -285,6 +290,7 @@ export interface InitOutput {
     readonly wasmmp4mediaindex_fromFile: (a: number, b: number) => [number, number, number];
     readonly wasmmp4mediaindex_new: (a: number, b: number) => [number, number, number];
     readonly wasmmp4mediaindex_packet: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmmp4mediaindex_pcmTrim: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmmp4mediaindex_sample: (a: number, b: number) => [number, number, number];
     readonly wasmmp4mediaindex_sampleCount: (a: number) => number;
     readonly wasmmp4mediaindex_tracks: (a: number) => [number, number, number];

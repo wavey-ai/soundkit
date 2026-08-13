@@ -60,6 +60,7 @@ async function decodeMp4MediaFile(file, expected) {
   let audioBytes = 0;
   let audioFrames = 0;
   const frames = [];
+  const videoPresentationTimes = [];
   try {
     const tracks = index.tracks();
     const video = tracks.find((track) => track.kind === "video");
@@ -68,6 +69,12 @@ async function decodeMp4MediaFile(file, expected) {
     assert.ok(audio, `${file} has a Rust-indexed audio track`);
     assert.equal(video.codec, expected.codec, `${file} video codec`);
     assert.equal(audio.codec, expected.audioCodec, `${file} audio codec`);
+    if (expected.videoTimeline) {
+      assert.deepEqual(video.timeline, expected.videoTimeline, `${file} video edit timeline`);
+    }
+    if (expected.audioTimeline) {
+      assert.deepEqual(audio.timeline, expected.audioTimeline, `${file} audio edit timeline`);
+    }
     if (audio.codec === "aac") {
       audioDecoder = new WasmAacLcDecoder(audio.decoderConfiguration);
     } else if (audio.codec === "flac") {
@@ -83,20 +90,25 @@ async function decodeMp4MediaFile(file, expected) {
       const source = bytes.subarray(sample.offset, sample.offset + sample.size);
       const packet = index.packet(sampleIndex, source);
       if (packet.kind === "video") {
+        videoPresentationTimes.push(packet.presentationTime);
         frames.push(...decoder.decode(packet.data, packet.presentationTime, packet.duration));
       } else {
         audioPackets += 1;
         audioBytes += packet.data.byteLength;
         if (audioDecoder) {
           if (audio.codec === "aac") {
-            audioFrames += audioDecoder.decodeInterleaved(packet.data).length / audio.channels;
+            const decodedFrames = audioDecoder.decodeInterleaved(packet.data).length / audio.channels;
+            const trim = index.pcmTrim(sampleIndex, decodedFrames);
+            audioFrames += trim?.frameCount ?? 0;
           } else {
             audioFrames += countPcmFrames(audioDecoder.push(packet.data));
           }
         } else if (audio.codec === "pcm") {
           const bytesPerFrame = audio.channels * Math.ceil(audio.bitsPerSample / 8);
           assert.equal(packet.data.byteLength % bytesPerFrame, 0, `${file} PCM frame alignment`);
-          audioFrames += packet.data.byteLength / bytesPerFrame;
+          const decodedFrames = packet.data.byteLength / bytesPerFrame;
+          const trim = index.pcmTrim(sampleIndex, decodedFrames);
+          audioFrames += trim?.frameCount ?? 0;
         }
       }
     }
@@ -105,6 +117,11 @@ async function decodeMp4MediaFile(file, expected) {
     }
     frames.push(...decoder.flush());
     assertExportedFrameContract(file, frames, expected);
+    assert.deepEqual(
+      frames.map((frame) => frame.pts).sort((left, right) => left - right),
+      videoPresentationTimes.sort((left, right) => left - right),
+      `${file} preserves the Rust edit-list presentation timeline through decode`,
+    );
     assert.ok(audioPackets > 0, `${file} extracts audio packets`);
     assert.ok(audioBytes > 0, `${file} extracts audio bytes`);
     assert.equal(audioFrames, expected.audioFrames, `${file} decoded audio frame count`);
@@ -258,10 +275,12 @@ async function inspectExplicitProfileGap(file, expected) {
 await decodeMp4MediaFile("h264-high-aac.mp4", {
   codec: "h264",
   audioCodec: "aac",
-  audioFrames: 145408,
+  audioFrames: 144000,
   frames: 75,
   bitDepth: 8,
   chroma: "420",
+  videoTimeline: { presentationStart: 0, mediaStart: 1024, duration: 38400 },
+  audioTimeline: { presentationStart: 0, mediaStart: 1024, duration: 144000 },
 });
 await decodeMp4MediaFile("h264-flac.mp4", {
   codec: "h264",
@@ -274,7 +293,7 @@ await decodeMp4MediaFile("h264-flac.mp4", {
 await decodeMp4MediaFile("hevc-main-aac.mov", {
   codec: "hevc",
   audioCodec: "aac",
-  audioFrames: 145408,
+  audioFrames: 144000,
   frames: 75,
   bitDepth: 8,
   chroma: "420",
