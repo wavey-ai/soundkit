@@ -63,6 +63,22 @@ pub fn parse_hevc_decoder_configuration(data: &[u8]) -> Result<NalDecoderConfigu
     })
 }
 
+/// Parse an AV1 `AV1CodecConfigurationRecord` (`av1C`) into its config OBUs.
+///
+/// The record prefixes its OBU stream with four bytes of marker, version,
+/// profile, level and chroma fields. AV1 decoders consume OBUs, so those bytes
+/// must not reach them: rav1d rejects the whole record as an invalid argument.
+/// MP4 carries this record in an `av1C` box and Matroska carries the same
+/// bytes as CodecPrivate.
+pub fn parse_av1_decoder_configuration(data: &[u8]) -> Result<Vec<u8>, String> {
+    const AV1C_HEADER_BYTES: usize = 4;
+    let marker = data.first().copied().unwrap_or_default();
+    if data.len() < AV1C_HEADER_BYTES || marker & 0x80 == 0 || marker & 0x7f != 1 {
+        return Err("invalid av1C decoder configuration".to_string());
+    }
+    Ok(data[AV1C_HEADER_BYTES..].to_vec())
+}
+
 /// Convert one container sample containing length-prefixed NAL units to Annex B.
 pub fn length_prefixed_nals_to_annex_b(data: &[u8], length_size: u8) -> Result<Vec<u8>, String> {
     if !(1..=4).contains(&length_size) {
@@ -1077,6 +1093,25 @@ mod tests {
             length_prefixed_nals_to_annex_b(&[0, 0, 0, 2, 0x65, 0x88], 4).unwrap(),
             [0, 0, 0, 1, 0x65, 0x88]
         );
+    }
+
+    #[test]
+    fn parses_av1c_into_config_obus() {
+        // marker + version, then profile, chroma and delay fields, then a
+        // sequence header OBU.
+        let av1c = [0x81, 0x04, 0x0c, 0x00, 0x0a, 0x0c, 0x02, 0x00];
+        assert_eq!(
+            parse_av1_decoder_configuration(&av1c).unwrap(),
+            [0x0a, 0x0c, 0x02, 0x00]
+        );
+        // A record with no configOBUs is still well formed.
+        assert!(parse_av1_decoder_configuration(&av1c[..4])
+            .unwrap()
+            .is_empty());
+        assert!(parse_av1_decoder_configuration(&av1c[..3]).is_err());
+        // Missing marker bit, and an unsupported version.
+        assert!(parse_av1_decoder_configuration(&[0x01, 0, 0, 0]).is_err());
+        assert!(parse_av1_decoder_configuration(&[0x82, 0, 0, 0]).is_err());
     }
 
     #[test]

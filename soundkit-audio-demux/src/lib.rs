@@ -1205,7 +1205,13 @@ fn parse_stsd_video(data: &[u8]) -> Option<Mp4VideoSampleEntry> {
                         nal_length_size = Some(config.length_size);
                         decoder_configuration = config.annex_b;
                     }
-                    _ => decoder_configuration = child_payload.to_vec(),
+                    b"av1C" => {
+                        decoder_configuration =
+                            soundkit_video::parse_av1_decoder_configuration(child_payload)?;
+                    }
+                    // A vpcC box is codec metadata, not parameter sets: VP9
+                    // frames carry everything the decoder needs.
+                    _ => decoder_configuration = Vec::new(),
                 }
             }
             Ok(())

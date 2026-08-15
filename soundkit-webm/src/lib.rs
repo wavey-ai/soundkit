@@ -888,6 +888,11 @@ fn parse_media_track_entry(data: &[u8]) -> Result<Option<WebmMediaTrackConfig>, 
             let config = soundkit_video::parse_hevc_decoder_configuration(&codec_private)?;
             (config.annex_b, Some(config.length_size))
         }
+        // Matroska carries the AV1CodecConfigurationRecord as CodecPrivate.
+        "V_AV1" if !codec_private.is_empty() => (
+            soundkit_video::parse_av1_decoder_configuration(&codec_private)?,
+            None,
+        ),
         _ => (codec_private.clone(), None),
     };
     Ok(Some(WebmMediaTrackConfig {
