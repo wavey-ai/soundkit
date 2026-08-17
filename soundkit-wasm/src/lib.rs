@@ -1387,8 +1387,8 @@ impl WasmFlacEncoder {
         Ok(Uint8Array::from(output.as_slice()))
     }
 
-    /// Signal EOF and drain the final FLAC packet. OxideAV deliberately
-    /// buffers a short final block until this call.
+    /// Signal EOF and drain the final FLAC packet.
+    /// The encoder can buffer a short final block until this call.
     #[wasm_bindgen(js_name = finish)]
     pub fn finish(&mut self) -> Result<Uint8Array, JsValue> {
         let capacity = (self.frame_size as usize)
@@ -3599,11 +3599,7 @@ fn planar_f32_to_interleaved_i32(
     for frame in 0..frames {
         for channel in 0..channels {
             let sample = planar[(channel * frames) + frame].clamp(-1.0, 1.0) as f64;
-            let scaled = if sample < 0.0 {
-                (sample * scale).round()
-            } else {
-                (sample * (scale - 1.0)).round()
-            };
+            let scaled = (sample * scale).round();
             interleaved.push((scaled as i64).clamp(min_sample as i64, max_sample as i64) as i32);
         }
     }
@@ -3634,6 +3630,18 @@ mod tests {
         }
         frames.extend(decoder.flush_frames().unwrap());
         frames
+    }
+
+    #[cfg(feature = "flac")]
+    #[test]
+    fn flac_planar_conversion_preserves_normalized_24_bit_pcm() {
+        let samples = [-8_388_608, -4_194_305, -1, 0, 1, 4_194_305, 8_388_607];
+        let planar = samples
+            .iter()
+            .map(|sample| *sample as f32 / 8_388_608.0)
+            .collect::<Vec<_>>();
+        let interleaved = planar_f32_to_interleaved_i32(&planar, planar.len(), 1, 24).unwrap();
+        assert_eq!(interleaved, samples);
     }
 
     #[test]

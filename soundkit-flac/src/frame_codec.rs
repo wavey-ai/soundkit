@@ -10,7 +10,8 @@ use flacenc::bitsink::ByteSink;
 use flacenc::component::{BitRepr, Stream, StreamInfo};
 use flacenc::config;
 use flacenc::error::{Verified, Verify};
-use flacenc::source::{Fill, FrameBuf};
+use flacenc::source::{Context, Fill, FrameBuf};
+#[cfg(feature = "packet-codec")]
 use oxideav_core::{
     CodecId, CodecParameters, Decoder as OxideDecoder, Frame as OxideFrame, Packet, SampleFormat,
     TimeBase,
@@ -109,6 +110,7 @@ impl FlacFrameConfig {
             .ok_or(FlacFrameError::Overflow("FLAC PCM byte count"))
     }
 
+    #[cfg(feature = "packet-codec")]
     fn maximum_packet_bytes(&self) -> Result<usize, FlacFrameError> {
         self.raw_pcm_bytes()?
             .checked_mul(MAX_PACKET_EXPANSION_RATIO)
@@ -116,6 +118,7 @@ impl FlacFrameConfig {
             .ok_or(FlacFrameError::Overflow("FLAC packet size limit"))
     }
 
+    #[cfg(feature = "packet-codec")]
     fn sample_format(&self) -> SampleFormat {
         match self.bits_per_sample {
             16 => SampleFormat::S16,
@@ -151,6 +154,7 @@ impl EncodedFlacFrame {
 }
 
 /// Decoded interleaved samples and the format that was actually checked.
+#[cfg(feature = "packet-codec")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecodedFlacFrame {
     pub sample_rate: u32,
@@ -160,6 +164,7 @@ pub struct DecodedFlacFrame {
     pub samples: Vec<i32>,
 }
 
+#[cfg(feature = "packet-codec")]
 impl DecodedFlacFrame {
     pub fn to_s24le(&self) -> Result<Vec<u8>, FlacFrameError> {
         if self.bits_per_sample != 24 {
@@ -230,6 +235,7 @@ pub struct FlacFrameEncoder {
     stream_info: StreamInfo,
     frame_buffer: FrameBuf,
     converted_samples: Vec<i32>,
+    context: Context,
     next_sequence: u32,
 }
 
@@ -262,6 +268,10 @@ impl FlacFrameEncoder {
             stream_info,
             frame_buffer,
             converted_samples: Vec::with_capacity(config.sample_count()?),
+            context: Context::new(
+                usize::from(config.bits_per_sample),
+                usize::from(config.channels),
+            ),
             next_sequence: 0,
         })
     }
@@ -278,6 +288,16 @@ impl FlacFrameEncoder {
     pub fn reset(&mut self) {
         self.next_sequence = 0;
         self.converted_samples.clear();
+        self.stream_info = StreamInfo::new(
+            self.config.sample_rate as usize,
+            usize::from(self.config.channels),
+            usize::from(self.config.bits_per_sample),
+        )
+        .expect("validated FLAC stream geometry");
+        self.context = Context::new(
+            usize::from(self.config.bits_per_sample),
+            usize::from(self.config.channels),
+        );
     }
 
     pub fn encode_i16(&mut self, interleaved: &[i16]) -> Result<EncodedFlacFrame, FlacFrameError> {
@@ -291,7 +311,7 @@ impl FlacFrameEncoder {
         self.converted_samples.clear();
         self.converted_samples
             .extend(interleaved.iter().copied().map(i32::from));
-        self.encode_converted()
+        self.encode_converted(self.config.frame_length)
     }
 
     pub fn encode_s24le(&mut self, interleaved: &[u8]) -> Result<EncodedFlacFrame, FlacFrameError> {
@@ -320,12 +340,37 @@ impl FlacFrameEncoder {
             };
             self.converted_samples.push(signed);
         }
-        self.encode_converted()
+        self.encode_converted(self.config.frame_length)
     }
 
     /// Encodes interleaved signed samples, clipping to the configured bit depth.
     pub fn encode_i32(&mut self, interleaved: &[i32]) -> Result<EncodedFlacFrame, FlacFrameError> {
         validate_sample_len(self.config, interleaved.len())?;
+        self.encode_i32_block(interleaved)
+    }
+
+    /// Encodes one complete stream block up to the configured frame length.
+    ///
+    /// A complete FLAC file can use a shorter final block. The caller must
+    /// keep all non-final blocks at the configured frame length.
+    pub fn encode_i32_block(
+        &mut self,
+        interleaved: &[i32],
+    ) -> Result<EncodedFlacFrame, FlacFrameError> {
+        let channels = usize::from(self.config.channels);
+        if interleaved.len() % channels != 0 {
+            return Err(FlacFrameError::InvalidInput(format!(
+                "interleaved block has {} samples, which is not divisible by {channels} channels",
+                interleaved.len()
+            )));
+        }
+        let frame_length = interleaved.len() / channels;
+        if !(FLAC_MIN_BLOCK_SIZE..=self.config.frame_length).contains(&(frame_length as u32)) {
+            return Err(FlacFrameError::InvalidInput(format!(
+                "stream block has {frame_length} frames, expected {FLAC_MIN_BLOCK_SIZE}..={}",
+                self.config.frame_length
+            )));
+        }
         let (minimum, maximum) = sample_limits(self.config.bits_per_sample);
         self.converted_samples.clear();
         self.converted_samples.extend(
@@ -333,17 +378,29 @@ impl FlacFrameEncoder {
                 .iter()
                 .map(|sample| sample.clamp(&minimum, &maximum)),
         );
-        self.encode_converted()
+        self.encode_converted(frame_length as u32)
     }
 
-    fn encode_converted(&mut self) -> Result<EncodedFlacFrame, FlacFrameError> {
-        self.frame_buffer
-            .fill_interleaved(&self.converted_samples)
-            .map_err(|error| FlacFrameError::InvalidInput(error.to_string()))?;
+    fn encode_converted(&mut self, frame_length: u32) -> Result<EncodedFlacFrame, FlacFrameError> {
+        let mut final_frame_buffer;
+        let frame_buffer = if frame_length == self.config.frame_length {
+            self.frame_buffer
+                .fill_interleaved(&self.converted_samples)
+                .map_err(|error| FlacFrameError::InvalidInput(error.to_string()))?;
+            &self.frame_buffer
+        } else {
+            final_frame_buffer =
+                FrameBuf::with_size(usize::from(self.config.channels), frame_length as usize)
+                    .map_err(|error| FlacFrameError::InvalidInput(error.to_string()))?;
+            final_frame_buffer
+                .fill_interleaved(&self.converted_samples)
+                .map_err(|error| FlacFrameError::InvalidInput(error.to_string()))?;
+            &final_frame_buffer
+        };
         let sequence = self.next_sequence;
         let frame = flacenc::encode_fixed_size_frame(
             &self.encoder_config,
-            &self.frame_buffer,
+            frame_buffer,
             sequence as usize,
             &self.stream_info,
         )
@@ -358,32 +415,66 @@ impl FlacFrameEncoder {
                 "encoder returned an empty FLAC frame".to_string(),
             ));
         }
-        if payload.len() > self.config.maximum_packet_bytes()? {
+        let pcm_bytes = self
+            .converted_samples
+            .len()
+            .checked_mul(usize::from(self.config.bits_per_sample / 8))
+            .ok_or(FlacFrameError::Overflow("FLAC PCM byte count"))?;
+        let maximum_packet_bytes = pcm_bytes
+            .checked_mul(MAX_PACKET_EXPANSION_RATIO)
+            .and_then(|bytes| bytes.checked_add(MAX_PACKET_OVERHEAD_BYTES))
+            .ok_or(FlacFrameError::Overflow("FLAC packet size limit"))?;
+        if payload.len() > maximum_packet_bytes {
             return Err(FlacFrameError::Encode(format!(
                 "encoded frame has {} bytes, exceeding the defensive {} byte limit",
                 payload.len(),
-                self.config.maximum_packet_bytes()?
+                maximum_packet_bytes
             )));
         }
+        self.stream_info.update_frame_info(&frame);
+        self.context
+            .fill_interleaved(&self.converted_samples)
+            .map_err(|error| FlacFrameError::Encode(error.to_string()))?;
         self.next_sequence = (self.next_sequence + 1) & 0x7fff_ffff;
         Ok(EncodedFlacFrame {
             sequence,
             sample_rate: self.config.sample_rate,
             channels: self.config.channels,
             bits_per_sample: self.config.bits_per_sample,
-            frame_count: self.config.frame_length,
-            pcm_bytes: self.config.raw_pcm_bytes()?,
+            frame_count: frame_length,
+            pcm_bytes,
             payload,
         })
+    }
+
+    /// Returns the FLAC metadata block for the frames encoded so far.
+    pub fn stream_header(&self) -> Result<Vec<u8>, FlacFrameError> {
+        let mut stream_info = self.stream_info.clone();
+        if self.context.total_samples() > 0 {
+            stream_info.set_total_samples(self.context.total_samples());
+            stream_info.set_md5_digest(&self.context.md5_digest());
+        }
+        let stream = Stream::with_stream_info(stream_info);
+        let mut sink = ByteSink::with_capacity(stream.count_bits());
+        stream
+            .write(&mut sink)
+            .map_err(|error| FlacFrameError::Encode(error.to_string()))?;
+        let bytes = sink.into_inner();
+        bytes
+            .strip_prefix(b"fLaC")
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| FlacFrameError::Encode("FLAC metadata has no stream marker".to_string()))
     }
 }
 
 /// Persistent per-track pure-Rust decoder.
+#[cfg(feature = "packet-codec")]
 pub struct FlacFrameDecoder {
     config: FlacFrameConfig,
     inner: Box<dyn OxideDecoder>,
 }
 
+#[cfg(feature = "packet-codec")]
 impl fmt::Debug for FlacFrameDecoder {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -393,6 +484,7 @@ impl fmt::Debug for FlacFrameDecoder {
     }
 }
 
+#[cfg(feature = "packet-codec")]
 impl FlacFrameDecoder {
     pub fn new(config: FlacFrameConfig) -> Result<Self, FlacFrameError> {
         config.validate()?;
@@ -535,6 +627,7 @@ fn verified_encoder_config(
         .map_err(|(_, error)| FlacFrameError::InvalidConfig(error.to_string()))
 }
 
+#[cfg(feature = "packet-codec")]
 fn make_decoder(config: FlacFrameConfig) -> Result<Box<dyn OxideDecoder>, FlacFrameError> {
     let stream = Stream::new(
         config.sample_rate as usize,
@@ -562,7 +655,7 @@ fn make_decoder(config: FlacFrameConfig) -> Result<Box<dyn OxideDecoder>, FlacFr
         .map_err(|error| FlacFrameError::InvalidConfig(error.to_string()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "packet-codec"))]
 mod tests {
     use super::*;
 

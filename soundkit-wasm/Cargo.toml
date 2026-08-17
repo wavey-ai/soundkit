@@ -38,7 +38,7 @@ vorbis = ["dep:soundkit-vorbis"]
 flac = [
   "dep:soundkit-flac",
   "soundkit-flac/claxon-decoder",
-  "soundkit-flac/oxideav-encoder",
+  "soundkit-flac/flacenc-encoder",
 ]
 aac = ["dep:soundkit-aac", "soundkit-aac/fdk"]
 m4a = ["aac", "soundkit-aac/mp4-decoder"]

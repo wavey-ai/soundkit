@@ -18,10 +18,11 @@ soundkit = { path = "../soundkit" }
 tracing = "0.1.40"
 
 [features]
-default = ["libflac", "oxideav-encoder"]
+default = ["libflac", "flacenc-encoder"]
 libflac = ["libflac-sys"]
 claxon-decoder = ["claxon"]
 oxideav-encoder = ["dep:oxideav-core", "dep:oxideav-flac"]
+flacenc-encoder = ["dep:flacenc"]
 packet-codec = ["dep:flacenc", "dep:oxideav-core", "dep:oxideav-flac"]
 
 [dev-dependencies]

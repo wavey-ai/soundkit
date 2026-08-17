@@ -4,34 +4,193 @@ use core::slice;
 use libflac_sys as ffi;
 #[cfg(feature = "libflac")]
 use libflac_sys::*;
-#[cfg(feature = "oxideav-encoder")]
+#[cfg(all(feature = "oxideav-encoder", not(feature = "flacenc-encoder")))]
 use oxideav_core::registry::codec::Encoder as OxideEncoder;
-#[cfg(feature = "oxideav-encoder")]
+#[cfg(all(feature = "oxideav-encoder", not(feature = "flacenc-encoder")))]
 use oxideav_core::{AudioFrame as OxideAudioFrame, CodecId, CodecParameters, Error as OxideError};
-#[cfg(feature = "oxideav-encoder")]
+#[cfg(all(feature = "oxideav-encoder", not(feature = "flacenc-encoder")))]
 use oxideav_core::{Frame as OxideFrame, SampleFormat};
 #[cfg(feature = "libflac")]
 use soundkit::audio_packet::Decoder;
-#[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
+#[cfg(any(
+    feature = "libflac",
+    feature = "oxideav-encoder",
+    feature = "flacenc-encoder"
+))]
 use soundkit::audio_packet::Encoder;
-#[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
+#[cfg(all(
+    feature = "libflac",
+    not(feature = "oxideav-encoder"),
+    not(feature = "flacenc-encoder")
+))]
 use std::cell::RefCell;
-#[cfg(feature = "oxideav-encoder")]
+#[cfg(all(feature = "oxideav-encoder", not(feature = "flacenc-encoder")))]
 use std::collections::VecDeque;
-#[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
+#[cfg(all(
+    feature = "libflac",
+    not(feature = "oxideav-encoder"),
+    not(feature = "flacenc-encoder")
+))]
 use std::rc::Rc;
 #[cfg(feature = "libflac")]
 use tracing::{debug, error, trace};
 
-#[cfg(feature = "packet-codec")]
+#[cfg(any(feature = "packet-codec", feature = "flacenc-encoder"))]
 mod frame_codec;
 #[cfg(feature = "packet-codec")]
+pub use frame_codec::{DecodedFlacFrame, FlacFrameDecoder};
+#[cfg(any(feature = "packet-codec", feature = "flacenc-encoder"))]
 pub use frame_codec::{
-    DecodedFlacFrame, EncodedFlacFrame, FlacFrameConfig, FlacFrameDecoder, FlacFrameEncoder,
-    FlacFrameError, FlacProfile,
+    EncodedFlacFrame, FlacFrameConfig, FlacFrameEncoder, FlacFrameError, FlacProfile,
 };
 
-#[cfg(feature = "oxideav-encoder")]
+#[cfg(feature = "flacenc-encoder")]
+pub struct FlacEncoder {
+    sample_rate: u32,
+    channels: u32,
+    bits_per_sample: u32,
+    frame_length: u32,
+    compression_level: u32,
+    inner: FlacFrameEncoder,
+    stream_header: Vec<u8>,
+    emitted_stream_header: bool,
+}
+
+#[cfg(feature = "flacenc-encoder")]
+impl FlacEncoder {
+    fn profile(compression_level: u32) -> FlacProfile {
+        match compression_level {
+            0..=4 => FlacProfile::Realtime,
+            5..=8 => FlacProfile::Balanced,
+            _ => FlacProfile::Maximum,
+        }
+    }
+
+    fn make_inner(
+        sample_rate: u32,
+        bits_per_sample: u32,
+        channels: u32,
+        frame_length: u32,
+        compression_level: u32,
+    ) -> Result<(FlacFrameEncoder, Vec<u8>), String> {
+        let channels =
+            u16::try_from(channels).map_err(|_| format!("Channel count {channels} exceeds u16"))?;
+        let bits_per_sample = u8::try_from(bits_per_sample)
+            .map_err(|_| format!("Bits per sample {bits_per_sample} exceeds u8"))?;
+        let config = FlacFrameConfig::new(
+            sample_rate,
+            channels,
+            bits_per_sample,
+            frame_length,
+            Self::profile(compression_level),
+        )
+        .map_err(|error| error.to_string())?;
+        let inner = FlacFrameEncoder::new(config).map_err(|error| error.to_string())?;
+        let stream_header = inner.stream_header().map_err(|error| error.to_string())?;
+        Ok((inner, stream_header))
+    }
+
+    /// Finish the FLAC stream.
+    ///
+    /// The flacenc backend emits each complete block immediately. This call
+    /// finalizes STREAMINFO and therefore does not emit another frame.
+    pub fn finish(&mut self, _output: &mut [u8]) -> Result<usize, String> {
+        self.stream_header = self
+            .inner
+            .stream_header()
+            .map_err(|error| error.to_string())?;
+        Ok(0)
+    }
+
+    pub fn stream_header(&self) -> &[u8] {
+        &self.stream_header
+    }
+}
+
+#[cfg(feature = "flacenc-encoder")]
+impl Encoder for FlacEncoder {
+    fn new(
+        sample_rate: u32,
+        bits_per_sample: u32,
+        channels: u32,
+        frame_length: u32,
+        compression_level: u32,
+    ) -> Self {
+        let (inner, stream_header) = Self::make_inner(
+            sample_rate,
+            bits_per_sample,
+            channels,
+            frame_length,
+            compression_level,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        Self {
+            sample_rate,
+            channels,
+            bits_per_sample,
+            frame_length,
+            compression_level,
+            inner,
+            stream_header,
+            emitted_stream_header: false,
+        }
+    }
+
+    fn init(&mut self) -> Result<(), String> {
+        self.reset()
+    }
+
+    fn encode_i16(&mut self, _input: &[i16], _output: &mut [u8]) -> Result<usize, String> {
+        Err("Not implemented - FLAC uses i32 input".to_string())
+    }
+
+    fn encode_i32(&mut self, input: &[i32], output: &mut [u8]) -> Result<usize, String> {
+        let encoded = self
+            .inner
+            .encode_i32_block(input)
+            .map_err(|error| error.to_string())?;
+        self.stream_header = self
+            .inner
+            .stream_header()
+            .map_err(|error| error.to_string())?;
+        let header_length = if self.emitted_stream_header {
+            0
+        } else {
+            self.stream_header.len()
+        };
+        let encoded_length = header_length
+            .checked_add(encoded.payload.len())
+            .ok_or_else(|| "FLAC packet length overflow".to_string())?;
+        if output.len() < encoded_length {
+            return Err(format!(
+                "Output buffer of len {} too small for FLAC packet of len {encoded_length}",
+                output.len()
+            ));
+        }
+        if header_length > 0 {
+            output[..header_length].copy_from_slice(&self.stream_header);
+        }
+        output[header_length..encoded_length].copy_from_slice(&encoded.payload);
+        self.emitted_stream_header = true;
+        Ok(encoded_length)
+    }
+
+    fn reset(&mut self) -> Result<(), String> {
+        let (inner, stream_header) = Self::make_inner(
+            self.sample_rate,
+            self.bits_per_sample,
+            self.channels,
+            self.frame_length,
+            self.compression_level,
+        )?;
+        self.inner = inner;
+        self.stream_header = stream_header;
+        self.emitted_stream_header = false;
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "oxideav-encoder", not(feature = "flacenc-encoder")))]
 pub struct FlacEncoder {
     sample_rate: u32,
     channels: u32,
@@ -44,7 +203,7 @@ pub struct FlacEncoder {
     emitted_stream_header: bool,
 }
 
-#[cfg(feature = "oxideav-encoder")]
+#[cfg(all(feature = "oxideav-encoder", not(feature = "flacenc-encoder")))]
 impl FlacEncoder {
     fn sample_format(bits_per_sample: u32) -> Result<SampleFormat, String> {
         match bits_per_sample {
@@ -148,7 +307,7 @@ impl FlacEncoder {
     }
 }
 
-#[cfg(feature = "oxideav-encoder")]
+#[cfg(all(feature = "oxideav-encoder", not(feature = "flacenc-encoder")))]
 impl Encoder for FlacEncoder {
     fn new(
         sample_rate: u32,
@@ -244,7 +403,11 @@ impl Encoder for FlacEncoder {
     }
 }
 
-#[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
+#[cfg(all(
+    feature = "libflac",
+    not(feature = "oxideav-encoder"),
+    not(feature = "flacenc-encoder")
+))]
 pub struct FlacEncoder {
     encoder: *mut ffi::FLAC__StreamEncoder,
     sample_rate: u32,
@@ -255,7 +418,11 @@ pub struct FlacEncoder {
     compression_level: u32,
 }
 
-#[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
+#[cfg(all(
+    feature = "libflac",
+    not(feature = "oxideav-encoder"),
+    not(feature = "flacenc-encoder")
+))]
 extern "C" fn write_callback(
     _encoder: *const ffi::FLAC__StreamEncoder,
     buffer: *const ffi::FLAC__byte,
@@ -272,7 +439,11 @@ extern "C" fn write_callback(
     ffi::FLAC__STREAM_ENCODER_WRITE_STATUS_OK
 }
 
-#[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
+#[cfg(all(
+    feature = "libflac",
+    not(feature = "oxideav-encoder"),
+    not(feature = "flacenc-encoder")
+))]
 impl Encoder for FlacEncoder {
     fn new(
         sample_rate: u32,
@@ -375,7 +546,11 @@ impl Encoder for FlacEncoder {
     }
 }
 
-#[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
+#[cfg(all(
+    feature = "libflac",
+    not(feature = "oxideav-encoder"),
+    not(feature = "flacenc-encoder")
+))]
 impl Drop for FlacEncoder {
     fn drop(&mut self) {
         unsafe {
@@ -953,23 +1128,31 @@ pub use claxon_decoder::FlacDecoderClaxon;
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
+    #[cfg(any(
+        feature = "libflac",
+        feature = "oxideav-encoder",
+        feature = "flacenc-encoder"
+    ))]
     use super::*;
-    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
+    #[cfg(all(feature = "libflac", not(feature = "flacenc-encoder")))]
     use soundkit::audio_bytes::{f32le_to_s24, s16le_to_i32, s24le_to_i32};
     #[cfg(any(feature = "libflac", feature = "claxon-decoder"))]
     use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
-    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
+    #[cfg(all(feature = "libflac", not(feature = "flacenc-encoder")))]
     use soundkit::wav::WavStreamProcessor;
     #[cfg(any(feature = "libflac", feature = "claxon-decoder"))]
     use std::fs;
-    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
+    #[cfg(all(feature = "libflac", not(feature = "flacenc-encoder")))]
     use std::fs::File;
-    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
+    #[cfg(all(feature = "libflac", not(feature = "flacenc-encoder")))]
     use std::io::Read;
-    #[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
+    #[cfg(all(
+        feature = "libflac",
+        not(feature = "oxideav-encoder"),
+        not(feature = "flacenc-encoder")
+    ))]
     use std::io::Write;
-    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
+    #[cfg(all(feature = "libflac", not(feature = "flacenc-encoder")))]
     use std::path::Path;
     #[cfg(any(
         feature = "libflac",
@@ -983,7 +1166,7 @@ mod tests {
         feature = "claxon-decoder"
     ))]
     use std::sync::Once;
-    #[cfg(any(feature = "libflac", feature = "oxideav-encoder"))]
+    #[cfg(all(feature = "libflac", not(feature = "flacenc-encoder")))]
     use tracing::trace;
 
     #[cfg(any(
@@ -1016,7 +1199,11 @@ mod tests {
             .join(file)
     }
 
-    #[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
+    #[cfg(all(
+        feature = "libflac",
+        not(feature = "oxideav-encoder"),
+        not(feature = "flacenc-encoder")
+    ))]
     fn golden_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -1111,7 +1298,7 @@ mod tests {
         fs::write(&output_path, pcm_bytes).unwrap();
     }
 
-    #[cfg(feature = "libflac")]
+    #[cfg(all(feature = "libflac", not(feature = "flacenc-encoder")))]
     fn run_flac_encoder_with_wav_file(file_path: &Path, output_path: &Path) {
         init_tracing();
 
@@ -1194,7 +1381,11 @@ mod tests {
         encoder.reset().expect("Failed to reset encoder");
     }
 
-    #[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
+    #[cfg(all(
+        feature = "libflac",
+        not(feature = "oxideav-encoder"),
+        not(feature = "flacenc-encoder")
+    ))]
     #[test]
     fn test_flac_encoder_with_wave_16bit() {
         run_flac_encoder_with_wav_file(
@@ -1203,7 +1394,11 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
+    #[cfg(all(
+        feature = "libflac",
+        not(feature = "oxideav-encoder"),
+        not(feature = "flacenc-encoder")
+    ))]
     #[test]
     fn test_flac_encoder_with_wave_24bit() {
         run_flac_encoder_with_wav_file(
@@ -1212,7 +1407,11 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "libflac", not(feature = "oxideav-encoder")))]
+    #[cfg(all(
+        feature = "libflac",
+        not(feature = "oxideav-encoder"),
+        not(feature = "flacenc-encoder")
+    ))]
     #[test]
     fn test_flac_encoder_with_wave_32bit() {
         run_flac_encoder_with_wav_file(
@@ -1221,13 +1420,54 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "oxideav-encoder", feature = "libflac"))]
+    #[cfg(all(
+        feature = "oxideav-encoder",
+        feature = "libflac",
+        not(feature = "flacenc-encoder")
+    ))]
     #[test]
     fn test_oxideav_flac_encoder_streaming_packets_roundtrip() {
         run_flac_encoder_with_wav_file(
             &testdata_path("wav_stereo/A_Tusk_is_used_to_make_costly_gifts.wav"),
             Path::new(""),
         );
+    }
+
+    #[cfg(all(feature = "flacenc-encoder", feature = "claxon-decoder"))]
+    #[test]
+    fn test_flacenc_stream_encoder_roundtrip_with_a_short_final_block() {
+        use std::io::Cursor;
+
+        let channels = 2usize;
+        let frame_length = 128usize;
+        let frame_count = frame_length * 2 + 64;
+        let samples = (0..frame_count * channels)
+            .map(|index| ((index as i32 * 977) % 65_536) - 32_768)
+            .collect::<Vec<_>>();
+        let mut encoder = FlacEncoder::new(48_000, 16, channels as u32, frame_length as u32, 5);
+        encoder.init().unwrap();
+
+        let mut packets = Vec::new();
+        for chunk in samples.chunks(frame_length * channels) {
+            let mut output = vec![0u8; chunk.len() * 8 + 4_096];
+            let encoded = encoder.encode_i32(chunk, &mut output).unwrap();
+            output.truncate(encoded);
+            packets.push(output);
+        }
+        let mut flush = vec![0u8; frame_length * channels * 8 + 4_096];
+        assert_eq!(encoder.finish(&mut flush).unwrap(), 0);
+
+        let header = encoder.stream_header();
+        let mut file = b"fLaC".to_vec();
+        file.extend_from_slice(header);
+        file.extend_from_slice(&packets[0][header.len()..]);
+        for packet in &packets[1..] {
+            file.extend_from_slice(packet);
+        }
+
+        let mut reader = claxon::FlacReader::new(Cursor::new(file)).unwrap();
+        let decoded = reader.samples().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(decoded, samples);
     }
 
     #[cfg(feature = "claxon-decoder")]

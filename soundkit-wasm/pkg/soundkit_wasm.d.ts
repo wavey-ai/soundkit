@@ -112,8 +112,8 @@ export class WasmFlacEncoder {
     [Symbol.dispose](): void;
     encodePlanarF32(planar: Float32Array, frames_per_channel: number): Uint8Array;
     /**
-     * Signal EOF and drain the final FLAC packet. OxideAV deliberately
-     * buffers a short final block until this call.
+     * Signal EOF and drain the final FLAC packet.
+     * The encoder can buffer a short final block until this call.
      */
     finish(): Uint8Array;
     constructor(sample_rate: number, channels: number, bits_per_sample: number, frame_size: number, compression_level: number);

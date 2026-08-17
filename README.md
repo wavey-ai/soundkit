@@ -130,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | WAV / RF64 | `WavStreamEncoder` / `WasmWavEncoder` | Yes | Emits an exact header, then bounded interleaved PCM chunks. Uses RF64 beyond 4 GiB. |
 | MP3 | `mp3lame` | Yes | Feature-gated encoder path. |
 | AAC ADTS | `fdk-aac` | Yes | ADTS output. |
-| FLAC | `libFLAC` | Yes | Reference encoder. |
+| FLAC | `flacenc` | Yes | The default encoder is pure Rust. Enable `oxideav-encoder` only for compatibility tests. |
 | Opus | `libopus` | Yes | Packet encoder. |
 | AMR-NB | OpenCORE AMR-NB | Yes | 160-sample speech frames. |
 | G.711 / G.722 / G.726 / G.729 / GSM | Codec crates | Yes | Frame or sample streaming, depending on codec. |

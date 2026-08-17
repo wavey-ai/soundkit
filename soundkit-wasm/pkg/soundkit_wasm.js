@@ -580,8 +580,8 @@ export class WasmFlacEncoder {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
-     * Signal EOF and drain the final FLAC packet. OxideAV deliberately
-     * buffers a short final block until this call.
+     * Signal EOF and drain the final FLAC packet.
+     * The encoder can buffer a short final block until this call.
      * @returns {Uint8Array}
      */
     finish() {
