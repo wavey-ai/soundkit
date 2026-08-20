@@ -18,6 +18,50 @@ resampling, codec wrappers, and browser-safe streaming.
 | Video decode | `soundkit-video`, `soundkit-dnx` | Pure-Rust H.264, HEVC, VP9, AV1, ProRes, DNxHD, and DNxHR decoding. |
 | WASM | `soundkit-wasm` | Seekable browser media adapters and deterministic Rust audio/video decode. |
 
+## Platform Integration Policy
+
+SoundKit complements platform media APIs rather than replacing device I/O or
+ordinary presentation playback. Rust owns every operation that must be bounded,
+portable, byte-addressable, or deterministic. Apple frameworks and Web APIs own
+the device and presentation services they are designed to provide.
+
+| Operation | Apple platforms | Browser / WebCodecs | SoundKit responsibility |
+| --- | --- | --- | --- |
+| Audio session, routes, capture, and device output | `AVAudioSession`, Audio Unit, or `AVAudioEngine` | Web Audio and `AudioWorklet` | Codec packets, deterministic DSP, and stored stream formats. |
+| Ordinary original-file playback | `AVPlayer` is appropriate | An HTML media element is appropriate | Optional inspection and compatibility fallback. This path does not define canonical media. |
+| File and container inspection | SoundKit first | SoundKit first in a worker | Detect and validate bytes. Never trust a suffix or MIME type as the parser contract. |
+| Container demux and sample indexing | SoundKit | SoundKit | Own MOV/MP4, fragmented MP4, WebM/Matroska, MPEG-TS/M2TS, Ogg, CAF, and MXF ranges, timestamps, edit lists, and packet limits. |
+| Codec decode supported by SoundKit | SoundKit first | SoundKit first | Produce the same bounded decoded-frame contract across native and WASM targets. |
+| Unsupported codec profile | `AVAssetReader` or `AVAudioConverter` fallback | `AudioDecoder` fallback after `isConfigSupported()` | Demux first, supply access units, validate output, and consume fallback PCM immediately in bounded blocks. |
+| Canonical normalization and resampling | SoundKit | SoundKit | Keep channel mapping, sample rate, priming, finite-sample handling, and hashes consistent across platforms. |
+| Application Opus/FLAC creation | SoundKit only | SoundKit only | Frame, encode, hash, and build byte indexes with one cross-platform contract. |
+| Random-access editing or cached playback | SoundKit indexed stream | SoundKit indexed stream | Resolve byte ranges and decode only the requested packets. Do not create a persistent PCM working copy. |
+| Video presentation decode | VideoToolbox may be selected | WebCodecs may be selected | Retain container/index ownership and provide Rust fallback for supported codecs and profiles. |
+
+The selection order for canonical imports is:
+
+1. SoundKit detects and demuxes the source.
+2. A SoundKit decoder handles the codec when supported.
+3. A platform decoder handles only a codec profile SoundKit explicitly rejects.
+4. The adapter returns bounded PCM blocks directly to Rust.
+5. SoundKit normalizes, hashes, encodes, indexes, and stores the result.
+
+This ordering avoids two incompatible canonical pipelines. Platform decoders can
+change priming, channel mapping, sample conversion, or supported profiles between
+OS and browser releases. Those differences are acceptable for fallback playback,
+but they must not silently change stored packet bytes or cache identities.
+
+`AVAssetReader` and `AVAudioConverter` provide the sequential and pull-based
+decode APIs needed for a bounded fallback. WebCodecs `AudioDecoder` provides an
+asynchronous access-unit API with a decode queue and flush operation. WebCodecs
+does not demux containers, generate byte-range indexes, or frame SoundKit streams.
+Its availability and codec profiles must be checked at runtime. Whole-file browser
+APIs such as `decodeAudioData()` are not a canonical SoundKit import path.
+
+References: [AVAssetReader](https://developer.apple.com/documentation/avfoundation/avassetreader),
+[AVAudioConverter](https://developer.apple.com/documentation/avfaudio/avaudioconverter),
+and [WebKit WebCodecs audio support](https://webkit.org/blog/16993/news-from-wwdc25-web-technology-coming-this-fall-in-safari-26-beta/).
+
 ## Streaming Decode Matrix
 
 `Stream output` means the decoder can emit PCM before EOF from chunked input.
@@ -75,8 +119,9 @@ tool rather than a codec decoder.
 
 ## Native Media Pipeline
 
-SoundKit extracts audio and video without browser or device media decoders.
-Rust owns container validation, timestamps, codec normalization, and decoded frame validation.
+SoundKit can extract audio and video without browser or device media decoders.
+Integrations may use a platform fallback under the policy above. Rust still owns
+container validation, timestamps, codec normalization, and decoded-frame validation.
 
 Browser `File` and `Blob` sources use seekable byte ranges for MOV, MP4, M4A, and CAF.
 Large `mdat` and CAF `data` extents never cross the WASM boundary as complete buffers.

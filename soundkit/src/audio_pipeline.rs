@@ -127,6 +127,199 @@ pub fn mixdown_to_mono_f32(channels: &[Vec<f32>]) -> Result<Vec<f32>, String> {
     Ok(mono)
 }
 
+/// One bounded block of the library's canonical 48 kHz stereo PCM.
+///
+/// This type deliberately stays inside Rust. Browser adapters can feed its
+/// samples straight into Opus and FLAC encoders without materializing a
+/// complete Float32 programme in JavaScript.
+#[derive(Debug)]
+pub struct Stereo48kBlock {
+    pub left: Vec<f32>,
+    pub right: Vec<f32>,
+}
+
+impl Stereo48kBlock {
+    pub fn frame_count(&self) -> usize {
+        self.left.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.left.is_empty()
+    }
+}
+
+/// Incrementally normalizes decoded SoundKit frames to 48 kHz stereo.
+///
+/// The interpolation and channel selection intentionally match the previous
+/// browser implementation: mono is duplicated, sources with more channels
+/// use their first two channels, and non-48 kHz sources use linear
+/// interpolation over the complete stream timeline. Only the previous stereo
+/// sample and the current decoded block are retained.
+#[derive(Debug, Default)]
+pub struct StreamingStereo48kNormalizer {
+    source_sample_rate: u32,
+    source_channels: u8,
+    source_frames: u64,
+    output_frames: u64,
+    previous_left: f32,
+    previous_right: f32,
+    has_previous: bool,
+    finished: bool,
+}
+
+impl StreamingStereo48kNormalizer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn source_sample_rate(&self) -> u32 {
+        self.source_sample_rate
+    }
+
+    pub fn source_channels(&self) -> u8 {
+        self.source_channels
+    }
+
+    pub fn source_frames(&self) -> u64 {
+        self.source_frames
+    }
+
+    pub fn output_frames(&self) -> u64 {
+        self.output_frames
+    }
+
+    pub fn push(&mut self, audio: &AudioData) -> Result<Option<Stereo48kBlock>, String> {
+        if self.finished {
+            return Err("48 kHz stereo normalizer is already finished".to_owned());
+        }
+        let sample_rate = audio.sampling_rate();
+        let channel_count = audio.channel_count();
+        if sample_rate == 0 || channel_count == 0 {
+            return Err("decoded audio has invalid PCM geometry".to_owned());
+        }
+        if self.source_sample_rate == 0 {
+            self.source_sample_rate = sample_rate;
+            self.source_channels = channel_count;
+        } else if self.source_sample_rate != sample_rate || self.source_channels != channel_count {
+            return Err(format!(
+                "decoded PCM geometry changed from {} Hz/{} ch to {sample_rate} Hz/{channel_count} ch",
+                self.source_sample_rate, self.source_channels
+            ));
+        }
+
+        let channels = audio_to_f32_channels(audio)?;
+        let left = channels
+            .first()
+            .ok_or_else(|| "decoded audio contained no channels".to_owned())?;
+        let right = channels.get(1).unwrap_or(left);
+        if left.is_empty() || right.len() != left.len() {
+            return Err("decoded audio contained an invalid PCM block".to_owned());
+        }
+        let frame_count = left.len() as u64;
+        let start_frame = self.source_frames;
+        let end_frame = start_frame
+            .checked_add(frame_count)
+            .ok_or_else(|| "decoded audio frame count overflowed".to_owned())?;
+
+        let block = if sample_rate == 48_000 {
+            self.output_frames = self
+                .output_frames
+                .checked_add(frame_count)
+                .ok_or_else(|| "normalized audio frame count overflowed".to_owned())?;
+            Stereo48kBlock {
+                left: left.iter().map(|sample| finite_pcm(*sample)).collect(),
+                right: right.iter().map(|sample| finite_pcm(*sample)).collect(),
+            }
+        } else {
+            let maximum_output = ((frame_count * 48_000).div_ceil(u64::from(sample_rate)) + 4)
+                .try_into()
+                .map_err(|_| "normalized audio block exceeds this address space".to_owned())?;
+            let mut output_left = Vec::with_capacity(maximum_output);
+            let mut output_right = Vec::with_capacity(maximum_output);
+            loop {
+                let source_position = self.output_frames as f64 * f64::from(sample_rate) / 48_000.0;
+                let lower = source_position.floor() as u64;
+                let upper = lower + 1;
+                if upper >= end_frame {
+                    break;
+                }
+                let fraction = (source_position - lower as f64) as f32;
+                let left_lower = stream_sample(left, self.previous_left, start_frame, lower);
+                let right_lower = stream_sample(right, self.previous_right, start_frame, lower);
+                let left_upper = stream_sample(left, self.previous_left, start_frame, upper);
+                let right_upper = stream_sample(right, self.previous_right, start_frame, upper);
+                output_left.push(finite_pcm(
+                    left_lower + ((left_upper - left_lower) * fraction),
+                ));
+                output_right.push(finite_pcm(
+                    right_lower + ((right_upper - right_lower) * fraction),
+                ));
+                self.output_frames += 1;
+            }
+            Stereo48kBlock {
+                left: output_left,
+                right: output_right,
+            }
+        };
+
+        self.source_frames = end_frame;
+        self.previous_left = finite_pcm(*left.last().expect("non-empty channel checked above"));
+        self.previous_right = finite_pcm(*right.last().expect("non-empty channel checked above"));
+        self.has_previous = true;
+        Ok((!block.is_empty()).then_some(block))
+    }
+
+    /// Completes the exact rounded 48 kHz duration by repeating the final
+    /// sample, matching the old bounded browser stream.
+    pub fn finish(&mut self) -> Result<Option<Stereo48kBlock>, String> {
+        if self.finished {
+            return Err("48 kHz stereo normalizer is already finished".to_owned());
+        }
+        self.finished = true;
+        if !self.has_previous || self.source_frames == 0 || self.source_sample_rate == 0 {
+            return Err("decoded source contained no PCM".to_owned());
+        }
+        if self.source_sample_rate == 48_000 {
+            return Ok(None);
+        }
+        let target_frames = ((self.source_frames as f64 * 48_000.0)
+            / f64::from(self.source_sample_rate))
+        .round()
+        .max(1.0) as u64;
+        let remaining = target_frames.saturating_sub(self.output_frames);
+        self.output_frames = target_frames;
+        if remaining == 0 {
+            return Ok(None);
+        }
+        let remaining: usize = remaining
+            .try_into()
+            .map_err(|_| "normalized audio tail exceeds this address space".to_owned())?;
+        Ok(Some(Stereo48kBlock {
+            left: vec![self.previous_left; remaining],
+            right: vec![self.previous_right; remaining],
+        }))
+    }
+}
+
+fn finite_pcm(sample: f32) -> f32 {
+    if sample.is_finite() {
+        sample.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn stream_sample(samples: &[f32], previous: f32, start_frame: u64, frame: u64) -> f32 {
+    if frame < start_frame {
+        return previous;
+    }
+    samples
+        .get((frame - start_frame) as usize)
+        .copied()
+        .map(finite_pcm)
+        .unwrap_or(previous)
+}
+
 pub fn f32s_to_le_bytes(samples: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(std::mem::size_of_val(samples));
     for sample in samples {
@@ -431,5 +624,59 @@ mod tests {
     fn test_f32_from_le_bytes_rejects_truncated_input() {
         let error = f32s_from_le_bytes(&[0, 1, 2]).unwrap_err();
         assert!(error.contains("multiple of 4"));
+    }
+
+    fn pcm16_audio(sample_rate: u32, channels: &[Vec<i16>]) -> AudioData {
+        AudioData::new(
+            16,
+            channels.len() as u8,
+            sample_rate,
+            interleave_vecs_i16(channels),
+            EncodingFlag::PCMSigned,
+            Endianness::LittleEndian,
+        )
+    }
+
+    fn normalize_blocks(blocks: &[AudioData]) -> (Vec<f32>, Vec<f32>) {
+        let mut normalizer = StreamingStereo48kNormalizer::new();
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for block in blocks {
+            if let Some(output) = normalizer.push(block).unwrap() {
+                left.extend(output.left);
+                right.extend(output.right);
+            }
+        }
+        if let Some(output) = normalizer.finish().unwrap() {
+            left.extend(output.left);
+            right.extend(output.right);
+        }
+        (left, right)
+    }
+
+    #[test]
+    fn streaming_stereo_normalizer_duplicates_mono_without_resampling() {
+        let audio = pcm16_audio(48_000, &[vec![i16::MIN, 0, i16::MAX]]);
+        let (left, right) = normalize_blocks(&[audio]);
+        assert_eq!(left, right);
+        assert_eq!(left.len(), 3);
+        assert_eq!(left[0], -1.0);
+        assert_eq!(left[1], 0.0);
+    }
+
+    #[test]
+    fn streaming_stereo_normalizer_is_independent_of_decoder_chunking() {
+        let left: Vec<i16> = (0..100).map(|sample| sample * 211 - 10_000).collect();
+        let right: Vec<i16> = (0..100).map(|sample| 10_000 - sample * 173).collect();
+        let whole = pcm16_audio(44_100, &[left.clone(), right.clone()]);
+        let chunks = [
+            pcm16_audio(44_100, &[left[..37].to_vec(), right[..37].to_vec()]),
+            pcm16_audio(44_100, &[left[37..73].to_vec(), right[37..73].to_vec()]),
+            pcm16_audio(44_100, &[left[73..].to_vec(), right[73..].to_vec()]),
+        ];
+        let expected = normalize_blocks(&[whole]);
+        let actual = normalize_blocks(&chunks);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.0.len(), 109);
     }
 }

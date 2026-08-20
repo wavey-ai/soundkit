@@ -3,22 +3,17 @@ use alac::Reader as AlacReader;
 use alac::{Decoder as CodecDecoder, StreamInfo};
 use frame_header::{EncodingFlag, Endianness};
 use soundkit::audio_types::AudioData;
+pub use soundkit_audio_demux::{
+    inspect_caf_chunk, validate_caf_file_header, CafAudioIndex, CafChunkRange,
+};
 #[cfg(test)]
 use std::io::Cursor;
 
 const MAX_ALAC_CHANNELS: u8 = 8;
 const MAX_ALAC_FRAMES_PER_PACKET: u32 = 65_536;
 const MAX_ALAC_PACKET_BYTES: usize = 16 * 1024 * 1024;
-const MAX_CAF_COOKIE_BYTES: u64 = 1024 * 1024;
+#[cfg(test)]
 const MAX_CAF_PACKET_TABLE_BYTES: u64 = 64 * 1024 * 1024;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CafChunkRange {
-    pub chunk_type: [u8; 4],
-    pub payload_offset: u64,
-    pub payload_size: u64,
-    pub end: u64,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CafPacketRange {
@@ -38,74 +33,6 @@ pub struct CafAlacPacketIndex {
     pub priming_frames: u32,
     pub remainder_frames: u32,
     pub packets: Vec<CafPacketRange>,
-}
-
-pub fn validate_caf_file_header(header: &[u8], file_size: u64) -> Result<(), String> {
-    if file_size < 8 || header.len() < 8 {
-        return Err("CAF source ends before its 8-byte file header".to_string());
-    }
-    if &header[..4] != b"caff" {
-        return Err("CAF source does not start with caff".to_string());
-    }
-    let version = u16::from_be_bytes([header[4], header[5]]);
-    let flags = u16::from_be_bytes([header[6], header[7]]);
-    if version != 1 || flags != 0 {
-        return Err(format!(
-            "unsupported CAF header version={version} flags={flags}"
-        ));
-    }
-    Ok(())
-}
-
-/// Inspect one CAF chunk header without reading its payload.
-pub fn inspect_caf_chunk(
-    header: &[u8],
-    absolute_offset: u64,
-    file_size: u64,
-) -> Result<CafChunkRange, String> {
-    if absolute_offset > file_size || file_size - absolute_offset < 12 {
-        return Err("CAF source ends before a chunk header".to_string());
-    }
-    if header.len() < 12 {
-        return Err("CAF chunk header needs 12 bytes".to_string());
-    }
-    let chunk_type: [u8; 4] = header[..4].try_into().unwrap();
-    let signed_size = i64::from_be_bytes(header[4..12].try_into().unwrap());
-    let payload_offset = absolute_offset + 12;
-    let payload_size = match signed_size {
-        -1 => file_size - payload_offset,
-        value if value >= 0 => value as u64,
-        value => return Err(format!("CAF chunk has invalid negative size {value}")),
-    };
-    let end = payload_offset
-        .checked_add(payload_size)
-        .ok_or_else(|| "CAF chunk range overflows u64".to_string())?;
-    if end > file_size {
-        return Err(format!(
-            "CAF chunk {} exceeds the source length",
-            String::from_utf8_lossy(&chunk_type)
-        ));
-    }
-    let budget = match &chunk_type {
-        b"desc" => Some(32),
-        b"kuki" => Some(MAX_CAF_COOKIE_BYTES),
-        b"pakt" => Some(MAX_CAF_PACKET_TABLE_BYTES),
-        _ => None,
-    };
-    if let Some(budget) = budget {
-        if payload_size > budget {
-            return Err(format!(
-                "CAF chunk {} exceeds the {budget} byte metadata budget",
-                String::from_utf8_lossy(&chunk_type)
-            ));
-        }
-    }
-    Ok(CafChunkRange {
-        chunk_type,
-        payload_offset,
-        payload_size,
-        end,
-    })
 }
 
 impl CafAlacPacketIndex {

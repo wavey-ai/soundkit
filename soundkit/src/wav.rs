@@ -80,6 +80,18 @@ impl WavStreamProcessor {
         self.buffer.len()
     }
 
+    /// Exact PCM frame count advertised by the data chunk once its header has
+    /// been parsed. This lets streaming transcoders size their final encoder
+    /// block without reading or retaining the complete WAV first.
+    pub fn total_frames(&self) -> Option<u64> {
+        let bytes_per_sample = self.bits_per_sample.checked_div(8)?;
+        let bytes_per_frame = bytes_per_sample.checked_mul(self.channel_count)?;
+        if bytes_per_frame == 0 || self.data_chunk_size == 0 {
+            return None;
+        }
+        Some((self.data_chunk_size as u64) / (bytes_per_frame as u64))
+    }
+
     pub fn add(&mut self, chunk: &[u8]) -> Result<Option<AudioData>, String> {
         if chunk.len() > MAX_WAV_INPUT_CHUNK_BYTES {
             return Err(format!(

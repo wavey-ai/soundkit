@@ -93,6 +93,11 @@ export class WasmAudioTrackDemuxer {
 export class WasmCafAlacIndex {
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * Validate, decode, priming/remainder trim, and encode one CAF packet.
+     * Only the indexed packet bytes cross the WASM boundary.
+     */
+    encodeAlacSample(index: number, source_bytes: Uint8Array, encoder: WasmStreamingLibraryEncoder): any;
     constructor(description: Uint8Array, magic_cookie: Uint8Array, packet_table: Uint8Array, data_payload_offset: number, data_payload_size: number);
     /**
      * Validate exactly one packet range before codec decode.
@@ -143,6 +148,16 @@ export class WasmMp4MediaDemuxer {
 export class WasmMp4MediaIndex {
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * Validate, decode, edit-list trim, and encode one indexed AAC-LC sample.
+     */
+    encodeAacLcSample(index: number, source_bytes: Uint8Array, encoder: WasmStreamingLibraryEncoder): any;
+    /**
+     * Validate, decode, edit-list trim, and encode one indexed ALAC sample.
+     * JavaScript transports only the requested container byte range; PCM
+     * remains within Rust throughout the operation.
+     */
+    encodeAlacSample(index: number, source_bytes: Uint8Array, encoder: WasmStreamingLibraryEncoder): any;
     /**
      * Conformance helper for small complete files. Large browser imports
      * should locate and read only `moov`, then call the constructor.
@@ -246,6 +261,41 @@ export class WasmOpusEncoder {
     reset(): void;
 }
 
+/**
+ * One-pass encoder for the library import fast path.
+ *
+ * A 48 kHz stereo PCM16 WAV is already in the geometry used by the library's
+ * Opus cache. Keeping the WAV parser and both encoders together means each
+ * bounded input chunk is parsed once and immediately fans out to Opus and,
+ * for lossless imports, FLAC. No decoded PCM crosses into JavaScript and no
+ * seekable Float32 working copy has to be completed before encoding starts.
+ */
+export class WasmPcm16WaveLibraryEncoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Drain the last partial Opus/FLAC blocks. No complete PCM is retained.
+     */
+    finish(): any;
+    constructor(preserve_lossless: boolean);
+    /**
+     * Parse and encode one bounded WAV byte range.
+     */
+    push(bytes: Uint8Array): any;
+}
+
+/**
+ * Bounded incremental SHA-256 for browser streams that are not otherwise
+ * passing through a SoundKit import encoder.
+ */
+export class WasmSha256 {
+    free(): void;
+    [Symbol.dispose](): void;
+    finish(): string;
+    constructor();
+    update(bytes: Uint8Array): void;
+}
+
 export class WasmSoundKitFrameDecoder {
     free(): void;
     [Symbol.dispose](): void;
@@ -260,6 +310,49 @@ export class WasmSoundKitFrameDecoder {
     reset(): void;
     setDecimalKey(key: string): void;
     setKeyBytes(key: Uint8Array): void;
+}
+
+/**
+ * Bounded, format-detecting library import pipeline.
+ *
+ * Encoded source bytes enter Rust once. SoundKit decodes them incrementally,
+ * normalizes each PCM block to the library's 48 kHz stereo geometry, and
+ * immediately emits indexed SoundKit-v2 Opus and optional FLAC packets. PCM
+ * never crosses the WASM boundary and no complete decoded source is retained.
+ */
+export class WasmStreamingLibraryEncoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Drain decoder, resampler, and codec tails without retaining complete
+     * PCM in either Rust or JavaScript.
+     */
+    finish(): any;
+    constructor(preserve_lossless: boolean);
+    /**
+     * Open the bounded output pipeline for seekable AAC-LC container samples.
+     */
+    static newAacLc(audio_specific_config: Uint8Array, preserve_lossless: boolean): WasmStreamingLibraryEncoder;
+    /**
+     * Open the same bounded output pipeline for a seekable ALAC container.
+     * The adapter supplies Rust-validated packet ranges; decoded PCM remains
+     * inside this object and feeds the shared Opus/FLAC encoders directly.
+     */
+    static newAlac(magic_cookie: Uint8Array, preserve_lossless: boolean): WasmStreamingLibraryEncoder;
+    /**
+     * Decode and encode one bounded source byte range.
+     */
+    push(bytes: Uint8Array): any;
+    /**
+     * Decode one indexed ALAC access unit and encode only its Rust-selected
+     * presentation-frame slice.
+     */
+    pushAlacPacket(packet: Uint8Array, source_frame_start: number, frame_count: number): any;
+    /**
+     * Hash a bounded source range without decoding it. Seekable container
+     * adapters use this while scanning metadata and packet ranges once.
+     */
+    updateSourceBytes(bytes: Uint8Array): void;
 }
 
 /**
@@ -355,7 +448,10 @@ export interface InitOutput {
     readonly __wbg_wasmopusdecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdecoderesult_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusencoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmpcm16wavelibraryencoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmsha256_free: (a: number, b: number) => void;
     readonly __wbg_wasmsoundkitframedecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmstreaminglibraryencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmvideodecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmwavencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmwebmmediademuxer_free: (a: number, b: number) => void;
@@ -394,6 +490,7 @@ export interface InitOutput {
     readonly wasmaudiotrackdemuxer_push: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmcafalacindex_bitDepth: (a: number) => number;
     readonly wasmcafalacindex_channels: (a: number) => number;
+    readonly wasmcafalacindex_encodeAlacSample: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly wasmcafalacindex_magicCookie: (a: number) => any;
     readonly wasmcafalacindex_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly wasmcafalacindex_packet: (a: number, b: number, c: number, d: number) => [number, number, number];
@@ -410,6 +507,8 @@ export interface InitOutput {
     readonly wasmmp4mediademuxer_new: () => number;
     readonly wasmmp4mediademuxer_pcmTrim: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly wasmmp4mediademuxer_push: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmmp4mediaindex_encodeAacLcSample: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly wasmmp4mediaindex_encodeAlacSample: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly wasmmp4mediaindex_fromFile: (a: number, b: number) => [number, number, number];
     readonly wasmmp4mediaindex_new: (a: number, b: number) => [number, number, number];
     readonly wasmmp4mediaindex_packet: (a: number, b: number, c: number, d: number) => [number, number, number];
@@ -442,6 +541,12 @@ export interface InitOutput {
     readonly wasmopusencoder_encodeInterleavedI16: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmopusencoder_new: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly wasmopusencoder_reset: (a: number) => [number, number];
+    readonly wasmpcm16wavelibraryencoder_finish: (a: number) => [number, number, number];
+    readonly wasmpcm16wavelibraryencoder_new: (a: number) => number;
+    readonly wasmpcm16wavelibraryencoder_push: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmsha256_finish: (a: number) => [number, number, number, number];
+    readonly wasmsha256_new: () => number;
+    readonly wasmsha256_update: (a: number, b: number, c: number) => [number, number];
     readonly wasmsoundkitframedecoder_bufferedBytes: (a: number) => number;
     readonly wasmsoundkitframedecoder_clearKey: (a: number) => void;
     readonly wasmsoundkitframedecoder_finish: (a: number) => [number, number];
@@ -452,6 +557,13 @@ export interface InitOutput {
     readonly wasmsoundkitframedecoder_reset: (a: number) => void;
     readonly wasmsoundkitframedecoder_setDecimalKey: (a: number, b: number, c: number) => [number, number];
     readonly wasmsoundkitframedecoder_setKeyBytes: (a: number, b: number, c: number) => [number, number];
+    readonly wasmstreaminglibraryencoder_finish: (a: number) => [number, number, number];
+    readonly wasmstreaminglibraryencoder_new: (a: number) => [number, number, number];
+    readonly wasmstreaminglibraryencoder_newAacLc: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmstreaminglibraryencoder_newAlac: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmstreaminglibraryencoder_push: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmstreaminglibraryencoder_pushAlacPacket: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly wasmstreaminglibraryencoder_updateSourceBytes: (a: number, b: number, c: number) => [number, number];
     readonly wasmvideodecoder_decode: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly wasmvideodecoder_decodeStream: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmvideodecoder_flush: (a: number) => [number, number, number];

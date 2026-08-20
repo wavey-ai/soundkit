@@ -473,6 +473,24 @@ export class WasmCafAlacIndex {
         return ret;
     }
     /**
+     * Validate, decode, priming/remainder trim, and encode one CAF packet.
+     * Only the indexed packet bytes cross the WASM boundary.
+     * @param {number} index
+     * @param {Uint8Array} source_bytes
+     * @param {WasmStreamingLibraryEncoder} encoder
+     * @returns {any}
+     */
+    encodeAlacSample(index, source_bytes, encoder) {
+        const ptr0 = passArray8ToWasm0(source_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        _assertClass(encoder, WasmStreamingLibraryEncoder);
+        const ret = wasm.wasmcafalacindex_encodeAlacSample(this.__wbg_ptr, index, ptr0, len0, encoder.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * @returns {Uint8Array}
      */
     get magicCookie() {
@@ -704,6 +722,42 @@ export class WasmMp4MediaIndex {
     free() {
         const ptr = this.__destroy_into_raw();
         wasm.__wbg_wasmmp4mediaindex_free(ptr, 0);
+    }
+    /**
+     * Validate, decode, edit-list trim, and encode one indexed AAC-LC sample.
+     * @param {number} index
+     * @param {Uint8Array} source_bytes
+     * @param {WasmStreamingLibraryEncoder} encoder
+     * @returns {any}
+     */
+    encodeAacLcSample(index, source_bytes, encoder) {
+        const ptr0 = passArray8ToWasm0(source_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        _assertClass(encoder, WasmStreamingLibraryEncoder);
+        const ret = wasm.wasmmp4mediaindex_encodeAacLcSample(this.__wbg_ptr, index, ptr0, len0, encoder.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Validate, decode, edit-list trim, and encode one indexed ALAC sample.
+     * JavaScript transports only the requested container byte range; PCM
+     * remains within Rust throughout the operation.
+     * @param {number} index
+     * @param {Uint8Array} source_bytes
+     * @param {WasmStreamingLibraryEncoder} encoder
+     * @returns {any}
+     */
+    encodeAlacSample(index, source_bytes, encoder) {
+        const ptr0 = passArray8ToWasm0(source_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        _assertClass(encoder, WasmStreamingLibraryEncoder);
+        const ret = wasm.wasmmp4mediaindex_encodeAlacSample(this.__wbg_ptr, index, ptr0, len0, encoder.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
     }
     /**
      * Conformance helper for small complete files. Large browser imports
@@ -1177,6 +1231,119 @@ export class WasmOpusEncoder {
 }
 if (Symbol.dispose) WasmOpusEncoder.prototype[Symbol.dispose] = WasmOpusEncoder.prototype.free;
 
+/**
+ * One-pass encoder for the library import fast path.
+ *
+ * A 48 kHz stereo PCM16 WAV is already in the geometry used by the library's
+ * Opus cache. Keeping the WAV parser and both encoders together means each
+ * bounded input chunk is parsed once and immediately fans out to Opus and,
+ * for lossless imports, FLAC. No decoded PCM crosses into JavaScript and no
+ * seekable Float32 working copy has to be completed before encoding starts.
+ */
+export class WasmPcm16WaveLibraryEncoder {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmPcm16WaveLibraryEncoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmpcm16wavelibraryencoder_free(ptr, 0);
+    }
+    /**
+     * Drain the last partial Opus/FLAC blocks. No complete PCM is retained.
+     * @returns {any}
+     */
+    finish() {
+        const ret = wasm.wasmpcm16wavelibraryencoder_finish(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {boolean} preserve_lossless
+     */
+    constructor(preserve_lossless) {
+        const ret = wasm.wasmpcm16wavelibraryencoder_new(preserve_lossless);
+        this.__wbg_ptr = ret;
+        WasmPcm16WaveLibraryEncoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Parse and encode one bounded WAV byte range.
+     * @param {Uint8Array} bytes
+     * @returns {any}
+     */
+    push(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmpcm16wavelibraryencoder_push(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+}
+if (Symbol.dispose) WasmPcm16WaveLibraryEncoder.prototype[Symbol.dispose] = WasmPcm16WaveLibraryEncoder.prototype.free;
+
+/**
+ * Bounded incremental SHA-256 for browser streams that are not otherwise
+ * passing through a SoundKit import encoder.
+ */
+export class WasmSha256 {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmSha256Finalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmsha256_free(ptr, 0);
+    }
+    /**
+     * @returns {string}
+     */
+    finish() {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ret = wasm.wasmsha256_finish(this.__wbg_ptr);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    constructor() {
+        const ret = wasm.wasmsha256_new();
+        this.__wbg_ptr = ret;
+        WasmSha256Finalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @param {Uint8Array} bytes
+     */
+    update(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsha256_update(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+}
+if (Symbol.dispose) WasmSha256.prototype[Symbol.dispose] = WasmSha256.prototype.free;
+
 export class WasmSoundKitFrameDecoder {
     static __wrap(ptr) {
         const obj = Object.create(WasmSoundKitFrameDecoder.prototype);
@@ -1289,6 +1456,134 @@ export class WasmSoundKitFrameDecoder {
     }
 }
 if (Symbol.dispose) WasmSoundKitFrameDecoder.prototype[Symbol.dispose] = WasmSoundKitFrameDecoder.prototype.free;
+
+/**
+ * Bounded, format-detecting library import pipeline.
+ *
+ * Encoded source bytes enter Rust once. SoundKit decodes them incrementally,
+ * normalizes each PCM block to the library's 48 kHz stereo geometry, and
+ * immediately emits indexed SoundKit-v2 Opus and optional FLAC packets. PCM
+ * never crosses the WASM boundary and no complete decoded source is retained.
+ */
+export class WasmStreamingLibraryEncoder {
+    static __wrap(ptr) {
+        const obj = Object.create(WasmStreamingLibraryEncoder.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmStreamingLibraryEncoderFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmStreamingLibraryEncoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmstreaminglibraryencoder_free(ptr, 0);
+    }
+    /**
+     * Drain decoder, resampler, and codec tails without retaining complete
+     * PCM in either Rust or JavaScript.
+     * @returns {any}
+     */
+    finish() {
+        const ret = wasm.wasmstreaminglibraryencoder_finish(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {boolean} preserve_lossless
+     */
+    constructor(preserve_lossless) {
+        const ret = wasm.wasmstreaminglibraryencoder_new(preserve_lossless);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmStreamingLibraryEncoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Open the bounded output pipeline for seekable AAC-LC container samples.
+     * @param {Uint8Array} audio_specific_config
+     * @param {boolean} preserve_lossless
+     * @returns {WasmStreamingLibraryEncoder}
+     */
+    static newAacLc(audio_specific_config, preserve_lossless) {
+        const ptr0 = passArray8ToWasm0(audio_specific_config, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmstreaminglibraryencoder_newAacLc(ptr0, len0, preserve_lossless);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmStreamingLibraryEncoder.__wrap(ret[0]);
+    }
+    /**
+     * Open the same bounded output pipeline for a seekable ALAC container.
+     * The adapter supplies Rust-validated packet ranges; decoded PCM remains
+     * inside this object and feeds the shared Opus/FLAC encoders directly.
+     * @param {Uint8Array} magic_cookie
+     * @param {boolean} preserve_lossless
+     * @returns {WasmStreamingLibraryEncoder}
+     */
+    static newAlac(magic_cookie, preserve_lossless) {
+        const ptr0 = passArray8ToWasm0(magic_cookie, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmstreaminglibraryencoder_newAlac(ptr0, len0, preserve_lossless);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmStreamingLibraryEncoder.__wrap(ret[0]);
+    }
+    /**
+     * Decode and encode one bounded source byte range.
+     * @param {Uint8Array} bytes
+     * @returns {any}
+     */
+    push(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmstreaminglibraryencoder_push(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Decode one indexed ALAC access unit and encode only its Rust-selected
+     * presentation-frame slice.
+     * @param {Uint8Array} packet
+     * @param {number} source_frame_start
+     * @param {number} frame_count
+     * @returns {any}
+     */
+    pushAlacPacket(packet, source_frame_start, frame_count) {
+        const ptr0 = passArray8ToWasm0(packet, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmstreaminglibraryencoder_pushAlacPacket(this.__wbg_ptr, ptr0, len0, source_frame_start, frame_count);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Hash a bounded source range without decoding it. Seekable container
+     * adapters use this while scanning metadata and packet ranges once.
+     * @param {Uint8Array} bytes
+     */
+    updateSourceBytes(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmstreaminglibraryencoder_updateSourceBytes(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+}
+if (Symbol.dispose) WasmStreamingLibraryEncoder.prototype[Symbol.dispose] = WasmStreamingLibraryEncoder.prototype.free;
 
 /**
  * Pure-Rust video access-unit decoder shared by browser and native imports.
@@ -1757,9 +2052,18 @@ const WasmOpusDecoderFinalization = (typeof FinalizationRegistry === 'undefined'
 const WasmOpusEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmopusencoder_free(ptr, 1));
+const WasmPcm16WaveLibraryEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmpcm16wavelibraryencoder_free(ptr, 1));
+const WasmSha256Finalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmsha256_free(ptr, 1));
 const WasmSoundKitFrameDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmsoundkitframedecoder_free(ptr, 1));
+const WasmStreamingLibraryEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmstreaminglibraryencoder_free(ptr, 1));
 const WasmVideoDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmvideodecoder_free(ptr, 1));
@@ -1774,6 +2078,12 @@ function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
     wasm.__wbindgen_externrefs.set(idx, obj);
     return idx;
+}
+
+function _assertClass(instance, klass) {
+    if (!(instance instanceof klass)) {
+        throw new Error(`expected instance of ${klass.name}`);
+    }
 }
 
 function getArrayF32FromWasm0(ptr, len) {

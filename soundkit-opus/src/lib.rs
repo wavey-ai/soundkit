@@ -172,16 +172,32 @@ pub struct OpusDecoder {
 }
 
 impl OpusDecoder {
-    pub fn new(sample_rate: usize, channels: usize) -> Self {
-        let decoder = PureOpusDecoder::new(sample_rate as i32, channels)
-            .expect("failed to create Opus decoder");
+    pub fn new(sample_rate: usize, channels: usize) -> Result<Self, String> {
+        const SUPPORTED_SAMPLE_RATES: [usize; 5] = [8_000, 12_000, 16_000, 24_000, 48_000];
 
-        OpusDecoder {
+        if !SUPPORTED_SAMPLE_RATES.contains(&sample_rate) {
+            return Err(format!(
+                "unsupported Opus decode sample rate {sample_rate} Hz; expected 8000, 12000, 16000, 24000, or 48000 Hz"
+            ));
+        }
+        if channels == 0 {
+            return Err("Opus decode channel count must be 1 or 2".to_string());
+        }
+        if channels > 2 {
+            return Err(format!(
+                "unsupported Opus channel mapping for {channels} channels; the single-stream decoder supports mono or stereo"
+            ));
+        }
+
+        let decoder = PureOpusDecoder::new(sample_rate as i32, channels)
+            .map_err(|error| format!("failed to create Opus decoder: {error}"))?;
+
+        Ok(OpusDecoder {
             decoder,
             sample_rate: sample_rate as u32,
             channels: channels as u8,
             first_frame_logged: false,
-        }
+        })
     }
 
     pub fn init(&mut self) -> Result<(), String> {
@@ -364,7 +380,7 @@ impl OpusStreamDecoder {
             self.pre_skip_remaining = pre_skip as usize * self.channels.unwrap() as usize;
 
             let channels = self.channels.unwrap();
-            let decoder = OpusDecoder::new(self.sample_rate.unwrap() as usize, channels as usize);
+            let decoder = OpusDecoder::new(self.sample_rate.unwrap() as usize, channels as usize)?;
 
             self.decoder = Some(decoder);
             self.header_parsed = true;
@@ -501,6 +517,31 @@ mod tests {
             .join(file)
     }
 
+    #[test]
+    fn opus_decoder_accepts_all_supported_decode_rates() {
+        for sample_rate in [8_000, 12_000, 16_000, 24_000, 48_000] {
+            let decoder = OpusDecoder::new(sample_rate, 1)
+                .unwrap_or_else(|error| panic!("{sample_rate} Hz failed: {error}"));
+            assert_eq!(decoder.sample_rate(), sample_rate as u32);
+            assert_eq!(decoder.channels(), 1);
+        }
+    }
+
+    #[test]
+    fn opus_decoder_rejects_invalid_metadata_without_panicking() {
+        for (sample_rate, channels) in [(44_100, 1), (48_000, 0), (48_000, 3)] {
+            let result = std::panic::catch_unwind(|| OpusDecoder::new(sample_rate, channels));
+            assert!(
+                result.is_ok(),
+                "OpusDecoder::new panicked for {sample_rate} Hz and {channels} channels"
+            );
+            assert!(
+                result.unwrap().is_err(),
+                "invalid Opus metadata was accepted for {sample_rate} Hz and {channels} channels"
+            );
+        }
+    }
+
     fn parse_length_prefixed_opus(data: &[u8]) -> Result<(RawOpusHeader, Vec<&[u8]>), String> {
         if data.len() < 19 || !data.starts_with(b"OpusHead") {
             return Err("Missing OpusHead".to_string());
@@ -537,7 +578,8 @@ mod tests {
         let mut encoder = OpusEncoder::new(SAMPLE_RATE, 16, CHANNELS, FRAME_SIZE, 128_000);
         encoder.init().expect("Failed to initialize opus encoder");
 
-        let mut decoder = OpusDecoder::new(SAMPLE_RATE as usize, CHANNELS as usize);
+        let mut decoder = OpusDecoder::new(SAMPLE_RATE as usize, CHANNELS as usize)
+            .expect("failed to construct Opus decoder");
         decoder.init().expect("Decoder initialization failed");
 
         let input = (0..FRAME_SIZE as usize)
@@ -578,7 +620,8 @@ mod tests {
             let mut encoder = OpusEncoder::new(SAMPLE_RATE, 16, CHANNELS, FRAME_SIZE, 128_000);
             encoder.init().expect("Failed to initialize opus encoder");
 
-            let mut decoder = OpusDecoder::new(SAMPLE_RATE as usize, CHANNELS as usize);
+            let mut decoder = OpusDecoder::new(SAMPLE_RATE as usize, CHANNELS as usize)
+                .expect("failed to construct Opus decoder");
             decoder.init().expect("Decoder initialization failed");
 
             let input = (0..FRAME_SIZE as usize * FRAMES)
@@ -662,7 +705,8 @@ mod tests {
         let (header, packets) =
             parse_length_prefixed_opus(&opus_bytes).expect("failed to parse opus fixture");
 
-        let mut decoder = OpusDecoder::new(header.sample_rate as usize, header.channels as usize);
+        let mut decoder = OpusDecoder::new(header.sample_rate as usize, header.channels as usize)
+            .expect("failed to construct Opus decoder");
         decoder.init().expect("Decoder initialization failed");
 
         let mut decoded = Vec::new();
@@ -711,7 +755,8 @@ mod tests {
             parse_length_prefixed_opus(&opus_bytes).expect("failed to parse opus fixture");
 
         const MAX_OPUS_FRAME_SAMPLES: usize = 5760; // 120 ms @ 48kHz
-        let mut decoder = OpusDecoder::new(header.sample_rate as usize, header.channels as usize);
+        let mut decoder = OpusDecoder::new(header.sample_rate as usize, header.channels as usize)
+            .expect("failed to construct Opus decoder");
         decoder.init().expect("Decoder initialization failed");
 
         let mut decoded = Vec::new();
@@ -773,7 +818,8 @@ mod tests {
         let mut decoder = OpusDecoder::new(
             audio_data.sampling_rate() as usize,
             audio_data.channel_count() as usize,
-        );
+        )
+        .expect("failed to construct Opus decoder");
         decoder.init().expect("Decoder initialization failed");
 
         let frame_size = std::cmp::max(1, (audio_data.sampling_rate() / 50) as usize);

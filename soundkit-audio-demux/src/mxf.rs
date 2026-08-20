@@ -474,6 +474,7 @@ fn picture_config(
         codec_id: info.profile.as_str().to_string(),
         timescale,
         timeline: None,
+        edit_timeline: Vec::new(),
         sample_count,
         width: Some(info.width),
         height: Some(info.height),
@@ -482,6 +483,12 @@ fn picture_config(
         bits_per_sample: Some(info.bit_depth),
         pcm_endianness: None,
         pcm_float: None,
+        pcm_signed: None,
+        pcm_packed: None,
+        pcm_aligned_high: None,
+        pcm_interleaved: None,
+        pcm_bytes_per_frame: None,
+        pcm_frames_per_packet: None,
         codec_private: Vec::new(),
         decoder_configuration: Vec::new(),
         nal_length_size: None,
@@ -542,6 +549,7 @@ fn pcm_audio_config(
         codec_id: format!("pcm_s{bits}le"),
         timescale: sample_rate,
         timeline: None,
+        edit_timeline: Vec::new(),
         sample_count: descriptor
             .duration
             .and_then(|value| u32::try_from(value).ok())
@@ -553,6 +561,19 @@ fn pcm_audio_config(
         bits_per_sample: Some(bits),
         pcm_endianness: Some(PcmEndianness::Little),
         pcm_float: Some(false),
+        pcm_signed: Some(true),
+        pcm_packed: Some(container_ul[14] != 0x03),
+        pcm_aligned_high: Some(false),
+        pcm_interleaved: Some(true),
+        pcm_bytes_per_frame: Some(
+            u32::from(channels)
+                * if container_ul[14] == 0x03 {
+                    4
+                } else {
+                    u32::from(bits).div_ceil(8)
+                },
+        ),
+        pcm_frames_per_packet: Some(1),
         codec_private: Vec::new(),
         decoder_configuration: Vec::new(),
         nal_length_size: None,
