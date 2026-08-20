@@ -44,7 +44,7 @@ This ledger is the operational TODO. The detailed phases below remain the comple
 - [ ] Add malformed-input and allocation-budget regression coverage to CI.
 - [ ] Add release throughput and peak-buffer benchmarks for the common container paths.
 - [ ] Confirm no large-push performance cliff remains in MP4, WebM, Ogg, TS/M2TS, or CAF.
-- [ ] Commit and push the SoundKit implementation and fixtures.
+- [x] Commit and push the SoundKit implementation and fixtures as `cae319b`.
 - [ ] Update `vin.yl.native` to the pushed SoundKit revision.
 - [ ] Route YL.VIN imports through the SoundKit-owned container path.
 - [ ] Run focused native tests, the iOS Debug build, and the iOS test suite.
