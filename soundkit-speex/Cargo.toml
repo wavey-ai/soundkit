@@ -8,7 +8,6 @@ repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
 frame-header = "0.2.1"
-memchr = "2"
 oxideav-core = "0.1"
 oxideav-speex = { git = "https://github.com/OxideAV/oxideav-speex.git" }
 soundkit = { path = "../soundkit" }

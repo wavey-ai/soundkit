@@ -16,3 +16,15 @@ mxf = ["dep:soundkit-video"]
 [dependencies]
 soundkit-video = { path = "../soundkit-video", default-features = false, optional = true }
 soundkit-webm = { path = "../soundkit-webm", default-features = false, features = ["vorbis"], optional = true }
+
+[[example]]
+name = "inspect-mp4-media"
+required-features = ["mp4"]
+
+[[example]]
+name = "extract-mp4-track"
+required-features = ["mp4"]
+
+[[example]]
+name = "inspect-mxf-media"
+required-features = ["mxf"]

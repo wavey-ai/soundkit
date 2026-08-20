@@ -4,199 +4,10 @@ use lewton::header::{
     read_header_comment, read_header_ident, read_header_setup, IdentHeader, SetupHeader,
 };
 use lewton::samples::{InterleavedSamples, Samples};
-use memchr::memmem;
 use soundkit::audio_types::AudioData;
-use std::collections::VecDeque;
-
+use soundkit::ogg::{OggPacket as SharedOggPacket, OggPacketParser as SharedOggPacketParser};
+#[cfg(test)]
 const MAX_OGG_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
-const MAX_OGG_PACKET_BYTES: usize = 16 * 1024 * 1024;
-
-#[derive(Debug)]
-struct OggPageHeader {
-    header_type: u8,
-    granule_position: Option<u64>,
-    serial: u32,
-    segment_count: u8,
-}
-
-impl OggPageHeader {
-    fn parse(data: &[u8]) -> Option<Self> {
-        if data.len() < 27 || &data[0..4] != b"OggS" {
-            return None;
-        }
-
-        let raw_granule = u64::from_le_bytes(data[6..14].try_into().ok()?);
-        Some(Self {
-            header_type: data[5],
-            granule_position: (raw_granule != u64::MAX).then_some(raw_granule),
-            serial: u32::from_le_bytes(data[14..18].try_into().ok()?),
-            segment_count: data[26],
-        })
-    }
-
-    fn is_first_page(&self) -> bool {
-        self.header_type & 0x02 != 0
-    }
-
-    fn is_last_page(&self) -> bool {
-        self.header_type & 0x04 != 0
-    }
-}
-
-struct OggPacket {
-    data: Vec<u8>,
-    serial: u32,
-    first_in_stream: bool,
-    last_in_page: bool,
-    last_in_stream: bool,
-    granule_position: Option<u64>,
-}
-
-struct OggPacketParser {
-    buffer: Vec<u8>,
-    pos: usize,
-    packet_buffer: Vec<u8>,
-    pending_packets: VecDeque<OggPacket>,
-    error: Option<String>,
-}
-
-impl OggPacketParser {
-    fn new() -> Self {
-        Self {
-            buffer: Vec::with_capacity(8192),
-            pos: 0,
-            packet_buffer: Vec::with_capacity(4096),
-            pending_packets: VecDeque::new(),
-            error: None,
-        }
-    }
-
-    fn push<'a>(&'a mut self, data: &[u8]) -> OggPackets<'a> {
-        if data.len() > MAX_OGG_INPUT_CHUNK_BYTES {
-            self.error = Some(format!(
-                "Ogg input chunk exceeds the {MAX_OGG_INPUT_CHUNK_BYTES} byte streaming budget"
-            ));
-        } else {
-            self.buffer.extend_from_slice(data);
-        }
-        OggPackets { parser: self }
-    }
-
-    fn take_error(&mut self) -> Result<(), String> {
-        match self.error.take() {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-
-    fn compact(&mut self) {
-        if self.pos > 0 {
-            self.buffer.drain(..self.pos);
-            self.pos = 0;
-        }
-    }
-}
-
-struct OggPackets<'a> {
-    parser: &'a mut OggPacketParser,
-}
-
-impl Iterator for OggPackets<'_> {
-    type Item = OggPacket;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(packet) = self.parser.pending_packets.pop_front() {
-            return Some(packet);
-        }
-
-        loop {
-            let search_start = self.parser.pos;
-            let Some(oggs_pos) = memmem::find(&self.parser.buffer[search_start..], b"OggS") else {
-                let keep = self.parser.buffer.len().min(3);
-                self.parser.buffer.drain(..self.parser.buffer.len() - keep);
-                self.parser.pos = 0;
-                return None;
-            };
-            self.parser.pos = search_start + oggs_pos;
-
-            if self.parser.buffer.len() - self.parser.pos < 27 {
-                self.parser.compact();
-                return None;
-            }
-
-            let header = OggPageHeader::parse(&self.parser.buffer[self.parser.pos..])?;
-            let header_size = 27 + header.segment_count as usize;
-
-            if self.parser.buffer.len() - self.parser.pos < header_size {
-                self.parser.compact();
-                return None;
-            }
-
-            let segment_table =
-                &self.parser.buffer[self.parser.pos + 27..self.parser.pos + header_size];
-            let body_size: usize = segment_table.iter().map(|&x| x as usize).sum();
-            let total_size = header_size + body_size;
-
-            if self.parser.buffer.len() - self.parser.pos < total_size {
-                self.parser.compact();
-                return None;
-            }
-
-            let body_start = self.parser.pos + header_size;
-            let mut seg_offset = 0;
-            let mut completed = Vec::new();
-
-            for &seg_size in segment_table {
-                let seg_start = body_start + seg_offset;
-                let seg_end = seg_start + seg_size as usize;
-                if self
-                    .parser
-                    .packet_buffer
-                    .len()
-                    .saturating_add(seg_size as usize)
-                    > MAX_OGG_PACKET_BYTES
-                {
-                    self.parser.error = Some(format!(
-                        "Ogg packet exceeds the {MAX_OGG_PACKET_BYTES} byte packet budget"
-                    ));
-                    self.parser.packet_buffer.clear();
-                    self.parser.pos = self.parser.buffer.len();
-                    return None;
-                }
-                self.parser
-                    .packet_buffer
-                    .extend_from_slice(&self.parser.buffer[seg_start..seg_end]);
-                seg_offset += seg_size as usize;
-
-                if seg_size < 255 {
-                    let mut packet_data = Vec::new();
-                    std::mem::swap(&mut packet_data, &mut self.parser.packet_buffer);
-                    completed.push(OggPacket {
-                        data: packet_data,
-                        serial: header.serial,
-                        first_in_stream: header.is_first_page(),
-                        last_in_page: false,
-                        last_in_stream: false,
-                        granule_position: header.granule_position,
-                    });
-                }
-            }
-
-            if let Some(last) = completed.last_mut() {
-                last.last_in_page = true;
-                last.last_in_stream = header.is_last_page();
-            }
-
-            self.parser.pending_packets.extend(completed);
-            self.parser.pos += total_size;
-            self.parser.compact();
-
-            if let Some(packet) = self.parser.pending_packets.pop_front() {
-                return Some(packet);
-            }
-        }
-    }
-}
 
 #[derive(Clone, Copy)]
 struct VorbisStreamInfo {
@@ -324,7 +135,7 @@ impl Default for VorbisPacketDecoder {
 /// pages incrementally, decodes Vorbis packets with the pure Rust `lewton`
 /// decoder, and returns interleaved signed 16-bit PCM.
 pub struct VorbisDecoder {
-    parser: OggPacketParser,
+    parser: SharedOggPacketParser,
     state: VorbisDecodeState,
     info: Option<VorbisStreamInfo>,
 }
@@ -332,7 +143,7 @@ pub struct VorbisDecoder {
 impl VorbisDecoder {
     pub fn new() -> Self {
         Self {
-            parser: OggPacketParser::new(),
+            parser: SharedOggPacketParser::new(),
             state: VorbisDecodeState::HeaderIdent,
             info: None,
         }
@@ -353,18 +164,29 @@ impl VorbisDecoder {
     /// Feed more Ogg Vorbis bytes. Returns decoded interleaved S16LE PCM when
     /// complete packets have produced audio.
     pub fn add(&mut self, data: &[u8]) -> Result<Option<AudioData>, String> {
-        let packets: Vec<_> = self.parser.push(data).collect();
-        self.parser.take_error()?;
+        let packets = self.parser.add(data)?;
         let mut samples = Vec::new();
 
         for packet in packets {
             self.process_packet(packet, &mut samples)?;
         }
 
+        self.audio_data_from_samples(samples)
+    }
+
+    pub fn finish(&mut self) -> Result<Option<AudioData>, String> {
+        let packets = self.parser.finish()?;
+        let mut samples = Vec::new();
+        for packet in packets {
+            self.process_packet(packet, &mut samples)?;
+        }
+        self.audio_data_from_samples(samples)
+    }
+
+    fn audio_data_from_samples(&self, samples: Vec<i16>) -> Result<Option<AudioData>, String> {
         if samples.is_empty() {
             return Ok(None);
         }
-
         let info = self
             .info
             .ok_or_else(|| "Vorbis stream info unavailable after decode".to_string())?;
@@ -372,7 +194,6 @@ impl VorbisDecoder {
         for sample in samples {
             pcm_bytes.extend_from_slice(&sample.to_le_bytes());
         }
-
         Ok(Some(AudioData::new(
             16,
             info.channels,
@@ -383,7 +204,11 @@ impl VorbisDecoder {
         )))
     }
 
-    fn process_packet(&mut self, packet: OggPacket, samples: &mut Vec<i16>) -> Result<(), String> {
+    fn process_packet(
+        &mut self,
+        packet: SharedOggPacket,
+        samples: &mut Vec<i16>,
+    ) -> Result<(), String> {
         let state = std::mem::replace(&mut self.state, VorbisDecodeState::HeaderIdent);
         match state {
             VorbisDecodeState::HeaderIdent => {
@@ -485,9 +310,8 @@ mod tests {
 
     #[test]
     fn ogg_parser_bounds_garbage_and_input_chunks() {
-        let mut parser = OggPacketParser::new();
-        assert_eq!(parser.push(&vec![0x55; 65_536]).count(), 0);
-        assert!(parser.buffer.len() <= 3);
+        let mut parser = SharedOggPacketParser::new();
+        assert!(parser.add(&vec![0x55; 65_536]).is_err());
 
         let mut decoder = VorbisDecoder::new();
         let error = decoder
@@ -518,7 +342,7 @@ mod tests {
                 pcm.extend_from_slice(audio.data());
             }
         }
-        if let Some(audio) = decoder.add(&[]).unwrap() {
+        if let Some(audio) = decoder.finish().unwrap() {
             pcm.extend_from_slice(audio.data());
         }
         pcm
@@ -586,7 +410,7 @@ mod tests {
                 decoded.extend_from_slice(audio.data());
             }
         }
-        if let Some(audio) = decoder.add(&[]).unwrap() {
+        if let Some(audio) = decoder.finish().unwrap() {
             decoded.extend_from_slice(audio.data());
         }
 

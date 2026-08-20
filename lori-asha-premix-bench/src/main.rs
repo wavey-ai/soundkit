@@ -694,7 +694,8 @@ fn decode_with_soundkit(
     _track: &TrackData,
     packets: &[Vec<u8>],
 ) -> Result<PacketDecodeResult, String> {
-    let mut decoder = SoundkitDecoder::new(TARGET_SAMPLE_RATE as usize, TARGET_CHANNELS as usize);
+    let mut decoder = SoundkitDecoder::new(TARGET_SAMPLE_RATE as usize, TARGET_CHANNELS as usize)
+        .map_err(|e| format!("soundkit-opus decoder construction failed: {e}"))?;
     decoder
         .init()
         .map_err(|e| format!("soundkit-opus decoder init failed: {}", e))?;
@@ -846,7 +847,7 @@ fn encode_with_c_libopus(
     bitrate: u32,
 ) -> Result<PacketEncodeResult, String> {
     let mut err = MaybeUninit::uninit();
-    let mut encoder = unsafe {
+    let encoder = unsafe {
         opus_sys::opus_encoder_create(
             TARGET_SAMPLE_RATE as i32,
             TARGET_CHANNELS as i32,

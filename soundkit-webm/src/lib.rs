@@ -1,3 +1,4 @@
+#[cfg(any(feature = "opus", feature = "vorbis"))]
 use frame_header::{EncodingFlag, Endianness};
 #[cfg(feature = "opus")]
 use soundkit::audio_packet::Decoder;
@@ -7,7 +8,6 @@ use soundkit_opus::OpusDecoder;
 #[cfg(feature = "vorbis")]
 use soundkit_vorbis::VorbisPacketDecoder;
 use std::collections::VecDeque;
-use tracing::{debug, trace};
 
 #[cfg(feature = "opus")]
 const MAX_OPUS_FRAME_SAMPLES: usize = 5760; // 120 ms @ 48 kHz
@@ -366,6 +366,7 @@ fn parse_opus_head_metadata(codec_private: &[u8]) -> Option<(u16, i16, u8)> {
 }
 
 /// Audio track information extracted from WebM
+#[cfg(any())]
 #[derive(Clone, Debug)]
 struct AudioTrackInfo {
     track_number: u64,
@@ -495,6 +496,7 @@ pub struct WebmMediaDemuxer {
     cluster_timecode: i64,
 }
 
+#[cfg(any(feature = "opus", feature = "vorbis"))]
 enum WebmAudioDecoder {
     #[cfg(feature = "opus")]
     Opus(OpusDecoder),
@@ -1194,6 +1196,7 @@ where
     Ok(())
 }
 
+#[cfg(any())]
 pub struct WebmOpusDemuxer {
     buffer: Vec<u8>,
     state: ParserState,
@@ -1202,6 +1205,7 @@ pub struct WebmOpusDemuxer {
     emitted_config: bool,
 }
 
+#[cfg(any())]
 impl WebmOpusDemuxer {
     pub fn new() -> Self {
         Self {
@@ -1584,6 +1588,100 @@ impl WebmOpusDemuxer {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(any())]
+impl Default for WebmOpusDemuxer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Compatibility Opus-only view of the shared WebM/Matroska parser.
+pub struct WebmOpusDemuxer {
+    media: WebmMediaDemuxer,
+    sample_rate: Option<u32>,
+    channels: Option<u8>,
+    timecode_scale_ns: u64,
+}
+
+impl WebmOpusDemuxer {
+    pub fn new() -> Self {
+        Self {
+            media: WebmMediaDemuxer::new(),
+            sample_rate: None,
+            channels: None,
+            timecode_scale_ns: 1_000_000,
+        }
+    }
+
+    pub fn init(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn add(&mut self, data: &[u8]) -> Result<Vec<WebmOpusDemuxEvent>, String> {
+        let events = self.media.add(data)?;
+        self.convert_events(events)
+    }
+
+    pub fn finish(&mut self) -> Result<Vec<WebmOpusDemuxEvent>, String> {
+        let events = self.media.finish()?;
+        self.convert_events(events)
+    }
+
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.sample_rate
+    }
+
+    pub fn channels(&self) -> Option<u8> {
+        self.channels
+    }
+
+    fn convert_events(
+        &mut self,
+        events: Vec<WebmMediaDemuxEvent>,
+    ) -> Result<Vec<WebmOpusDemuxEvent>, String> {
+        let mut output = Vec::new();
+        for event in events {
+            match event {
+                WebmMediaDemuxEvent::Config {
+                    timecode_scale_ns,
+                    track,
+                } if track.kind == WebmTrackKind::Audio && track.codec_id == "A_OPUS" => {
+                    let sample_rate = track.sample_rate.unwrap_or(48_000);
+                    let channels = track.channels.unwrap_or(2);
+                    let (pre_skip, output_gain, mapping_family) =
+                        parse_opus_head_metadata(&track.codec_private).unwrap_or((0, 0, 0));
+                    self.sample_rate = Some(sample_rate);
+                    self.channels = Some(channels);
+                    self.timecode_scale_ns = timecode_scale_ns;
+                    output.push(WebmOpusDemuxEvent::Config(WebmOpusConfig {
+                        sample_rate,
+                        channels,
+                        pre_skip,
+                        output_gain,
+                        mapping_family,
+                        codec_private: track.codec_private,
+                    }));
+                }
+                WebmMediaDemuxEvent::Packet {
+                    kind: WebmTrackKind::Audio,
+                    codec_id,
+                    data,
+                    timestamp_ns,
+                    ..
+                } if codec_id == "A_OPUS" => {
+                    let ticks = timestamp_ns / self.timecode_scale_ns.max(1) as i64;
+                    let timecode = i16::try_from(ticks).map_err(|_| {
+                        format!("WebM Opus timestamp {timestamp_ns}ns exceeds legacy i16 timecode")
+                    })?;
+                    output.push(WebmOpusDemuxEvent::Packet { data, timecode });
+                }
+                _ => {}
+            }
+        }
+        Ok(output)
     }
 }
 
@@ -2095,6 +2193,7 @@ impl Default for WebmAudioDemuxer {
 }
 
 /// Streaming WebM audio decoder
+#[cfg(any())]
 pub struct WebmDecoder {
     buffer: Vec<u8>,
     state: ParserState,
@@ -2109,6 +2208,7 @@ pub struct WebmDecoder {
     header_complete: bool,
 }
 
+#[cfg(any())]
 impl WebmDecoder {
     pub fn new() -> Self {
         Self {
@@ -2728,10 +2828,291 @@ impl WebmDecoder {
     }
 }
 
+#[cfg(any())]
 impl Default for WebmDecoder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[cfg(any(feature = "opus", feature = "vorbis"))]
+struct PendingAudioPacket {
+    data: Vec<u8>,
+    discard_padding_ns: Option<i64>,
+}
+
+/// Streaming decoder backed by the shared WebM/Matroska media parser.
+pub struct WebmDecoder {
+    demuxer: WebmAudioDemuxer,
+    config: Option<WebmAudioConfig>,
+    #[cfg(any(feature = "opus", feature = "vorbis"))]
+    decoder: Option<WebmAudioDecoder>,
+    #[cfg(any(feature = "opus", feature = "vorbis"))]
+    pending: VecDeque<PendingAudioPacket>,
+    #[cfg(feature = "opus")]
+    scratch: Vec<i16>,
+    #[cfg(feature = "opus")]
+    pre_skip_remaining: usize,
+}
+
+impl WebmDecoder {
+    pub fn new() -> Self {
+        Self {
+            demuxer: WebmAudioDemuxer::new(),
+            config: None,
+            #[cfg(any(feature = "opus", feature = "vorbis"))]
+            decoder: None,
+            #[cfg(any(feature = "opus", feature = "vorbis"))]
+            pending: VecDeque::new(),
+            #[cfg(feature = "opus")]
+            scratch: Vec::new(),
+            #[cfg(feature = "opus")]
+            pre_skip_remaining: 0,
+        }
+    }
+
+    pub fn init(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn add(&mut self, data: &[u8]) -> Result<Option<AudioData>, String> {
+        let events = self.demuxer.add(data)?;
+        self.accept_events(events)?;
+        self.decode_pending()
+    }
+
+    pub fn finish(&mut self) -> Result<Option<AudioData>, String> {
+        let events = self.demuxer.finish()?;
+        self.accept_events(events)?;
+        self.decode_pending()
+    }
+
+    pub fn sample_rate(&self) -> Option<u32> {
+        self.config.as_ref().map(|config| {
+            if config.codec_id == "A_OPUS" {
+                48_000
+            } else {
+                config.sample_rate
+            }
+        })
+    }
+
+    pub fn channels(&self) -> Option<u8> {
+        self.config.as_ref().map(|config| config.channels)
+    }
+
+    fn accept_events(&mut self, events: Vec<WebmAudioDemuxEvent>) -> Result<(), String> {
+        for event in events {
+            match event {
+                WebmAudioDemuxEvent::Config(config) => self.configure(config)?,
+                WebmAudioDemuxEvent::Packet {
+                    data,
+                    discard_padding_ns,
+                    ..
+                } => {
+                    #[cfg(any(feature = "opus", feature = "vorbis"))]
+                    self.pending.push_back(PendingAudioPacket {
+                        data,
+                        discard_padding_ns,
+                    });
+                    #[cfg(not(any(feature = "opus", feature = "vorbis")))]
+                    let _ = (data, discard_padding_ns);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(any(feature = "opus", feature = "vorbis"))]
+    fn configure(&mut self, config: WebmAudioConfig) -> Result<(), String> {
+        if self.config.is_some() {
+            return Err("WebM decoder received more than one audio configuration".to_string());
+        }
+        match config.codec_id.as_str() {
+            #[cfg(feature = "opus")]
+            "A_OPUS" => {
+                if config.mapping_family.unwrap_or(0) != 0 || !(1..=2).contains(&config.channels) {
+                    return Err(format!(
+                        "unsupported WebM Opus mapping family {:?} with {} channels",
+                        config.mapping_family, config.channels
+                    ));
+                }
+                let mut decoder = OpusDecoder::new(48_000, usize::from(config.channels))?;
+                decoder.init()?;
+                self.pre_skip_remaining = usize::from(config.pre_skip.unwrap_or(0));
+                self.decoder = Some(WebmAudioDecoder::Opus(decoder));
+            }
+            #[cfg(feature = "vorbis")]
+            "A_VORBIS" => {
+                let headers = parse_vorbis_codec_private(&config.codec_private)?;
+                let mut decoder = VorbisPacketDecoder::new();
+                decoder.init()?;
+                for header in headers {
+                    decoder.decode_packet(&header)?;
+                }
+                self.decoder = Some(WebmAudioDecoder::Vorbis(decoder));
+            }
+            other => return Err(format!("unsupported or disabled WebM codec: {other}")),
+        }
+        self.config = Some(config);
+        Ok(())
+    }
+
+    #[cfg(not(any(feature = "opus", feature = "vorbis")))]
+    fn configure(&mut self, config: WebmAudioConfig) -> Result<(), String> {
+        Err(format!(
+            "unsupported or disabled WebM codec: {}",
+            config.codec_id
+        ))
+    }
+
+    #[cfg(any(feature = "opus", feature = "vorbis"))]
+    fn decode_pending(&mut self) -> Result<Option<AudioData>, String> {
+        let mut decoder = match self.decoder.take() {
+            Some(decoder) => decoder,
+            None => return Ok(None),
+        };
+        let result = match &mut decoder {
+            #[cfg(feature = "opus")]
+            WebmAudioDecoder::Opus(decoder) => self.decode_opus(decoder),
+            #[cfg(feature = "vorbis")]
+            WebmAudioDecoder::Vorbis(decoder) => self.decode_vorbis(decoder),
+        };
+        self.decoder = Some(decoder);
+        result
+    }
+
+    #[cfg(not(any(feature = "opus", feature = "vorbis")))]
+    fn decode_pending(&mut self) -> Result<Option<AudioData>, String> {
+        Ok(None)
+    }
+
+    #[cfg(feature = "opus")]
+    fn decode_opus(&mut self, decoder: &mut OpusDecoder) -> Result<Option<AudioData>, String> {
+        let config = self
+            .config
+            .as_ref()
+            .ok_or_else(|| "WebM Opus decoder has no configuration".to_string())?;
+        let channels = usize::from(config.channels);
+        let output_gain = config.output_gain.unwrap_or(0);
+        let required = MAX_OPUS_FRAME_SAMPLES
+            .checked_mul(channels)
+            .ok_or_else(|| "WebM Opus scratch size overflow".to_string())?;
+        if self.scratch.len() < required {
+            self.scratch.resize(required, 0);
+        }
+        let mut pcm = Vec::new();
+        while let Some(packet) = self.pending.pop_front() {
+            let samples = decoder
+                .decode_i16(&packet.data, &mut self.scratch, false)
+                .map_err(|error| format!("WebM Opus decode failed: {error}"))?;
+            let (discard_start, discard_end) =
+                discard_padding_frames(packet.discard_padding_ns, 48_000, samples)?;
+            let pre_skip = self
+                .pre_skip_remaining
+                .min(samples.saturating_sub(discard_start));
+            self.pre_skip_remaining -= pre_skip;
+            let start_frame = discard_start + pre_skip;
+            let end_frame = samples.saturating_sub(discard_end).max(start_frame);
+            for sample in &self.scratch[start_frame * channels..end_frame * channels] {
+                let sample = apply_opus_gain(*sample, output_gain);
+                pcm.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+        if pcm.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(AudioData::new(
+            16,
+            config.channels,
+            48_000,
+            pcm,
+            EncodingFlag::PCMSigned,
+            Endianness::LittleEndian,
+        )))
+    }
+
+    #[cfg(feature = "vorbis")]
+    fn decode_vorbis(
+        &mut self,
+        decoder: &mut VorbisPacketDecoder,
+    ) -> Result<Option<AudioData>, String> {
+        let config = self
+            .config
+            .as_ref()
+            .ok_or_else(|| "WebM Vorbis decoder has no configuration".to_string())?;
+        let sample_rate = decoder.sample_rate().unwrap_or(config.sample_rate);
+        let channels = usize::from(decoder.channels().unwrap_or(config.channels));
+        let mut pcm = Vec::new();
+        while let Some(packet) = self.pending.pop_front() {
+            let Some(samples) = decoder.decode_packet(&packet.data)? else {
+                continue;
+            };
+            if samples.len() % channels != 0 {
+                return Err("WebM Vorbis decoder returned a partial channel frame".to_string());
+            }
+            let frames = samples.len() / channels;
+            let (discard_start, discard_end) =
+                discard_padding_frames(packet.discard_padding_ns, sample_rate, frames)?;
+            let end_frame = frames.saturating_sub(discard_end).max(discard_start);
+            for sample in &samples[discard_start * channels..end_frame * channels] {
+                pcm.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+        if pcm.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(AudioData::new(
+            16,
+            channels as u8,
+            sample_rate,
+            pcm,
+            EncodingFlag::PCMSigned,
+            Endianness::LittleEndian,
+        )))
+    }
+}
+
+impl Default for WebmDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(feature = "opus", feature = "vorbis"))]
+fn discard_padding_frames(
+    padding_ns: Option<i64>,
+    sample_rate: u32,
+    decoded_frames: usize,
+) -> Result<(usize, usize), String> {
+    let Some(padding_ns) = padding_ns else {
+        return Ok((0, 0));
+    };
+    let magnitude = padding_ns.unsigned_abs();
+    let frames = magnitude
+        .checked_mul(u64::from(sample_rate))
+        .and_then(|value| value.checked_add(999_999_999))
+        .ok_or_else(|| "WebM discard-padding conversion overflow".to_string())?
+        / 1_000_000_000;
+    let frames = usize::try_from(frames)
+        .map_err(|_| "WebM discard padding exceeds this platform".to_string())?
+        .min(decoded_frames);
+    if padding_ns < 0 {
+        Ok((frames, 0))
+    } else {
+        Ok((0, frames))
+    }
+}
+
+#[cfg(feature = "opus")]
+fn apply_opus_gain(sample: i16, gain_q8_db: i16) -> i16 {
+    if gain_q8_db == 0 {
+        return sample;
+    }
+    let gain = 10_f64.powf(f64::from(gain_q8_db) / (20.0 * 256.0));
+    (f64::from(sample) * gain)
+        .round()
+        .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
 }
 
 #[cfg(test)]
@@ -2978,6 +3359,48 @@ mod tests {
         assert!(packets.iter().any(|(_, discard)| discard.is_some()));
     }
 
+    #[cfg(feature = "opus")]
+    #[test]
+    fn shared_decoder_matches_ffmpeg_frame_count_for_final_block_group() {
+        let data = fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("testdata/video-compat/never-final/vp9-profile0-opus.webm"),
+        )
+        .unwrap();
+        let mut decoder = WebmDecoder::new();
+        let mut pcm = Vec::new();
+        for chunk in data.chunks(997) {
+            if let Some(audio) = decoder.add(chunk).unwrap() {
+                assert_eq!(audio.sampling_rate(), 48_000);
+                assert_eq!(audio.channel_count(), 2);
+                pcm.extend_from_slice(audio.data());
+            }
+        }
+        if let Some(audio) = decoder.finish().unwrap() {
+            pcm.extend_from_slice(audio.data());
+        }
+
+        // FFmpeg 8.1.2 emits 144,000 stereo frames for this fixture.
+        assert_eq!(pcm.len(), 144_000 * 2 * 2);
+    }
+
+    #[cfg(feature = "opus")]
+    #[test]
+    fn applies_signed_discard_padding_and_opus_gain() {
+        assert_eq!(
+            discard_padding_frames(Some(-2_000_000), 48_000, 960),
+            Ok((96, 0))
+        );
+        assert_eq!(
+            discard_padding_frames(Some(2_000_000), 48_000, 960),
+            Ok((0, 96))
+        );
+        assert_eq!(apply_opus_gain(1234, 0), 1234);
+        assert!(apply_opus_gain(1000, 256) > 1000);
+        assert_eq!(apply_opus_gain(i16::MAX, 2560), i16::MAX);
+    }
+
     #[test]
     fn oversized_block_is_rejected_from_its_header() {
         let mut demuxer = WebmMediaDemuxer::new();
@@ -3181,6 +3604,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "vorbis")]
     #[test]
     fn test_webm_vorbis_itag_171_decode() {
         let test_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

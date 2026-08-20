@@ -2,11 +2,13 @@
 use soundkit_webm::{WebmAudioDemuxEvent, WebmAudioDemuxer};
 #[cfg(feature = "mpeg-ts")]
 use std::collections::HashMap;
+#[cfg(feature = "mp4")]
+use std::collections::VecDeque;
 
 #[cfg(feature = "mxf")]
 mod mxf;
 #[cfg(feature = "mxf")]
-pub use mxf::{MxfMediaDemuxEvent, MxfMediaDemuxer};
+pub use mxf::{MxfMediaDemuxEvent, MxfMediaDemuxer, MxfMediaIndex, MxfPartition, MxfPartitionKind};
 mod caf;
 pub use caf::{inspect_caf_chunk, validate_caf_file_header, CafAudioIndex, CafChunkRange};
 
@@ -14,6 +16,7 @@ const MIN_DETECTION_BYTES: usize = 8192;
 const MAX_GENERIC_DETECTION_BYTES: usize = 65_536;
 const MAX_MP4_DETECTION_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_CONTAINER_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(any(feature = "mp4", feature = "mxf"))]
 const MAX_MEDIA_PACKET_BYTES: u32 = 128 * 1024 * 1024;
 #[cfg(feature = "mpeg-ts")]
 const MAX_MPEG_TS_PES_BYTES: usize = 1024 * 1024;
@@ -257,6 +260,7 @@ pub struct Mp4MediaIndex {
 const MAX_MP4_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum number of compressed access-unit records materialized from one MP4
 /// track. Constant-size PCM uses a compact descriptor and bounded packet runs.
+#[cfg(feature = "mp4")]
 const MAX_MP4_MATERIALIZED_ACCESS_UNITS: usize = 8_000_000;
 
 /// A Rust-validated top-level MOV/MP4 box range.
@@ -353,6 +357,7 @@ pub enum Mp4MediaDemuxEvent {
 #[cfg(feature = "mp4")]
 pub struct Mp4MediaDemuxer {
     buffer: Vec<u8>,
+    cursor: usize,
     absolute_start: u64,
     skip_remaining: u64,
     active_mdat: Option<RegularMdatRange>,
@@ -653,6 +658,7 @@ fn demuxer_for_format(format: &str) -> Result<DemuxerState, String> {
 }
 
 fn detect_and_init_demuxer(bytes: &[u8]) -> Result<DemuxerState, String> {
+    let _ = bytes;
     #[cfg(feature = "mpeg-ts")]
     if looks_like_mpeg_ts(bytes) {
         return demuxer_for_format("mpeg-ts");
@@ -733,6 +739,7 @@ fn process_state(
     bytes: &[u8],
     finalizing: bool,
 ) -> Result<Vec<AudioDemuxEvent>, String> {
+    let _ = (bytes, finalizing);
     match state {
         #[cfg(feature = "mp4")]
         DemuxerState::Mp4(demuxer) => {
@@ -1811,6 +1818,7 @@ impl Mp4MediaDemuxer {
     pub fn new() -> Self {
         Self {
             buffer: Vec::with_capacity(128 * 1024),
+            cursor: 0,
             absolute_start: 0,
             skip_remaining: 0,
             active_mdat: None,
@@ -1868,7 +1876,7 @@ impl Mp4MediaDemuxer {
         loop {
             if self.skip_remaining > 0 {
                 let remaining = usize::try_from(self.skip_remaining).unwrap_or(usize::MAX);
-                let available = self.buffer.len().min(remaining);
+                let available = self.remaining_len().min(remaining);
                 self.drain_front(available);
                 self.skip_remaining -= available as u64;
                 if self.skip_remaining > 0 {
@@ -1884,7 +1892,7 @@ impl Mp4MediaDemuxer {
                 }
                 continue;
             }
-            let Some(header) = Mp4BoxHeader::read(&self.buffer) else {
+            let Some(header) = Mp4BoxHeader::read(self.remaining()) else {
                 break;
             };
             if header.name == *b"mdat" {
@@ -1911,7 +1919,7 @@ impl Mp4MediaDemuxer {
                     MAX_MP4_METADATA_BYTES
                 ));
             }
-            if self.buffer.len() < header.size {
+            if self.remaining_len() < header.size {
                 if finalizing {
                     return Err(format!(
                         "truncated fragmented MP4 box {}",
@@ -1924,12 +1932,12 @@ impl Mp4MediaDemuxer {
             let box_start = self.absolute_start;
             match &header.name {
                 b"moov" => {
-                    let payload = self.buffer[header.header_size..header.size].to_vec();
+                    let payload = self.remaining()[header.header_size..header.size].to_vec();
                     events.extend(self.parse_moov(&payload)?);
                     self.drain_front(header.size);
                 }
                 b"moof" => {
-                    let payload = self.buffer[header.header_size..header.size].to_vec();
+                    let payload = self.remaining()[header.header_size..header.size].to_vec();
                     let fragments = self.parse_moof(&payload, box_start)?;
                     self.pending_fragments.extend(fragments);
                     self.drain_front(header.size);
@@ -1937,10 +1945,10 @@ impl Mp4MediaDemuxer {
                 _ => self.drain_front(header.size),
             }
         }
-        if finalizing && !self.buffer.is_empty() {
+        if finalizing && self.remaining_len() != 0 {
             return Err(format!(
                 "truncated fragmented MP4 box header ({} bytes remain)",
-                self.buffer.len()
+                self.remaining_len()
             ));
         }
         if finalizing && self.skip_remaining > 0 {
@@ -1956,8 +1964,20 @@ impl Mp4MediaDemuxer {
     }
 
     fn drain_front(&mut self, bytes: usize) {
-        self.buffer.drain(..bytes);
+        self.cursor += bytes;
         self.absolute_start += bytes as u64;
+        if self.cursor > 64 * 1024 || self.cursor == self.buffer.len() {
+            self.buffer.drain(..self.cursor);
+            self.cursor = 0;
+        }
+    }
+
+    fn remaining(&self) -> &[u8] {
+        &self.buffer[self.cursor..]
+    }
+
+    fn remaining_len(&self) -> usize {
+        self.buffer.len() - self.cursor
     }
 
     fn parse_moov(&mut self, data: &[u8]) -> Result<Vec<Mp4MediaDemuxEvent>, String> {
@@ -2143,18 +2163,12 @@ impl Mp4MediaDemuxer {
             }
         }
         pending.sort_unstable_by_key(|(_, sample)| sample.absolute_offset);
+        let mut pending: VecDeque<_> = pending.into();
 
         let mut events = Vec::new();
         loop {
-            let next = pending.iter().position(|(_, sample)| {
-                sample.absolute_offset >= mdat.payload_start
-                    && sample
-                        .absolute_offset
-                        .checked_add(u64::from(sample.size))
-                        .is_some_and(|end| end <= mdat.payload_end)
-            });
-            let Some(next) = next else {
-                let available_end = self.absolute_start + self.buffer.len() as u64;
+            let Some((track_id, sample)) = pending.front().cloned() else {
+                let available_end = self.absolute_start + self.remaining_len() as u64;
                 let drain_end = available_end.min(mdat.payload_end);
                 if drain_end > self.absolute_start {
                     self.drain_front((drain_end - self.absolute_start) as usize);
@@ -2164,26 +2178,44 @@ impl Mp4MediaDemuxer {
                 }
                 break;
             };
-            let (track_id, sample) = &pending[next];
+            let sample_end = sample
+                .absolute_offset
+                .checked_add(u64::from(sample.size))
+                .ok_or_else(|| "fragmented MP4 sample range overflow".to_string())?;
+            if sample.absolute_offset < mdat.payload_start {
+                return Err("fragmented MP4 sample precedes its mdat payload".to_string());
+            }
+            if sample.absolute_offset >= mdat.payload_end || sample_end > mdat.payload_end {
+                let available_end = self.absolute_start + self.remaining_len() as u64;
+                let drain_end = available_end.min(mdat.payload_end);
+                if drain_end > self.absolute_start {
+                    self.drain_front((drain_end - self.absolute_start) as usize);
+                }
+                if self.absolute_start == mdat.payload_end {
+                    self.active_mdat = None;
+                }
+                break;
+            }
             if sample.absolute_offset < self.absolute_start {
                 return Err("fragmented MP4 samples overlap or arrive out of order".to_string());
             }
             if sample.absolute_offset > self.absolute_start {
                 let gap = usize::try_from(sample.absolute_offset - self.absolute_start)
                     .map_err(|_| "fragmented MP4 sample gap exceeds this platform".to_string())?;
-                if self.buffer.len() < gap {
-                    self.drain_front(self.buffer.len());
+                if self.remaining_len() < gap {
+                    let available = self.remaining_len();
+                    self.drain_front(available);
                     break;
                 }
                 self.drain_front(gap);
             }
-            if self.buffer.len() < sample.size as usize {
+            if self.remaining_len() < sample.size as usize {
                 break;
             }
             let next_sample_id = self
                 .next_sample_ids
                 .iter_mut()
-                .find(|(candidate, _)| *candidate == u64::from(*track_id))
+                .find(|(candidate, _)| *candidate == u64::from(track_id))
                 .ok_or_else(|| format!("fragmented MP4 references unknown track {track_id}"))?;
             let sample_id = next_sample_id.1;
             next_sample_id.1 = next_sample_id
@@ -2193,10 +2225,10 @@ impl Mp4MediaDemuxer {
             let track = self
                 .tracks
                 .iter()
-                .find(|track| track.track_id == u64::from(*track_id))
+                .find(|track| track.track_id == u64::from(track_id))
                 .ok_or_else(|| format!("fragmented MP4 references unknown track {track_id}"))?;
             let raw = self
-                .buffer
+                .remaining()
                 .get(..sample.size as usize)
                 .ok_or_else(|| "fragmented MP4 sample is outside the buffered mdat".to_string())?;
             let data = match track.nal_length_size {
@@ -2209,7 +2241,7 @@ impl Mp4MediaDemuxer {
             let presentation_time =
                 map_mp4_presentation_time(&track.edit_timeline, media_presentation)?;
             events.push(Mp4MediaDemuxEvent::Packet(MediaTrackPacket {
-                track_id: u64::from(*track_id),
+                track_id: u64::from(track_id),
                 kind: track.kind,
                 codec: track.codec.clone(),
                 sample_id,
@@ -2220,7 +2252,7 @@ impl Mp4MediaDemuxer {
                 is_sync: sample.is_sync,
             }));
             self.drain_front(sample.size as usize);
-            pending.remove(next);
+            pending.pop_front();
             if self.absolute_start == mdat.payload_end {
                 self.active_mdat = None;
                 break;
@@ -4190,6 +4222,9 @@ struct MpegTsAudioDemuxer {
     pts_epoch: u64,
     last_raw_pts: Option<u64>,
     selected_program: Option<u16>,
+    psi_sections: HashMap<u16, PsiSectionAssembler>,
+    pat_version: Option<u8>,
+    pmt_version: Option<u8>,
 }
 
 #[cfg(feature = "mpeg-ts")]
@@ -4216,6 +4251,9 @@ impl MpegTsAudioDemuxer {
             pts_epoch: 0,
             last_raw_pts: None,
             selected_program: None,
+            psi_sections: HashMap::new(),
+            pat_version: None,
+            pmt_version: None,
         }
     }
 
@@ -4329,14 +4367,26 @@ impl MpegTsAudioDemuxer {
                 if Some(pid) == self.audio_pid {
                     self.current_pes.clear();
                 }
+                if let Some(assembler) = self.psi_sections.get_mut(&pid) {
+                    assembler.reset();
+                }
+            }
+        }
+        if discontinuity {
+            if let Some(assembler) = self.psi_sections.get_mut(&pid) {
+                assembler.reset();
             }
         }
 
         let payload = &packet[payload_start..];
         if pid == 0 {
-            self.parse_pat(payload, payload_unit_start)?;
+            for section in self.push_psi(pid, payload, payload_unit_start)? {
+                self.parse_pat_section(&section)?;
+            }
         } else if Some(pid) == self.pmt_pid {
-            self.parse_pmt(payload, payload_unit_start)?;
+            for section in self.push_psi(pid, payload, payload_unit_start)? {
+                self.parse_pmt_section(&section)?;
+            }
         } else if Some(pid) == self.audio_pid {
             if payload_unit_start {
                 events.extend(self.flush_current_pes()?);
@@ -4356,8 +4406,19 @@ impl MpegTsAudioDemuxer {
         Ok(())
     }
 
-    fn parse_pat(&mut self, payload: &[u8], payload_unit_start: bool) -> Result<(), String> {
-        let section = psi_section(payload, payload_unit_start)?;
+    fn push_psi(
+        &mut self,
+        pid: u16,
+        payload: &[u8],
+        payload_unit_start: bool,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        self.psi_sections
+            .entry(pid)
+            .or_default()
+            .push(payload, payload_unit_start)
+    }
+
+    fn parse_pat_section(&mut self, section: &[u8]) -> Result<(), String> {
         if section.len() < 12 || section[0] != 0x00 {
             return Ok(());
         }
@@ -4371,6 +4432,13 @@ impl MpegTsAudioDemuxer {
             return Ok(());
         }
         validate_psi_crc(&section[..section_end])?;
+        if section[5] & 0x01 == 0 {
+            return Ok(());
+        }
+        let version = (section[5] >> 1) & 0x1f;
+        if self.pat_version == Some(version) {
+            return Ok(());
+        }
 
         let entries_end = section_end.saturating_sub(4);
         let mut pos = 8usize;
@@ -4387,15 +4455,22 @@ impl MpegTsAudioDemuxer {
             pos += 4;
         }
         if let Some((program, pid)) = selected {
+            if self.pmt_pid != Some(pid) {
+                self.audio_pid = None;
+                self.audio_codec = None;
+                self.packet_format = None;
+                self.stream_type = None;
+                self.pmt_version = None;
+            }
             self.selected_program = Some(program);
             self.pmt_pid = Some(pid);
+            self.pat_version = Some(version);
         }
 
         Ok(())
     }
 
-    fn parse_pmt(&mut self, payload: &[u8], payload_unit_start: bool) -> Result<(), String> {
-        let section = psi_section(payload, payload_unit_start)?;
+    fn parse_pmt_section(&mut self, section: &[u8]) -> Result<(), String> {
         if section.len() < 16 || section[0] != 0x02 {
             return Ok(());
         }
@@ -4409,6 +4484,13 @@ impl MpegTsAudioDemuxer {
             return Ok(());
         }
         validate_psi_crc(&section[..section_end])?;
+        if section[5] & 0x01 == 0 {
+            return Ok(());
+        }
+        let version = (section[5] >> 1) & 0x1f;
+        if self.pmt_version == Some(version) {
+            return Ok(());
+        }
         let program_number = u16::from_be_bytes([section[3], section[4]]);
         if self
             .selected_program
@@ -4418,8 +4500,15 @@ impl MpegTsAudioDemuxer {
         }
 
         let program_info_length = (((section[10] & 0x0f) as usize) << 8) | section[11] as usize;
-        let mut pos = 12 + program_info_length;
         let entries_end = section_end.saturating_sub(4);
+        let program_descriptors_end = 12usize
+            .checked_add(program_info_length)
+            .ok_or_else(|| "MPEG-TS PMT program descriptor size overflow".to_string())?;
+        if program_descriptors_end > entries_end {
+            return Err("MPEG-TS PMT program descriptors exceed their section".to_string());
+        }
+        let program_descriptors = &section[12..program_descriptors_end];
+        let mut pos = program_descriptors_end;
 
         while pos + 5 <= entries_end {
             let stream_type = section[pos];
@@ -4433,15 +4522,18 @@ impl MpegTsAudioDemuxer {
             if descriptors_end > entries_end {
                 return Err("MPEG-TS PMT descriptor exceeds its section".to_string());
             }
-            if let Some((codec, packet_format)) =
-                ts_stream_codec(stream_type, &section[pos + 5..descriptors_end])
-            {
+            if let Some((codec, packet_format)) = ts_stream_codec(
+                stream_type,
+                program_descriptors,
+                &section[pos + 5..descriptors_end],
+            ) {
                 if self.audio_pid.is_none() {
                     self.audio_pid = Some(pid);
                     self.audio_codec = Some(codec);
                     self.packet_format = Some(packet_format);
                     self.stream_type = Some(stream_type);
                 }
+                self.pmt_version = Some(version);
                 break;
             }
 
@@ -4473,7 +4565,11 @@ impl MpegTsAudioDemuxer {
 
         match self.packet_format.clone().unwrap_or(AudioPacketFormat::Raw) {
             AudioPacketFormat::Adts => self.emit_adts_frames(payload, pts, dts),
-            AudioPacketFormat::Latm | AudioPacketFormat::Raw => {
+            AudioPacketFormat::Latm => self.emit_loas_frames(payload, pts, dts),
+            AudioPacketFormat::Raw if matches!(self.stream_type, Some(0x03 | 0x04)) => {
+                self.emit_mpeg_audio_frames(payload, pts, dts)
+            }
+            AudioPacketFormat::Raw => {
                 let mut events = Vec::new();
                 self.ensure_config(&mut events, None, None);
                 if !payload.is_empty() {
@@ -4501,6 +4597,120 @@ impl MpegTsAudioDemuxer {
                 Ok(events)
             }
         }
+    }
+
+    fn emit_loas_frames(
+        &mut self,
+        payload: &[u8],
+        pts: Option<u64>,
+        dts: Option<u64>,
+    ) -> Result<Vec<AudioDemuxEvent>, String> {
+        let mut events = Vec::new();
+        let mut position = 0usize;
+        while position + 3 <= payload.len() {
+            if payload[position] != 0x56 || payload[position + 1] & 0xe0 != 0xe0 {
+                position += 1;
+                continue;
+            }
+            let payload_length = (usize::from(payload[position + 1] & 0x1f) << 8)
+                | usize::from(payload[position + 2]);
+            let frame_length = 3usize
+                .checked_add(payload_length)
+                .ok_or_else(|| "LOAS/LATM frame size overflow".to_string())?;
+            if position + frame_length > payload.len() {
+                return Err("LOAS/LATM access unit is truncated at the PES boundary".to_string());
+            }
+            self.ensure_config(&mut events, None, None);
+            let first_frame = !events
+                .iter()
+                .any(|event| matches!(event, AudioDemuxEvent::Packet(_)));
+            events.push(AudioDemuxEvent::Packet(AudioTrackPacket {
+                container: AudioContainer::MpegTs,
+                codec: AudioCodec::Aac,
+                format: AudioPacketFormat::Latm,
+                data: payload[position..position + frame_length].to_vec(),
+                raw_data: None,
+                track_id: None,
+                pid: self.audio_pid,
+                stream_type: self.stream_type,
+                timescale: Some(90_000),
+                continuity_counter: self.current_pes_continuity,
+                discontinuity: self.current_pes_discontinuity && first_frame,
+                decode_time: dts,
+                sample_id: None,
+                start_time: pts,
+                duration: None,
+                rendering_offset: None,
+                is_sync: None,
+                timecode: pts.and_then(|value| i64::try_from(value).ok()),
+            }));
+            position += frame_length;
+        }
+        if position != payload.len() && payload[position..].iter().any(|byte| *byte != 0xff) {
+            return Err("LOAS/LATM PES ends with an incomplete access unit".to_string());
+        }
+        Ok(events)
+    }
+
+    fn emit_mpeg_audio_frames(
+        &mut self,
+        payload: &[u8],
+        pts: Option<u64>,
+        dts: Option<u64>,
+    ) -> Result<Vec<AudioDemuxEvent>, String> {
+        let mut events = Vec::new();
+        let mut position = 0usize;
+        let mut timestamp_offset = 0u64;
+        while position + 4 <= payload.len() {
+            let Some(header) = parse_mpeg_audio_header(&payload[position..]) else {
+                position += 1;
+                continue;
+            };
+            if position + header.frame_length > payload.len() {
+                return Err("MPEG audio frame is truncated at the PES boundary".to_string());
+            }
+            let codec = if header.layer == 3 {
+                AudioCodec::Mp3
+            } else {
+                AudioCodec::Unknown(format!("mp{}", header.layer))
+            };
+            if !self.emitted_config {
+                self.audio_codec = Some(codec.clone());
+            }
+            self.ensure_config(&mut events, Some(header.sample_rate), Some(header.channels));
+            let duration = u32::try_from(
+                u64::from(header.samples_per_frame) * 90_000 / u64::from(header.sample_rate),
+            )
+            .map_err(|_| "MPEG audio timestamp duration exceeds u32".to_string())?;
+            let frame_pts = pts.and_then(|value| value.checked_add(timestamp_offset));
+            let frame_dts = dts.and_then(|value| value.checked_add(timestamp_offset));
+            events.push(AudioDemuxEvent::Packet(AudioTrackPacket {
+                container: AudioContainer::MpegTs,
+                codec,
+                format: AudioPacketFormat::Raw,
+                data: payload[position..position + header.frame_length].to_vec(),
+                raw_data: None,
+                track_id: None,
+                pid: self.audio_pid,
+                stream_type: self.stream_type,
+                timescale: Some(90_000),
+                continuity_counter: self.current_pes_continuity,
+                discontinuity: self.current_pes_discontinuity && timestamp_offset == 0,
+                decode_time: frame_dts,
+                sample_id: None,
+                start_time: frame_pts,
+                duration: Some(duration),
+                rendering_offset: None,
+                is_sync: None,
+                timecode: frame_pts.and_then(|value| i64::try_from(value).ok()),
+            }));
+            timestamp_offset = timestamp_offset.saturating_add(u64::from(duration));
+            position += header.frame_length;
+        }
+        if position != payload.len() && payload[position..].iter().any(|byte| *byte != 0xff) {
+            return Err("MPEG audio PES ends with an incomplete frame".to_string());
+        }
+        Ok(events)
     }
 
     fn emit_adts_frames(
@@ -4626,32 +4836,111 @@ impl MpegTsAudioDemuxer {
 }
 
 #[cfg(feature = "mpeg-ts")]
-fn psi_section(payload: &[u8], payload_unit_start: bool) -> Result<&[u8], String> {
-    if !payload_unit_start {
-        return Ok(payload);
-    }
-
-    let pointer = *payload
-        .first()
-        .ok_or_else(|| "Truncated PSI pointer field".to_string())? as usize;
-    if payload.len() < 1 + pointer {
-        return Err("PSI pointer exceeds payload".to_string());
-    }
-    Ok(&payload[1 + pointer..])
+#[derive(Default)]
+struct PsiSectionAssembler {
+    bytes: Vec<u8>,
+    expected: Option<usize>,
 }
 
 #[cfg(feature = "mpeg-ts")]
-fn ts_stream_codec(stream_type: u8, descriptors: &[u8]) -> Option<(AudioCodec, AudioPacketFormat)> {
+impl PsiSectionAssembler {
+    fn push(&mut self, payload: &[u8], payload_unit_start: bool) -> Result<Vec<Vec<u8>>, String> {
+        let mut completed = Vec::new();
+        let mut data = payload;
+        if payload_unit_start {
+            let pointer = usize::from(
+                *data
+                    .first()
+                    .ok_or_else(|| "truncated PSI pointer field".to_string())?,
+            );
+            data = data
+                .get(1..)
+                .ok_or_else(|| "truncated PSI pointer field".to_string())?;
+            if pointer > data.len() {
+                return Err("PSI pointer exceeds payload".to_string());
+            }
+            if !self.bytes.is_empty() {
+                self.append(&data[..pointer], &mut completed)?;
+                if !self.bytes.is_empty() {
+                    return Err(
+                        "PSI pointer starts a new section before the previous section ends"
+                            .to_string(),
+                    );
+                }
+            }
+            data = &data[pointer..];
+        }
+        self.append(data, &mut completed)?;
+        Ok(completed)
+    }
+
+    fn append(&mut self, mut data: &[u8], completed: &mut Vec<Vec<u8>>) -> Result<(), String> {
+        while !data.is_empty() {
+            if self.bytes.is_empty() && data[0] == 0xff {
+                return Ok(());
+            }
+            if self.expected.is_none() {
+                let header_needed = 3usize.saturating_sub(self.bytes.len());
+                let take = header_needed.min(data.len());
+                self.bytes.extend_from_slice(&data[..take]);
+                data = &data[take..];
+                if self.bytes.len() < 3 {
+                    return Ok(());
+                }
+                let section_length =
+                    ((usize::from(self.bytes[1] & 0x0f)) << 8) | usize::from(self.bytes[2]);
+                let expected = 3usize
+                    .checked_add(section_length)
+                    .ok_or_else(|| "PSI section size overflow".to_string())?;
+                if !(4..=1024).contains(&expected) {
+                    self.reset();
+                    return Err(format!("PSI section size {expected} is out of range"));
+                }
+                self.expected = Some(expected);
+            }
+            let expected = self.expected.unwrap();
+            let needed = expected - self.bytes.len();
+            let take = needed.min(data.len());
+            self.bytes.extend_from_slice(&data[..take]);
+            data = &data[take..];
+            if self.bytes.len() == expected {
+                completed.push(std::mem::take(&mut self.bytes));
+                self.expected = None;
+            }
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self) {
+        self.bytes.clear();
+        self.expected = None;
+    }
+}
+
+#[cfg(feature = "mpeg-ts")]
+fn ts_stream_codec(
+    stream_type: u8,
+    program_descriptors: &[u8],
+    descriptors: &[u8],
+) -> Option<(AudioCodec, AudioPacketFormat)> {
     match stream_type {
         0x0f => Some((AudioCodec::Aac, AudioPacketFormat::Adts)),
         0x11 => Some((AudioCodec::Aac, AudioPacketFormat::Latm)),
-        0x03 | 0x04 => Some((AudioCodec::Mp3, AudioPacketFormat::Raw)),
+        0x03 | 0x04 => Some((
+            AudioCodec::Unknown("mpeg-audio".to_string()),
+            AudioPacketFormat::Raw,
+        )),
         0x81 => Some((AudioCodec::Ac3, AudioPacketFormat::Raw)),
         0x87 => Some((AudioCodec::Ac3, AudioPacketFormat::Raw)),
         0x06 if descriptors_have_tag(descriptors, 0x6A)
             || descriptors_have_registration(descriptors, b"AC-3") =>
         {
             Some((AudioCodec::Ac3, AudioPacketFormat::Raw))
+        }
+        // FFmpeg signals AAC as private PES in M2TS mode and identifies the
+        // program with the HDMV registration descriptor.
+        0x06 if descriptors_have_registration(program_descriptors, b"HDMV") => {
+            Some((AudioCodec::Aac, AudioPacketFormat::Adts))
         }
         _ => None,
     }
@@ -4767,6 +5056,78 @@ fn parse_pes_timestamp(data: &[u8]) -> Result<u64, String> {
 }
 
 #[cfg(feature = "mpeg-ts")]
+struct MpegAudioHeader {
+    frame_length: usize,
+    sample_rate: u32,
+    channels: u8,
+    samples_per_frame: u32,
+    layer: u8,
+}
+
+#[cfg(feature = "mpeg-ts")]
+fn parse_mpeg_audio_header(data: &[u8]) -> Option<MpegAudioHeader> {
+    if data.len() < 4 || data[0] != 0xff || data[1] & 0xe0 != 0xe0 {
+        return None;
+    }
+    let version_bits = (data[1] >> 3) & 0x03;
+    let layer_bits = (data[1] >> 1) & 0x03;
+    if version_bits == 1 || layer_bits == 0 {
+        return None;
+    }
+    let layer = 4 - layer_bits;
+    let bitrate_index = usize::from(data[2] >> 4);
+    let sample_rate_index = usize::from((data[2] >> 2) & 0x03);
+    if bitrate_index == 0 || bitrate_index == 15 || sample_rate_index == 3 {
+        return None;
+    }
+    const MPEG1_LAYER1: [u16; 14] = [
+        32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448,
+    ];
+    const MPEG1_LAYER2: [u16; 14] = [
+        32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384,
+    ];
+    const MPEG1_LAYER3: [u16; 14] = [
+        32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+    ];
+    const MPEG2_LAYER1: [u16; 14] = [
+        32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256,
+    ];
+    const MPEG2_LAYER23: [u16; 14] = [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+    let mpeg1 = version_bits == 3;
+    let bitrate_kbps = match (mpeg1, layer) {
+        (true, 1) => MPEG1_LAYER1[bitrate_index - 1],
+        (true, 2) => MPEG1_LAYER2[bitrate_index - 1],
+        (true, 3) => MPEG1_LAYER3[bitrate_index - 1],
+        (false, 1) => MPEG2_LAYER1[bitrate_index - 1],
+        (false, 2 | 3) => MPEG2_LAYER23[bitrate_index - 1],
+        _ => return None,
+    };
+    let base_rate = [44_100u32, 48_000, 32_000][sample_rate_index];
+    let sample_rate = match version_bits {
+        3 => base_rate,
+        2 => base_rate / 2,
+        0 => base_rate / 4,
+        _ => return None,
+    };
+    let bitrate = u32::from(bitrate_kbps) * 1000;
+    let padding = u32::from((data[2] >> 1) & 1);
+    let (frame_length, samples_per_frame) = match layer {
+        1 => (((12 * bitrate / sample_rate) + padding) * 4, 384),
+        2 => ((144 * bitrate / sample_rate) + padding, 1152),
+        3 if mpeg1 => ((144 * bitrate / sample_rate) + padding, 1152),
+        3 => ((72 * bitrate / sample_rate) + padding, 576),
+        _ => return None,
+    };
+    Some(MpegAudioHeader {
+        frame_length: usize::try_from(frame_length).ok()?,
+        sample_rate,
+        channels: if data[3] >> 6 == 3 { 1 } else { 2 },
+        samples_per_frame,
+        layer,
+    })
+}
+
+#[cfg(feature = "mpeg-ts")]
 struct AdtsHeader {
     frame_length: usize,
     sample_rate: u32,
@@ -4827,9 +5188,12 @@ fn adts_sample_rate(index: u8) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(any(feature = "mp4", feature = "webm"))]
     use std::fs;
+    #[cfg(any(feature = "mp4", feature = "webm"))]
     use std::path::PathBuf;
 
+    #[cfg(feature = "mp4")]
     fn fixture(path: &str) -> Vec<u8> {
         fs::read(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -5626,6 +5990,135 @@ mod tests {
                 ..
             })
         )));
+    }
+
+    #[cfg(feature = "mpeg-ts")]
+    #[test]
+    fn real_ts_and_m2ts_match_ffprobe_packet_counts_and_chunking() {
+        let cases = [
+            ("mpeg-ts/aac-stereo-48k.ts", "mpeg-ts", "aac", 48usize),
+            ("mpeg-ts/aac-stereo-48k.m2ts", "m2ts", "aac", 48usize),
+            ("mpeg-ts/mp2-stereo-48k.ts", "mpeg-ts", "mp2", 42usize),
+        ];
+
+        for (path, format, codec, expected_packets) in cases {
+            let data = fixture(path);
+            let collect = |chunk_size: usize| {
+                let mut demuxer = AudioTrackDemuxer::new_with_format(format).unwrap();
+                let mut events = Vec::new();
+                for chunk in data.chunks(chunk_size) {
+                    events.extend(demuxer.push(chunk).unwrap());
+                }
+                events.extend(demuxer.flush().unwrap());
+                events
+            };
+            let reference = collect(data.len());
+            assert_eq!(reference, collect(1), "one-byte chunks changed {path}");
+            assert_eq!(reference, collect(188), "packet chunks changed {path}");
+            assert_eq!(reference, collect(4 * 1024), "4 KiB chunks changed {path}");
+            assert_eq!(
+                reference,
+                collect(64 * 1024),
+                "64 KiB chunks changed {path}"
+            );
+
+            let config = reference
+                .iter()
+                .find_map(|event| match event {
+                    AudioDemuxEvent::Config(config) => Some(config),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("audio configuration for {path}"));
+            assert_eq!(config.codec.as_str(), codec);
+            assert_eq!(config.sample_rate, Some(48_000));
+            assert_eq!(config.channels, Some(2));
+
+            let packets = reference
+                .iter()
+                .filter_map(|event| match event {
+                    AudioDemuxEvent::Packet(packet) => Some(packet),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(packets.len(), expected_packets, "FFprobe count for {path}");
+            assert!(packets
+                .iter()
+                .all(|packet| packet.timescale == Some(90_000)));
+            assert!(packets.windows(2).all(|pair| {
+                match (pair[0].start_time, pair[1].start_time) {
+                    (Some(left), Some(right)) => left <= right,
+                    _ => true,
+                }
+            }));
+        }
+    }
+
+    #[cfg(feature = "mpeg-ts")]
+    #[test]
+    fn reassembles_psi_sections_across_transport_packets() {
+        let pat = pat_section(0x1000);
+        let split = 7;
+        let mut assembler = PsiSectionAssembler::default();
+        assert!(assembler.push(&pat[..split], true).unwrap().is_empty());
+        let sections = assembler.push(&pat[split..], false).unwrap();
+        assert_eq!(sections, vec![pat[1..].to_vec()]);
+        validate_psi_crc(&sections[0]).unwrap();
+
+        let mut two_sections = vec![0];
+        two_sections.extend_from_slice(&pat[1..]);
+        two_sections.extend_from_slice(&pat[1..]);
+        let sections = PsiSectionAssembler::default()
+            .push(&two_sections, true)
+            .unwrap();
+        assert_eq!(sections.len(), 2);
+    }
+
+    #[cfg(feature = "mpeg-ts")]
+    #[test]
+    fn splits_loas_and_mpeg_layer_audio_access_units() {
+        let mut demuxer = MpegTsAudioDemuxer::new();
+        demuxer.audio_pid = Some(0x101);
+        demuxer.audio_codec = Some(AudioCodec::Aac);
+        demuxer.packet_format = Some(AudioPacketFormat::Latm);
+        let loas = [0x56, 0xe0, 0x03, 1, 2, 3, 0x56, 0xe0, 0x02, 4, 5];
+        let events = demuxer.emit_loas_frames(&loas, Some(90_000), None).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AudioDemuxEvent::Packet(_)))
+                .count(),
+            2
+        );
+
+        let mp3 = parse_mpeg_audio_header(&[0xff, 0xfb, 0x90, 0x00]).unwrap();
+        assert_eq!(
+            (mp3.layer, mp3.sample_rate, mp3.frame_length),
+            (3, 44_100, 417)
+        );
+        let mp2 = parse_mpeg_audio_header(&[0xff, 0xfd, 0x80, 0x00]).unwrap();
+        assert_eq!(
+            (mp2.layer, mp2.sample_rate, mp2.frame_length),
+            (2, 44_100, 417)
+        );
+
+        let mut payload = vec![0; mp3.frame_length * 2];
+        payload[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0x00]);
+        payload[mp3.frame_length..mp3.frame_length + 4].copy_from_slice(&[0xff, 0xfb, 0x90, 0x00]);
+        demuxer.emitted_config = false;
+        demuxer.audio_codec = Some(AudioCodec::Mp3);
+        demuxer.packet_format = Some(AudioPacketFormat::Raw);
+        let events = demuxer
+            .emit_mpeg_audio_frames(&payload, Some(180_000), Some(180_000))
+            .unwrap();
+        let packets = events
+            .iter()
+            .filter_map(|event| match event {
+                AudioDemuxEvent::Packet(packet) => Some(packet),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(packets.len(), 2);
+        assert!(packets[1].start_time > packets[0].start_time);
     }
 
     #[cfg(feature = "mpeg-ts")]
