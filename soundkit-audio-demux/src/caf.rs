@@ -11,11 +11,7 @@ const MAX_CAF_MATERIALIZED_PACKETS: usize = 8_000_000;
 const MAX_CAF_PACKET_BYTES: u32 = 128 * 1024 * 1024;
 
 const LPCM_IS_FLOAT: u32 = 1 << 0;
-const LPCM_IS_BIG_ENDIAN: u32 = 1 << 1;
-const LPCM_IS_SIGNED_INTEGER: u32 = 1 << 2;
-const LPCM_IS_PACKED: u32 = 1 << 3;
-const LPCM_IS_ALIGNED_HIGH: u32 = 1 << 4;
-const LPCM_IS_NON_INTERLEAVED: u32 = 1 << 5;
+const LPCM_IS_LITTLE_ENDIAN: u32 = 1 << 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CafChunkRange {
@@ -595,16 +591,16 @@ fn resolve_format(
                 AudioCodec::Pcm,
                 codec_id,
                 Some((
-                    if description.format_flags & LPCM_IS_BIG_ENDIAN != 0 {
-                        PcmEndianness::Big
-                    } else {
+                    if description.format_flags & LPCM_IS_LITTLE_ENDIAN != 0 {
                         PcmEndianness::Little
+                    } else {
+                        PcmEndianness::Big
                     },
                     is_float,
-                    description.format_flags & LPCM_IS_SIGNED_INTEGER != 0,
-                    description.format_flags & LPCM_IS_PACKED != 0,
-                    description.format_flags & LPCM_IS_ALIGNED_HIGH != 0,
-                    description.format_flags & LPCM_IS_NON_INTERLEAVED == 0,
+                    !is_float,
+                    bytes_per_frame == minimum_frame_bytes,
+                    false,
+                    true,
                 )),
             ))
         }
@@ -673,36 +669,16 @@ mod tests {
     #[test]
     fn indexes_common_pcm_widths_endianness_and_float_flags() {
         for (bits, flags, endianness, float) in [
-            (
-                16,
-                LPCM_IS_SIGNED_INTEGER | LPCM_IS_PACKED,
-                PcmEndianness::Little,
-                false,
-            ),
-            (
-                24,
-                LPCM_IS_BIG_ENDIAN | LPCM_IS_SIGNED_INTEGER | LPCM_IS_PACKED,
-                PcmEndianness::Big,
-                false,
-            ),
+            (16, 0, PcmEndianness::Big, false),
+            (24, LPCM_IS_LITTLE_ENDIAN, PcmEndianness::Little, false),
+            (32, 0, PcmEndianness::Big, false),
             (
                 32,
-                LPCM_IS_SIGNED_INTEGER | LPCM_IS_PACKED,
-                PcmEndianness::Little,
-                false,
-            ),
-            (
-                32,
-                LPCM_IS_FLOAT | LPCM_IS_PACKED,
+                LPCM_IS_FLOAT | LPCM_IS_LITTLE_ENDIAN,
                 PcmEndianness::Little,
                 true,
             ),
-            (
-                64,
-                LPCM_IS_FLOAT | LPCM_IS_BIG_ENDIAN | LPCM_IS_PACKED,
-                PcmEndianness::Big,
-                true,
-            ),
+            (64, LPCM_IS_FLOAT, PcmEndianness::Big, true),
         ] {
             for metadata_after_data in [false, true] {
                 let file = pcm_caf(bits, flags, 3, metadata_after_data);
@@ -711,6 +687,9 @@ mod tests {
                 assert_eq!(index.config.bits_per_sample, Some(bits as u8));
                 assert_eq!(index.config.pcm_endianness, Some(endianness));
                 assert_eq!(index.config.pcm_float, Some(float));
+                assert_eq!(index.config.pcm_signed, Some(!float));
+                assert_eq!(index.config.pcm_packed, Some(true));
+                assert_eq!(index.config.pcm_interleaved, Some(true));
                 assert_eq!(index.config.sample_count, Some(3));
                 assert_eq!(index.valid_frames, 3);
                 assert_eq!(index.channel_layout, vec![0, 1, 2, 3]);
@@ -722,7 +701,7 @@ mod tests {
 
     #[test]
     fn accepts_apple_style_nonzero_data_edit_count() {
-        let mut file = pcm_caf(32, LPCM_IS_FLOAT | LPCM_IS_PACKED, 3, false);
+        let mut file = pcm_caf(32, LPCM_IS_FLOAT | LPCM_IS_LITTLE_ENDIAN, 3, false);
         let data_chunk = file
             .windows(4)
             .position(|bytes| bytes == b"data")

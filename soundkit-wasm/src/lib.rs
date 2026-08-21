@@ -5837,14 +5837,14 @@ mod tests {
         let mut description = Vec::with_capacity(32);
         description.extend_from_slice(&48_000f64.to_be_bytes());
         description.extend_from_slice(b"lpcm");
-        description.extend_from_slice(&(1u32 | (1u32 << 3)).to_be_bytes());
+        description.extend_from_slice(&(1u32 | (1u32 << 1)).to_be_bytes());
         description.extend_from_slice(&8u32.to_be_bytes());
         description.extend_from_slice(&1u32.to_be_bytes());
         description.extend_from_slice(&2u32.to_be_bytes());
         description.extend_from_slice(&32u32.to_be_bytes());
 
         let mut data = Vec::with_capacity(4 + frame_count * 8);
-        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(&1u32.to_be_bytes());
         for frame in 0..frame_count {
             let left = frame as f32 / frame_count.max(1) as f32;
             data.extend_from_slice(&left.to_le_bytes());
@@ -6070,6 +6070,11 @@ mod tests {
         let last = index.packets.last().unwrap();
         let start = first.absolute_offset as usize;
         let end = last.absolute_offset as usize + last.size as usize;
+        let decoded =
+            audio_data_from_container_pcm(&index.config, data[start..end].to_vec()).unwrap();
+        let channels = audio_to_f32_channels(&decoded).unwrap();
+        assert!((channels[0][480] - 0.5).abs() < 0.000_001);
+        assert!((channels[1][480] + 0.5).abs() < 0.000_001);
         let batch = encoder
             .push_caf_pcm_range_rust(&index, 0, index.packets.len(), &data[start..end])
             .unwrap();
