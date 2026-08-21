@@ -2844,6 +2844,64 @@ impl WasmStreamingLibraryEncoder {
         self.encode_partial_audio_rust(decoded)
     }
 
+    /// Validate and encode one contiguous run of indexed CAF PCM packets.
+    pub fn push_caf_pcm_range_rust(
+        &mut self,
+        index: &CafAudioIndex,
+        sample_start: usize,
+        sample_end: usize,
+        source_bytes: &[u8],
+    ) -> Result<LibraryEncodeBatch, String> {
+        self.ensure_active()?;
+        if index.config.codec != AudioCodec::Pcm {
+            return Err("CAF packet range is not PCM".to_owned());
+        }
+        let samples = index
+            .packets
+            .get(sample_start..sample_end)
+            .filter(|samples| !samples.is_empty())
+            .ok_or_else(|| {
+                format!("CAF sample range {sample_start}..{sample_end} is out of range")
+            })?;
+        let mut expected_bytes = 0usize;
+        let mut expected_frames = 0u64;
+        let mut expected_offset = samples[0].absolute_offset;
+        for sample in samples {
+            if sample.absolute_offset != expected_offset {
+                return Err("CAF PCM sample range is not contiguous".to_owned());
+            }
+            expected_bytes = expected_bytes
+                .checked_add(sample.size as usize)
+                .ok_or_else(|| "CAF PCM sample range length overflows usize".to_owned())?;
+            expected_offset = expected_offset
+                .checked_add(u64::from(sample.size))
+                .ok_or_else(|| "CAF PCM sample range offset overflows u64".to_owned())?;
+            expected_frames = expected_frames
+                .checked_add(u64::from(sample.duration))
+                .ok_or_else(|| "CAF PCM sample range duration overflows u64".to_owned())?;
+        }
+        if source_bytes.len() != expected_bytes {
+            return Err(format!(
+                "CAF PCM sample range expected {expected_bytes} bytes, got {}",
+                source_bytes.len()
+            ));
+        }
+        let decoded = audio_data_from_container_pcm(&index.config, source_bytes.to_vec())?;
+        let decoded_frames = decoded_audio_frame_count(&decoded)?;
+        if u64::from(decoded_frames) != expected_frames {
+            return Err(format!(
+                "CAF PCM sample range expected {expected_frames} frames, decoded {decoded_frames}"
+            ));
+        }
+        let decoded = match index.pcm_packet_trim(sample_start, decoded_frames)? {
+            Some(trim) => {
+                trim_interleaved_audio(decoded, trim.source_frame_start, trim.frame_count)?
+            }
+            None => None,
+        };
+        self.encode_partial_audio_rust(decoded)
+    }
+
     /// Validate, decode, edit-list trim, and encode one indexed MOV/MP4 sample.
     pub fn push_mp4_sample_rust(
         &mut self,
@@ -6008,18 +6066,18 @@ mod tests {
             encoder.update_source_bytes_rust(chunk).unwrap();
         }
         let mut opus_bytes = 0usize;
-        for (sample_index, sample) in index.packets.iter().enumerate() {
-            let start = sample.absolute_offset as usize;
-            let end = start + sample.size as usize;
-            let batch = encoder
-                .push_caf_sample_rust(&index, sample_index, &data[start..end])
-                .unwrap();
-            opus_bytes += batch
-                .opus_packets
-                .iter()
-                .map(|packet| packet.bytes.len())
-                .sum::<usize>();
-        }
+        let first = index.packets.first().unwrap();
+        let last = index.packets.last().unwrap();
+        let start = first.absolute_offset as usize;
+        let end = last.absolute_offset as usize + last.size as usize;
+        let batch = encoder
+            .push_caf_pcm_range_rust(&index, 0, index.packets.len(), &data[start..end])
+            .unwrap();
+        opus_bytes += batch
+            .opus_packets
+            .iter()
+            .map(|packet| packet.bytes.len())
+            .sum::<usize>();
         let result = encoder.finish_rust().unwrap();
         opus_bytes += result
             .opus_packets
