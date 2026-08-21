@@ -210,11 +210,8 @@ impl CafAudioIndex {
         channel_layout: &[u8],
         data_payload_offset: u64,
         data_payload_size: u64,
-        edit_count: u32,
+        _edit_count: u32,
     ) -> Result<Self, String> {
-        if edit_count != 0 {
-            return Err(format!("CAF data edit count {edit_count} is unsupported"));
-        }
         if data_payload_size < 4 {
             return Err("CAF data chunk is shorter than its edit count".to_string());
         }
@@ -721,6 +718,21 @@ mod tests {
                 assert_eq!(index.packets[2].decode_time, 2);
             }
         }
+    }
+
+    #[test]
+    fn accepts_apple_style_nonzero_data_edit_count() {
+        let mut file = pcm_caf(32, LPCM_IS_FLOAT | LPCM_IS_PACKED, 3, false);
+        let data_chunk = file
+            .windows(4)
+            .position(|bytes| bytes == b"data")
+            .expect("generated CAF has a data chunk");
+        let edit_count = data_chunk + 12;
+        file[edit_count..edit_count + 4].copy_from_slice(&1u32.to_be_bytes());
+
+        let index = CafAudioIndex::from_file(&file).unwrap();
+        assert_eq!(index.config.codec, AudioCodec::Pcm);
+        assert_eq!(index.packets.len(), 3);
     }
 
     #[test]
