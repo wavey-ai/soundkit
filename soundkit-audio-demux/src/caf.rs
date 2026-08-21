@@ -1,6 +1,6 @@
 use crate::{
     AudioCodec, AudioContainer, AudioPacketFormat, AudioTrackConfig, MediaSampleIndex,
-    MediaTrackKind, PcmEndianness,
+    MediaTrackKind, MediaTrackPacket, PcmEndianness, PcmPacketTrim,
 };
 
 const MAX_CAF_DESCRIPTION_BYTES: u64 = 32;
@@ -333,6 +333,71 @@ impl CafAudioIndex {
             remainder_frames,
             channel_layout: channel_layout.to_vec(),
         })
+    }
+
+    /// Validate and normalize one indexed CAF packet.
+    ///
+    /// Callers must read exactly the range in `packets[sample_index]`.
+    pub fn packet_from_sample_bytes(
+        &self,
+        sample_index: usize,
+        raw: &[u8],
+    ) -> Result<MediaTrackPacket, String> {
+        let sample = self
+            .packets
+            .get(sample_index)
+            .ok_or_else(|| format!("CAF sample index {sample_index} is out of range"))?;
+        if raw.len() != sample.size as usize {
+            return Err(format!(
+                "CAF sample {} expected {} bytes, got {}",
+                sample.sample_id,
+                sample.size,
+                raw.len()
+            ));
+        }
+        Ok(MediaTrackPacket {
+            track_id: sample.track_id,
+            kind: sample.kind,
+            codec: sample.codec.clone(),
+            sample_id: sample.sample_id,
+            data: raw.to_vec(),
+            decode_time: sample.decode_time,
+            presentation_time: sample.presentation_time,
+            duration: sample.duration,
+            is_sync: sample.is_sync,
+        })
+    }
+
+    /// Select the decoded frames that belong to the CAF presentation.
+    /// Priming and remainder frames stay outside the returned range.
+    pub fn pcm_packet_trim(
+        &self,
+        sample_index: usize,
+        decoded_frames: u32,
+    ) -> Result<Option<PcmPacketTrim>, String> {
+        let sample = self
+            .packets
+            .get(sample_index)
+            .ok_or_else(|| format!("CAF sample index {sample_index} is out of range"))?;
+        let packet_start = sample.decode_time;
+        let packet_end = packet_start
+            .checked_add(u64::from(decoded_frames))
+            .ok_or_else(|| "CAF decoded packet timeline overflows u64".to_string())?;
+        let programme_start = u64::from(self.priming_frames);
+        let programme_end = programme_start
+            .checked_add(self.valid_frames)
+            .ok_or_else(|| "CAF presentation timeline overflows u64".to_string())?;
+        let start = packet_start.max(programme_start);
+        let end = packet_end.min(programme_end);
+        if end <= start {
+            return Ok(None);
+        }
+        Ok(Some(PcmPacketTrim {
+            source_frame_start: u32::try_from(start - packet_start)
+                .map_err(|_| "CAF packet trim start exceeds u32".to_string())?,
+            frame_count: u32::try_from(end - start)
+                .map_err(|_| "CAF packet trim length exceeds u32".to_string())?,
+        }))
     }
 }
 

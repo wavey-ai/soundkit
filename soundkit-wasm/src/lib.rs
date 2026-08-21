@@ -44,8 +44,9 @@ use soundkit_alac::{
 #[cfg(feature = "audio-demux")]
 use soundkit_audio_demux::{
     inspect_mp4_top_level_box, AudioCodec, AudioDemuxEvent, AudioTrackConfig, AudioTrackDemuxer,
-    MediaSampleIndex, MediaTrackConfig, MediaTrackKind, MediaTrackPacket, Mp4MediaDemuxEvent,
-    Mp4MediaDemuxer, Mp4MediaIndex, MxfMediaDemuxEvent, MxfMediaDemuxer, PcmEndianness,
+    CafAudioIndex, MediaSampleIndex, MediaTrackConfig, MediaTrackKind, MediaTrackPacket,
+    Mp4MediaDemuxEvent, Mp4MediaDemuxer, Mp4MediaIndex, MxfMediaDemuxEvent, MxfMediaDemuxer,
+    PcmEndianness,
 };
 #[cfg(feature = "flac")]
 use soundkit_flac::{FlacDecoderClaxon, FlacEncoder};
@@ -1078,6 +1079,19 @@ fn make_container_pcm_audio(
             Endianness::LittleEndian
         },
     ))
+}
+
+#[cfg(all(feature = "audio-demux", feature = "alac"))]
+fn decoded_audio_frame_count(audio: &AudioData) -> Result<u32, String> {
+    let bytes_per_sample = usize::from(audio.bits_per_sample().div_ceil(8));
+    let bytes_per_frame = bytes_per_sample
+        .checked_mul(usize::from(audio.channel_count()))
+        .ok_or_else(|| "decoded PCM frame size overflow".to_owned())?;
+    if bytes_per_frame == 0 || audio.data().len() % bytes_per_frame != 0 {
+        return Err("decoder returned misaligned PCM".to_owned());
+    }
+    u32::try_from(audio.data().len() / bytes_per_frame)
+        .map_err(|_| "decoded PCM frame count exceeds u32".to_owned())
 }
 
 #[cfg(feature = "alac")]
@@ -2638,10 +2652,7 @@ impl WasmStreamingLibraryEncoder {
         magic_cookie: &[u8],
         preserve_lossless: bool,
     ) -> Result<WasmStreamingLibraryEncoder, JsValue> {
-        let mut encoder = Self::new(preserve_lossless)?;
-        encoder.decoder = LibrarySourceDecoder::Finished;
-        encoder.alac_decoder = Some(AlacPacketDecoder::new(magic_cookie).map_err(js_error)?);
-        Ok(encoder)
+        Self::new_alac_rust(magic_cookie, preserve_lossless).map_err(js_error)
     }
 
     /// Open the bounded output pipeline for seekable AAC-LC container samples.
@@ -2650,27 +2661,14 @@ impl WasmStreamingLibraryEncoder {
         audio_specific_config: &[u8],
         preserve_lossless: bool,
     ) -> Result<WasmStreamingLibraryEncoder, JsValue> {
-        let mut encoder = Self::new(preserve_lossless)?;
-        encoder.decoder = LibrarySourceDecoder::Finished;
-        encoder.aac_lc_decoder = Some(
-            AacLcDecoder::from_audio_specific_config(audio_specific_config)
-                .map_err(|error| js_error(error.to_string()))?,
-        );
-        Ok(encoder)
+        Self::new_aac_lc_rust(audio_specific_config, preserve_lossless).map_err(js_error)
     }
 
     /// Hash a bounded source range without decoding it. Seekable container
     /// adapters use this while scanning metadata and packet ranges once.
     #[wasm_bindgen(js_name = updateSourceBytes)]
     pub fn update_source_bytes(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
-        if self.finished {
-            return Err(js_error(
-                "streaming library encoder is already finished".to_owned(),
-            ));
-        }
-        validate_stream_input_chunk(bytes).map_err(js_error)?;
-        self.source_digest.update(bytes);
-        Ok(())
+        self.update_source_bytes_rust(bytes).map_err(js_error)
     }
 
     /// Decode one indexed ALAC access unit and encode only its Rust-selected
@@ -2682,37 +2680,23 @@ impl WasmStreamingLibraryEncoder {
         source_frame_start: u32,
         frame_count: u32,
     ) -> Result<JsValue, JsValue> {
-        if self.finished {
-            return Err(js_error(
-                "streaming library encoder is already finished".to_owned(),
-            ));
-        }
-        validate_stream_input_chunk(packet).map_err(js_error)?;
-        let decoded = self
-            .alac_decoder
-            .as_mut()
-            .ok_or_else(|| js_error("ALAC library decoder is not open".to_owned()))?
-            .decode_packet(packet)
-            .map_err(js_error)?;
-        let decoded =
-            trim_interleaved_audio(decoded, source_frame_start, frame_count).map_err(js_error)?;
-        let mut opus_packets = Vec::new();
-        let mut flac_packets = Vec::new();
-        if let Some(decoded) = decoded {
-            self.encode_decoded(vec![decoded], &mut opus_packets, &mut flac_packets)
-                .map_err(js_error)?;
-        }
-        wave_library_result(
-            opus_packets,
-            flac_packets,
-            false,
-            self.normalizer.output_frames(),
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
+        wave_library_batch_to_js(
+            self.push_alac_packet_rust(packet, source_frame_start, frame_count)
+                .map_err(js_error)?,
+        )
+    }
+
+    /// Decode one indexed AAC-LC access unit and encode its selected frames.
+    #[wasm_bindgen(js_name = pushAacLcPacket)]
+    pub fn push_aac_lc_packet(
+        &mut self,
+        packet: &[u8],
+        source_frame_start: u32,
+        frame_count: u32,
+    ) -> Result<JsValue, JsValue> {
+        wave_library_batch_to_js(
+            self.push_aac_lc_packet_rust(packet, source_frame_start, frame_count)
+                .map_err(js_error)?,
         )
     }
 
@@ -2768,10 +2752,133 @@ impl WasmStreamingLibraryEncoder {
         })
     }
 
-    pub fn push_rust(&mut self, bytes: &[u8]) -> Result<LibraryEncodeBatch, String> {
-        if self.finished {
-            return Err("streaming library encoder is already finished".to_owned());
+    /// Open a Rust-native encoder for indexed ALAC packets.
+    pub fn new_alac_rust(magic_cookie: &[u8], preserve_lossless: bool) -> Result<Self, String> {
+        let mut encoder = Self::new_rust(preserve_lossless)?;
+        encoder.decoder = LibrarySourceDecoder::Finished;
+        encoder.alac_decoder = Some(AlacPacketDecoder::new(magic_cookie)?);
+        Ok(encoder)
+    }
+
+    /// Open a Rust-native encoder for indexed AAC-LC access units.
+    pub fn new_aac_lc_rust(
+        audio_specific_config: &[u8],
+        preserve_lossless: bool,
+    ) -> Result<Self, String> {
+        let mut encoder = Self::new_rust(preserve_lossless)?;
+        encoder.decoder = LibrarySourceDecoder::Finished;
+        encoder.aac_lc_decoder = Some(
+            AacLcDecoder::from_audio_specific_config(audio_specific_config)
+                .map_err(|error| error.to_string())?,
+        );
+        Ok(encoder)
+    }
+
+    /// Open a Rust-native encoder for indexed PCM packets.
+    pub fn new_seekable_pcm_rust(preserve_lossless: bool) -> Result<Self, String> {
+        let mut encoder = Self::new_rust(preserve_lossless)?;
+        encoder.decoder = LibrarySourceDecoder::Finished;
+        Ok(encoder)
+    }
+
+    /// Add one bounded source range to the source identity without decoding it.
+    pub fn update_source_bytes_rust(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.ensure_active()?;
+        validate_stream_input_chunk(bytes)?;
+        self.source_digest.update(bytes);
+        Ok(())
+    }
+
+    /// Decode and encode one validated ALAC access unit.
+    pub fn push_alac_packet_rust(
+        &mut self,
+        packet: &[u8],
+        source_frame_start: u32,
+        frame_count: u32,
+    ) -> Result<LibraryEncodeBatch, String> {
+        self.ensure_active()?;
+        let decoded = self.decode_alac_packet(packet)?;
+        let decoded = trim_interleaved_audio(decoded, source_frame_start, frame_count)?;
+        self.encode_partial_audio_rust(decoded)
+    }
+
+    /// Decode and encode one validated AAC-LC access unit.
+    pub fn push_aac_lc_packet_rust(
+        &mut self,
+        packet: &[u8],
+        source_frame_start: u32,
+        frame_count: u32,
+    ) -> Result<LibraryEncodeBatch, String> {
+        self.ensure_active()?;
+        let decoded = self.decode_aac_lc_packet(packet)?;
+        let decoded = trim_interleaved_audio(decoded, source_frame_start, frame_count)?;
+        self.encode_partial_audio_rust(decoded)
+    }
+
+    /// Validate, decode, trim, and encode one indexed CAF packet.
+    pub fn push_caf_sample_rust(
+        &mut self,
+        index: &CafAudioIndex,
+        sample_index: usize,
+        source_bytes: &[u8],
+    ) -> Result<LibraryEncodeBatch, String> {
+        self.ensure_active()?;
+        let packet = index.packet_from_sample_bytes(sample_index, source_bytes)?;
+        let decoded = match &index.config.codec {
+            AudioCodec::Pcm => audio_data_from_container_pcm(&index.config, packet.data)?,
+            AudioCodec::Alac => self.decode_alac_packet(&packet.data)?,
+            codec => {
+                return Err(format!(
+                    "unsupported seekable CAF audio codec: {}",
+                    codec.as_str()
+                ))
+            }
+        };
+        let decoded_frames = decoded_audio_frame_count(&decoded)?;
+        let decoded = match index.pcm_packet_trim(sample_index, decoded_frames)? {
+            Some(trim) => {
+                trim_interleaved_audio(decoded, trim.source_frame_start, trim.frame_count)?
+            }
+            None => None,
+        };
+        self.encode_partial_audio_rust(decoded)
+    }
+
+    /// Validate, decode, edit-list trim, and encode one indexed MOV/MP4 sample.
+    pub fn push_mp4_sample_rust(
+        &mut self,
+        index: &Mp4MediaIndex,
+        sample_index: usize,
+        source_bytes: &[u8],
+    ) -> Result<LibraryEncodeBatch, String> {
+        self.ensure_active()?;
+        let packet = index.packet_from_sample_bytes(sample_index, source_bytes)?;
+        if packet.kind != MediaTrackKind::Audio {
+            return Err(format!("MP4 sample {sample_index} is not audio"));
         }
+        let track = index
+            .tracks
+            .iter()
+            .find(|track| track.track_id == packet.track_id)
+            .ok_or_else(|| format!("MP4 sample references unknown track {}", packet.track_id))?;
+        let decoded = match packet.codec.as_str() {
+            "aac" => self.decode_aac_lc_packet(&packet.data)?,
+            "alac" => self.decode_alac_packet(&packet.data)?,
+            "pcm" => audio_data_from_media_pcm(track, packet.data)?,
+            codec => return Err(format!("unsupported seekable MP4 audio codec: {codec}")),
+        };
+        let decoded_frames = decoded_audio_frame_count(&decoded)?;
+        let decoded = match index.pcm_packet_trim(sample_index, decoded_frames)? {
+            Some(trim) => {
+                trim_interleaved_audio(decoded, trim.source_frame_start, trim.frame_count)?
+            }
+            None => None,
+        };
+        self.encode_partial_audio_rust(decoded)
+    }
+
+    pub fn push_rust(&mut self, bytes: &[u8]) -> Result<LibraryEncodeBatch, String> {
+        self.ensure_active()?;
         validate_stream_input_chunk(bytes)?;
         self.source_digest.update(bytes);
         let decoded = self.decoder.push(bytes)?;
@@ -2876,6 +2983,14 @@ impl WasmStreamingLibraryEncoder {
     feature = "flac"
 ))]
 impl WasmStreamingLibraryEncoder {
+    fn ensure_active(&self) -> Result<(), String> {
+        if self.finished {
+            Err("streaming library encoder is already finished".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+
     fn decode_alac_packet(&mut self, packet: &[u8]) -> Result<AudioData, String> {
         validate_stream_input_chunk(packet)?;
         self.alac_decoder
@@ -2909,13 +3024,20 @@ impl WasmStreamingLibraryEncoder {
     }
 
     fn encode_partial_audio(&mut self, decoded: Option<AudioData>) -> Result<JsValue, JsValue> {
+        wave_library_batch_to_js(self.encode_partial_audio_rust(decoded).map_err(js_error)?)
+    }
+
+    fn encode_partial_audio_rust(
+        &mut self,
+        decoded: Option<AudioData>,
+    ) -> Result<LibraryEncodeBatch, String> {
+        self.ensure_active()?;
         let mut opus_packets = Vec::new();
         let mut flac_packets = Vec::new();
         if let Some(decoded) = decoded {
-            self.encode_decoded(vec![decoded], &mut opus_packets, &mut flac_packets)
-                .map_err(js_error)?;
+            self.encode_decoded(vec![decoded], &mut opus_packets, &mut flac_packets)?;
         }
-        wave_library_result(
+        Ok(wave_library_batch(
             opus_packets,
             flac_packets,
             false,
@@ -2926,7 +3048,7 @@ impl WasmStreamingLibraryEncoder {
             None,
             None,
             None,
-        )
+        ))
     }
 
     fn encode_decoded(
@@ -5645,6 +5767,38 @@ mod tests {
         frames
     }
 
+    fn pcm_caf_fixture(frame_count: usize) -> Vec<u8> {
+        fn chunk(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(kind);
+            bytes.extend_from_slice(&(payload.len() as i64).to_be_bytes());
+            bytes.extend_from_slice(payload);
+            bytes
+        }
+
+        let mut description = Vec::with_capacity(32);
+        description.extend_from_slice(&48_000f64.to_be_bytes());
+        description.extend_from_slice(b"lpcm");
+        description.extend_from_slice(&(1u32 | (1u32 << 3)).to_be_bytes());
+        description.extend_from_slice(&8u32.to_be_bytes());
+        description.extend_from_slice(&1u32.to_be_bytes());
+        description.extend_from_slice(&2u32.to_be_bytes());
+        description.extend_from_slice(&32u32.to_be_bytes());
+
+        let mut data = Vec::with_capacity(4 + frame_count * 8);
+        data.extend_from_slice(&0u32.to_be_bytes());
+        for frame in 0..frame_count {
+            let left = frame as f32 / frame_count.max(1) as f32;
+            data.extend_from_slice(&left.to_le_bytes());
+            data.extend_from_slice(&(-0.5f32).to_le_bytes());
+        }
+
+        let mut file = b"caff\0\x01\0\0".to_vec();
+        file.extend_from_slice(&chunk(b"desc", &description));
+        file.extend_from_slice(&chunk(b"data", &data));
+        file
+    }
+
     #[cfg(feature = "flac")]
     #[test]
     fn flac_planar_conversion_preserves_normalized_24_bit_pcm() {
@@ -5834,6 +5988,108 @@ mod tests {
             .source_identity
             .as_deref()
             .is_some_and(|value| { value.starts_with("sha256:") && value.len() == 71 }));
+    }
+
+    #[cfg(all(
+        feature = "detect",
+        feature = "audio-demux",
+        feature = "aac-lc",
+        feature = "alac",
+        feature = "wav",
+        feature = "opus",
+        feature = "flac"
+    ))]
+    #[test]
+    fn rust_seekable_encoder_imports_pcm_caf_packets() {
+        let data = pcm_caf_fixture(960);
+        let index = CafAudioIndex::from_file(&data).unwrap();
+        let mut encoder = WasmStreamingLibraryEncoder::new_seekable_pcm_rust(true).unwrap();
+        for chunk in data.chunks(997) {
+            encoder.update_source_bytes_rust(chunk).unwrap();
+        }
+        let mut opus_bytes = 0usize;
+        for (sample_index, sample) in index.packets.iter().enumerate() {
+            let start = sample.absolute_offset as usize;
+            let end = start + sample.size as usize;
+            let batch = encoder
+                .push_caf_sample_rust(&index, sample_index, &data[start..end])
+                .unwrap();
+            opus_bytes += batch
+                .opus_packets
+                .iter()
+                .map(|packet| packet.bytes.len())
+                .sum::<usize>();
+        }
+        let result = encoder.finish_rust().unwrap();
+        opus_bytes += result
+            .opus_packets
+            .iter()
+            .map(|packet| packet.bytes.len())
+            .sum::<usize>();
+        assert!(result.done);
+        assert_eq!(result.frame_count, 960);
+        assert!(opus_bytes > 0);
+        assert!(result.opus_index.is_some());
+        assert!(result.flac_index.is_some());
+        assert!(result.source_identity.is_some());
+    }
+
+    #[cfg(all(
+        feature = "detect",
+        feature = "audio-demux",
+        feature = "aac-lc",
+        feature = "alac",
+        feature = "wav",
+        feature = "opus",
+        feature = "flac"
+    ))]
+    #[test]
+    fn rust_seekable_encoder_imports_mdat_first_aac_mp4() {
+        let data = fixture("mac_aac/A_Tusk_is_used_to_make_costly_gifts.m4a");
+        let mdat = data.windows(4).position(|value| value == b"mdat").unwrap();
+        let moov = data.windows(4).position(|value| value == b"moov").unwrap();
+        assert!(mdat < moov, "fixture must keep mdat before moov");
+
+        let index = Mp4MediaIndex::from_file(&data).unwrap();
+        let track = index
+            .tracks
+            .iter()
+            .find(|track| track.kind == MediaTrackKind::Audio && track.codec == "aac")
+            .unwrap();
+        let track_id = track.track_id;
+        let mut encoder =
+            WasmStreamingLibraryEncoder::new_aac_lc_rust(&track.codec_private, true).unwrap();
+        for chunk in data.chunks(997) {
+            encoder.update_source_bytes_rust(chunk).unwrap();
+        }
+        let mut opus_bytes = 0usize;
+        for (sample_index, sample) in index.samples.iter().enumerate() {
+            if sample.kind != MediaTrackKind::Audio || sample.track_id != track_id {
+                continue;
+            }
+            let start = sample.absolute_offset as usize;
+            let end = start + sample.size as usize;
+            let batch = encoder
+                .push_mp4_sample_rust(&index, sample_index, &data[start..end])
+                .unwrap();
+            opus_bytes += batch
+                .opus_packets
+                .iter()
+                .map(|packet| packet.bytes.len())
+                .sum::<usize>();
+        }
+        let result = encoder.finish_rust().unwrap();
+        opus_bytes += result
+            .opus_packets
+            .iter()
+            .map(|packet| packet.bytes.len())
+            .sum::<usize>();
+        assert!(result.done);
+        assert!(result.frame_count > 0);
+        assert!(opus_bytes > 0);
+        assert!(result.opus_index.is_some());
+        assert!(result.flac_index.is_some());
+        assert!(result.source_identity.is_some());
     }
 
     #[cfg(feature = "webm")]
