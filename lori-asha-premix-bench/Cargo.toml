@@ -11,5 +11,5 @@ bytes = "1"
 soundkit = { path = "../soundkit", version = "0.12.3" }
 soundkit-decoder = { path = "../soundkit-decoder" }
 soundkit-opus = { path = "../soundkit-opus" }
-libopus_rust = { package = "libopus", git = "https://github.com/wavey-ai/opus-rs" }
-opus-sys = { package = "opus-sys", git = "https://github.com/wavey-ai/opus-rs" }
+libopus_rust = { package = "libopus", git = "https://github.com/wavey-ai/opus-rs", branch = "main" }
+opus-sys = { package = "opus-sys", git = "https://github.com/wavey-ai/opus-rs", branch = "main" }
