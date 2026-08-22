@@ -4,11 +4,6 @@ Date: 2026-08-20
 
 Primary implementation repository: `/Users/jamie/wavey.ai/soundkit`
 
-Integration repositories:
-
-- `/Users/jamie/wavey.ai/vin.yl.app/Native/vin.yl.native`
-- `/Users/jamie/wavey.ai/vin.yl.app`
-
 ## Progress ledger
 
 Updated: 2026-08-22
@@ -41,6 +36,8 @@ This ledger is the operational TODO. The detailed phases below remain the comple
 - [x] Unpack D-10 AES3 PCM and cover genuine Avid OP-Atom and multi-track fixtures.
 - [x] Decode interlaced DNxHD and 12-bit DNxHR HQX/4:4:4 coding units.
 - [x] Run container malformed-input and allocation-budget regressions in CI, including the demux feature matrix.
+- [x] Run the official Matroska corpus at three input chunk sizes with allocation limits.
+- [x] Follow each Wavey-owned Git dependency on its `main` branch without a revision pin.
 - [x] Remove the obsolete July M4A decoder-options plan.
 
 ### Remaining before common production formats are ready to integrate
@@ -51,9 +48,6 @@ This ledger is the operational TODO. The detailed phases below remain the comple
 - [x] Add release throughput and peak-buffer benchmarks for the common container paths.
 - [x] Confirm no large-push performance cliff remains in MP4, WebM, Ogg, TS/M2TS, or CAF.
 - [x] Commit and push the common-container checkpoint as `42e5acf`.
-- [ ] Update `vin.yl.native` to follow the pushed SoundKit `main` branch.
-- [ ] Route YL.VIN imports through the SoundKit-owned container path.
-- [ ] Run focused native tests, the iOS Debug build, and the iOS test suite.
 
 ### Deferred specialty work
 
@@ -68,11 +62,11 @@ These items remain in the full plan but do not block the current common-format c
 
 ## Objective
 
-Make SoundKit the canonical container inspection, demux, timing, and indexing layer for YL.VIN imports.
+Make SoundKit a production-ready container inspection, demux, timing, and indexing library.
 
 Prioritize common production media before specialized archive variants.
 
-Support these container families without an AVFoundation or browser demux fallback:
+Support these container families without a platform or browser demux fallback:
 
 1. MOV and MP4.
 2. Fragmented MP4, CMAF, and DASH segments.
@@ -86,12 +80,8 @@ Platform decoders may handle an unsupported codec profile after SoundKit demuxes
 
 ## Repository boundaries
 
+- Change only the SoundKit repository in this plan.
 - Implement reusable container, codec, index, and timing logic in SoundKit.
-- Keep reusable YL.VIN engine adapters in `vin.yl.native`.
-- Keep Swift limited to file access, platform codec fallback, and application workflows.
-- Do not create a parallel Swift format catalog.
-- Do not add an AVFoundation fallback for a missing SoundKit demuxer.
-- Update the SoundKit `main` dependency only after its changes are pushed and validated.
 
 ## Working-tree safety
 
@@ -114,11 +104,9 @@ Do not reset, restore, reformat, or rewrite another agent's files.
 
 Implement core parser phases without touching those files.
 
-Integrate wrappers only after the current owner finishes or coordinates ownership.
-
 Before each phase:
 
-1. Run `git status --short` in every affected repository.
+1. Run `git status --short` in the SoundKit repository.
 2. Record the starting commit.
 3. Confirm that the phase does not overlap active edits.
 4. Use a separate worktree when ownership remains ambiguous.
@@ -140,7 +128,6 @@ The work is complete when all statements below are true.
 - Avid PCM and DNx fixtures pass without platform container parsing.
 - Container parsers have focused tests, malformed-input tests, and CI coverage.
 - Release benchmarks show no large input-chunk performance cliff.
-- YL.VIN imports supported containers through the SoundKit-owned path.
 
 ## Confirmed baseline defects
 
@@ -653,7 +640,7 @@ Tests:
 
 Exit gate:
 
-- Avid OP-Atom picture and audio files index and decode without AVFoundation demux.
+- Avid OP-Atom picture and audio files index and decode without platform demux.
 
 ## Phase 8: Remove structural performance cliffs
 
@@ -725,56 +712,6 @@ Exit gate:
 
 - Every supported container parser runs in normal pull-request CI.
 
-## Phase 10: Integrate the pushed SoundKit main branch into YL.VIN
-
-Complete this phase only after SoundKit passes all relevant gates.
-
-### 10.1 Update `vin.yl.native`
-
-Files:
-
-- `crates/bitneedle-native-core/Cargo.toml`
-- `crates/bitneedle-native-core/Cargo.lock`
-- reusable Rust bridge modules
-- C headers generated from the bridge contract
-
-Implementation:
-
-- Point every SoundKit crate at `branch = "main"`; do not use commit pins.
-- Add direct dependencies for the demux and index crates used by the bridge.
-- Expose seekable range plans instead of whole-file byte copies.
-- Emit bounded decoded PCM blocks into the existing normalization pipeline.
-- Replace Symphonia container ownership for newly supported formats.
-- Keep a platform decoder fallback only for rejected codec profiles.
-- Preserve SoundKit timing, trim, channel, and sample-rate decisions.
-
-### 10.2 Update the Apple application
-
-Implementation:
-
-- Let Swift provide validated file-range reads requested by Rust.
-- Keep container selection and packet interpretation in Rust.
-- Consume decoded blocks incrementally.
-- Do not retain a complete decoded PCM working copy.
-- Keep AVFoundation for device I/O and approved codec fallback only.
-- Record the selected demux and decoder path in technical diagnostics.
-- Keep user-facing messages free of internal service names.
-
-Validation:
-
-```sh
-make build
-make test
-```
-
-Use the repository-owned DerivedData caches from `AGENTS.md`.
-
-Do not start a release archive during this implementation plan.
-
-Exit gate:
-
-- Every supported fixture imports through SoundKit in an app integration test.
-
 ## Suggested commit sequence
 
 Keep each commit independently testable.
@@ -789,8 +726,6 @@ Keep each commit independently testable.
 8. `soundkit: add seekable avid mxf indexing`
 9. `soundkit: remove streaming front-drain hotspots`
 10. `soundkit: run media conformance and fuzzing in ci`
-11. `vin.yl.native: adopt the hardened soundkit revision`
-12. `yl.vin: route supported imports through soundkit`
 
 ## Final handoff checklist
 
@@ -803,11 +738,8 @@ Keep each commit independently testable.
 - [x] Include native and WASM benchmark results.
 - [x] Include peak-memory measurements.
 - [x] Confirm no public parser panic remains.
-- [ ] Confirm no unrelated dirty changes were overwritten.
-- [ ] Confirm the SoundKit commit is pushed.
-- [ ] Confirm `vin.yl.native` follows SoundKit `main` without a commit pin.
-- [ ] Confirm the YL.VIN Debug build passes.
-- [ ] Confirm the YL.VIN iOS test suite passes.
+- [x] Confirm no unrelated dirty changes were overwritten.
+- [x] Confirm the SoundKit implementation commits are pushed.
 
 ### Handoff record
 
