@@ -2120,7 +2120,11 @@ impl WebmAudioDemuxer {
 
     pub fn finish(&mut self) -> Result<Vec<WebmAudioDemuxEvent>, String> {
         let events = self.media.finish()?;
-        self.convert_media_events(events)
+        let events = self.convert_media_events(events)?;
+        if self.sample_rate.is_none() {
+            return Err("WebM source has no supported audio track".to_string());
+        }
+        Ok(events)
     }
 
     pub fn sample_rate(&self) -> Option<u32> {

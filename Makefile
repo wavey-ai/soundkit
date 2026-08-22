@@ -33,9 +33,18 @@ media-upstream-conformance: wasm media-upstream-corpus
 media-fuzz: wasm media-upstream-corpus
 	node scripts/fuzz-video-wasm.mjs
 
+.PHONY: container-corpus
+container-corpus:
+	./scripts/fetch-container-conformance-corpus.sh
+
+.PHONY: container-corpus-test
+container-corpus-test: container-corpus
+	cargo run --release -p soundkit-container-bench --bin container-corpus -- \
+		build/container-corpus scripts/container-corpus-manifest.tsv
+
 .PHONY: container-bench
 container-bench:
-	cargo run --release -p soundkit-container-bench
+	cargo run --release -p soundkit-container-bench --bin soundkit-container-bench
 
 .PHONY: container-bench-wasm
 container-bench-wasm: wasm

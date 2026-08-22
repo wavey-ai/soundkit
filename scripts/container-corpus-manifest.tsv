@@ -1,0 +1,14 @@
+# relative path                 SoundKit format  expected result
+# MPEG-4 Part 2 video and MP3 audio are outside the WebM media contract.
+matroska/test1.mkv              webm             reject
+matroska/test2.mkv              webm             accept
+# The audio adapter rejects the unsupported MP3 track after parsing header stripping.
+matroska/test3.mkv              webm             reject
+# This legacy live stream uses an EBML encoding outside SoundKit's accepted contract.
+matroska/test4.mkv              webm             reject
+matroska/test5.mkv              webm             accept
+# MPEG-4 Part 2 video and MP3 audio are outside the WebM media contract.
+matroska/test6.mkv              webm             reject
+# The upstream suite deliberately damages this file.
+matroska/test7.mkv              webm             reject
+matroska/test8.mkv              webm             accept

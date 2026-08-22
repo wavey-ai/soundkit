@@ -51,7 +51,7 @@ This ledger is the operational TODO. The detailed phases below remain the comple
 - [x] Add release throughput and peak-buffer benchmarks for the common container paths.
 - [x] Confirm no large-push performance cliff remains in MP4, WebM, Ogg, TS/M2TS, or CAF.
 - [x] Commit and push the common-container checkpoint as `42e5acf`.
-- [ ] Update `vin.yl.native` to the pushed SoundKit revision.
+- [ ] Update `vin.yl.native` to follow the pushed SoundKit `main` branch.
 - [ ] Route YL.VIN imports through the SoundKit-owned container path.
 - [ ] Run focused native tests, the iOS Debug build, and the iOS test suite.
 
@@ -91,7 +91,7 @@ Platform decoders may handle an unsupported codec profile after SoundKit demuxes
 - Keep Swift limited to file access, platform codec fallback, and application workflows.
 - Do not create a parallel Swift format catalog.
 - Do not add an AVFoundation fallback for a missing SoundKit demuxer.
-- Update the SoundKit revision only after its changes are pushed and validated.
+- Update the SoundKit `main` dependency only after its changes are pushed and validated.
 
 ## Working-tree safety
 
@@ -725,7 +725,7 @@ Exit gate:
 
 - Every supported container parser runs in normal pull-request CI.
 
-## Phase 10: Integrate the pushed SoundKit revision into YL.VIN
+## Phase 10: Integrate the pushed SoundKit main branch into YL.VIN
 
 Complete this phase only after SoundKit passes all relevant gates.
 
@@ -740,7 +740,7 @@ Files:
 
 Implementation:
 
-- Pin every SoundKit crate to one pushed commit.
+- Point every SoundKit crate at `branch = "main"`; do not use commit pins.
 - Add direct dependencies for the demux and index crates used by the bridge.
 - Expose seekable range plans instead of whole-file byte copies.
 - Emit bounded decoded PCM blocks into the existing normalization pipeline.
@@ -805,7 +805,7 @@ Keep each commit independently testable.
 - [x] Confirm no public parser panic remains.
 - [ ] Confirm no unrelated dirty changes were overwritten.
 - [ ] Confirm the SoundKit commit is pushed.
-- [ ] Confirm `vin.yl.native` pins that exact commit.
+- [ ] Confirm `vin.yl.native` follows SoundKit `main` without a commit pin.
 - [ ] Confirm the YL.VIN Debug build passes.
 - [ ] Confirm the YL.VIN iOS test suite passes.
 

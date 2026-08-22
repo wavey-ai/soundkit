@@ -16,7 +16,7 @@ oxideav = ["dep:oxideav-aac"]
 soundkit-lc = ["dep:soundkit-aac-lc"]
 
 [dependencies]
-fdk-aac = { git = "https://github.com/wavey-ai/fdk-aac-rs.git", optional = true }
+fdk-aac = { git = "https://github.com/wavey-ai/fdk-aac-rs.git", branch = "main", optional = true }
 oxideav-aac = { git = "https://github.com/OxideAV/oxideav-aac.git", optional = true }
 soundkit = { path = "../soundkit" }
 soundkit-aac-lc = { path = "../soundkit-aac-lc", optional = true }

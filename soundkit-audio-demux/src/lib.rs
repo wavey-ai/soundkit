@@ -758,8 +758,11 @@ fn process_state(
         }
         #[cfg(feature = "webm")]
         DemuxerState::WebM(demuxer) => {
-            let _ = finalizing;
-            convert_webm_events(demuxer.add(bytes)?)
+            if finalizing {
+                convert_webm_events(demuxer.finish()?)
+            } else {
+                convert_webm_events(demuxer.add(bytes)?)
+            }
         }
         #[cfg(feature = "mpeg-ts")]
         DemuxerState::MpegTs(demuxer) => {
@@ -6136,6 +6139,28 @@ mod tests {
                 ..
             })
         )));
+    }
+
+    #[cfg(feature = "webm")]
+    #[test]
+    fn webm_audio_flush_validates_the_container_tail() {
+        let mut data = fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("soundkit-webm")
+                .join("testdata")
+                .join("test.webm"),
+        )
+        .unwrap();
+        data.truncate(data.len() - 1);
+        let mut demuxer = AudioTrackDemuxer::new_with_format("webm").unwrap();
+        for chunk in data.chunks(997) {
+            demuxer.push(chunk).unwrap();
+        }
+        assert!(demuxer
+            .flush()
+            .unwrap_err()
+            .contains("truncated WebM element"));
     }
 
     #[cfg(feature = "mp4")]
