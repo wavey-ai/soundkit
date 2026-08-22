@@ -27,6 +27,7 @@ members = [
   "soundkit-decoder",
   "soundkit-fmp4",
   "soundkit-container-bench",
+  "soundkit-codec-fate",
   "lori-asha-premix-bench",
   "aac-wasm-bench",
 ]

@@ -39,6 +39,7 @@ This ledger is the operational TODO. The detailed phases below remain the comple
 - [x] Run the official Matroska corpus at three input chunk sizes with allocation limits.
 - [x] Follow each Wavey-owned Git dependency on its `main` branch without a revision pin.
 - [x] Remove the obsolete July M4A decoder-options plan.
+- [x] Add a formal, hash-verified FFmpeg FATE codec integration suite and local FFmpeg benchmark.
 
 ### Remaining before common production formats are ready to integrate
 

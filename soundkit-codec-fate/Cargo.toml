@@ -1,0 +1,12 @@
+[package]
+name = "soundkit-codec-fate"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+frame-header = "0.2.2"
+sha2 = "0.10"
+soundkit = { path = "../soundkit" }
+soundkit-decoder = { path = "../soundkit-decoder" }
+soundkit-video = { path = "../soundkit-video" }

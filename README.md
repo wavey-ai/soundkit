@@ -189,6 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Golden output | Decode with soundkit and write WAV under `golden/<format>/...`. |
 | Decoder tests | Compare chunked-vs-whole decode and run pipeline explicit/autodetect tests where available. |
 | External comparison | Compare native PCM with FFmpeg PCM where practical. |
+| Formal codec integration | Run `make codec-fate-test`; see the [FFmpeg FATE codec suite](docs/FFMPEG_FATE_CODEC_SUITE.md). |
 | Manual playback | Play decoded golden WAVs with `ffplay` after implementation. |
 
 ## License Notes

@@ -1,0 +1,25 @@
+# name                 kind   codec    expected  minimum quality  relative path                                           SHA-256
+aac-lc-mono            audio  aac-adts accept    30               aac/al04_44.mp4                                         e98388671459a44e499e3ddbfb93ffb9bc027bb4a434dbba9ee9a918600dfebf
+mp3-layer-3-mono       audio  auto     accept    30               mp3-conformance/si.bit                                  4f3382de1d9265013d42249ff108023d4a90ecf3c0136489d199243a90a5d0f9
+vorbis-stereo          audio  auto     accept    30               vorbis/1.0-test_small.ogg                                9f510e92b976eaf735009b444511f856db601eb13698b54fdfc9c4e078f9f3bc
+amr-nb-12k2            audio  amr-nb   accept    25               amrnb/12.2k.amr                                          34445340325350fb5f4e15893c7b1e6bfd3a6f87cd5dc8fc95989f2c3e8164fc
+h264-baseline-420      video  h264     accept    50               h264/nondeterministic_cut.h264                           9e601b2cdda47e0ece8a8ab78f42af751b37dd82163547380efec09584fa46ec
+hevc-main-420          video  hevc     accept    50               hevc-conformance/ipcm_A_NEC_2.bit                        f345fa066789908f6d2995a9d4fc7cee48a466c705857c75378e1d650feae30b
+vp9-profile0-420       video  vp9-webm accept    50               vp9-test-vectors/vp90-2-00-quantizer-50.webm             cf2857a0ecb999e0be00df5cf90c1081663f79b7ea5c9049eacf129d8b876b35
+av1-main-420           video  av1      accept    50               av1/decode_model.ivf                                     956947f45c96ea1f944fc2aac646d9088a307e436b2afc0477b9ae627babc7cd
+
+# Current output-quality gaps. SoundKit must decode these, but remain below the threshold.
+ac3-stereo-output      audio  auto     mismatch  25               ac3/monsters_inc_2.0_192_small.ac3                       4df071457c23d1a39fe52322892bc9333921ad6dfc8f87ffa0797bdfb5101bae
+opus-stereo-output     audio  opus-ogg mismatch  25               opus/testvector03.mka                                    630b879dc0c029412926abe25247fae570aff9937bc7a695feedb6bcba7e99bf
+vp9-resolution-change  video  vp9      mismatch  50               vp9-test-vectors/vp90-2-05-resize.ivf                    84a345546e47e37de87d2959347bf731f9f440f9f2ab32bede3f0e416100c585
+hevc-merge-output      video  hevc     mismatch  50               hevc-conformance/MERGE_A_TI_3.bit                        0a84103e548cf8944851cc33c7826ea5213245fd94517fd1071895740abce749
+
+# Current rejection gaps. FFmpeg must decode each source, and SoundKit must reject it explicitly.
+opus-surround          audio  opus-ogg reject    0                opus/tron.6ch.tinypkts.mka                               3c3dec9da0992dd01bdb2bef6231ece3d54f7b34326275978693db5390b07909
+eac3-stereo            audio  auto     reject    0                eac3/matrix2_commentary1_stereo_192_small.eac3            ea095d557bd6787266f4b7276a2be818a7fbc924997748be89d9ead962a3391c
+dts-es                 audio  auto     reject    0                dts/dts_es.dts                                            2e2530d220d51b914d1e7acb63badb5b2dae1578f3274116206fa1aa5e597638
+amr-wb                 audio  auto     reject    0                amrwb/seed-6k60.awb                                       5cd9696ce3b0df137c5c53f02392c3a9ee2ef0a614908d12f93c33fefa21b92f
+h264-high444-transition video h264     reject    0                h264/reinit-small_420_8-to-large_444_10.h264              1f01c0c8c18a73dd2ffcc765fbb29edb25de708c3085a561ac735517e0e1f2f0
+h264-interlaced        video  h264     reject    0                h264/crew_cif_timecode-2.h264                            11366c5cae6a7bf39c420fedf07bca21d142088517edb8ce75a0dcb05d2d45b8
+hevc-main10-cu-qp      video  hevc     reject    0                hevc/hdr10_plus_h265_sample.hevc                         663bd5179571133660a1e8ac260aa1f5bf8ce61d33dedb828a1cd7188771abcc
+hevc-rext-422-10       video  hevc     reject    0                hevc/food.hevc                                            269580b1efbb9d46b44299aa3222bc45120684280c9e5d2f38d9238316befdf9
