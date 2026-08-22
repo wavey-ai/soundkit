@@ -1,3 +1,5 @@
+#[cfg(feature = "mpeg-ts")]
+use access_unit::{bluray::parse_lpcm_access_unit, dts::parse_core_access_unit};
 #[cfg(feature = "webm")]
 use soundkit_webm::{WebmAudioDemuxEvent, WebmAudioDemuxer};
 #[cfg(feature = "mpeg-ts")]
@@ -8,7 +10,10 @@ use std::collections::VecDeque;
 #[cfg(feature = "mxf")]
 mod mxf;
 #[cfg(feature = "mxf")]
-pub use mxf::{MxfMediaDemuxEvent, MxfMediaDemuxer, MxfMediaIndex, MxfPartition, MxfPartitionKind};
+pub use mxf::{
+    unpack_aes3_pcm, MxfMediaDemuxEvent, MxfMediaDemuxer, MxfMediaIndex, MxfPartition,
+    MxfPartitionKind, MxfPcmSourcePacking, MxfTrackSourcePacking,
+};
 mod caf;
 pub use caf::{inspect_caf_chunk, validate_caf_file_header, CafAudioIndex, CafChunkRange};
 
@@ -61,6 +66,7 @@ pub enum AudioCodec {
     Vorbis,
     Mp3,
     Ac3,
+    Dts,
     Unknown(String),
 }
 
@@ -75,6 +81,7 @@ impl AudioCodec {
             AudioCodec::Vorbis => "vorbis",
             AudioCodec::Mp3 => "mp3",
             AudioCodec::Ac3 => "ac3",
+            AudioCodec::Dts => "dts",
             AudioCodec::Unknown(codec) => codec.as_str(),
         }
     }
@@ -1544,10 +1551,7 @@ impl RegularMp4AudioDemuxer {
             return Ok(events);
         }
 
-        loop {
-            let Some(sample) = self.next_sample_in_mdat(&mdat).cloned() else {
-                break;
-            };
+        while let Some(sample) = self.next_sample_in_mdat(&mdat).cloned() {
             let sample_end = sample.absolute_offset + sample.size as u64;
             if sample_end > available_end {
                 break;
@@ -2864,11 +2868,10 @@ fn build_constant_pcm_samples(tables: &RegularTrakTables) -> Result<Vec<RegularM
         .ok_or_else(|| "PCM track is missing stts timing".to_string())?
         .sample_duration;
     let frames_by_bytes = (MAX_PCM_PACKET_BYTES / sample_size).max(1);
-    let frames_by_duration = if sample_duration == 0 {
-        MAX_PCM_PACKET_FRAMES
-    } else {
-        (u32::MAX / sample_duration).max(1)
-    };
+    let frames_by_duration = u32::MAX
+        .checked_div(sample_duration)
+        .unwrap_or(MAX_PCM_PACKET_FRAMES)
+        .max(1);
     let max_packet_frames = MAX_PCM_PACKET_FRAMES
         .min(frames_by_bytes)
         .min(frames_by_duration);
@@ -4563,6 +4566,13 @@ impl MpegTsAudioDemuxer {
             None => return Ok(Vec::new()),
         };
 
+        if self.stream_type == Some(0x80) {
+            return self.emit_bluray_lpcm(payload, pts, dts);
+        }
+        if self.stream_type == Some(0x82) {
+            return self.emit_dts_frames(payload, pts, dts);
+        }
+
         match self.packet_format.clone().unwrap_or(AudioPacketFormat::Raw) {
             AudioPacketFormat::Adts => self.emit_adts_frames(payload, pts, dts),
             AudioPacketFormat::Latm => self.emit_loas_frames(payload, pts, dts),
@@ -4597,6 +4607,133 @@ impl MpegTsAudioDemuxer {
                 Ok(events)
             }
         }
+    }
+
+    fn emit_bluray_lpcm(
+        &mut self,
+        payload: &[u8],
+        pts: Option<u64>,
+        dts: Option<u64>,
+    ) -> Result<Vec<AudioDemuxEvent>, String> {
+        let unit = parse_lpcm_access_unit(payload).map_err(|error| error.to_string())?;
+        let duration_ticks = u64::try_from(unit.frames)
+            .ok()
+            .and_then(|frames| frames.checked_mul(90_000))
+            .ok_or_else(|| "Blu-ray LPCM duration calculation overflow".to_string())?
+            / u64::from(unit.sample_rate);
+        let duration = u32::try_from(duration_ticks)
+            .map_err(|_| "Blu-ray LPCM duration exceeds u32".to_string())?;
+        self.audio_codec = Some(AudioCodec::Pcm);
+        self.sample_rate = Some(unit.sample_rate);
+        self.channels = Some(unit.channels);
+
+        let mut events = Vec::new();
+        if !self.emitted_config {
+            events.push(AudioDemuxEvent::Config(AudioTrackConfig {
+                container: AudioContainer::MpegTs,
+                codec: AudioCodec::Pcm,
+                packet_format: Some(AudioPacketFormat::Raw),
+                codec_id: Some("pcm-bluray".to_string()),
+                track_id: None,
+                pid: self.audio_pid,
+                stream_type: self.stream_type,
+                timescale: Some(90_000),
+                transport_packet_stride: self.layout.map(|layout| layout.stride as u16),
+                transport_prefix_bytes: self.layout.map(|layout| layout.prefix as u8),
+                program_number: self.selected_program,
+                sample_rate: self.sample_rate,
+                channels: self.channels,
+                bits_per_sample: Some(unit.bits_per_sample),
+                pcm_endianness: Some(PcmEndianness::Big),
+                pcm_float: Some(false),
+                pcm_signed: Some(true),
+                pcm_packed: Some(true),
+                pcm_aligned_high: Some(false),
+                pcm_interleaved: Some(true),
+                pcm_bytes_per_frame: Some(
+                    u32::try_from(unit.bytes_per_frame)
+                        .map_err(|_| "Blu-ray LPCM frame size exceeds u32".to_string())?,
+                ),
+                pcm_frames_per_packet: Some(
+                    u32::try_from(unit.frames)
+                        .map_err(|_| "Blu-ray LPCM packet frame count exceeds u32".to_string())?,
+                ),
+                sample_count: None,
+                codec_private: unit.header.to_vec(),
+                pre_skip: None,
+                output_gain: None,
+                mapping_family: None,
+            }));
+            self.emitted_config = true;
+        }
+        events.push(AudioDemuxEvent::Packet(AudioTrackPacket {
+            container: AudioContainer::MpegTs,
+            codec: AudioCodec::Pcm,
+            format: AudioPacketFormat::Raw,
+            data: unit.payload.to_vec(),
+            raw_data: None,
+            track_id: None,
+            pid: self.audio_pid,
+            stream_type: self.stream_type,
+            timescale: Some(90_000),
+            continuity_counter: self.current_pes_continuity,
+            discontinuity: self.current_pes_discontinuity,
+            decode_time: dts,
+            sample_id: None,
+            start_time: pts,
+            duration: Some(duration),
+            rendering_offset: None,
+            is_sync: None,
+            timecode: pts.and_then(|value| i64::try_from(value).ok()),
+        }));
+        Ok(events)
+    }
+
+    fn emit_dts_frames(
+        &mut self,
+        payload: &[u8],
+        pts: Option<u64>,
+        dts: Option<u64>,
+    ) -> Result<Vec<AudioDemuxEvent>, String> {
+        let mut events = Vec::new();
+        let mut position = 0usize;
+        let mut timestamp_offset = 0u64;
+        while position < payload.len() {
+            let unit =
+                parse_core_access_unit(&payload[position..]).map_err(|error| error.to_string())?;
+            let end = position
+                .checked_add(unit.data.len())
+                .ok_or_else(|| "DTS access-unit byte range overflow".to_string())?;
+            self.ensure_config(&mut events, Some(unit.sample_rate), Some(unit.channels));
+            let duration =
+                u32::try_from(u64::from(unit.samples) * 90_000 / u64::from(unit.sample_rate))
+                    .map_err(|_| "DTS timestamp duration exceeds u32".to_string())?;
+            let frame_pts = pts.and_then(|value| value.checked_add(timestamp_offset));
+            let frame_dts = dts.and_then(|value| value.checked_add(timestamp_offset));
+            events.push(AudioDemuxEvent::Packet(AudioTrackPacket {
+                container: AudioContainer::MpegTs,
+                codec: AudioCodec::Dts,
+                format: AudioPacketFormat::Raw,
+                data: payload[position..end].to_vec(),
+                raw_data: None,
+                track_id: None,
+                pid: self.audio_pid,
+                stream_type: self.stream_type,
+                timescale: Some(90_000),
+                continuity_counter: self.current_pes_continuity,
+                discontinuity: self.current_pes_discontinuity && position == 0,
+                decode_time: frame_dts,
+                sample_id: None,
+                start_time: frame_pts,
+                duration: Some(duration),
+                rendering_offset: None,
+                is_sync: None,
+                timecode: frame_pts.and_then(|value| i64::try_from(value).ok()),
+            }));
+            timestamp_offset = timestamp_offset.saturating_add(u64::from(duration));
+            position = end;
+        }
+        Ok(events)
     }
 
     fn emit_loas_frames(
@@ -4931,6 +5068,8 @@ fn ts_stream_codec(
             AudioPacketFormat::Raw,
         )),
         0x81 => Some((AudioCodec::Ac3, AudioPacketFormat::Raw)),
+        0x80 => Some((AudioCodec::Pcm, AudioPacketFormat::Raw)),
+        0x82 => Some((AudioCodec::Dts, AudioPacketFormat::Raw)),
         0x87 => Some((AudioCodec::Ac3, AudioPacketFormat::Raw)),
         0x06 if descriptors_have_tag(descriptors, 0x6A)
             || descriptors_have_registration(descriptors, b"AC-3") =>
@@ -5149,9 +5288,8 @@ fn parse_adts_header(data: &[u8]) -> Option<AdtsHeader> {
     let sample_rate_index = (data[2] & 0x3c) >> 2;
     let sample_rate = adts_sample_rate(sample_rate_index)?;
     let channels = ((data[2] & 0x01) << 2) | ((data[3] & 0xc0) >> 6);
-    let frame_length = (((data[3] as usize & 0x03) << 11)
-        | ((data[4] as usize) << 3)
-        | (data[5] as usize >> 5)) as usize;
+    let frame_length =
+        ((data[3] as usize & 0x03) << 11) | ((data[4] as usize) << 3) | (data[5] as usize >> 5);
 
     if frame_length < 7 {
         return None;
@@ -5188,12 +5326,14 @@ fn adts_sample_rate(index: u8) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(any(feature = "mp4", feature = "webm"))]
+    #[cfg(any(feature = "mp4", feature = "mpeg-ts"))]
+    use sha2::{Digest, Sha256};
+    #[cfg(any(feature = "mp4", feature = "webm", feature = "mpeg-ts"))]
     use std::fs;
-    #[cfg(any(feature = "mp4", feature = "webm"))]
+    #[cfg(any(feature = "mp4", feature = "webm", feature = "mpeg-ts"))]
     use std::path::PathBuf;
 
-    #[cfg(feature = "mp4")]
+    #[cfg(any(feature = "mp4", feature = "mpeg-ts"))]
     fn fixture(path: &str) -> Vec<u8> {
         fs::read(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -5257,9 +5397,100 @@ mod tests {
         };
         let expected = decode(4 * 1024 * 1024);
         assert!(!expected.is_empty());
-        for chunk_size in [1, 4 * 1024, 64 * 1024] {
+        for chunk_size in [1, 188, 4 * 1024, 64 * 1024] {
             assert_eq!(decode(chunk_size), expected, "chunk size {chunk_size}");
         }
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn real_mp4_and_fmp4_match_ffprobe_reference() {
+        let regular = fixture("video-compat/never-final/h264-high-aac.mp4");
+        let index = Mp4MediaIndex::from_file(&regular).unwrap();
+        let video = index
+            .tracks
+            .iter()
+            .find(|track| track.kind == MediaTrackKind::Video)
+            .unwrap();
+        let audio = index
+            .tracks
+            .iter()
+            .find(|track| track.kind == MediaTrackKind::Audio)
+            .unwrap();
+        assert_eq!(
+            (video.codec.as_str(), video.timescale, video.sample_count),
+            ("h264", 12_800, 75)
+        );
+        assert_eq!(
+            (audio.codec.as_str(), audio.timescale, audio.sample_count),
+            ("aac", 48_000, 142)
+        );
+        assert_eq!(index.samples.len(), 217);
+        assert!(index.samples.iter().all(|sample| {
+            sample
+                .absolute_offset
+                .checked_add(u64::from(sample.size))
+                .is_some_and(|end| end <= regular.len() as u64)
+        }));
+
+        let fragmented = fixture("video-compat/never-final/h264-aac-fragmented.mp4");
+        let mut demuxer = Mp4MediaDemuxer::new();
+        let mut events = Vec::new();
+        for chunk in fragmented.chunks(4_093) {
+            events.extend(demuxer.push(chunk).unwrap());
+        }
+        events.extend(demuxer.flush().unwrap());
+        let packets = events
+            .iter()
+            .filter_map(|event| match event {
+                Mp4MediaDemuxEvent::Packet(packet) => Some(packet),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let video_packets = packets
+            .iter()
+            .copied()
+            .filter(|packet| packet.kind == MediaTrackKind::Video)
+            .collect::<Vec<_>>();
+        let audio_packets = packets
+            .iter()
+            .copied()
+            .filter(|packet| packet.kind == MediaTrackKind::Audio)
+            .collect::<Vec<_>>();
+        assert_eq!(video_packets.len(), 75);
+        assert_eq!(audio_packets.len(), 142);
+        assert_eq!(
+            (
+                audio_packets[0].presentation_time,
+                audio_packets[0].decode_time,
+                audio_packets[0].duration,
+            ),
+            (0, 0, 3_840)
+        );
+        assert_eq!(
+            (
+                audio_packets[141].presentation_time,
+                audio_packets[141].decode_time,
+                audio_packets[141].duration,
+            ),
+            (147_200, 147_200, 640)
+        );
+        assert_eq!(
+            (
+                video_packets[0].presentation_time,
+                video_packets[0].decode_time,
+                video_packets[0].duration,
+            ),
+            (1_024, 0, 512)
+        );
+        assert_eq!(
+            (
+                video_packets[74].presentation_time,
+                video_packets[74].decode_time,
+                video_packets[74].duration,
+            ),
+            (38_400, 37_888, 512)
+        );
     }
 
     #[cfg(feature = "mp4")]
@@ -5307,6 +5538,129 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(default_in24.pcm_endianness, Some(PcmEndianness::Big));
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn committed_mov_pcm_endian_fixtures_match_ffmpeg_hashes() {
+        let cases = [
+            (
+                "pcm-s24be.mov",
+                "in24",
+                24,
+                PcmEndianness::Big,
+                false,
+                "c4e54b143defc7ce84e84c3b6fe96b1f87423477a8ca0f6676085b35eba7d087",
+            ),
+            (
+                "pcm-s24le.mov",
+                "in24",
+                24,
+                PcmEndianness::Little,
+                false,
+                "c4e54b143defc7ce84e84c3b6fe96b1f87423477a8ca0f6676085b35eba7d087",
+            ),
+            (
+                "pcm-s32be.mov",
+                "in32",
+                32,
+                PcmEndianness::Big,
+                false,
+                "1568245a441f20f5c94b0810fa460c820f0e7d65ab2c6091100bf8c23ad7913c",
+            ),
+            (
+                "pcm-s32le.mov",
+                "in32",
+                32,
+                PcmEndianness::Little,
+                false,
+                "1568245a441f20f5c94b0810fa460c820f0e7d65ab2c6091100bf8c23ad7913c",
+            ),
+            (
+                "pcm-f32be.mov",
+                "fl32",
+                32,
+                PcmEndianness::Big,
+                true,
+                "31522f2b9f09614ab868408fd95f5d826028b61407827b7b112d0ab9981ad65e",
+            ),
+            (
+                "pcm-f32le.mov",
+                "fl32",
+                32,
+                PcmEndianness::Little,
+                true,
+                "31522f2b9f09614ab868408fd95f5d826028b61407827b7b112d0ab9981ad65e",
+            ),
+            (
+                "pcm-f64be.mov",
+                "fl64",
+                64,
+                PcmEndianness::Big,
+                true,
+                "0a01dbaba912df543bf79d7780f4853fccfb612c8c5276d11ba01c0563879d7e",
+            ),
+            (
+                "pcm-f64le.mov",
+                "fl64",
+                64,
+                PcmEndianness::Little,
+                true,
+                "0a01dbaba912df543bf79d7780f4853fccfb612c8c5276d11ba01c0563879d7e",
+            ),
+        ];
+
+        for (name, codec_id, bits, endianness, float, expected_hash) in cases {
+            let file = fixture(&format!("mov-pcm/{name}"));
+            let index = Mp4MediaIndex::from_file(&file).unwrap();
+            let track = index
+                .tracks
+                .iter()
+                .find(|track| track.kind == MediaTrackKind::Audio)
+                .unwrap();
+            assert_eq!(track.codec_id, codec_id, "{name}");
+            assert_eq!(track.sample_rate, Some(48_000), "{name}");
+            assert_eq!(track.channels, Some(2), "{name}");
+            assert_eq!(track.bits_per_sample, Some(bits), "{name}");
+            assert_eq!(track.pcm_endianness, Some(endianness), "{name}");
+            assert_eq!(track.pcm_float, Some(float), "{name}");
+            assert_eq!(track.sample_count, 2, "{name}");
+
+            let samples = index
+                .samples
+                .iter()
+                .enumerate()
+                .filter(|(_, sample)| sample.track_id == track.track_id)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                samples
+                    .iter()
+                    .map(|(_, sample)| u64::from(sample.duration))
+                    .sum::<u64>(),
+                4_800,
+                "{name}"
+            );
+            let mut canonical = Vec::new();
+            for (sample_index, sample) in samples {
+                let start = usize::try_from(sample.absolute_offset).unwrap();
+                let end = start + sample.size as usize;
+                let packet = index
+                    .packet_from_sample_bytes(sample_index, &file[start..end])
+                    .unwrap();
+                canonical.extend_from_slice(&packet.data);
+            }
+            let bytes_per_sample = usize::from(bits.div_ceil(8));
+            if endianness == PcmEndianness::Big {
+                for sample in canonical.chunks_exact_mut(bytes_per_sample) {
+                    sample.reverse();
+                }
+            }
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&canonical)),
+                expected_hash,
+                "{name}"
+            );
+        }
     }
 
     #[cfg(feature = "mp4")]
@@ -6021,6 +6375,11 @@ mod tests {
                 collect(64 * 1024),
                 "64 KiB chunks changed {path}"
             );
+            assert_eq!(
+                reference,
+                collect(4 * 1024 * 1024),
+                "4 MiB chunks changed {path}"
+            );
 
             let config = reference
                 .iter()
@@ -6050,6 +6409,105 @@ mod tests {
                     _ => true,
                 }
             }));
+        }
+    }
+
+    #[cfg(feature = "mpeg-ts")]
+    #[test]
+    fn real_m2ts_lpcm_and_dts_match_ffmpeg_references() {
+        struct Case {
+            path: &'static str,
+            codec: AudioCodec,
+            packets: usize,
+            reference_sha256: &'static str,
+            swap_s16_to_little_endian: bool,
+        }
+        let cases = [
+            Case {
+                path: "mpeg-ts/lpcm-stereo-48k.m2ts",
+                codec: AudioCodec::Pcm,
+                packets: 20,
+                reference_sha256:
+                    "7126a0d8077e0433c1e78df6c0f1074f78daf3800240ef48c936114ef7cbb563",
+                swap_s16_to_little_endian: true,
+            },
+            Case {
+                path: "mpeg-ts/dts-stereo-48k.m2ts",
+                codec: AudioCodec::Dts,
+                packets: 10,
+                reference_sha256:
+                    "a5472bde5d532950bdb12c27bb63bf190147c77e70f54d7e558090875a15ccd4",
+                swap_s16_to_little_endian: false,
+            },
+        ];
+
+        for case in cases {
+            let data = fixture(case.path);
+            let collect = |chunk_size: usize| {
+                let mut demuxer = AudioTrackDemuxer::new_with_format("m2ts").unwrap();
+                let mut events = Vec::new();
+                for chunk in data.chunks(chunk_size) {
+                    events.extend(demuxer.push(chunk).unwrap());
+                }
+                events.extend(demuxer.flush().unwrap());
+                events
+            };
+            let reference = collect(data.len());
+            for chunk_size in [1, 188, 4 * 1024, 64 * 1024, 4 * 1024 * 1024] {
+                assert_eq!(
+                    reference,
+                    collect(chunk_size),
+                    "chunk size {chunk_size} changed {}",
+                    case.path
+                );
+            }
+
+            let config = reference
+                .iter()
+                .find_map(|event| match event {
+                    AudioDemuxEvent::Config(config) => Some(config),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("audio configuration for {}", case.path));
+            assert_eq!(config.codec, case.codec);
+            assert_eq!(config.sample_rate, Some(48_000));
+            assert_eq!(config.channels, Some(2));
+            if case.codec == AudioCodec::Pcm {
+                assert_eq!(config.bits_per_sample, Some(16));
+                assert_eq!(config.pcm_endianness, Some(PcmEndianness::Big));
+                assert_eq!(config.pcm_bytes_per_frame, Some(4));
+            }
+
+            let packets = reference
+                .iter()
+                .filter_map(|event| match event {
+                    AudioDemuxEvent::Packet(packet) => Some(packet),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                packets.len(),
+                case.packets,
+                "FFprobe count for {}",
+                case.path
+            );
+            assert!(packets.iter().all(|packet| packet.codec == case.codec));
+            assert!(packets.iter().all(|packet| packet.duration.is_some()));
+            let mut elementary = packets
+                .iter()
+                .flat_map(|packet| packet.data.iter().copied())
+                .collect::<Vec<_>>();
+            if case.swap_s16_to_little_endian {
+                for sample in elementary.chunks_exact_mut(2) {
+                    sample.swap(0, 1);
+                }
+            }
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&elementary)),
+                case.reference_sha256,
+                "FFmpeg elementary-stream hash for {}",
+                case.path
+            );
         }
     }
 

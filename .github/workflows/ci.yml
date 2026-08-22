@@ -17,7 +17,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake automake autoconf libtool nasm librubberband-dev
+          sudo apt-get install -y cmake automake autoconf libtool nasm ffmpeg librubberband-dev
       - name: Build and install libopus 1.5.2
         run: |
           curl -sL https://github.com/xiph/opus/releases/download/v1.5.2/opus-1.5.2.tar.gz | tar xz
@@ -38,5 +38,16 @@ jobs:
           cargo test -p soundkit-aac
           cargo test -p soundkit-opus
           cargo test -p soundkit-ogg-opus
+          cargo test -p soundkit-vorbis
           cargo test -p soundkit-webm
+          cargo test -p soundkit-alac
+          cargo test -p soundkit-audio-demux
+          cargo test -p soundkit-dnx
+          cargo test -p soundkit-video
           cargo test -p soundkit-decoder
+      - name: Run container hardening feature matrix
+        run: |
+          cargo test -p soundkit-audio-demux --no-default-features --features mp4
+          cargo test -p soundkit-audio-demux --no-default-features --features webm
+          cargo test -p soundkit-audio-demux --no-default-features --features mpeg-ts
+          cargo test -p soundkit-audio-demux --no-default-features --features mxf

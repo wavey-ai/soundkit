@@ -572,6 +572,170 @@ export class WasmCafAlacIndex {
 }
 if (Symbol.dispose) WasmCafAlacIndex.prototype[Symbol.dispose] = WasmCafAlacIndex.prototype.free;
 
+/**
+ * Seekable, Rust-validated CAF audio sample index.
+ */
+export class WasmCafAudioIndex {
+    static __wrap(ptr) {
+        const obj = Object.create(WasmCafAudioIndex.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmCafAudioIndexFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmCafAudioIndexFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmcafaudioindex_free(ptr, 0);
+    }
+    /**
+     * @returns {any}
+     */
+    config() {
+        const ret = wasm.wasmcafaudioindex_config(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {Uint8Array} bytes
+     * @returns {WasmCafAudioIndex}
+     */
+    static fromFile(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmcafaudioindex_fromFile(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmCafAudioIndex.__wrap(ret[0]);
+    }
+    /**
+     * @param {number} index
+     * @param {Uint8Array} source_bytes
+     * @returns {any}
+     */
+    packet(index, source_bytes) {
+        const ptr0 = passArray8ToWasm0(source_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmcafaudioindex_packet(this.__wbg_ptr, index, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @param {number} index
+     * @returns {object}
+     */
+    sample(index) {
+        const ret = wasm.wasmcafaudioindex_sample(this.__wbg_ptr, index);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @returns {number}
+     */
+    get sampleCount() {
+        const ret = wasm.wasmcafaudioindex_sampleCount(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) WasmCafAudioIndex.prototype[Symbol.dispose] = WasmCafAudioIndex.prototype.free;
+
+/**
+ * Format-detecting decode, normalization, and hashing in one bounded session.
+ */
+export class WasmCanonicalPcmDecoder {
+    static __wrap(ptr) {
+        const obj = Object.create(WasmCanonicalPcmDecoder.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmCanonicalPcmDecoderFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmCanonicalPcmDecoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmcanonicalpcmdecoder_free(ptr, 0);
+    }
+    /**
+     * Drain decoder and normalizer tails and finalize the source identity.
+     * @returns {any}
+     */
+    finish() {
+        const ret = wasm.wasmcanonicalpcmdecoder_finish(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    constructor() {
+        const ret = wasm.wasmcanonicalpcmdecoder_new();
+        this.__wbg_ptr = ret;
+        WasmCanonicalPcmDecoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {WasmCanonicalPcmDecoder}
+     */
+    static newAuto() {
+        const ret = wasm.wasmcanonicalpcmdecoder_newAuto();
+        return WasmCanonicalPcmDecoder.__wrap(ret);
+    }
+    /**
+     * @param {number} sample_rate
+     * @param {number} channels
+     * @returns {WasmCanonicalPcmDecoder}
+     */
+    static newRawLinear16(sample_rate, channels) {
+        const ret = wasm.wasmcanonicalpcmdecoder_newRawLinear16(sample_rate, channels);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmCanonicalPcmDecoder.__wrap(ret[0]);
+    }
+    /**
+     * @param {string} format
+     * @returns {WasmCanonicalPcmDecoder}
+     */
+    static newWithFormat(format) {
+        const ptr0 = passStringToWasm0(format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmcanonicalpcmdecoder_newWithFormat(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmCanonicalPcmDecoder.__wrap(ret[0]);
+    }
+    /**
+     * Decode one bounded source byte range.
+     * @param {Uint8Array} bytes
+     * @returns {any}
+     */
+    push(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmcanonicalpcmdecoder_push(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+}
+if (Symbol.dispose) WasmCanonicalPcmDecoder.prototype[Symbol.dispose] = WasmCanonicalPcmDecoder.prototype.free;
+
 export class WasmFlacEncoder {
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
@@ -1105,6 +1269,12 @@ export class WasmOpusDecodeResult {
 if (Symbol.dispose) WasmOpusDecodeResult.prototype[Symbol.dispose] = WasmOpusDecodeResult.prototype.free;
 
 export class WasmOpusDecoder {
+    static __wrap(ptr) {
+        const obj = Object.create(WasmOpusDecoder.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmOpusDecoderFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -1151,6 +1321,21 @@ export class WasmOpusDecoder {
     destroy() {
         const ptr = this.__destroy_into_raw();
         wasm.wasmopusdecoder_destroy(ptr);
+    }
+    /**
+     * Uses the allocation-light CELT decoder for SoundKit-owned cache
+     * streams. It rejects SILK or hybrid packets.
+     * @param {number} channels
+     * @param {number} sample_rate
+     * @param {number} frame_size
+     * @returns {WasmOpusDecoder}
+     */
+    static forSoundKitStream(channels, sample_rate, frame_size) {
+        const ret = wasm.wasmopusdecoder_forSoundKitStream(channels, sample_rate, frame_size);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmOpusDecoder.__wrap(ret[0]);
     }
     /**
      * @param {number} channels
@@ -1553,6 +1738,22 @@ export class WasmStreamingLibraryEncoder {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
+     * Decode one indexed AAC-LC access unit and encode its selected frames.
+     * @param {Uint8Array} packet
+     * @param {number} source_frame_start
+     * @param {number} frame_count
+     * @returns {any}
+     */
+    pushAacLcPacket(packet, source_frame_start, frame_count) {
+        const ptr0 = passArray8ToWasm0(packet, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmstreaminglibraryencoder_pushAacLcPacket(this.__wbg_ptr, ptr0, len0, source_frame_start, frame_count);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * Decode one indexed ALAC access unit and encode only its Rust-selected
      * presentation-frame slice.
      * @param {Uint8Array} packet
@@ -1937,11 +2138,32 @@ export function validateCafFileHeader(header, file_size) {
         throw takeFromExternrefTable0(ret[0]);
     }
 }
+
+/**
+ * Return the current WebAssembly linear-memory size in bytes.
+ * @returns {number}
+ */
+export function wasmMemoryBytes() {
+    const ret = wasm.wasmMemoryBytes();
+    return ret >>> 0;
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg___wbindgen_memory_de265df8aadd6273: function() {
+            const ret = wasm.memory;
+            return ret;
+        },
         __wbg___wbindgen_throw_344f42d3211c4765: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
+        },
+        __wbg_buffer_0f212447ac64c53b: function(arg0) {
+            const ret = arg0.buffer;
+            return ret;
+        },
+        __wbg_byteLength_41862ca4020b9c43: function(arg0) {
+            const ret = arg0.byteLength;
+            return ret;
         },
         __wbg_length_98f10d1e2f4ea968: function(arg0) {
             const ret = arg0.length;
@@ -1949,6 +2171,10 @@ function __wbg_get_imports() {
         },
         __wbg_new_32b398fb48b6d94a: function() {
             const ret = new Array();
+            return ret;
+        },
+        __wbg_new_cd45aabdf6073e84: function(arg0) {
+            const ret = new Uint8Array(arg0);
             return ret;
         },
         __wbg_new_da52cf8fe3429cb2: function() {
@@ -2025,6 +2251,12 @@ const WasmAudioTrackDemuxerFinalization = (typeof FinalizationRegistry === 'unde
 const WasmCafAlacIndexFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmcafalacindex_free(ptr, 1));
+const WasmCafAudioIndexFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmcafaudioindex_free(ptr, 1));
+const WasmCanonicalPcmDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmcanonicalpcmdecoder_free(ptr, 1));
 const WasmFlacEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmflacencoder_free(ptr, 1));

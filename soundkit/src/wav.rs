@@ -285,7 +285,7 @@ impl WavStreamProcessor {
         if self.channel_count == 0 || self.sampling_rate == 0 || self.bits_per_sample == 0 {
             return Err("WAV fmt contains invalid audio geometry".to_string());
         }
-        if self.bits_per_sample % 8 != 0 {
+        if !self.bits_per_sample.is_multiple_of(8) {
             return Err("WAV sample width must be byte-aligned".to_string());
         }
         self.endianness = Endianness::LittleEndian;

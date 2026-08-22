@@ -71,6 +71,25 @@ golden/ac3/*
 .vscode/
 # Ignore most testdata but allow specific test files
 testdata/*
+!testdata/caf/
+!testdata/caf/README.md
+!testdata/caf/SHA256SUMS
+!testdata/caf/*.caf
+!testdata/mov-pcm/
+!testdata/mov-pcm/README.md
+!testdata/mov-pcm/SHA256SUMS
+!testdata/mov-pcm/*.mov
+!testdata/dnx-specialty/
+!testdata/dnx-specialty/README.md
+!testdata/dnx-specialty/SHA256SUMS
+!testdata/dnx-specialty/*.mov
+!testdata/mxf-avid/
+!testdata/mxf-avid/README.md
+!testdata/mxf-avid/SHA256SUMS
+!testdata/mxf-avid/*.mxf
+!testdata/mpeg-ts/
+!testdata/mpeg-ts/dts-stereo-48k.m2ts
+!testdata/mpeg-ts/lpcm-stereo-48k.m2ts
 !testdata/mp3/
 testdata/mp3/*
 !testdata/mp3/A_Tusk_is_used_to_make_costly_gifts.mp3

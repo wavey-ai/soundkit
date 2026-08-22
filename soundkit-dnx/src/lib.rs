@@ -58,31 +58,80 @@ impl fmt::Display for DnxError {
 
 impl std::error::Error for DnxError {}
 
-/// Decode one complete progressive DNxHD or DNxHR coding unit.
+/// Decode one complete DNxHD or DNxHR frame.
 ///
-/// The supported legacy profiles are 1080p CIDs 1235, 1237, 1238, and 1253.
-/// DNxHR 444, HQX, HQ, SQ, and LB are also supported. Interlaced VC-3 and
-/// 12-bit DNxHR 444 fail before allocating output planes.
+/// The supported legacy profiles are progressive 1080p CIDs 1235, 1237,
+/// 1238, and 1253, plus interlaced 10-bit CID 1241. DNxHR 444, HQX, HQ, SQ,
+/// and LB are supported, including 12-bit 444 and HQX coding units.
 pub fn decode_frame(data: &[u8]) -> Result<DnxFrame, DnxError> {
-    let header = Header::parse(data)?;
+    let cid = read_u32(data, 0x28)?;
+    let profile = LegacyProfile::for_cid(cid);
+    let first_unit = match profile.filter(|profile| profile.interlaced) {
+        Some(profile) => {
+            let frame_bytes = profile
+                .coding_unit_size
+                .checked_mul(2)
+                .ok_or_else(|| DnxError::new("interlaced DNx frame size overflow"))?;
+            if data.len() != frame_bytes {
+                return Err(DnxError::new(format!(
+                    "interlaced DNx CID {cid} requires two {}-byte field coding units; got {} bytes",
+                    profile.coding_unit_size,
+                    data.len()
+                )));
+            }
+            &data[..profile.coding_unit_size]
+        }
+        _ => data,
+    };
+    let header = Header::parse(first_unit)?;
     let supported = matches!(
         (header.cid, header.bit_depth, header.is_444),
         (1235, 10, false)
             | (1237 | 1238 | 1253, 8, false)
-            | (1270, 10, true)
-            | (1271, 10, false)
+            | (1241, 10, false)
+            | (1270, 10 | 12, true)
+            | (1271, 10 | 12, false)
             | (1272..=1274, 8, false)
     );
-    if !supported || header.interlaced {
+    if !supported {
         return Err(DnxError::new(format!(
-            "DNx decoder supports progressive DNxHD 1080p and DNxHR 444/HQX/HQ/SQ/LB; got CID {}, {}-bit, 4:{}, interlaced={}",
+            "DNx decoder does not support CID {}, {}-bit, 4:{}, interlaced={}",
             header.cid,
             header.bit_depth,
             if header.is_444 { "4:4" } else { "2:2" },
             header.interlaced,
         )));
     }
-    Decoder::new(data, header)?.decode()
+    let first_field = if header.interlaced {
+        usize::from(header.field_parity)
+    } else {
+        0
+    };
+    let mut decoder = Decoder::new(first_unit, header, first_field)?;
+    decoder.decode_rows()?;
+
+    if header.interlaced {
+        let field_bytes = profile
+            .ok_or_else(|| DnxError::new("interlaced DNx frame has no fixed coding-unit size"))?
+            .coding_unit_size;
+        let second_unit = &data[field_bytes..];
+        let second_header = Header::parse(second_unit)?;
+        if second_header.cid != header.cid
+            || second_header.width != header.width
+            || second_header.height != header.height
+            || second_header.bit_depth != header.bit_depth
+            || !second_header.interlaced
+        {
+            return Err(DnxError::new(
+                "interlaced DNx field coding-unit headers disagree",
+            ));
+        }
+        decoder.data = second_unit;
+        decoder.header = second_header;
+        decoder.field = 1 - first_field;
+        decoder.decode_rows()?;
+    }
+    decoder.finish()
 }
 
 /// Backwards-compatible name for callers that require HQX specifically.
@@ -107,6 +156,7 @@ struct Header {
     adaptive_color_transform: bool,
     interlaced: bool,
     mbaff: bool,
+    field_parity: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -116,16 +166,20 @@ struct LegacyProfile {
     coding_unit_size: usize,
     bit_depth: u8,
     is_444: bool,
+    interlaced: bool,
 }
 
 impl LegacyProfile {
     fn for_cid(cid: u32) -> Option<Self> {
-        let (coding_unit_size, bit_depth, is_444) = match cid {
-            1235 => (917_504, 10, false),
-            1237 => (606_208, 8, false),
-            1238 => (917_504, 8, false),
-            1253 => (188_416, 8, false),
-            1256 => (1_835_008, 10, true),
+        let (coding_unit_size, bit_depth, is_444, interlaced) = match cid {
+            1235 => (917_504, 10, false, false),
+            1237 => (606_208, 8, false, false),
+            1238 => (917_504, 8, false, false),
+            1241 => (458_752, 10, false, true),
+            1242 => (303_104, 8, false, true),
+            1243 => (458_752, 8, false, true),
+            1253 => (188_416, 8, false, false),
+            1256 => (1_835_008, 10, true, false),
             _ => return None,
         };
         Some(Self {
@@ -134,6 +188,7 @@ impl LegacyProfile {
             coding_unit_size,
             bit_depth,
             is_444,
+            interlaced,
         })
     }
 }
@@ -211,7 +266,7 @@ impl CodecTables {
                 level_shift: 6,
                 dc_shift: 0,
             }),
-            (1270, 10) => Ok(Self {
+            (1270, 10 | 12) => Ok(Self {
                 luma_weight: &tables::DNXHD_1235_LUMA_WEIGHT,
                 chroma_weight: &tables::DNXHD_1235_LUMA_WEIGHT,
                 dc_codes: &tables::DNXHD_1235_DC_CODES,
@@ -225,10 +280,10 @@ impl CodecTables {
                 eob_index: 4,
                 index_bits: 6,
                 level_bias: 32,
-                level_shift: 6,
-                dc_shift: 0,
+                level_shift: if header.bit_depth == 12 { 4 } else { 6 },
+                dc_shift: if header.bit_depth == 12 { 2 } else { 0 },
             }),
-            (1271, 10) => Ok(Self {
+            (1241, 10) => Ok(Self {
                 luma_weight: &tables::DNXHD_1241_LUMA_WEIGHT,
                 chroma_weight: &tables::DNXHD_1241_CHROMA_WEIGHT,
                 dc_codes: &tables::DNXHD_1235_DC_CODES,
@@ -241,9 +296,26 @@ impl CodecTables {
                 run_values: &tables::DNXHD_1235_RUN,
                 eob_index: 4,
                 index_bits: 6,
-                level_bias: 32,
-                level_shift: 6,
+                level_bias: 8,
+                level_shift: 4,
                 dc_shift: 0,
+            }),
+            (1271, 10 | 12) => Ok(Self {
+                luma_weight: &tables::DNXHD_1241_LUMA_WEIGHT,
+                chroma_weight: &tables::DNXHD_1241_CHROMA_WEIGHT,
+                dc_codes: &tables::DNXHD_1235_DC_CODES,
+                dc_bits: &tables::DNXHD_1235_DC_BITS,
+                ac_codes: &tables::DNXHD_1235_AC_CODES,
+                ac_bits: &tables::DNXHD_1235_AC_BITS,
+                ac_info: &tables::DNXHD_1235_AC_INFO,
+                run_codes: &tables::DNXHD_1235_RUN_CODES,
+                run_bits: &tables::DNXHD_1235_RUN_BITS,
+                run_values: &tables::DNXHD_1235_RUN,
+                eob_index: 4,
+                index_bits: 6,
+                level_bias: if header.bit_depth == 12 { 8 } else { 32 },
+                level_shift: if header.bit_depth == 12 { 4 } else { 6 },
+                dc_shift: if header.bit_depth == 12 { 2 } else { 0 },
             }),
             (1272, 8) => Ok(Self {
                 luma_weight: &tables::DNXHD_1238_LUMA_WEIGHT,
@@ -306,7 +378,14 @@ impl Header {
             )));
         }
         let width = read_u16(data, 0x1a)? as usize;
-        let height = read_u16(data, 0x18)? as usize;
+        let mut height = read_u16(data, 0x18)? as usize;
+        let mb_height = read_u16(data, 0x16c)? as usize;
+        let interlaced = data[5] & 2 != 0;
+        if interlaced && height.div_ceil(16) == mb_height {
+            height = height
+                .checked_mul(2)
+                .ok_or_else(|| DnxError::new("interlaced DNx height overflow"))?;
+        }
         let pixels = width
             .checked_mul(height)
             .ok_or_else(|| DnxError::new("DNx dimensions overflow"))?;
@@ -326,9 +405,7 @@ impl Header {
             }
         };
         let cid = read_u32(data, 0x28)?;
-        let mb_height = read_u16(data, 0x16c)? as usize;
         let mb_width = width.div_ceil(16);
-        let interlaced = data[5] & 2 != 0;
         let is_444 = data[0x2c] >> 6 & 1 != 0;
         if let Some(profile) = LegacyProfile::for_cid(cid) {
             if !legacy {
@@ -389,6 +466,7 @@ impl Header {
             adaptive_color_transform: data[0x2c] & 1 != 0,
             interlaced,
             mbaff: data[6] >> 5 & 1 != 0,
+            field_parity: data[5] & 1 != 0,
         })
     }
 }
@@ -402,10 +480,11 @@ struct Decoder<'a> {
     dc: Vlc,
     ac: Vlc,
     run: Vlc,
+    field: usize,
 }
 
 impl<'a> Decoder<'a> {
-    fn new(data: &'a [u8], header: Header) -> Result<Self, DnxError> {
+    fn new(data: &'a [u8], header: Header, field: usize) -> Result<Self, DnxError> {
         let tables = CodecTables::for_header(header)?;
         let y_stride = header.width;
         let c_width = if header.is_444 {
@@ -437,10 +516,11 @@ impl<'a> Decoder<'a> {
             dc: Vlc::new(tables.dc_codes, tables.dc_bits, None)?,
             ac: Vlc::new(tables.ac_codes, tables.ac_bits, None)?,
             run: Vlc::new(tables.run_codes, tables.run_bits, Some(tables.run_values))?,
+            field,
         })
     }
 
-    fn decode(mut self) -> Result<DnxFrame, DnxError> {
+    fn decode_rows(&mut self) -> Result<(), DnxError> {
         if self.header.mbaff {
             return Err(DnxError::new(
                 "DNxHR HQX macroblock-adaptive interlace is not supported",
@@ -449,6 +529,10 @@ impl<'a> Decoder<'a> {
         for y in 0..self.header.mb_height {
             self.decode_row(y)?;
         }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<DnxFrame, DnxError> {
         Ok(DnxFrame {
             width: self.header.width as u32,
             height: self.header.height as u32,
@@ -550,12 +634,15 @@ impl<'a> Decoder<'a> {
             } else {
                 value
             };
+            let delta = delta
+                .checked_shl(self.tables.dc_shift)
+                .ok_or_else(|| DnxError::new("DNx DC delta overflow"))?;
             last_dc[component] = last_dc[component]
                 .checked_add(delta)
                 .ok_or_else(|| DnxError::new("DNx DC predictor overflow"))?;
         }
-        block[0] = i16::try_from(last_dc[component] << self.tables.dc_shift)
-            .map_err(|_| DnxError::new("DNx DC coefficient overflow"))?;
+        // The VC-3 coefficient store is a signed 16-bit lane.
+        block[0] = last_dc[component] as i16;
         let mut i = 0usize;
         loop {
             let index = self.ac.decode(bits)? as usize;
@@ -599,15 +686,16 @@ impl<'a> Decoder<'a> {
             if negative {
                 level = -level;
             }
-            block[ZIGZAG[i]] =
-                i16::try_from(level).map_err(|_| DnxError::new("DNx AC coefficient overflow"))?;
+            block[ZIGZAG[i]] = level as i16;
         }
         Ok(())
     }
 
     fn put_macroblock(&mut self, x: usize, y: usize, blocks: &mut [[i16; 64]; 12]) {
         let y_x = x * 16;
-        let top = y * 16;
+        let row_step = if self.header.interlaced { 2 } else { 1 };
+        let top = y * 16 * row_step + self.field;
+        let lower_block = 8 * row_step;
         let depth = self.header.bit_depth;
         if self.header.is_444 {
             for (plane, block_indices) in [[0, 1, 6, 7], [2, 3, 8, 9], [4, 5, 10, 11]]
@@ -620,6 +708,7 @@ impl<'a> Decoder<'a> {
                     top,
                     &mut blocks[block_indices[0]],
                     depth,
+                    row_step,
                 );
                 put_block(
                     &mut self.planes[plane],
@@ -627,32 +716,91 @@ impl<'a> Decoder<'a> {
                     top,
                     &mut blocks[block_indices[1]],
                     depth,
+                    row_step,
                 );
                 put_block(
                     &mut self.planes[plane],
                     y_x,
-                    top + 8,
+                    top + lower_block,
                     &mut blocks[block_indices[2]],
                     depth,
+                    row_step,
                 );
                 put_block(
                     &mut self.planes[plane],
                     y_x + 8,
-                    top + 8,
+                    top + lower_block,
                     &mut blocks[block_indices[3]],
                     depth,
+                    row_step,
                 );
             }
         } else {
             let c_x = x * 8;
-            put_block(&mut self.planes[0], y_x, top, &mut blocks[0], depth);
-            put_block(&mut self.planes[0], y_x + 8, top, &mut blocks[1], depth);
-            put_block(&mut self.planes[1], c_x, top, &mut blocks[2], depth);
-            put_block(&mut self.planes[2], c_x, top, &mut blocks[3], depth);
-            put_block(&mut self.planes[0], y_x, top + 8, &mut blocks[4], depth);
-            put_block(&mut self.planes[0], y_x + 8, top + 8, &mut blocks[5], depth);
-            put_block(&mut self.planes[1], c_x, top + 8, &mut blocks[6], depth);
-            put_block(&mut self.planes[2], c_x, top + 8, &mut blocks[7], depth);
+            put_block(
+                &mut self.planes[0],
+                y_x,
+                top,
+                &mut blocks[0],
+                depth,
+                row_step,
+            );
+            put_block(
+                &mut self.planes[0],
+                y_x + 8,
+                top,
+                &mut blocks[1],
+                depth,
+                row_step,
+            );
+            put_block(
+                &mut self.planes[1],
+                c_x,
+                top,
+                &mut blocks[2],
+                depth,
+                row_step,
+            );
+            put_block(
+                &mut self.planes[2],
+                c_x,
+                top,
+                &mut blocks[3],
+                depth,
+                row_step,
+            );
+            put_block(
+                &mut self.planes[0],
+                y_x,
+                top + lower_block,
+                &mut blocks[4],
+                depth,
+                row_step,
+            );
+            put_block(
+                &mut self.planes[0],
+                y_x + 8,
+                top + lower_block,
+                &mut blocks[5],
+                depth,
+                row_step,
+            );
+            put_block(
+                &mut self.planes[1],
+                c_x,
+                top + lower_block,
+                &mut blocks[6],
+                depth,
+                row_step,
+            );
+            put_block(
+                &mut self.planes[2],
+                c_x,
+                top + lower_block,
+                &mut blocks[7],
+                depth,
+                row_step,
+            );
         }
     }
 }
@@ -760,26 +908,34 @@ impl<'a> BitReader<'a> {
     }
 }
 
-fn put_block(plane: &mut DnxPlane, x: usize, y: usize, block: &mut [i16; 64], bit_depth: u8) {
+fn put_block(
+    plane: &mut DnxPlane,
+    x: usize,
+    y: usize,
+    block: &mut [i16; 64],
+    bit_depth: u8,
+    row_step: usize,
+) {
     idct(block, bit_depth);
     let maximum = (1i16 << bit_depth) - 1;
     let width = plane.width as usize;
     let height = plane.height as usize;
     for row in 0..8 {
-        if y + row >= height {
+        let output_row = y + row * row_step;
+        if output_row >= height {
             break;
         }
         for column in 0..8 {
             if x + column >= width {
                 break;
             }
-            plane.samples[(y + row) * plane.stride + x + column] =
+            plane.samples[output_row * plane.stride + x + column] =
                 block[row * 8 + column].clamp(0, maximum) as u16;
         }
     }
 }
 
-// FFmpeg's scalar 10-bit simple IDCT, translated to fixed-width Rust. Keeping
+// FFmpeg's scalar simple IDCT, translated to fixed-width Rust. Keeping
 // the integer transform makes native and WASM output byte-identical.
 fn idct(block: &mut [i16; 64], bit_depth: u8) {
     let parameters = IdctParameters::for_depth(bit_depth);
@@ -796,7 +952,7 @@ struct IdctParameters {
     weights: [i64; 7],
     row_shift: i64,
     column_shift: i64,
-    dc_shift: u32,
+    dc_shift: i8,
 }
 
 impl IdctParameters {
@@ -814,6 +970,12 @@ impl IdctParameters {
                 column_shift: 19,
                 dc_shift: 2,
             },
+            12 => Self {
+                weights: [45451, 42813, 38531, 32767, 25746, 17734, 9041],
+                row_shift: 16,
+                column_shift: 17,
+                dc_shift: -1,
+            },
             _ => unreachable!("unsupported DNx IDCT depth"),
         }
     }
@@ -823,7 +985,12 @@ fn idct_row(row: &mut [i16], parameters: IdctParameters) {
     let [w1, w2, w3, w4, w5, w6, w7] = parameters.weights;
     let shift = parameters.row_shift;
     if row[1..].iter().all(|value| *value == 0) {
-        let value = i32::from(row[0]) * (1 << parameters.dc_shift);
+        let value = if parameters.dc_shift >= 0 {
+            i32::from(row[0]) * (1 << parameters.dc_shift)
+        } else {
+            let shift = u32::from(parameters.dc_shift.unsigned_abs());
+            (i32::from(row[0]) + (1 << (shift - 1))) >> shift
+        };
         row.fill(value as i16);
         return;
     }
@@ -932,6 +1099,21 @@ mod tests {
         container[start..start + coding_unit_size].to_vec()
     }
 
+    fn reference_specialty_coding_unit(file: &str, coding_unit_size: usize) -> Vec<u8> {
+        let container = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../testdata/dnx-specialty")
+                .join(file),
+        )
+        .unwrap();
+        let prefix = [0x00, 0x00, 0x02, 0x80];
+        let start = container
+            .windows(prefix.len())
+            .position(|window| window == prefix)
+            .expect("DNx coding-unit prefix");
+        container[start..start + coding_unit_size].to_vec()
+    }
+
     fn frame_hash(frame: &DnxFrame) -> String {
         let mut digest = Sha256::new();
         for plane in &frame.planes {
@@ -956,6 +1138,42 @@ mod tests {
         assert_eq!(
             frame_hash(&frame),
             "32c0a789031d1f47b9e16c252acda863510fb71b1c1105b9a895da932448a154"
+        );
+    }
+
+    #[test]
+    fn decodes_interlaced_dnxhd_fields_byte_identically() {
+        let frame = decode_frame(&reference_specialty_coding_unit(
+            "dnxhd-1080i-cid1241.mov",
+            917_504,
+        ))
+        .unwrap();
+        assert_eq!(
+            (frame.width, frame.height, frame.bit_depth),
+            (1920, 1080, 10)
+        );
+        assert_eq!(frame.color_model, DnxColorModel::Ycbcr);
+        assert_eq!(
+            frame_hash(&frame),
+            "b658e3589be881e75ab3d55e29a30a37b2b18dc211f6b339ea2dfd9c779194d7"
+        );
+    }
+
+    #[test]
+    fn decodes_12_bit_dnxhr_hqx_byte_identically() {
+        let frame = decode_frame(&reference_specialty_coding_unit(
+            "dnxhr-hqx-12bit.mov",
+            917_504,
+        ))
+        .unwrap();
+        assert_eq!(
+            (frame.width, frame.height, frame.bit_depth),
+            (1920, 1080, 12)
+        );
+        assert_eq!(frame.color_model, DnxColorModel::Ycbcr);
+        assert_eq!(
+            frame_hash(&frame),
+            "f2e3808a55a04abb6728f7a9a139071f05e967c166f3a013dc390617642831c3"
         );
     }
 

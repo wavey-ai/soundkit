@@ -3340,6 +3340,7 @@ mod tests {
 
         let reference = collect(4 * 1024 * 1024);
         assert_eq!(reference, collect(1));
+        assert_eq!(reference, collect(188));
         assert_eq!(reference, collect(4 * 1024));
         assert_eq!(reference, collect(64 * 1024));
 

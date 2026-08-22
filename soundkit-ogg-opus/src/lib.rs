@@ -673,6 +673,7 @@ mod tests {
         };
         let reference = collect(MAX_OGG_INPUT_CHUNK_BYTES);
         assert_eq!(reference, collect(1));
+        assert_eq!(reference, collect(188));
         assert_eq!(reference, collect(4 * 1024));
         assert_eq!(reference, collect(64 * 1024));
         assert!(matches!(

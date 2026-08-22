@@ -23,6 +23,7 @@ use soundkit::frame_stream::{SoundKitFrame, SoundKitFrameStream, SoundKitFrameSt
 use soundkit::raw_pcm::{RawPcmFormat, RawPcmStreamProcessor};
 use soundkit::wav::{WavSampleFormat, WavStreamEncoder, WavStreamProcessor};
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 #[cfg(feature = "detect")]
 use access_unit::{detect_audio, AudioType};
@@ -77,6 +78,13 @@ const CANONICAL_PCM_BLOCK_FRAMES: usize = 96_000;
 const MAX_OPUS_PACKET_FRAMES: usize = 5_760;
 #[cfg(any(feature = "aac", feature = "m4a", feature = "mp3", feature = "flac"))]
 const DEFAULT_SCRATCH_SAMPLES: usize = 262_144;
+
+/// Return the current WebAssembly linear-memory size in bytes.
+#[wasm_bindgen(js_name = wasmMemoryBytes)]
+pub fn wasm_memory_bytes() -> usize {
+    let memory = wasm_bindgen::memory().unchecked_into::<js_sys::WebAssembly::Memory>();
+    Uint8Array::new(&memory.buffer()).byte_length() as usize
+}
 
 fn validate_stream_input_chunk(bytes: &[u8]) -> Result<(), String> {
     if bytes.len() > MAX_STREAM_INPUT_CHUNK_BYTES {
@@ -325,6 +333,13 @@ pub struct WasmAlacPacketDecoder {
 #[wasm_bindgen]
 pub struct WasmCafAlacIndex {
     index: CafAlacPacketIndex,
+}
+
+/// Seekable, Rust-validated CAF audio sample index.
+#[cfg(feature = "audio-demux")]
+#[wasm_bindgen]
+pub struct WasmCafAudioIndex {
+    index: CafAudioIndex,
 }
 
 /// Seekable, Rust-validated MOV/MP4 audio-and-video sample index.
@@ -1654,6 +1669,43 @@ impl WasmAudioTrackDemuxer {
     pub fn flush(&mut self) -> Result<Array, JsValue> {
         let events = self.demuxer.flush().map_err(js_error)?;
         audio_demux_events_to_js(events)
+    }
+}
+
+#[cfg(feature = "audio-demux")]
+#[wasm_bindgen]
+impl WasmCafAudioIndex {
+    #[wasm_bindgen(js_name = fromFile)]
+    pub fn from_file(bytes: &[u8]) -> Result<WasmCafAudioIndex, JsValue> {
+        Ok(Self {
+            index: CafAudioIndex::from_file(bytes).map_err(js_error)?,
+        })
+    }
+
+    pub fn config(&self) -> Result<JsValue, JsValue> {
+        audio_demux_event_to_js(AudioDemuxEvent::Config(self.index.config.clone()))
+    }
+
+    #[wasm_bindgen(getter, js_name = sampleCount)]
+    pub fn sample_count(&self) -> usize {
+        self.index.packets.len()
+    }
+
+    pub fn sample(&self, index: usize) -> Result<Object, JsValue> {
+        let sample = self
+            .index
+            .packets
+            .get(index)
+            .ok_or_else(|| js_error(format!("CAF sample index {index} is out of range")))?;
+        media_sample_index_to_js(sample)
+    }
+
+    pub fn packet(&self, index: usize, source_bytes: &[u8]) -> Result<JsValue, JsValue> {
+        let packet = self
+            .index
+            .packet_from_sample_bytes(index, source_bytes)
+            .map_err(js_error)?;
+        Ok(media_track_packet_to_js(&packet)?.into())
     }
 }
 

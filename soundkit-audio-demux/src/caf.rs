@@ -160,11 +160,10 @@ impl CafAudioIndex {
                 b"pakt" => set_once(&mut packet_table, payload.to_vec(), "pakt")?,
                 b"kuki" => set_once(&mut magic_cookie, payload.to_vec(), "kuki")?,
                 b"chan" => set_once(&mut channel_layout, payload.to_vec(), "chan")?,
-                b"data" => {
-                    if data_range.replace(range.clone()).is_some() {
-                        return Err("CAF source contains multiple data chunks".to_string());
-                    }
+                b"data" if data_range.replace(range.clone()).is_some() => {
+                    return Err("CAF source contains multiple data chunks".to_string());
                 }
+                b"data" => {}
                 _ => {}
             }
             if range.end <= position {
@@ -529,7 +528,7 @@ fn resolve_packet_sizes(
             description.bytes_per_packet
         ));
     }
-    if packet_bytes % u64::from(description.bytes_per_packet) != 0 {
+    if !packet_bytes.is_multiple_of(u64::from(description.bytes_per_packet)) {
         return Err("CAF constant packet size does not divide the data chunk".to_string());
     }
     let packet_count = packet_bytes / u64::from(description.bytes_per_packet);
@@ -576,7 +575,9 @@ fn resolve_format(
             }
             let bytes_per_frame = description.bytes_per_packet / description.frames_per_packet;
             if bytes_per_frame == 0
-                || description.bytes_per_packet % description.frames_per_packet != 0
+                || !description
+                    .bytes_per_packet
+                    .is_multiple_of(description.frames_per_packet)
             {
                 return Err("CAF LPCM packet geometry is not frame-aligned".to_string());
             }
@@ -615,6 +616,7 @@ fn resolve_format(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     fn chunk(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -769,5 +771,73 @@ mod tests {
         assert!(!index.packets.is_empty());
         assert!(index.valid_frames > 0);
         assert_eq!(index.config.sample_count, Some(index.packets.len() as u32));
+    }
+
+    #[test]
+    fn committed_pcm_caf_fixtures_match_ffmpeg_hashes() {
+        let cases: [(&[u8], u8, PcmEndianness, bool, &str); 5] = [
+            (
+                include_bytes!("../../testdata/caf/pcm-s16be.caf"),
+                16,
+                PcmEndianness::Big,
+                false,
+                "7126a0d8077e0433c1e78df6c0f1074f78daf3800240ef48c936114ef7cbb563",
+            ),
+            (
+                include_bytes!("../../testdata/caf/pcm-s24le.caf"),
+                24,
+                PcmEndianness::Little,
+                false,
+                "c4e54b143defc7ce84e84c3b6fe96b1f87423477a8ca0f6676085b35eba7d087",
+            ),
+            (
+                include_bytes!("../../testdata/caf/pcm-s32be.caf"),
+                32,
+                PcmEndianness::Big,
+                false,
+                "1568245a441f20f5c94b0810fa460c820f0e7d65ab2c6091100bf8c23ad7913c",
+            ),
+            (
+                include_bytes!("../../testdata/caf/pcm-f32le.caf"),
+                32,
+                PcmEndianness::Little,
+                true,
+                "31522f2b9f09614ab868408fd95f5d826028b61407827b7b112d0ab9981ad65e",
+            ),
+            (
+                include_bytes!("../../testdata/caf/pcm-f64be.caf"),
+                64,
+                PcmEndianness::Big,
+                true,
+                "0a01dbaba912df543bf79d7780f4853fccfb612c8c5276d11ba01c0563879d7e",
+            ),
+        ];
+
+        for (file, bits, endianness, float, expected_hash) in cases {
+            let index = CafAudioIndex::from_file(file).unwrap();
+            assert_eq!(index.config.sample_rate, Some(48_000));
+            assert_eq!(index.config.channels, Some(2));
+            assert_eq!(index.config.bits_per_sample, Some(bits));
+            assert_eq!(index.config.pcm_endianness, Some(endianness));
+            assert_eq!(index.config.pcm_float, Some(float));
+            assert_eq!(index.valid_frames, 4_800);
+
+            let bytes_per_sample = usize::from(bits.div_ceil(8));
+            let mut canonical = Vec::new();
+            for (sample_index, sample) in index.packets.iter().enumerate() {
+                let start = usize::try_from(sample.absolute_offset).unwrap();
+                let end = start + sample.size as usize;
+                let packet = index
+                    .packet_from_sample_bytes(sample_index, &file[start..end])
+                    .unwrap();
+                canonical.extend_from_slice(&packet.data);
+            }
+            if endianness == PcmEndianness::Big && bytes_per_sample > 1 {
+                for sample in canonical.chunks_exact_mut(bytes_per_sample) {
+                    sample.reverse();
+                }
+            }
+            assert_eq!(format!("{:x}", Sha256::digest(&canonical)), expected_hash);
+        }
     }
 }

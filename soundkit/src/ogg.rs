@@ -249,7 +249,7 @@ impl OggPacketParser {
             }
             self.last_granule = Some(header.granule_position);
         }
-        if header.continued() != !self.packet_buffer.is_empty() {
+        if header.continued() == self.packet_buffer.is_empty() {
             return Err(if header.continued() {
                 "Ogg continued-packet flag has no preceding packet".to_string()
             } else {

@@ -11,7 +11,7 @@ Integration repositories:
 
 ## Progress ledger
 
-Updated: 2026-08-20
+Updated: 2026-08-22
 
 This ledger is the operational TODO. The detailed phases below remain the complete implementation plan.
 
@@ -35,16 +35,22 @@ This ledger is the operational TODO. The detailed phases below remain the comple
 - [x] Run the full SoundKit workspace test suite after the parser changes.
 - [x] Resolve warnings introduced by the parser and Opus constructor changes.
 - [x] Verify demux-only no-default builds for Ogg Opus, WebM, and audio demux.
+- [x] Compare committed MOV, MP4, fMP4, WebM, Ogg, TS/M2TS, and CAF fixtures with pinned references.
+- [x] Extract Blu-ray LPCM and DTS core access units from M2TS through shared `access-unit` parsers.
+- [x] Resolve Avid MXF package graphs, clip-wrapped seek units, private KLVs, and MultipleDescriptors.
+- [x] Unpack D-10 AES3 PCM and cover genuine Avid OP-Atom and multi-track fixtures.
+- [x] Decode interlaced DNxHD and 12-bit DNxHR HQX/4:4:4 coding units.
+- [x] Run container malformed-input and allocation-budget regressions in CI, including the demux feature matrix.
 - [x] Remove the obsolete July M4A decoder-options plan.
 
 ### Remaining before common production formats are ready to integrate
 
-- [ ] Add or finish real-fixture reference comparisons for MOV/MP4/fMP4, WebM, Ogg, TS/M2TS, and CAF.
-- [ ] Run chunk-boundary invariance tests for every common container at 1 byte, 188 bytes, 4 KiB, 64 KiB, and 4 MiB where applicable.
-- [ ] Add malformed-input and allocation-budget regression coverage to CI.
-- [ ] Add release throughput and peak-buffer benchmarks for the common container paths.
-- [ ] Confirm no large-push performance cliff remains in MP4, WebM, Ogg, TS/M2TS, or CAF.
-- [x] Commit and push the SoundKit implementation and fixtures as `cae319b`.
+- [x] Add or finish real-fixture reference comparisons for MOV/MP4/fMP4, WebM, Ogg, TS/M2TS, and CAF.
+- [x] Run chunk-boundary invariance tests for every common container at 1 byte, 188 bytes, 4 KiB, 64 KiB, and 4 MiB where applicable.
+- [x] Add malformed-input and allocation-budget regression coverage to CI.
+- [x] Add release throughput and peak-buffer benchmarks for the common container paths.
+- [x] Confirm no large-push performance cliff remains in MP4, WebM, Ogg, TS/M2TS, or CAF.
+- [x] Commit and push the common-container checkpoint as `42e5acf`.
 - [ ] Update `vin.yl.native` to the pushed SoundKit revision.
 - [ ] Route YL.VIN imports through the SoundKit-owned container path.
 - [ ] Run focused native tests, the iOS Debug build, and the iOS test suite.
@@ -53,12 +59,12 @@ This ledger is the operational TODO. The detailed phases below remain the comple
 
 These items remain in the full plan but do not block the current common-format checkpoint.
 
-- [ ] Extract M2TS Blu-ray LPCM and DTS access units.
-- [ ] Resolve the full MXF Preface, package, sequence, source-clip, and track-origin graph.
-- [ ] Split clip-wrapped OP-Atom PCM into edit-unit seek points using resolved package timing.
-- [ ] Unpack AES3 PCM instead of exposing its container words as packed PCM.
-- [ ] Add Avid-generated multi-channel, AES3, and malformed OP-Atom fixtures.
-- [ ] Add interlaced DNxHD and 12-bit DNxHR 4:4:4 support.
+- [x] Extract M2TS Blu-ray LPCM and DTS access units.
+- [x] Resolve the full MXF Preface, package, sequence, source-clip, and track-origin graph.
+- [x] Split clip-wrapped OP-Atom PCM into edit-unit seek points using resolved package timing.
+- [x] Unpack AES3 PCM instead of exposing its container words as packed PCM.
+- [x] Add Avid-generated multi-channel, AES3, and malformed OP-Atom fixtures.
+- [x] Add interlaced DNxHD and 12-bit DNxHR 4:4:4 support.
 
 ## Objective
 
@@ -788,17 +794,40 @@ Keep each commit independently testable.
 
 ## Final handoff checklist
 
-- [ ] List every changed public API.
-- [ ] List every newly supported container and codec combination.
-- [ ] List every intentionally unsupported profile.
-- [ ] Include fixture provenance and hashes.
-- [ ] Include focused test results.
-- [ ] Include full workspace test results.
-- [ ] Include native and WASM benchmark results.
-- [ ] Include peak-memory measurements.
-- [ ] Confirm no public parser panic remains.
+- [x] List every changed public API.
+- [x] List every newly supported container and codec combination.
+- [x] List every intentionally unsupported profile.
+- [x] Include fixture provenance and hashes.
+- [x] Include focused test results.
+- [x] Include full workspace test results.
+- [x] Include native and WASM benchmark results.
+- [x] Include peak-memory measurements.
+- [x] Confirm no public parser panic remains.
 - [ ] Confirm no unrelated dirty changes were overwritten.
 - [ ] Confirm the SoundKit commit is pushed.
 - [ ] Confirm `vin.yl.native` pins that exact commit.
 - [ ] Confirm the YL.VIN Debug build passes.
 - [ ] Confirm the YL.VIN iOS test suite passes.
+
+### Handoff record
+
+Public API additions in this pass are `AudioCodec::Dts`,
+`MxfPcmSourcePacking`, `MxfTrackSourcePacking`,
+`MxfMediaIndex::sample_data`, `unpack_aes3_pcm`, `wasm_memory_bytes`, and the
+`WasmCafAudioIndex` seekable CAF adapter. `MxfMediaIndex` now exposes source
+packing metadata for indexed PCM ranges.
+
+New combinations are big- and little-endian integer/float PCM plus ALAC in
+CAF; QuickTime PCM versions 0/1/2; M2TS Blu-ray LPCM and DTS core; Avid OP-Atom
+DNx and PCM; D-10 AES3 PCM; interlaced DNxHD; and 12-bit DNxHR HQX/4:4:4.
+Deliberately unsupported specialty profiles remain DTS-HD extensions and
+14-bit/little-endian DTS core packing, non-DNx MXF picture decoding, and DNx
+legacy CIDs outside the explicit decoder profile table. Unsupported picture
+essence can coexist with supported PCM tracks and is skipped by the MXF index.
+
+Fixture provenance and SHA-256 files live beside the CAF, MOV PCM, M2TS, DNx,
+and Avid MXF fixtures. Focused results are 52 audio-demux tests and 10 DNx
+tests; the complete `cargo test --workspace` and the four no-default demux
+feature builds pass. `docs/CONTAINER_BENCHMARK_2026-08-22.md` records native
+allocator peaks and fresh-process WASM linear-memory growth. Public MXF range
+conversion paths contain no unchecked parser `unwrap` or `expect` calls.
