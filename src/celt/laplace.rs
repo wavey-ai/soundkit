@@ -49,7 +49,7 @@ pub fn encode_laplace(enc: &mut RangeEncoder, value: i32, mut fs: u32, decay: i3
     represented
 }
 
-pub fn decode_laplace(dec: &mut RangeDecoder, mut fs: u32, decay: i32) -> i32 {
+pub fn decode_laplace(dec: &mut RangeDecoder<'_>, mut fs: u32, decay: i32) -> i32 {
     let mut val = 0i32;
     let fm = dec.decode_bin(15);
     let mut fl = 0u32;
@@ -111,7 +111,7 @@ pub fn encode_laplace_p0(enc: &mut RangeEncoder, value: i32, p0: u16, decay: u16
     }
 }
 
-pub fn decode_laplace_p0(dec: &mut RangeDecoder, p0: u16, decay: u16) -> i32 {
+pub fn decode_laplace_p0(dec: &mut RangeDecoder<'_>, p0: u16, decay: u16) -> i32 {
     let sign_icdf = [32768u16 - p0, (32768u16 - p0) / 2, 0];
     let mut s = dec.decode_icdf16(&sign_icdf, 15) as i32;
     if s == 2 {

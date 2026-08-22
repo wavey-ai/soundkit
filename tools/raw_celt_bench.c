@@ -21,12 +21,20 @@ typedef enum {
     MODE_BOTH = 2
 } BenchMode;
 
+typedef enum {
+    FIXTURE_MIXED = 0,
+    FIXTURE_TONE = 1
+} BenchFixture;
+
 typedef struct {
     int repeats;
     int seconds;
     BenchMode mode;
     int dump_packets;
     int dump_decode_pitch;
+    int frame_size;
+    int bitrate;
+    BenchFixture fixture;
 } Options;
 
 typedef struct {
@@ -35,17 +43,24 @@ typedef struct {
 } DecodeQuality;
 
 static void usage(void) {
-    fprintf(stderr, "usage: raw_celt_bench_c [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--dump-packets n] [--dump-decode-pitch n]\n");
+    fprintf(stderr, "usage: raw_celt_bench_c [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--frame-size n] [--bitrate n] [--fixture mixed|tone] [--dump-packets n] [--dump-decode-pitch n]\n");
     exit(2);
 }
 
-static int parse_positive_int(const char *value) {
+static int parse_positive_int(const char *value, long maximum) {
     char *end = NULL;
     long parsed = strtol(value, &end, 10);
-    if (end == value || *end != '\0' || parsed <= 0 || parsed > 3600) {
+    if (end == value || *end != '\0' || parsed <= 0 || parsed > maximum) {
         usage();
     }
     return (int)parsed;
+}
+
+static int contains_int(const int *values, size_t count, int value) {
+    for (size_t i = 0; i < count; i++) {
+        if (values[i] == value) return 1;
+    }
+    return 0;
 }
 
 static Options parse_options(int argc, char **argv) {
@@ -55,13 +70,16 @@ static Options parse_options(int argc, char **argv) {
     options.mode = MODE_BOTH;
     options.dump_packets = 0;
     options.dump_decode_pitch = 0;
+    options.frame_size = 0;
+    options.bitrate = 0;
+    options.fixture = FIXTURE_MIXED;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--repeats") == 0) {
             if (++i >= argc) usage();
-            options.repeats = parse_positive_int(argv[i]);
+            options.repeats = parse_positive_int(argv[i], 3600);
         } else if (strcmp(argv[i], "--seconds") == 0) {
             if (++i >= argc) usage();
-            options.seconds = parse_positive_int(argv[i]);
+            options.seconds = parse_positive_int(argv[i], 3600);
         } else if (strcmp(argv[i], "--mode") == 0) {
             if (++i >= argc) usage();
             if (strcmp(argv[i], "cbr") == 0) {
@@ -73,12 +91,39 @@ static Options parse_options(int argc, char **argv) {
             } else {
                 usage();
             }
+        } else if (strcmp(argv[i], "--frame-size") == 0) {
+            if (++i >= argc) usage();
+            options.frame_size = parse_positive_int(argv[i], SAMPLE_RATE);
+            if (!contains_int(
+                    FRAME_SIZES,
+                    sizeof(FRAME_SIZES) / sizeof(FRAME_SIZES[0]),
+                    options.frame_size)) {
+                usage();
+            }
+        } else if (strcmp(argv[i], "--bitrate") == 0) {
+            if (++i >= argc) usage();
+            options.bitrate = parse_positive_int(argv[i], 1000000000L);
+            if (!contains_int(
+                    BITRATES,
+                    sizeof(BITRATES) / sizeof(BITRATES[0]),
+                    options.bitrate)) {
+                usage();
+            }
+        } else if (strcmp(argv[i], "--fixture") == 0) {
+            if (++i >= argc) usage();
+            if (strcmp(argv[i], "mixed") == 0) {
+                options.fixture = FIXTURE_MIXED;
+            } else if (strcmp(argv[i], "tone") == 0) {
+                options.fixture = FIXTURE_TONE;
+            } else {
+                usage();
+            }
         } else if (strcmp(argv[i], "--dump-packets") == 0) {
             if (++i >= argc) usage();
-            options.dump_packets = parse_positive_int(argv[i]);
+            options.dump_packets = parse_positive_int(argv[i], 3600);
         } else if (strcmp(argv[i], "--dump-decode-pitch") == 0) {
             if (++i >= argc) usage();
-            options.dump_decode_pitch = parse_positive_int(argv[i]);
+            options.dump_decode_pitch = parse_positive_int(argv[i], 3600);
         } else {
             usage();
         }
@@ -116,12 +161,21 @@ static float triangle_wave(uint32_t phase) {
     return (float)v * (1.0f / 16384.0f);
 }
 
-static float *generate_fixture(int seconds, int *total_frames) {
+static float *generate_fixture(int seconds, int *total_frames, BenchFixture fixture) {
     *total_frames = SAMPLE_RATE * seconds;
     float *pcm = (float *)malloc((size_t)(*total_frames) * CHANNELS * sizeof(float));
     if (!pcm) {
         fprintf(stderr, "out of memory\n");
         exit(1);
+    }
+
+    if (fixture == FIXTURE_TONE) {
+        for (int i = 0; i < *total_frames; i++) {
+            double phase = 6.283185307179586 * (double)i / 48.0;
+            pcm[i * CHANNELS] = (float)(0.25 * sin(phase));
+            pcm[i * CHANNELS + 1] = (float)(0.22 * sin(phase + 0.2));
+        }
+        return pcm;
     }
 
     uint32_t noise = 0x12345678u;
@@ -433,9 +487,11 @@ static void dump_packets(
         }
         for (size_t i = 0; i < sizeof(FRAME_SIZES) / sizeof(FRAME_SIZES[0]); i++) {
             int frame_size = FRAME_SIZES[i];
+            if (options->frame_size != 0 && options->frame_size != frame_size) continue;
             int packet_count = total_frames / frame_size;
             for (size_t j = 0; j < sizeof(BITRATES) / sizeof(BITRATES[0]); j++) {
                 int bitrate = BITRATES[j];
+                if (options->bitrate != 0 && options->bitrate != bitrate) continue;
                 int min_packet = 0;
                 int max_packet = 0;
                 uint64_t checksum = 0;
@@ -488,9 +544,11 @@ static void dump_decode_pitch(
         }
         for (size_t i = 0; i < sizeof(FRAME_SIZES) / sizeof(FRAME_SIZES[0]); i++) {
             int frame_size = FRAME_SIZES[i];
+            if (options->frame_size != 0 && options->frame_size != frame_size) continue;
             int packet_count = total_frames / frame_size;
             for (size_t j = 0; j < sizeof(BITRATES) / sizeof(BITRATES[0]); j++) {
                 int bitrate = BITRATES[j];
+                if (options->bitrate != 0 && options->bitrate != bitrate) continue;
                 int min_packet = 0;
                 int max_packet = 0;
                 uint64_t checksum = 0;
@@ -548,7 +606,7 @@ static void dump_decode_pitch(
 int main(int argc, char **argv) {
     Options options = parse_options(argc, argv);
     int total_frames = 0;
-    float *pcm = generate_fixture(options.seconds, &total_frames);
+    float *pcm = generate_fixture(options.seconds, &total_frames, options.fixture);
     int max_packets = total_frames / FRAME_SIZES[0];
     unsigned char *packets =
         (unsigned char *)malloc((size_t)max_packets * MAX_PACKET_BYTES);
@@ -583,9 +641,11 @@ int main(int argc, char **argv) {
         }
         for (size_t i = 0; i < sizeof(FRAME_SIZES) / sizeof(FRAME_SIZES[0]); i++) {
             int frame_size = FRAME_SIZES[i];
+            if (options.frame_size != 0 && options.frame_size != frame_size) continue;
             int packet_count = total_frames / frame_size;
             for (size_t j = 0; j < sizeof(BITRATES) / sizeof(BITRATES[0]); j++) {
                 int bitrate = BITRATES[j];
+                if (options.bitrate != 0 && options.bitrate != bitrate) continue;
                 int bytes = 0;
                 int min_packet = 0;
                 int max_packet = 0;

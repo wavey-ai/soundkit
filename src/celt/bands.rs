@@ -504,12 +504,12 @@ pub fn theta_metrics(
     (qn, delta)
 }
 
-pub enum BandCoder<'a> {
+pub enum BandCoder<'a, 'buf> {
     Encode(&'a mut RangeEncoder),
-    Decode(&'a mut RangeDecoder),
+    Decode(&'a mut RangeDecoder<'buf>),
 }
 
-impl BandCoder<'_> {
+impl BandCoder<'_, '_> {
     fn is_encode(&self) -> bool {
         matches!(self, Self::Encode(_))
     }
@@ -647,7 +647,7 @@ struct SplitContext {
 
 fn quant_band_n1(
     ctx: &mut BandContext<'_>,
-    coder: &mut BandCoder<'_>,
+    coder: &mut BandCoder<'_, '_>,
     x: &mut [f32],
     lowband_out: Option<&mut [f32]>,
 ) -> u32 {
@@ -668,7 +668,7 @@ fn quant_band_n1(
 #[allow(clippy::too_many_arguments)]
 fn compute_theta(
     ctx: &mut BandContext<'_>,
-    coder: &mut BandCoder<'_>,
+    coder: &mut BandCoder<'_, '_>,
     x: &mut [f32],
     y: &mut [f32],
     n: usize,
@@ -894,7 +894,7 @@ fn shift_right_i32(value: i32, shift: isize) -> i32 {
 #[allow(clippy::too_many_arguments)]
 fn quant_partition(
     ctx: &mut BandContext<'_>,
-    coder: &mut BandCoder<'_>,
+    coder: &mut BandCoder<'_, '_>,
     x: &mut [f32],
     n: usize,
     b: i32,
@@ -1096,7 +1096,7 @@ fn quant_partition(
 #[allow(clippy::too_many_arguments)]
 fn quant_band_mono(
     ctx: &mut BandContext<'_>,
-    coder: &mut BandCoder<'_>,
+    coder: &mut BandCoder<'_, '_>,
     x: &mut [f32],
     n: usize,
     b: i32,
@@ -1247,7 +1247,7 @@ fn quant_band_mono(
 
 fn quant_band_n1_stereo(
     ctx: &mut BandContext<'_>,
-    coder: &mut BandCoder<'_>,
+    coder: &mut BandCoder<'_, '_>,
     x: &mut [f32],
     y: &mut [f32],
     lowband_out: Option<&mut [f32]>,
@@ -1270,10 +1270,21 @@ fn quant_band_n1_stereo(
     1
 }
 
+fn copy_active_stereo_band(x: &mut [f32], y: &mut [f32], left_energy: f32, right_energy: f32) {
+    if left_energy >= 1e-10 && right_energy >= 1e-10 {
+        return;
+    }
+    if left_energy > right_energy {
+        y.copy_from_slice(x);
+    } else {
+        x.copy_from_slice(y);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn quant_band_stereo(
     ctx: &mut BandContext<'_>,
-    coder: &mut BandCoder<'_>,
+    coder: &mut BandCoder<'_, '_>,
     x: &mut [f32],
     y: &mut [f32],
     n: usize,
@@ -1296,6 +1307,14 @@ fn quant_band_stereo(
 
     let orig_fill = fill;
     let mut fill = fill;
+    if coder.is_encode() {
+        copy_active_stereo_band(
+            x,
+            y,
+            ctx.band_e[ctx.band],
+            ctx.band_e[ctx.mode.nb_ebands + ctx.band],
+        );
+    }
     let sctx = compute_theta(
         ctx, coder, x, y, n, &mut b, blocks, blocks, lm, true, &mut fill,
     );
@@ -1520,7 +1539,7 @@ pub fn quant_all_bands_mono(
     tf_res: &[i32],
     total_bits: i32,
     balance: i32,
-    coder: &mut BandCoder<'_>,
+    coder: &mut BandCoder<'_, '_>,
     lm: usize,
     coded_bands: usize,
     seed: &mut u32,
@@ -1567,7 +1586,7 @@ pub fn quant_all_bands_mono_with_scratch(
     tf_res: &[i32],
     total_bits: i32,
     mut balance: i32,
-    coder: &mut BandCoder<'_>,
+    coder: &mut BandCoder<'_, '_>,
     lm: usize,
     coded_bands: usize,
     seed: &mut u32,
@@ -1740,7 +1759,7 @@ pub fn quant_all_bands_stereo(
     tf_res: &[i32],
     total_bits: i32,
     balance: i32,
-    coder: &mut BandCoder<'_>,
+    coder: &mut BandCoder<'_, '_>,
     lm: usize,
     coded_bands: usize,
     seed: &mut u32,
@@ -1793,7 +1812,7 @@ pub fn quant_all_bands_stereo_with_scratch(
     tf_res: &[i32],
     total_bits: i32,
     mut balance: i32,
-    coder: &mut BandCoder<'_>,
+    coder: &mut BandCoder<'_, '_>,
     lm: usize,
     coded_bands: usize,
     seed: &mut u32,
@@ -2134,4 +2153,22 @@ pub fn quant_all_bands_stereo_with_scratch(
     }
 
     *seed = ctx.seed;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_active_stereo_band;
+
+    #[test]
+    fn silent_stereo_band_uses_the_active_channel_for_mid_side() {
+        let mut left = [1.0, -0.5, 0.25];
+        let mut right = [0.0; 3];
+        copy_active_stereo_band(&mut left, &mut right, 1.0, 0.0);
+        assert_eq!(left, right);
+
+        let mut left = [0.0; 3];
+        let mut right = [-0.25, 0.5, -1.0];
+        copy_active_stereo_band(&mut left, &mut right, 0.0, 1.0);
+        assert_eq!(left, right);
+    }
 }

@@ -7,6 +7,9 @@ BENCH_DIR="${BENCH_DIR:-/tmp/libopus-rs-raw-bench}"
 REPEATS="${REPEATS:-21}"
 AUDIO_SECONDS="${AUDIO_SECONDS:-4}"
 MODE="${MODE:-both}"
+FRAME_SIZE="${FRAME_SIZE:-}"
+BITRATE="${BITRATE:-}"
+FIXTURE="${FIXTURE:-mixed}"
 C_BENCH_CFLAGS="${C_BENCH_CFLAGS--O3 -DNDEBUG}"
 RUST_BENCH_RUSTFLAGS="${RUST_BENCH_RUSTFLAGS--C target-cpu=native}"
 BUILD_RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }${RUST_BENCH_RUSTFLAGS}"
@@ -25,8 +28,20 @@ while [[ $# -gt 0 ]]; do
       MODE="$2"
       shift 2
       ;;
+    --frame-size)
+      FRAME_SIZE="$2"
+      shift 2
+      ;;
+    --bitrate)
+      BITRATE="$2"
+      shift 2
+      ;;
+    --fixture)
+      FIXTURE="$2"
+      shift 2
+      ;;
     *)
-      echo "usage: tools/run_raw_celt_bench.sh [--repeats n] [--seconds n] [--mode cbr|vbr|both]" >&2
+      echo "usage: tools/run_raw_celt_bench.sh [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--frame-size n] [--bitrate n] [--fixture mixed|tone]" >&2
       exit 2
       ;;
   esac
@@ -36,6 +51,14 @@ case "$MODE" in
   cbr | vbr | both) ;;
   *)
     echo "--mode must be cbr, vbr, or both" >&2
+    exit 2
+    ;;
+esac
+
+case "$FIXTURE" in
+  mixed | tone) ;;
+  *)
+    echo "--fixture must be mixed or tone" >&2
     exit 2
     ;;
 esac
@@ -75,10 +98,18 @@ fi
 RUSTFLAGS="$BUILD_RUSTFLAGS" cargo build --release --target-dir "$TARGET_DIR" --example raw_celt_bench >/dev/null
 
 echo "Raw in-memory CELT benchmark: generated 48 kHz stereo fixture, no file I/O in measured loops." >&2
-echo "Repeats: $REPEATS, seconds: $AUDIO_SECONDS, mode: $MODE" >&2
+echo "Repeats: $REPEATS, seconds: $AUDIO_SECONDS, mode: $MODE, fixture: $FIXTURE" >&2
 
-rust_out="$("$rust_bin" --repeats "$REPEATS" --seconds "$AUDIO_SECONDS" --mode "$MODE")"
-c_out="$("$c_bin" --repeats "$REPEATS" --seconds "$AUDIO_SECONDS" --mode "$MODE")"
+bench_args=(--repeats "$REPEATS" --seconds "$AUDIO_SECONDS" --mode "$MODE" --fixture "$FIXTURE")
+if [[ -n "$FRAME_SIZE" ]]; then
+  bench_args+=(--frame-size "$FRAME_SIZE")
+fi
+if [[ -n "$BITRATE" ]]; then
+  bench_args+=(--bitrate "$BITRATE")
+fi
+
+rust_out="$("$rust_bin" "${bench_args[@]}")"
+c_out="$("$c_bin" "${bench_args[@]}")"
 
 rt_factor=$((AUDIO_SECONDS * 1000))
 

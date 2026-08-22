@@ -1,6 +1,6 @@
 use libopus_rs::{
-    channels as packet_channels, Application, Decoder, Encoder, CELT_FRAME_SIZES_48K,
-    CELT_MAX_FRAME_BYTES, CELT_MIN_FRAME_BYTES,
+    channels as packet_channels, Application, Decoder, Encoder, Error, CELT_FRAME_SIZES_48K,
+    CELT_MAX_FRAME_BYTES, CELT_MIN_FRAME_BYTES, PCM_I24_MAX, PCM_I24_MIN,
 };
 
 fn tone(frame_size: usize, channels: usize, frame_index: usize) -> Vec<f32> {
@@ -110,6 +110,23 @@ fn encode_and_decode_48k_celt_only_smoke_path() {
         .unwrap();
     assert_eq!(decoded_samples, 960);
     assert_eq!(decoded_into, decoded_i16);
+
+    let expected_i24 = decoded
+        .iter()
+        .map(|&sample| libopus_rs::celt::mathops::float_to_i24(sample))
+        .collect::<Vec<_>>();
+    let mut decoder = Decoder::new(48_000, 2).unwrap();
+    let decoded_i24 = decoder.decode_i24(&packet, false).unwrap();
+    assert_eq!(decoded_i24, expected_i24);
+    let mut decoder = Decoder::new(48_000, 2).unwrap();
+    let mut decoded_i24_into = Vec::new();
+    assert_eq!(
+        decoder
+            .decode_i24_into(&packet, false, &mut decoded_i24_into)
+            .unwrap(),
+        960
+    );
+    assert_eq!(decoded_i24_into, decoded_i24);
 }
 
 #[test]
@@ -127,12 +144,12 @@ fn celt_encoder_carries_final_range_rng_between_frames() {
 
     assert_eq!(
         hex(&packet),
-        "e4be0dd79fb8ecc723b754a861007abfb47dfb6c6d44417e7cbe7dae671022b8e681556640de34de"
+        "e43c70f02c5aeb1305c47c5e813c60a15a50274252efa7b98bfe08aac87f87a6c573bbe22a2f87df"
     );
 }
 
 #[test]
-fn celt_encoder_counts_decay_limited_coarse_energy_badness_like_c() {
+fn celt_encoder_keeps_decay_limited_coarse_energy_regression() {
     let mut encoder = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
     encoder.set_bitrate(128_000).unwrap();
     encoder.set_vbr(false).unwrap();
@@ -146,7 +163,7 @@ fn celt_encoder_counts_decay_limited_coarse_energy_badness_like_c() {
 
     assert_eq!(
         hex(&packet),
-        "e4e927f194cee4aa8f6c33e989b902b9c491db3a10a5daca8197018a6fe2aac58518294d3a2c1351"
+        "e442126dc9145bdb5c7ae8f555987aa98418f3013da12183861f51e914dfcf9c90b4ac22e7d3c63d"
     );
 }
 
@@ -174,6 +191,55 @@ fn encode_i16_matches_equivalent_f32_input() {
     assert_eq!(
         i16_encoder.encode_i16(&pcm_i16, 960).unwrap(),
         f32_encoder.encode_f32(&pcm_f32, 960).unwrap()
+    );
+}
+
+#[test]
+fn encode_i24_matches_equivalent_f32_input() {
+    let mut pcm_i24 = (0..960)
+        .flat_map(|i| {
+            let t = i as f32;
+            [
+                (0.72 * (0.017 * t).sin() * PCM_I24_MAX as f32).round() as i32,
+                (0.64 * (0.019 * t + 0.4).sin() * PCM_I24_MAX as f32).round() as i32,
+            ]
+        })
+        .collect::<Vec<_>>();
+    pcm_i24[0] = PCM_I24_MIN;
+    pcm_i24[1] = PCM_I24_MAX;
+    let pcm_f32 = pcm_i24
+        .iter()
+        .map(|sample| *sample as f32 / 8_388_608.0)
+        .collect::<Vec<_>>();
+
+    let mut i24_encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut f32_encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    i24_encoder.set_bitrate(128_000).unwrap();
+    f32_encoder.set_bitrate(128_000).unwrap();
+    assert_eq!(
+        i24_encoder.encode_i24(&pcm_i24, 960).unwrap(),
+        f32_encoder.encode_f32(&pcm_f32, 960).unwrap()
+    );
+
+    let mut i24_encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut f32_encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    assert_eq!(
+        i24_encoder
+            .encode_i24_with_frame_bytes(&pcm_i24, 960, 320)
+            .unwrap(),
+        f32_encoder
+            .encode_f32_with_frame_bytes(&pcm_f32, 960, 320)
+            .unwrap()
+    );
+
+    let mut encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut invalid = pcm_i24;
+    invalid[0] = PCM_I24_MAX + 1;
+    assert_eq!(encoder.encode_i24(&invalid, 960), Err(Error::BadArg));
+    invalid[0] = PCM_I24_MIN - 1;
+    assert_eq!(
+        encoder.encode_i24_with_frame_bytes(&invalid, 960, 320),
+        Err(Error::BadArg)
     );
 }
 
@@ -290,6 +356,6 @@ fn vbr_packet_budget_varies_with_signal_shape() {
 
 #[test]
 fn celt_vbr_tracks_constrained_reservoir_over_raw_fixture() {
-    assert_eq!(vbr_stats(120, 128_000, 400), (16_439, 34, 59));
-    assert_eq!(vbr_stats(960, 128_000, 50), (16_370, 320, 500));
+    assert_eq!(vbr_stats(120, 128_000, 400), (16_439, 35, 59));
+    assert_eq!(vbr_stats(960, 128_000, 50), (16_370, 321, 500));
 }

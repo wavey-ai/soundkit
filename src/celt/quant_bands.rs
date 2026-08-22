@@ -378,7 +378,7 @@ pub fn unquant_coarse_energy(
     end: usize,
     old_e_bands: &mut [f32],
     intra: bool,
-    dec: &mut RangeDecoder,
+    dec: &mut RangeDecoder<'_>,
     channels: usize,
     lm: usize,
 ) {
@@ -424,7 +424,7 @@ pub fn unquant_fine_energy(
     end: usize,
     old_e_bands: &mut [f32],
     fine_quant: &[i32],
-    dec: &mut RangeDecoder,
+    dec: &mut RangeDecoder<'_>,
     channels: usize,
 ) {
     for i in start..end {
@@ -447,7 +447,7 @@ pub fn unquant_energy_finalise(
     fine_quant: &[i32],
     fine_priority: &[i32],
     mut bits_left: i32,
-    dec: &mut RangeDecoder,
+    dec: &mut RangeDecoder<'_>,
     channels: usize,
 ) {
     for prio in 0..2 {

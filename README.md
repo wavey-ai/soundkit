@@ -1,9 +1,10 @@
 # libopus-rs
 
-Rust implementation of the Opus 1.5.2 codec.
+Pure Rust implementation of Opus, with a current focus on 48 kHz CELT.
 
-This crate does not wrap libopus or expose a C API. Upstream libopus 1.5.2 tests
-and fixtures are used as behavioral reference material during the port.
+This crate does not wrap libopus or expose a C API. Stable releases and
+upstream main provide behavioral evidence. Encoder packets do not need to be
+byte-identical when quality and interoperability agree.
 
 ## Current Support
 
@@ -16,11 +17,15 @@ and fixtures are used as behavioral reference material during the port.
 - spectral frame coding, quantized energy, and band quantization
 - dynamic allocation analysis, theta RDO, and energy-error feedback
 - pitch prefilter signaling, filtering, and decoder postfiltering
+- LPC tone detection and tone-aware allocation
+- transient-aware pitch filtering and ineffective-filter cancellation
+- safe stereo band handling when one channel is silent
 - spread decision state, band helpers, synthesis, deemphasis, rotation, and
   algebraic VQ
 - experimental 48 kHz CELT-only raw packet encode/decode through the Rust
   `Encoder`/`Decoder` types for 2.5, 5, 10, and 20 ms fullband frames
   with CBR, constrained VBR, or exact compressed-frame-byte controls
+- signed 24-bit PCM encode/decode APIs using sign-extended `i32` samples
 
 The codec is incomplete. The supported audio path is limited to CELT-only raw
 frames. Ogg Opus, SILK, and hybrid speech coding are not implemented.
@@ -31,16 +36,45 @@ The encoder is experimental. CELT-only CBR and constrained VBR are suitable for
 internal testing and non-critical generated-audio workflows. They are not
 production replacements for libopus.
 
-Raw CELT parity work reduced constrained VBR divergence from upstream C. The
-checked matrix has a mean absolute aligned-SNR gap of about `0.039 dB`, with the
-largest observed VBR row gap about `0.21 dB`. VBR tracks the target byte budget
-and packet-size envelope. It is not byte-identical to C, and near-threshold
-energy/allocation decision drift remains.
+The current encoder follows the best available upstream 48 kHz CELT behavior.
+It does not target byte identity with one libopus release.
 
-The largest known CBR quality gap is the 5 ms / 48 kb/s case, about `0.30 dB`
-on the deterministic benchmark fixture. That split is traced to current-frame
-band-energy drift before coarse-energy quantization, not to packet corruption or
-decoder interop failure.
+### Real-Music Quality Checkpoint
+
+Official ViSQOL Audio scored 120 matched Rust and libopus 1.6.1 round trips
+from *Westside* and *After Dark Confirmation*.
+
+The corpus used five repeatable random eight-second excerpts from each 48 kHz,
+24-bit master. It covered 96, 128, and 192 kb/s, 5 and 20 ms frames, CBR, and
+constrained VBR.
+
+Rust scored `4.5840` MOS-LQO. C scored `4.5850`. The paired Rust-minus-C
+difference was `-0.0010`, with a 95% confidence interval from `-0.0019` to
+`-0.0001`.
+
+CBR showed no material difference. The only repeatable signal was 20 ms
+constrained VBR at 128 kb/s. Rust scored `4.6139`; C scored `4.6258`.
+The difference was `-0.0119`.
+
+This corpus shows no material overall quality gap. It does not prove
+transparency or replace a controlled listening test. ViSQOL Audio downmixes
+stereo to mono. Separate side-channel diagnostics found no material stereo
+regression.
+
+See [the complete 2026-08-22 quality result](quality-results/2026-08-22-westside-after-dark/README.md).
+
+A one-second, 72-row mixed fixture compares Rust with libopus 1.6.1. The mean
+absolute aligned-SNR gap is `0.032 dB`. The maximum gap is `0.18 dB`.
+
+At 5 ms and 48 kb/s, Rust CBR measures `13.15 dB`; C measures `13.28 dB`.
+Rust constrained VBR measures `13.40 dB`; C measures `13.32 dB`.
+
+The deterministic fixture is regression evidence, not a listening test.
+Synthetic SNR can favor an obsolete filter decision. Real-audio perceptual
+tests must gate further encoder changes.
+
+The first 5 ms, 128 kb/s pure-tone packet is byte-identical to C. Later spectral
+payloads differ, so tone and PVQ tracing remains active work.
 
 See [PORTING.md](PORTING.md) for the module-by-module plan and test status.
 See [SAFETY.md](SAFETY.md) for the unsafe-code policy.
@@ -53,6 +87,11 @@ cargo build --release
 ```
 
 The crate is built with `#![forbid(unsafe_code)]`. It does not expose a C API.
+
+The 24-bit methods use the range `-8_388_608..=8_388_607` in `i32`. Conversion
+to the internal `f32` path preserves every 24-bit input value exactly. Opus is
+still lossy; this avoids an extra 16-bit PCM boundary but does not make the
+compressed stream lossless.
 
 ## WAV Round Trip
 
@@ -89,13 +128,20 @@ deterministic in-memory 48 kHz stereo fixture.
 tools/run_raw_celt_bench.sh --repeats 21 --seconds 4 --mode both
 ```
 
+Filter a trace to one row or select the pure-tone fixture:
+
+```sh
+tools/run_raw_celt_bench.sh --seconds 1 --repeats 1 --frame-size 240 --bitrate 48000
+tools/run_raw_celt_bench.sh --seconds 1 --repeats 1 --frame-size 240 --bitrate 128000 --fixture tone
+```
+
 For local speed runs, benchmark the Rust side with host-native codegen:
 
 ```sh
 RUST_BENCH_RUSTFLAGS='-C target-cpu=native -C target-feature=+avx2' tools/run_raw_celt_bench.sh --repeats 21 --seconds 4 --mode both
 ```
 
-Set `OPUS_DIR=path/to/opus-1.5.2` to compare against a built upstream source
+Set `OPUS_DIR=path/to/built-libopus` to compare against a built upstream source
 tree. Otherwise the script uses `pkg-config opus`. The C reference is configured
 for restricted-lowdelay/fullband mode with CBR or constrained VBR. Reported
 speed columns are normalized as realtime speedup:
@@ -160,11 +206,7 @@ decode into the WASM decoder's output buffer. They expose `outputPtr` and
 profile around a Rust decode loop, run a single Rust case with
 `--profile-rust-decode /tmp/rust-decode.cpuprofile.json`.
 
-A full-track browser API comparison was run on:
-
-```text
-/Users/jamie/Downloads/Lori Asha - Lori Asha Album Premix/02 - Lori Asha - Westside.mp3
-```
+A full-track browser API comparison used the *Westside* premix source.
 
 `ffmpeg` decoded and resampled the source one time to identical `48 kHz` stereo
 `s16` PCM. Node.js then encoded and decoded 20 ms frames. It used `libopusjs` C
@@ -191,7 +233,7 @@ does not reduce the quality gap relative to C. Rust decode performance is faster
 at 48 kb/s. Rust encode remains slower, especially at 128 kb/s, and requires
 targeted profiling before parity claims with the C encoder.
 
-A snapshot of a local run (`AUDIO_SECONDS=1 REPEATS=1 MODE=both`) is included below:
+A historical local snapshot is included below. Run the tool for current results.
 
 | Mode | Frame | Bitrate | Rust enc (xRTF) | Enc vs C | Rust dec (xRTF) | Dec vs C | C enc (xRTF) | C dec (xRTF) | Rust bytes | C bytes | Rust pkt | C pkt |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -270,7 +312,10 @@ A snapshot of a local run (`AUDIO_SECONDS=1 REPEATS=1 MODE=both`) is included be
 
 Run `tools/run_raw_celt_bench.sh` to generate a local current table.
 
-## Encoder Parity Next Steps
+## Historical Encoder Parity Notes
+
+This section records the earlier 1.5.2-focused trace. It is not the active
+roadmap. See [TODO.md](TODO.md) for the current quality-led plan.
 
 CBR byte parity remains the active target before VBR parity. On the
 deterministic 128 kb/s raw CELT fixture, the first 2.5 ms mismatch was frame 7.
@@ -384,7 +429,7 @@ Ported in this checkpoint:
 - reusable-output `Decoder::decode_f32_into` for f32 decode loops
 - final-range RNG handoff after CELT encode/decode frames
 
-Resume from this checkpoint:
+The historical continuation list was:
 
 1. Trace the next 2.5 ms high-rate CBR mismatch, starting with 160 kb/s frame
    226 or the 256/384/512 kb/s frame-17 split.

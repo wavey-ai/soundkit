@@ -304,7 +304,7 @@ pub fn encode_pulses(y: &[i32], n: usize, k: usize, enc: &mut RangeEncoder) {
 }
 
 /// Decode a pulse vector with the CELT range decoder.
-pub fn decode_pulses(y: &mut [i32], n: usize, k: usize, dec: &mut RangeDecoder) -> i32 {
+pub fn decode_pulses(y: &mut [i32], n: usize, k: usize, dec: &mut RangeDecoder<'_>) -> i32 {
     debug_assert!(y.len() >= n);
     if k == 0 {
         y[..n].fill(0);
@@ -333,7 +333,7 @@ pub fn decode_pulses_with_cache(
     y: &mut [i32],
     n: usize,
     k: usize,
-    dec: &mut RangeDecoder,
+    dec: &mut RangeDecoder<'_>,
     u_scratch: &mut Vec<u32>,
     row_cache: &mut CwrsDecodeCache,
 ) -> i32 {

@@ -67,7 +67,7 @@ pub fn encode_transient_flag(
     }
 }
 
-pub fn decode_transient_flag(lm: usize, total_bits: i32, dec: &mut RangeDecoder) -> bool {
+pub fn decode_transient_flag(lm: usize, total_bits: i32, dec: &mut RangeDecoder<'_>) -> bool {
     if lm > 0 && dec.tell() + 3 <= total_bits {
         dec.decode_bit_logp(3)
     } else {
@@ -131,7 +131,7 @@ pub fn tf_decode(
     is_transient: bool,
     tf_res: &mut [i32],
     lm: usize,
-    dec: &mut RangeDecoder,
+    dec: &mut RangeDecoder<'_>,
 ) {
     assert!(lm < TF_SELECT_TABLE.len());
     assert!(end <= tf_res.len());
@@ -181,7 +181,7 @@ pub fn encode_spread_decision(spread: i32, total_bits: i32, enc: &mut RangeEncod
     }
 }
 
-pub fn decode_spread_decision(total_bits: i32, dec: &mut RangeDecoder) -> i32 {
+pub fn decode_spread_decision(total_bits: i32, dec: &mut RangeDecoder<'_>) -> i32 {
     if dec.tell() + 4 <= total_bits {
         dec.decode_icdf(&SPREAD_ICDF, 5) as i32
     } else {
@@ -223,7 +223,7 @@ pub struct DecodedPrefilter {
 pub fn decode_prefilter(
     start: usize,
     total_bits: i32,
-    dec: &mut RangeDecoder,
+    dec: &mut RangeDecoder<'_>,
 ) -> Option<DecodedPrefilter> {
     if start != 0 || dec.tell() + 16 > total_bits {
         return None;
@@ -305,7 +305,7 @@ pub fn decode_dynalloc_offsets(
     mut total_bits_frac: i32,
     channels: usize,
     lm: usize,
-    dec: &mut RangeDecoder,
+    dec: &mut RangeDecoder<'_>,
 ) -> i32 {
     assert!(end <= mode.nb_ebands);
     assert!(offsets.len() >= mode.nb_ebands);
@@ -560,6 +560,8 @@ fn dynalloc_analysis_with_scratch(
     vbr: bool,
     constrained_vbr: bool,
     analysis_leak_boost: Option<&[u8; 19]>,
+    tone_frequency: f32,
+    toneishness: f32,
     offsets: &mut [i32],
     importance: &mut [i32],
     scratch: &mut DynallocAnalysisScratch,
@@ -675,6 +677,29 @@ fn dynalloc_analysis_with_scratch(
             *value *= 0.5;
         }
     }
+    if toneishness > 0.98 {
+        let frequency_bin = (0.5 + tone_frequency * 120.0 / core::f32::consts::PI).floor() as i32;
+        for (i, value) in follower.iter_mut().enumerate().take(end).skip(start) {
+            let band_start = mode.ebands[i] as i32;
+            let band_end = mode.ebands[i + 1] as i32;
+            if (band_start..=band_end).contains(&frequency_bin) {
+                *value += 2.0;
+            }
+            if (band_start - 1..=band_end + 1).contains(&frequency_bin) {
+                *value += 1.0;
+            }
+            if (band_start - 2..=band_end + 2).contains(&frequency_bin) {
+                *value += 1.0;
+            }
+            if (band_start - 3..=band_end + 3).contains(&frequency_bin) {
+                *value += 0.5;
+            }
+        }
+        if end >= 2 && frequency_bin >= mode.ebands[end] as i32 {
+            follower[end - 1] += 2.0;
+            follower[end - 2] += 1.0;
+        }
+    }
     if let Some(leak_boost) = analysis_leak_boost {
         for i in start..end.min(19) {
             follower[i] += leak_boost[i] as f32 * (1.0 / 64.0);
@@ -733,7 +758,7 @@ pub fn encode_alloc_trim(
     }
 }
 
-pub fn decode_alloc_trim(total_bits_frac: i32, dec: &mut RangeDecoder) -> i32 {
+pub fn decode_alloc_trim(total_bits_frac: i32, dec: &mut RangeDecoder<'_>) -> i32 {
     if dec.tell_frac() as i32 + (6 << BITRES) <= total_bits_frac {
         dec.decode_icdf(&TRIM_ICDF, 7) as i32
     } else {
@@ -761,6 +786,8 @@ pub struct CeltFrameConfig {
     pub band_log_e2: Option<Vec<f32>>,
     pub tf_estimate: f32,
     pub tf_chan: usize,
+    pub tone_frequency: f32,
+    pub toneishness: f32,
     pub signal_bandwidth: usize,
     pub analysis_leak_boost: Option<[u8; 19]>,
     pub vbr_state: Option<CeltVbrConfig>,
@@ -790,6 +817,8 @@ impl CeltFrameConfig {
             band_log_e2: None,
             tf_estimate: 0.0,
             tf_chan: 0,
+            tone_frequency: -1.0,
+            toneishness: 0.0,
             signal_bandwidth: mode.nb_ebands - 1,
             analysis_leak_boost: None,
             vbr_state: None,
@@ -1106,7 +1135,7 @@ pub fn encode_spectral_frame_with_scratch(
         .vbr_state
         .map_or(config.packet_bytes, |vbr| vbr.effective_bytes);
     let eff_end = config.end.min(mode.eff_ebands);
-    let mut enc = RangeEncoder::new(config.packet_bytes);
+    let mut enc = RangeEncoder::with_extra_capacity(config.packet_bytes, 1);
     let silence = false;
     if enc.tell() == 1 && enc.tell() < total_bits {
         enc.encode_bit_logp(silence, 15);
@@ -1148,6 +1177,8 @@ pub fn encode_spectral_frame_with_scratch(
             config.vbr,
             config.constrained_vbr,
             config.analysis_leak_boost.as_ref(),
+            config.tone_frequency,
+            config.toneishness,
             &mut scratch.offsets,
             &mut scratch.importance,
             &mut scratch.dynalloc,
@@ -1184,7 +1215,7 @@ pub fn encode_spectral_frame_with_scratch(
     );
     scratch.tf_res.resize(mode.nb_ebands, 0);
     scratch.tf_res[..mode.nb_ebands].fill(0);
-    let tf_select = if effective_bytes >= 15 * config.channels {
+    let tf_select = if effective_bytes >= 15 * config.channels && config.toneishness < 0.98 {
         let tf_x = if config.tf_chan == 1 {
             y.as_ref().map(|right| &right[..]).unwrap_or(&x[..])
         } else {
@@ -1383,7 +1414,7 @@ pub fn encode_spectral_frame_with_scratch(
     }
 
     Ok(CeltFrameEncodeResult {
-        data: enc.range_data().to_vec(),
+        data: enc.into_range_data(),
         allocation,
         tf_res: scratch.tf_res.clone(),
         collapse_masks: scratch.collapse_masks.clone(),

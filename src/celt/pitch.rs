@@ -22,6 +22,135 @@ pub struct PrefilterDecision {
     pub tapset: i32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ToneAnalysis {
+    pub frequency: f32,
+    pub toneishness: f32,
+}
+
+impl Default for ToneAnalysis {
+    fn default() -> Self {
+        Self {
+            frequency: -1.0,
+            toneishness: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PrefilterScratch {
+    pre: Vec<Vec<f32>>,
+    pitch_buf: Vec<f32>,
+    autocorr: Vec<f32>,
+    lpc: Vec<f32>,
+    x_lp4: Vec<f32>,
+    y_lp4: Vec<f32>,
+    xcorr: Vec<f32>,
+    yy_lookup: Vec<f32>,
+}
+
+fn tone_lpc(x: &[f32], delay: usize) -> Option<[f32; 2]> {
+    debug_assert!(x.len() > 2 * delay);
+    let len = x.len();
+    let mut r00 = 0.0f32;
+    let mut r01 = 0.0f32;
+    let mut r02 = 0.0f32;
+    for i in 0..len - 2 * delay {
+        r00 += x[i] * x[i];
+        r01 += x[i] * x[i + delay];
+        r02 += x[i] * x[i + 2 * delay];
+    }
+
+    let mut edges = 0.0f32;
+    for i in 0..delay {
+        edges += x[len + i - 2 * delay] * x[len + i - 2 * delay] - x[i] * x[i];
+    }
+    let r11 = r00 + edges;
+    edges = 0.0;
+    for i in 0..delay {
+        edges += x[len + i - delay] * x[len + i - delay] - x[i + delay] * x[i + delay];
+    }
+    let r22 = r11 + edges;
+    edges = 0.0;
+    for i in 0..delay {
+        edges += x[len + i - 2 * delay] * x[len + i - delay] - x[i] * x[i + delay];
+    }
+    let r12 = r01 + edges;
+
+    let reverse_r00 = r00 + r22;
+    let reverse_r01 = r01 + r12;
+    let reverse_r11 = 2.0 * r11;
+    let reverse_r02 = 2.0 * r02;
+    let reverse_r12 = r12 + r01;
+    r00 = reverse_r00;
+    r01 = reverse_r01;
+    let r11 = reverse_r11;
+    r02 = reverse_r02;
+    let r12 = reverse_r12;
+
+    let product = r00 * r11;
+    let denominator = product - r01 * r01;
+    if denominator < 0.001 * product {
+        return None;
+    }
+
+    let numerator1 = r02 * r11 - r01 * r12;
+    let lpc1 = (numerator1 / denominator).clamp(-1.0, 1.0);
+    let numerator0 = r00 * r12 - r02 * r01;
+    let lpc0 = (numerator0 / denominator).clamp(-1.999_999, 1.999_999);
+    Some([lpc0, lpc1])
+}
+
+pub fn tone_detect(
+    input: &[Vec<f32>],
+    channels: usize,
+    len: usize,
+    sample_rate: usize,
+    scratch: &mut Vec<f32>,
+) -> ToneAnalysis {
+    assert!((1..=2).contains(&channels));
+    assert!(input.len() >= channels);
+    assert!(input
+        .iter()
+        .take(channels)
+        .all(|channel| channel.len() >= len));
+
+    scratch.resize(len, 0.0);
+    let x = &mut scratch[..len];
+    if channels == 2 {
+        for (i, sample) in x.iter_mut().enumerate() {
+            *sample = input[0][i] + input[1][i];
+        }
+    } else {
+        x.copy_from_slice(&input[0][..len]);
+    }
+
+    let mut delay = 1usize;
+    let mut lpc = tone_lpc(x, delay);
+    while delay <= sample_rate / 3_000
+        && match lpc {
+            None => true,
+            Some(coefficients) => coefficients[0] > 1.0 && coefficients[1] < 0.0,
+        }
+    {
+        delay *= 2;
+        lpc = tone_lpc(x, delay);
+    }
+
+    let Some([lpc0, lpc1]) = lpc else {
+        return ToneAnalysis::default();
+    };
+    let discriminant = lpc0 * lpc0 + 3.999_999 * lpc1;
+    if !discriminant.is_finite() || discriminant >= 0.0 {
+        return ToneAnalysis::default();
+    }
+
+    ToneAnalysis {
+        frequency: (0.5 * lpc0).acos() / delay as f32,
+        toneishness: -lpc1,
+    }
+}
+
 fn inner_prod(x: &[f32], y: &[f32], len: usize) -> f32 {
     let mut acc = f32x4::ZERO;
     let mut i = 0usize;
@@ -40,8 +169,8 @@ fn inner_prod(x: &[f32], y: &[f32], len: usize) -> f32 {
     sum
 }
 
-fn autocorr(x: &[f32], lag: usize, n: usize) -> Vec<f32> {
-    let mut ac = vec![0.0f32; lag + 1];
+fn autocorr(x: &[f32], lag: usize, n: usize, ac: &mut Vec<f32>) {
+    ac.resize(lag + 1, 0.0);
     for k in 0..=lag {
         let mut sum = 0.0f32;
         for i in k..n {
@@ -49,11 +178,11 @@ fn autocorr(x: &[f32], lag: usize, n: usize) -> Vec<f32> {
         }
         ac[k] = sum;
     }
-    ac
 }
 
-fn celt_lpc(ac: &[f32], p: usize) -> Vec<f32> {
-    let mut lpc = vec![0.0f32; p];
+fn celt_lpc(ac: &[f32], p: usize, lpc: &mut Vec<f32>) {
+    lpc.resize(p, 0.0);
+    lpc[..p].fill(0.0);
     let mut error = ac[0];
     if ac[0] > 1e-10 {
         for i in 0..p {
@@ -76,7 +205,6 @@ fn celt_lpc(ac: &[f32], p: usize) -> Vec<f32> {
             }
         }
     }
-    lpc
 }
 
 fn celt_fir5(x: &mut [f32], num: &[f32; 5]) {
@@ -97,9 +225,16 @@ fn celt_fir5(x: &mut [f32], num: &[f32; 5]) {
     }
 }
 
-fn pitch_downsample(pre: &[Vec<f32>], len: usize, channels: usize) -> Vec<f32> {
+fn pitch_downsample(
+    pre: &[Vec<f32>],
+    len: usize,
+    channels: usize,
+    x_lp: &mut Vec<f32>,
+    ac: &mut Vec<f32>,
+    lpc: &mut Vec<f32>,
+) {
     let half_len = len >> 1;
-    let mut x_lp = vec![0.0f32; half_len];
+    x_lp.resize(half_len, 0.0);
     for i in 1..half_len {
         x_lp[i] = 0.25 * pre[0][2 * i - 1] + 0.25 * pre[0][2 * i + 1] + 0.5 * pre[0][2 * i];
     }
@@ -111,14 +246,14 @@ fn pitch_downsample(pre: &[Vec<f32>], len: usize, channels: usize) -> Vec<f32> {
         x_lp[0] += 0.25 * pre[1][1] + 0.5 * pre[1][0];
     }
 
-    let mut ac = autocorr(&x_lp, 4, half_len);
+    autocorr(x_lp, 4, half_len, ac);
     ac[0] *= 1.0001;
     for i in 1..=4 {
         ac[i] -= ac[i] * (0.008 * i as f32) * (0.008 * i as f32);
     }
-    let mut lpc = celt_lpc(&ac, 4);
+    celt_lpc(ac, 4, lpc);
     let mut tmp = 1.0f32;
-    for coef in &mut lpc {
+    for coef in lpc.iter_mut() {
         tmp *= 0.9;
         *coef *= tmp;
     }
@@ -129,16 +264,14 @@ fn pitch_downsample(pre: &[Vec<f32>], len: usize, channels: usize) -> Vec<f32> {
         lpc[3] + 0.8 * lpc[2],
         0.8 * lpc[3],
     ];
-    celt_fir5(&mut x_lp, &lpc2);
-    x_lp
+    celt_fir5(x_lp, &lpc2);
 }
 
-fn pitch_xcorr(x: &[f32], y: &[f32], len: usize, max_pitch: usize) -> Vec<f32> {
-    let mut xcorr = vec![0.0f32; max_pitch];
+fn pitch_xcorr(x: &[f32], y: &[f32], len: usize, max_pitch: usize, xcorr: &mut Vec<f32>) {
+    xcorr.resize(max_pitch, 0.0);
     for i in 0..max_pitch {
         xcorr[i] = inner_prod(x, &y[i..], len);
     }
-    xcorr
 }
 
 fn find_best_pitch(xcorr: &[f32], y: &[f32], len: usize, max_pitch: usize) -> [usize; 2] {
@@ -176,10 +309,18 @@ fn find_best_pitch(xcorr: &[f32], y: &[f32], len: usize, max_pitch: usize) -> [u
     best_pitch
 }
 
-fn pitch_search(x_lp: &[f32], y: &[f32], len: usize, max_pitch: usize) -> usize {
+fn pitch_search(
+    x_lp: &[f32],
+    y: &[f32],
+    len: usize,
+    max_pitch: usize,
+    x_lp4: &mut Vec<f32>,
+    y_lp4: &mut Vec<f32>,
+    xcorr: &mut Vec<f32>,
+) -> usize {
     let lag = len + max_pitch;
-    let mut x_lp4 = vec![0.0f32; len >> 2];
-    let mut y_lp4 = vec![0.0f32; lag >> 2];
+    x_lp4.resize(len >> 2, 0.0);
+    y_lp4.resize(lag >> 2, 0.0);
     for j in 0..len >> 2 {
         x_lp4[j] = x_lp[2 * j];
     }
@@ -187,10 +328,11 @@ fn pitch_search(x_lp: &[f32], y: &[f32], len: usize, max_pitch: usize) -> usize 
         y_lp4[j] = y[2 * j];
     }
 
-    let mut xcorr = pitch_xcorr(&x_lp4, &y_lp4, len >> 2, max_pitch >> 2);
-    let best_pitch = find_best_pitch(&xcorr, &y_lp4, len >> 2, max_pitch >> 2);
+    pitch_xcorr(x_lp4, y_lp4, len >> 2, max_pitch >> 2, xcorr);
+    let best_pitch = find_best_pitch(xcorr, y_lp4, len >> 2, max_pitch >> 2);
 
-    xcorr = vec![0.0f32; max_pitch >> 1];
+    xcorr.resize(max_pitch >> 1, 0.0);
+    xcorr[..max_pitch >> 1].fill(0.0);
     for i in 0..max_pitch >> 1 {
         if (i as isize - 2 * best_pitch[0] as isize).abs() > 2
             && (i as isize - 2 * best_pitch[1] as isize).abs() > 2
@@ -199,7 +341,7 @@ fn pitch_search(x_lp: &[f32], y: &[f32], len: usize, max_pitch: usize) -> usize 
         }
         xcorr[i] = inner_prod(x_lp, &y[i..], len >> 1).max(-1.0);
     }
-    let best_pitch = find_best_pitch(&xcorr, y, len >> 1, max_pitch >> 1);
+    let best_pitch = find_best_pitch(xcorr, y, len >> 1, max_pitch >> 1);
 
     let offset = if best_pitch[0] > 0 && best_pitch[0] < (max_pitch >> 1) - 1 {
         let a = xcorr[best_pitch[0] - 1];
@@ -254,6 +396,7 @@ fn remove_doubling(
     t0: &mut usize,
     prev_period: usize,
     prev_gain: f32,
+    yy_lookup: &mut Vec<f32>,
 ) -> f32 {
     let minperiod0 = minperiod;
     let maxperiod = maxperiod / 2;
@@ -269,7 +412,7 @@ fn remove_doubling(
     let t0_initial = *t0;
     let mut t = t0_initial;
     let (xx, xy0) = dual_inner_prod(&x[base..], &x[base..], &x[base - t0_initial..], n);
-    let mut yy_lookup = vec![0.0f32; maxperiod + 1];
+    yy_lookup.resize(maxperiod + 1, 0.0);
     yy_lookup[0] = xx;
     let mut yy = xx;
     for i in 1..=maxperiod {
@@ -506,7 +649,25 @@ pub fn comb_filter_in_place(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+fn should_cancel_pitch_filter(
+    before: &[f32; 2],
+    after: &[f32; 2],
+    channels: usize,
+    gain: f32,
+) -> bool {
+    debug_assert!((1..=2).contains(&channels));
+    if channels == 1 {
+        return after[0] > before[0];
+    }
+
+    let threshold0 = 0.25 * gain * before[0] + 0.01 * before[1];
+    let threshold1 = 0.25 * gain * before[1] + 0.01 * before[0];
+    after[0] - before[0] > threshold0
+        || after[1] - before[1] > threshold1
+        || (before[0] - after[0] < threshold0 && before[1] - after[1] < threshold1)
+}
+
+#[allow(clippy::approx_constant, clippy::too_many_arguments)]
 pub fn run_prefilter(
     mode: &CeltMode,
     input: &mut [Vec<f32>],
@@ -516,38 +677,71 @@ pub fn run_prefilter(
     prev_tapset: usize,
     prefilter_tapset: usize,
     enabled: bool,
+    tf_estimate: f32,
+    mut tone_frequency: f32,
+    toneishness: f32,
     max_pitch_ratio: Option<f32>,
     packet_bytes: usize,
     channels: usize,
     n: usize,
+    scratch: &mut PrefilterScratch,
 ) -> (PrefilterDecision, f32) {
     let overlap = mode.overlap;
-    let mut pre = vec![vec![0.0f32; n + COMBFILTER_MAXPERIOD]; channels];
+    scratch.pre.resize_with(channels, Vec::new);
     for c in 0..channels {
-        pre[c][..COMBFILTER_MAXPERIOD].copy_from_slice(&prefilter_mem[c]);
-        pre[c][COMBFILTER_MAXPERIOD..COMBFILTER_MAXPERIOD + n]
+        scratch.pre[c].resize(n + COMBFILTER_MAXPERIOD, 0.0);
+        scratch.pre[c][..COMBFILTER_MAXPERIOD].copy_from_slice(&prefilter_mem[c]);
+        scratch.pre[c][COMBFILTER_MAXPERIOD..COMBFILTER_MAXPERIOD + n]
             .copy_from_slice(&input[c][overlap..overlap + n]);
     }
 
     let mut pitch_index = COMBFILTER_MINPERIOD;
     let mut gain1 = 0.0f32;
-    if enabled {
-        let pitch_buf = pitch_downsample(&pre, COMBFILTER_MAXPERIOD + n, channels);
+    if enabled && toneishness > 0.99 {
+        let mut multiple = 1usize;
+        // Keep this threshold slightly above PI for the 48 kHz path.
+        if tone_frequency >= 3.1416 {
+            tone_frequency = core::f32::consts::PI - tone_frequency;
+        }
+        while tone_frequency >= multiple as f32 * 0.39 {
+            multiple += 1;
+        }
+        if tone_frequency > 0.006_148 {
+            pitch_index = ((2.0 * core::f32::consts::PI * multiple as f32 / tone_frequency + 0.5)
+                .floor() as usize)
+                .min(COMBFILTER_MAXPERIOD - 2);
+        } else {
+            pitch_index = COMBFILTER_MINPERIOD;
+        }
+        gain1 = 0.75;
+    } else if enabled {
+        pitch_downsample(
+            &scratch.pre,
+            COMBFILTER_MAXPERIOD + n,
+            channels,
+            &mut scratch.pitch_buf,
+            &mut scratch.autocorr,
+            &mut scratch.lpc,
+        );
         let pitch = pitch_search(
-            &pitch_buf[COMBFILTER_MAXPERIOD >> 1..],
-            &pitch_buf,
+            &scratch.pitch_buf[COMBFILTER_MAXPERIOD >> 1..],
+            &scratch.pitch_buf,
             n,
             COMBFILTER_MAXPERIOD - 3 * COMBFILTER_MINPERIOD,
+            &mut scratch.x_lp4,
+            &mut scratch.y_lp4,
+            &mut scratch.xcorr,
         );
         pitch_index = COMBFILTER_MAXPERIOD - pitch;
         gain1 = remove_doubling(
-            &pitch_buf,
+            &scratch.pitch_buf,
             COMBFILTER_MAXPERIOD,
             COMBFILTER_MINPERIOD,
             n,
             &mut pitch_index,
             prev_period,
             prev_gain,
+            &mut scratch.yy_lookup,
         );
         pitch_index = pitch_index.min(COMBFILTER_MAXPERIOD - 2);
         gain1 *= 0.7;
@@ -559,6 +753,9 @@ pub fn run_prefilter(
     let mut threshold = 0.2f32;
     if (pitch_index as isize - prev_period as isize).abs() * 10 > pitch_index as isize {
         threshold += 0.2;
+        if tf_estimate > 0.98 {
+            gain1 = 0.0;
+        }
     }
     if packet_bytes < 25 {
         threshold += 0.1;
@@ -574,7 +771,7 @@ pub fn run_prefilter(
     }
     threshold = threshold.max(0.2);
 
-    let (enabled, qgain) = if gain1 < threshold {
+    let (mut enabled, mut qgain) = if gain1 < threshold {
         gain1 = 0.0;
         (false, 0)
     } else {
@@ -586,6 +783,13 @@ pub fn run_prefilter(
         (true, qgain)
     };
 
+    let mut before = [0.0f32; 2];
+    for c in 0..channels {
+        before[c] = input[c][overlap..overlap + n]
+            .iter()
+            .map(|sample| sample.abs())
+            .sum();
+    }
     let offset = mode.short_mdct_size - overlap;
     for c in 0..channels {
         let period = prev_period.max(COMBFILTER_MINPERIOD);
@@ -593,7 +797,7 @@ pub fn run_prefilter(
             comb_filter(
                 &mut input[c],
                 overlap,
-                &pre[c],
+                &scratch.pre[c],
                 COMBFILTER_MAXPERIOD,
                 period,
                 period,
@@ -609,7 +813,7 @@ pub fn run_prefilter(
         comb_filter(
             &mut input[c],
             overlap + offset,
-            &pre[c],
+            &scratch.pre[c],
             COMBFILTER_MAXPERIOD + offset,
             period,
             pitch_index,
@@ -621,13 +825,49 @@ pub fn run_prefilter(
             Some(&mode.window),
             overlap,
         );
+    }
 
+    let mut after = [0.0f32; 2];
+    for c in 0..channels {
+        after[c] = input[c][overlap..overlap + n]
+            .iter()
+            .map(|sample| sample.abs())
+            .sum();
+    }
+    let cancel_pitch = should_cancel_pitch_filter(&before, &after, channels, gain1);
+
+    if cancel_pitch {
+        for c in 0..channels {
+            input[c][overlap..overlap + n]
+                .copy_from_slice(&scratch.pre[c][COMBFILTER_MAXPERIOD..COMBFILTER_MAXPERIOD + n]);
+            comb_filter(
+                &mut input[c],
+                overlap + offset,
+                &scratch.pre[c],
+                COMBFILTER_MAXPERIOD + offset,
+                prev_period.max(COMBFILTER_MINPERIOD),
+                pitch_index,
+                overlap,
+                -prev_gain,
+                0.0,
+                prev_tapset,
+                prefilter_tapset,
+                Some(&mode.window),
+                overlap,
+            );
+        }
+        gain1 = 0.0;
+        enabled = false;
+        qgain = 0;
+    }
+
+    for c in 0..channels {
         if n > COMBFILTER_MAXPERIOD {
-            prefilter_mem[c].copy_from_slice(&pre[c][n..n + COMBFILTER_MAXPERIOD]);
+            prefilter_mem[c].copy_from_slice(&scratch.pre[c][n..n + COMBFILTER_MAXPERIOD]);
         } else {
             prefilter_mem[c].copy_within(n..COMBFILTER_MAXPERIOD, 0);
             prefilter_mem[c][COMBFILTER_MAXPERIOD - n..COMBFILTER_MAXPERIOD]
-                .copy_from_slice(&pre[c][COMBFILTER_MAXPERIOD..COMBFILTER_MAXPERIOD + n]);
+                .copy_from_slice(&scratch.pre[c][COMBFILTER_MAXPERIOD..COMBFILTER_MAXPERIOD + n]);
         }
     }
 
@@ -640,4 +880,40 @@ pub fn run_prefilter(
         },
         gain1,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_cancel_pitch_filter, tone_detect};
+
+    #[test]
+    fn pitch_filter_requires_a_material_channel_benefit() {
+        let before = [100.0, 100.0];
+
+        assert!(should_cancel_pitch_filter(&before, &[114.0, 80.0], 2, 0.5));
+        assert!(should_cancel_pitch_filter(&before, &[90.0, 90.0], 2, 0.5));
+        assert!(!should_cancel_pitch_filter(&before, &[80.0, 100.0], 2, 0.5));
+        assert!(should_cancel_pitch_filter(&before, &[101.0, 0.0], 1, 0.5));
+        assert!(!should_cancel_pitch_filter(&before, &[99.0, 0.0], 1, 0.5));
+    }
+
+    #[test]
+    fn tone_detector_finds_a_pure_tone_and_rejects_silence() {
+        let sample_rate = 48_000usize;
+        let frequency_hz = 1_000.0f32;
+        let angular_frequency = 2.0 * core::f32::consts::PI * frequency_hz / sample_rate as f32;
+        let input = vec![(0..1_080)
+            .map(|sample| (angular_frequency * sample as f32).sin())
+            .collect::<Vec<_>>()];
+        let mut scratch = Vec::new();
+
+        let tone = tone_detect(&input, 1, input[0].len(), sample_rate, &mut scratch);
+        assert!(tone.toneishness > 0.999);
+        assert!((tone.frequency - angular_frequency).abs() < 1e-4);
+
+        let silence = vec![vec![0.0; input[0].len()]];
+        let tone = tone_detect(&silence, 1, silence[0].len(), sample_rate, &mut scratch);
+        assert_eq!(tone.frequency, -1.0);
+        assert_eq!(tone.toneishness, 0.0);
+    }
 }

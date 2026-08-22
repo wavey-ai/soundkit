@@ -4,8 +4,8 @@ use crate::celt::codec::{
 use crate::celt::modes::CeltMode;
 use crate::celt::pitch::{comb_filter_in_place, COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD};
 use crate::celt::synthesis::{
-    celt_synthesis_with_overlap_into, deemphasis_interleaved_i16_into, deemphasis_interleaved_into,
-    SynthesisScratch,
+    celt_synthesis_with_overlap_into, deemphasis_interleaved_i16_into,
+    deemphasis_interleaved_i24_into, deemphasis_interleaved_into, SynthesisScratch,
 };
 use crate::constants::{valid_channels, valid_sample_rate, Bandwidth};
 use crate::packet;
@@ -92,6 +92,30 @@ impl Decoder {
     ) -> Result<usize> {
         let channels = self.decode_channels(packet, decode_fec)?;
         deemphasis_interleaved_i16_into(
+            &self.mode,
+            &self.synthesis_channels[..channels],
+            &mut self.preemph_mem,
+            pcm,
+        )?;
+        Ok(pcm.len() / channels)
+    }
+
+    /// Decodes to signed 24-bit PCM stored sign-extended in `i32` samples.
+    pub fn decode_i24(&mut self, packet: &[u8], decode_fec: bool) -> Result<Vec<i32>> {
+        let mut pcm = Vec::new();
+        self.decode_i24_into(packet, decode_fec, &mut pcm)?;
+        Ok(pcm)
+    }
+
+    /// Decodes into signed 24-bit PCM stored sign-extended in `i32` samples.
+    pub fn decode_i24_into(
+        &mut self,
+        packet: &[u8],
+        decode_fec: bool,
+        pcm: &mut Vec<i32>,
+    ) -> Result<usize> {
+        let channels = self.decode_channels(packet, decode_fec)?;
+        deemphasis_interleaved_i24_into(
             &self.mode,
             &self.synthesis_channels[..channels],
             &mut self.preemph_mem,

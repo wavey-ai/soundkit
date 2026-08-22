@@ -136,11 +136,7 @@ for JS callers that want to avoid cloning the result. To capture a Chrome CPU
 profile around a Rust decode loop, run a single Rust case with
 `--profile-rust-decode /tmp/rust-decode.cpuprofile.json`.
 
-A full-track browser API comparison was run on:
-
-```text
-/Users/jamie/Downloads/Lori Asha - Lori Asha Album Premix/02 - Lori Asha - Westside.mp3
-```
+A full-track browser API comparison used the *Westside* premix source.
 
 The source was decoded and resampled once with `ffmpeg` to identical `48 kHz`
 stereo `s16` PCM, then encoded and decoded in Node.js with 20 ms frames through

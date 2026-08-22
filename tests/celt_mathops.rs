@@ -163,3 +163,16 @@ fn official_float_to_i16_and_limit2_behaviour() {
         assert_eq!(buffer[i], if pattern[i] > 0.0 { 2.0 } else { -2.0 });
     }
 }
+
+#[test]
+fn signed_24_bit_pcm_conversion_rounds_and_clamps() {
+    let scale = 1.0 / 8_388_608.0;
+    assert_eq!(float_to_i24(-2.0), -8_388_608);
+    assert_eq!(float_to_i24(-1.0), -8_388_608);
+    assert_eq!(float_to_i24(-0.501 * scale), -1);
+    assert_eq!(float_to_i24(-0.499 * scale), 0);
+    assert_eq!(float_to_i24(0.499 * scale), 0);
+    assert_eq!(float_to_i24(0.501 * scale), 1);
+    assert_eq!(float_to_i24(1.0), 8_388_607);
+    assert_eq!(float_to_i24(2.0), 8_388_607);
+}

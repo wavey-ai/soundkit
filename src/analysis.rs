@@ -31,6 +31,14 @@ pub(crate) struct AnalysisInfo {
     pub leak_boost: [u8; LEAK_BANDS],
 }
 
+#[derive(Clone, Debug, Default)]
+struct TonalityAnalysisScratch {
+    downmix_tmp: Vec<f32>,
+    resampled: Vec<f32>,
+    fft_input: Vec<KissFftCpx>,
+    fft_output: Vec<KissFftCpx>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct TonalityAnalysisState {
     angle: [f32; 240],
@@ -56,6 +64,7 @@ pub(crate) struct TonalityAnalysisState {
     downmix_state: [f32; 3],
     info: [AnalysisInfo; DETECT_SIZE],
     fft: KissFftState,
+    scratch: TonalityAnalysisScratch,
 }
 
 impl TonalityAnalysisState {
@@ -84,6 +93,7 @@ impl TonalityAnalysisState {
             downmix_state: [0.0; 3],
             info: [AnalysisInfo::default(); DETECT_SIZE],
             fft: KissFftState::new(480).expect("480-point analysis FFT is supported"),
+            scratch: TonalityAnalysisScratch::default(),
         }
     }
 
@@ -125,6 +135,7 @@ impl TonalityAnalysisState {
         subframe_24k: usize,
         offset_24k: usize,
         channels: usize,
+        tmp: &mut Vec<f32>,
     ) -> f32 {
         if subframe_24k == 0 {
             return 0.0;
@@ -132,7 +143,7 @@ impl TonalityAnalysisState {
 
         let subframe = subframe_24k * 2;
         let offset = offset_24k * 2;
-        let mut tmp = vec![0.0f32; subframe];
+        tmp.resize(subframe, 0.0);
         for j in 0..subframe {
             let frame = offset + j;
             let mut sample = pcm[frame * channels];
@@ -179,6 +190,19 @@ impl TonalityAnalysisState {
         offset_48k: usize,
         channels: usize,
     ) {
+        let mut scratch = std::mem::take(&mut self.scratch);
+        self.tonality_analysis_with_scratch(pcm, len_48k, offset_48k, channels, &mut scratch);
+        self.scratch = scratch;
+    }
+
+    fn tonality_analysis_with_scratch(
+        &mut self,
+        pcm: &[f32],
+        len_48k: usize,
+        offset_48k: usize,
+        channels: usize,
+        scratch: &mut TonalityAnalysisScratch,
+    ) {
         if !self.initialized {
             self.mem_fill = 240;
             self.initialized = true;
@@ -187,9 +211,16 @@ impl TonalityAnalysisState {
         let len = len_48k / 2;
         let offset = offset_48k / 2;
         let writable = len.min(ANALYSIS_BUF_SIZE - self.mem_fill);
-        let mut first = vec![0.0f32; writable];
-        let hp_ener_first = self.downmix_and_resample(pcm, &mut first, writable, offset, channels);
-        self.inmem[self.mem_fill..self.mem_fill + writable].copy_from_slice(&first);
+        scratch.resampled.resize(writable, 0.0);
+        let hp_ener_first = self.downmix_and_resample(
+            pcm,
+            &mut scratch.resampled,
+            writable,
+            offset,
+            channels,
+            &mut scratch.downmix_tmp,
+        );
+        self.inmem[self.mem_fill..self.mem_fill + writable].copy_from_slice(&scratch.resampled);
         self.hp_ener_accum += hp_ener_first;
         if self.mem_fill + len < ANALYSIS_BUF_SIZE {
             self.mem_fill += len;
@@ -206,35 +237,43 @@ impl TonalityAnalysisState {
             return;
         }
 
-        let mut input = vec![KissFftCpx::default(); 480];
-        let mut output = vec![KissFftCpx::default(); 480];
+        scratch.fft_input.resize(480, KissFftCpx::default());
+        scratch.fft_input[..480].fill(KissFftCpx::default());
+        scratch.fft_output.resize(480, KissFftCpx::default());
+        scratch.fft_output[..480].fill(KissFftCpx::default());
         for i in 0..240 {
             let w = Self::analysis_window(i);
-            input[i].r = w * self.inmem[i];
-            input[i].i = w * self.inmem[240 + i];
-            input[480 - i - 1].r = w * self.inmem[480 - i - 1];
-            input[480 - i - 1].i = w * self.inmem[720 - i - 1];
+            scratch.fft_input[i].r = w * self.inmem[i];
+            scratch.fft_input[i].i = w * self.inmem[240 + i];
+            scratch.fft_input[480 - i - 1].r = w * self.inmem[480 - i - 1];
+            scratch.fft_input[480 - i - 1].i = w * self.inmem[720 - i - 1];
         }
 
         self.inmem
             .copy_within(ANALYSIS_BUF_SIZE - 240..ANALYSIS_BUF_SIZE, 0);
         let remaining = len - (ANALYSIS_BUF_SIZE - self.mem_fill);
-        let mut rest = vec![0.0f32; remaining];
-        self.hp_ener_accum =
-            self.downmix_and_resample(pcm, &mut rest, remaining, offset + writable, channels);
-        self.inmem[240..240 + remaining].copy_from_slice(&rest);
+        scratch.resampled.resize(remaining, 0.0);
+        self.hp_ener_accum = self.downmix_and_resample(
+            pcm,
+            &mut scratch.resampled,
+            remaining,
+            offset + writable,
+            channels,
+            &mut scratch.downmix_tmp,
+        );
+        self.inmem[240..240 + remaining].copy_from_slice(&scratch.resampled);
         self.mem_fill = 240 + remaining;
 
-        opus_fft(&self.fft, &input, &mut output);
+        opus_fft(&self.fft, &scratch.fft_input, &mut scratch.fft_output);
 
-        let mut tonality = vec![0.0f32; 240];
-        let mut tonality2 = vec![0.0f32; 240];
-        let mut noisiness = vec![0.0f32; 240];
+        let mut tonality = [0.0f32; 240];
+        let mut tonality2 = [0.0f32; 240];
+        let mut noisiness = [0.0f32; 240];
         for i in 1..240 {
-            let x1r = output[i].r + output[480 - i].r;
-            let x1i = output[i].i - output[480 - i].i;
-            let x2r = output[i].i + output[480 - i].i;
-            let x2i = output[480 - i].r - output[i].r;
+            let x1r = scratch.fft_output[i].r + scratch.fft_output[480 - i].r;
+            let x1i = scratch.fft_output[i].i - scratch.fft_output[480 - i].i;
+            let x2r = scratch.fft_output[i].i + scratch.fft_output[480 - i].i;
+            let x2i = scratch.fft_output[480 - i].r - scratch.fft_output[i].r;
 
             let angle = ANALYSIS_INV_2PI * fast_atan2f(x1i, x1r);
             let d_angle = angle - self.angle[i];
@@ -282,12 +321,13 @@ impl TonalityAnalysisState {
         let mut band_log2 = [0.0f32; NB_TBANDS + 1];
         let mut leakage_from = [0.0f32; NB_TBANDS + 1];
         let mut leakage_to = [0.0f32; NB_TBANDS + 1];
-        let mut first_band_energy = (2.0 * output[0].r).powi(2) + (2.0 * output[0].i).powi(2);
+        let mut first_band_energy =
+            (2.0 * scratch.fft_output[0].r).powi(2) + (2.0 * scratch.fft_output[0].i).powi(2);
         for i in 1..4 {
-            first_band_energy += output[i].r * output[i].r
-                + output[480 - i].r * output[480 - i].r
-                + output[i].i * output[i].i
-                + output[480 - i].i * output[480 - i].i;
+            first_band_energy += scratch.fft_output[i].r * scratch.fft_output[i].r
+                + scratch.fft_output[480 - i].r * scratch.fft_output[480 - i].r
+                + scratch.fft_output[i].i * scratch.fft_output[i].i
+                + scratch.fft_output[480 - i].i * scratch.fft_output[480 - i].i;
         }
         band_log2[0] = Self::half_log2_energy(first_band_energy * INV_CELT_SIG_SCALE_SQUARED);
 
@@ -304,10 +344,10 @@ impl TonalityAnalysisState {
             let mut tonal_energy = 0.0f32;
             let mut noise_energy = 0.0f32;
             for i in TBANDS[b]..TBANDS[b + 1] {
-                let raw_bin_energy = output[i].r * output[i].r
-                    + output[480 - i].r * output[480 - i].r
-                    + output[i].i * output[i].i
-                    + output[480 - i].i * output[480 - i].i;
+                let raw_bin_energy = scratch.fft_output[i].r * scratch.fft_output[i].r
+                    + scratch.fft_output[480 - i].r * scratch.fft_output[480 - i].r
+                    + scratch.fft_output[i].i * scratch.fft_output[i].i
+                    + scratch.fft_output[480 - i].i * scratch.fft_output[480 - i].i;
                 let bin_energy = raw_bin_energy * INV_CELT_SIG_SCALE_SQUARED;
                 energy += bin_energy;
                 tonal_energy += bin_energy * tonality[i].max(0.0);

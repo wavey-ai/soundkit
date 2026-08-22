@@ -148,6 +148,11 @@ pub fn float_to_i16(x: f32) -> i16 {
     (x + 0.5).floor() as i16
 }
 
+pub fn float_to_i24(x: f32) -> i32 {
+    let x = (x * 8_388_608.0).clamp(-8_388_608.0, 8_388_607.0);
+    (x + 0.5).floor() as i32
+}
+
 pub fn celt_float2int16(input: &[f32], output: &mut [i16]) {
     assert!(output.len() >= input.len());
     for (out, value) in output.iter_mut().zip(input.iter()) {

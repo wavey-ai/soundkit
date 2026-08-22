@@ -11,9 +11,9 @@ const LOG2_FRAC_TABLE: [i32; 24] = [
     0, 8, 13, 16, 19, 21, 23, 24, 26, 27, 28, 29, 30, 31, 32, 32, 33, 34, 34, 35, 36, 36, 37, 37,
 ];
 
-pub enum AllocationCoder<'a> {
+pub enum AllocationCoder<'a, 'buf> {
     Encode(&'a mut RangeEncoder),
-    Decode(&'a mut RangeDecoder),
+    Decode(&'a mut RangeDecoder<'buf>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,7 +96,7 @@ fn interp_bits2pulses(
     fine_priority: &mut [i32],
     c: usize,
     lm: usize,
-    mut coder: Option<&mut AllocationCoder<'_>>,
+    mut coder: Option<&mut AllocationCoder<'_, '_>>,
     prev: usize,
     signal_bandwidth: usize,
 ) -> (usize, i32) {
@@ -320,7 +320,7 @@ pub fn clt_compute_allocation(
     total: i32,
     channels: usize,
     lm: usize,
-    coder: Option<&mut AllocationCoder<'_>>,
+    coder: Option<&mut AllocationCoder<'_, '_>>,
     prev: usize,
     signal_bandwidth: usize,
 ) -> Allocation {
@@ -358,7 +358,7 @@ pub fn clt_compute_allocation_with_scratch(
     total: i32,
     channels: usize,
     lm: usize,
-    coder: Option<&mut AllocationCoder<'_>>,
+    coder: Option<&mut AllocationCoder<'_, '_>>,
     prev: usize,
     signal_bandwidth: usize,
     scratch: &mut AllocationScratch,

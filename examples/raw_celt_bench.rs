@@ -15,6 +15,12 @@ enum BenchMode {
     Vbr,
 }
 
+#[derive(Clone, Copy)]
+enum BenchFixture {
+    Mixed,
+    Tone,
+}
+
 impl BenchMode {
     const fn label(self) -> &'static str {
         match self {
@@ -30,6 +36,9 @@ struct Options {
     seconds: usize,
     mode: Option<BenchMode>,
     dump_packets: Option<usize>,
+    frame_size: Option<usize>,
+    bitrate: Option<i32>,
+    fixture: BenchFixture,
 }
 
 struct EncodeResult {
@@ -42,7 +51,7 @@ struct EncodeResult {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: raw_celt_bench [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--dump-packets n]"
+        "usage: raw_celt_bench [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--frame-size n] [--bitrate n] [--fixture mixed|tone] [--dump-packets n]"
     );
     std::process::exit(2);
 }
@@ -53,6 +62,9 @@ fn parse_options() -> Options {
         seconds: 4,
         mode: None,
         dump_packets: None,
+        frame_size: None,
+        bitrate: None,
+        fixture: BenchFixture::Mixed,
     };
     let args = env::args().collect::<Vec<_>>();
     let mut i = 1usize;
@@ -89,6 +101,36 @@ fn parse_options() -> Options {
                         .unwrap_or_else(|| usage()),
                 );
             }
+            "--frame-size" => {
+                i += 1;
+                let frame_size = args
+                    .get(i)
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or_else(|| usage());
+                if !CELT_FRAME_SIZES_48K.contains(&frame_size) {
+                    usage();
+                }
+                options.frame_size = Some(frame_size);
+            }
+            "--bitrate" => {
+                i += 1;
+                let bitrate = args
+                    .get(i)
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or_else(|| usage());
+                if !BITRATES.contains(&bitrate) {
+                    usage();
+                }
+                options.bitrate = Some(bitrate);
+            }
+            "--fixture" => {
+                i += 1;
+                options.fixture = match args.get(i).map(String::as_str) {
+                    Some("mixed") => BenchFixture::Mixed,
+                    Some("tone") => BenchFixture::Tone,
+                    _ => usage(),
+                };
+            }
             _ => usage(),
         }
         i += 1;
@@ -107,7 +149,7 @@ fn modes(options: &Options) -> &'static [BenchMode] {
     }
 }
 
-fn generate_fixture(seconds: usize) -> Vec<f32> {
+fn generate_mixed_fixture(seconds: usize) -> Vec<f32> {
     let frames = SAMPLE_RATE * seconds;
     let mut pcm = Vec::with_capacity(frames * CHANNELS);
     let mut noise = 0x1234_5678u32;
@@ -130,6 +172,24 @@ fn generate_fixture(seconds: usize) -> Vec<f32> {
         pcm.push(right.clamp(-1.0, 1.0));
     }
     pcm
+}
+
+fn generate_tone_fixture(seconds: usize) -> Vec<f32> {
+    let frames = SAMPLE_RATE * seconds;
+    let mut pcm = Vec::with_capacity(frames * CHANNELS);
+    for i in 0..frames {
+        let phase = 6.283_185_307_179_586 * i as f64 / 48.0;
+        pcm.push((0.25 * phase.sin()) as f32);
+        pcm.push((0.22 * (phase + 0.2).sin()) as f32);
+    }
+    pcm
+}
+
+fn generate_fixture(seconds: usize, fixture: BenchFixture) -> Vec<f32> {
+    match fixture {
+        BenchFixture::Mixed => generate_mixed_fixture(seconds),
+        BenchFixture::Tone => generate_tone_fixture(seconds),
+    }
 }
 
 fn centered_u16(value: u32) -> f32 {
@@ -357,7 +417,17 @@ fn dump_packets(
     println!("impl\tmode\tframe_size\tframe_ms\tbitrate\tframe\tlen\thex");
     for &mode in modes(options) {
         for &frame_size in &CELT_FRAME_SIZES_48K {
+            if let Some(selected) = options.frame_size {
+                if selected != frame_size {
+                    continue;
+                }
+            }
             for &bitrate in &BITRATES {
+                if let Some(selected) = options.bitrate {
+                    if selected != bitrate {
+                        continue;
+                    }
+                }
                 let encoded = encode_packets(pcm, frame_size, bitrate, mode)?;
                 for (frame, packet) in encoded.packets.iter().take(limit).enumerate() {
                     print!(
@@ -379,7 +449,7 @@ fn dump_packets(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = parse_options();
-    let pcm = generate_fixture(options.seconds);
+    let pcm = generate_fixture(options.seconds, options.fixture);
     if let Some(limit) = options.dump_packets {
         return dump_packets(&pcm, &options, limit);
     }
@@ -387,7 +457,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("impl\tmode\tframe_size\tframe_ms\tbitrate\tencode_ms\tdecode_ms\tbytes\tmin_packet\tmax_packet\tchecksum\tquality_lag\tquality_snr_db");
     for &mode in modes(&options) {
         for &frame_size in &CELT_FRAME_SIZES_48K {
+            if let Some(selected) = options.frame_size {
+                if selected != frame_size {
+                    continue;
+                }
+            }
             for &bitrate in &BITRATES {
+                if let Some(selected) = options.bitrate {
+                    if selected != bitrate {
+                        continue;
+                    }
+                }
                 let (encode_ms, bytes, min_packet, max_packet, encode_checksum) =
                     time_encode(&pcm, frame_size, bitrate, mode, options.repeats)?;
                 let encoded = encode_packets(&pcm, frame_size, bitrate, mode)?;

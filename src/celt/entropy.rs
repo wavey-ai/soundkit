@@ -51,8 +51,14 @@ pub struct RangeEncoder {
 
 impl RangeEncoder {
     pub fn new(size: usize) -> Self {
+        Self::with_extra_capacity(size, 0)
+    }
+
+    pub(crate) fn with_extra_capacity(size: usize, extra_capacity: usize) -> Self {
+        let mut buf = Vec::with_capacity(size.saturating_add(extra_capacity));
+        buf.resize(size, 0);
         Self {
-            buf: vec![0; size],
+            buf,
             storage: size as u32,
             end_offs: 0,
             end_window: 0,
@@ -73,6 +79,11 @@ impl RangeEncoder {
 
     pub fn range_data(&self) -> &[u8] {
         self.buffer()
+    }
+
+    pub(crate) fn into_range_data(mut self) -> Vec<u8> {
+        self.buf.truncate(self.storage as usize);
+        self.buf
     }
 
     pub fn range_bytes(&self) -> u32 {
@@ -335,8 +346,8 @@ impl RangeEncoder {
 }
 
 #[derive(Clone, Debug)]
-pub struct RangeDecoder {
-    buf: Vec<u8>,
+pub struct RangeDecoder<'a> {
+    buf: &'a [u8],
     storage: u32,
     end_offs: u32,
     end_window: u32,
@@ -350,10 +361,10 @@ pub struct RangeDecoder {
     error: i32,
 }
 
-impl RangeDecoder {
-    pub fn new(buf: &[u8]) -> Self {
+impl<'a> RangeDecoder<'a> {
+    pub fn new(buf: &'a [u8]) -> Self {
         let mut dec = Self {
-            buf: buf.to_vec(),
+            buf,
             storage: buf.len() as u32,
             end_offs: 0,
             end_window: 0,

@@ -57,3 +57,8 @@ pub fn valid_sample_rate(fs: i32) -> bool {
 pub fn valid_channels(channels: i32) -> bool {
     matches!(channels, 1 | 2)
 }
+
+/// Lowest signed 24-bit PCM value when samples are stored in `i32`.
+pub const PCM_I24_MIN: i32 = -(1 << 23);
+/// Highest signed 24-bit PCM value when samples are stored in `i32`.
+pub const PCM_I24_MAX: i32 = (1 << 23) - 1;

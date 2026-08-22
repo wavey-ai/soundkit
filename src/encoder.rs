@@ -8,9 +8,12 @@ use crate::celt::codec::{
 use crate::celt::mathops::{celt_log2, celt_sqrt};
 use crate::celt::mdct::{clt_mdct_forward_with_scratch, MdctScratch};
 use crate::celt::modes::CeltMode;
-use crate::celt::pitch::{run_prefilter, COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD};
+use crate::celt::pitch::{
+    run_prefilter, tone_detect, PrefilterScratch, ToneAnalysis, COMBFILTER_MAXPERIOD,
+    COMBFILTER_MINPERIOD,
+};
 use crate::celt::quant_bands::{amp2_log2, E_MEANS};
-use crate::constants::{valid_channels, valid_sample_rate};
+use crate::constants::{valid_channels, valid_sample_rate, PCM_I24_MAX, PCM_I24_MIN};
 use crate::packet;
 use crate::{Error, Result};
 
@@ -43,6 +46,25 @@ struct TransientAnalysis {
     is_transient: bool,
     tf_estimate: f32,
     tf_chan: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SpreadAnalysisScratch {
+    weights: Vec<i32>,
+    noise_floor: Vec<f32>,
+    mask: Vec<f32>,
+    signal: Vec<f32>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EncoderFrameScratch {
+    inputs: Vec<Vec<f32>>,
+    freq: Vec<f32>,
+    band_e: Vec<f32>,
+    band_log_e: Vec<f32>,
+    norm: Vec<f32>,
+    transient_old: Vec<f32>,
+    spread: SpreadAnalysisScratch,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,7 +123,10 @@ pub struct Encoder {
     spectral_scratch: CeltFrameEncodeScratch,
     pcm_f32_scratch: Vec<f32>,
     filtered_scratch: Vec<f32>,
+    tone_scratch: Vec<f32>,
     transient_scratch: Vec<f32>,
+    prefilter_scratch: PrefilterScratch,
+    frame_scratch: EncoderFrameScratch,
 }
 
 impl Encoder {
@@ -148,7 +173,10 @@ impl Encoder {
             spectral_scratch: CeltFrameEncodeScratch::default(),
             pcm_f32_scratch: Vec::new(),
             filtered_scratch: Vec::new(),
+            tone_scratch: Vec::new(),
             transient_scratch: Vec::new(),
+            prefilter_scratch: PrefilterScratch::default(),
+            frame_scratch: EncoderFrameScratch::default(),
             mode,
         })
     }
@@ -341,6 +369,7 @@ impl Encoder {
         inputs: &[Vec<f32>],
         channels: usize,
         len: usize,
+        tone: ToneAnalysis,
         scratch: &mut Vec<f32>,
     ) -> TransientAnalysis {
         let len2 = len / 2;
@@ -396,7 +425,11 @@ impl Encoder {
             }
         }
 
-        let is_transient = mask_metric > 200;
+        let mut is_transient = mask_metric > 200;
+        if tone.toneishness > 0.98 && tone.frequency < 0.026 {
+            is_transient = false;
+            mask_metric = 0;
+        }
         let tf_max = celt_sqrt(27.0 * mask_metric as f32).max(42.0) - 42.0;
         let tf_estimate = celt_sqrt((0.0069 * tf_max.min(163.0) - 0.139).max(0.0));
         TransientAnalysis {
@@ -465,6 +498,7 @@ impl Encoder {
         start: usize,
         end: usize,
         channels: usize,
+        spread_old: &mut Vec<f32>,
     ) -> bool {
         if end <= start + 1
             || new_e.len() < channels * nb_ebands
@@ -473,7 +507,8 @@ impl Encoder {
             return false;
         }
 
-        let mut spread_old = vec![0.0f32; nb_ebands];
+        spread_old.resize(nb_ebands, 0.0);
+        spread_old[..nb_ebands].fill(0.0);
         if channels == 1 {
             spread_old[start] = old_e[start];
             for i in start + 1..end {
@@ -511,48 +546,51 @@ impl Encoder {
         band_log_e: &[f32],
         end: usize,
         channels: usize,
-    ) -> Vec<i32> {
+        scratch: &mut SpreadAnalysisScratch,
+    ) {
         const LSB_DEPTH: i32 = 24;
 
-        let mut weights = vec![32i32; mode.nb_ebands];
+        scratch.weights.resize(mode.nb_ebands, 32);
+        scratch.weights[..mode.nb_ebands].fill(32);
         if end == 0 || band_log_e.len() < channels * mode.nb_ebands {
-            return weights;
+            return;
         }
 
-        let mut noise_floor = vec![0.0f32; mode.nb_ebands];
+        scratch.noise_floor.resize(mode.nb_ebands, 0.0);
+        scratch.noise_floor[..mode.nb_ebands].fill(0.0);
         for i in 0..end {
-            noise_floor[i] = 0.0625 * mode.log_n[i] as f32 + 0.5 + (9 - LSB_DEPTH) as f32
+            scratch.noise_floor[i] = 0.0625 * mode.log_n[i] as f32 + 0.5 + (9 - LSB_DEPTH) as f32
                 - E_MEANS[i]
                 + 0.0062 * (i as f32 + 5.0) * (i as f32 + 5.0);
         }
 
         let mut max_depth = -31.9f32;
-        let mut mask = vec![0.0f32; mode.nb_ebands];
+        scratch.mask.resize(mode.nb_ebands, 0.0);
+        scratch.mask[..mode.nb_ebands].fill(0.0);
         for i in 0..end {
-            let mut value = band_log_e[i] - noise_floor[i];
+            let mut value = band_log_e[i] - scratch.noise_floor[i];
             for c in 1..channels {
-                value = value.max(band_log_e[c * mode.nb_ebands + i] - noise_floor[i]);
+                value = value.max(band_log_e[c * mode.nb_ebands + i] - scratch.noise_floor[i]);
             }
             max_depth = max_depth.max(value);
-            mask[i] = value;
+            scratch.mask[i] = value;
         }
 
-        let signal = mask.clone();
+        scratch.signal.resize(mode.nb_ebands, 0.0);
+        scratch.signal[..mode.nb_ebands].copy_from_slice(&scratch.mask[..mode.nb_ebands]);
         for i in 1..end {
-            mask[i] = mask[i].max(mask[i - 1] - 2.0);
+            scratch.mask[i] = scratch.mask[i].max(scratch.mask[i - 1] - 2.0);
         }
         for i in (0..end.saturating_sub(1)).rev() {
-            mask[i] = mask[i].max(mask[i + 1] - 3.0);
+            scratch.mask[i] = scratch.mask[i].max(scratch.mask[i + 1] - 3.0);
         }
 
         let depth_floor = 0.0f32.max(max_depth - 12.0);
         for i in 0..end {
-            let smr = signal[i] - depth_floor.max(mask[i]);
+            let smr = scratch.signal[i] - depth_floor.max(scratch.mask[i]);
             let shift = (-(0.5 + smr).floor() as i32).clamp(0, 5);
-            weights[i] = 32 >> shift;
+            scratch.weights[i] = 32 >> shift;
         }
-
-        weights
     }
 
     fn apply_energy_error_feedback(
@@ -701,6 +739,26 @@ impl Encoder {
         frame_bytes: usize,
         allow_vbr_shrink: bool,
     ) -> Result<Vec<u8>> {
+        let mut scratch = std::mem::take(&mut self.frame_scratch);
+        let result = self.encode_filtered_f32_with_frame_bytes_inner(
+            pcm,
+            frame_size,
+            frame_bytes,
+            allow_vbr_shrink,
+            &mut scratch,
+        );
+        self.frame_scratch = scratch;
+        result
+    }
+
+    fn encode_filtered_f32_with_frame_bytes_inner(
+        &mut self,
+        pcm: &mut [f32],
+        frame_size: usize,
+        frame_bytes: usize,
+        allow_vbr_shrink: bool,
+        scratch: &mut EncoderFrameScratch,
+    ) -> Result<Vec<u8>> {
         let lm = self.frame_lm(frame_size)?;
         Self::validate_frame_bytes(frame_bytes)?;
         let stream_channels = self.choose_stream_channels(frame_size);
@@ -737,17 +795,43 @@ impl Encoder {
         }
         self.hybrid_stereo_width_q14 = target_stereo_width_q14;
 
-        let mut inputs = Vec::with_capacity(self.channels);
+        scratch.inputs.resize_with(self.channels, Vec::new);
         for c in 0..self.channels {
-            let mut input = vec![0.0f32; 2 * n];
+            let input = &mut scratch.inputs[c];
+            input.resize(2 * n, 0.0);
+            input[..2 * n].fill(0.0);
             input[..overlap].copy_from_slice(&self.overlap_mem[c]);
             for i in 0..n {
                 let sample = pcm[i * self.channels + c] * CELT_SIG_SCALE;
                 input[overlap + i] = sample - self.preemph_mem[c];
                 self.preemph_mem[c] = self.mode.preemph[0] * sample;
             }
-            inputs.push(input);
         }
+
+        let tone = tone_detect(
+            &scratch.inputs,
+            self.channels,
+            n + overlap,
+            self.mode.fs as usize,
+            &mut self.tone_scratch,
+        );
+        let transient = Self::transient_analysis(
+            &scratch.inputs,
+            self.channels,
+            n + overlap,
+            tone,
+            &mut self.transient_scratch,
+        );
+        let toneishness = tone.toneishness.min(1.0 - transient.tf_estimate);
+        config.is_transient = lm > 0 && transient.is_transient && (frame_bytes * 8) as i32 >= 16;
+        config.tf_estimate = transient.tf_estimate;
+        config.tone_frequency = tone.frequency;
+        config.toneishness = toneishness;
+        config.tf_chan = if stream_channels == 1 {
+            0
+        } else {
+            transient.tf_chan.min(stream_channels - 1)
+        };
 
         let prefilter_enabled =
             frame_bytes > 12 * stream_channels && (frame_bytes * 8) as i32 >= 16;
@@ -756,19 +840,23 @@ impl Encoder {
         let previous_prefilter_gain = self.prefilter_gain;
         let (prefilter, prefilter_gain) = run_prefilter(
             &self.mode,
-            &mut inputs,
+            &mut scratch.inputs,
             &mut self.prefilter_mem,
             self.prefilter_period,
             self.prefilter_gain,
             self.prefilter_tapset,
             prefilter_tapset,
             prefilter_enabled,
+            transient.tf_estimate,
+            tone.frequency,
+            toneishness,
             self.analysis_info
                 .valid
                 .then_some(self.analysis_info.max_pitch_ratio),
             frame_bytes,
             self.channels,
             n,
+            &mut self.prefilter_scratch,
         );
         let pitch_change = (prefilter_gain > 0.4 || previous_prefilter_gain > 0.4)
             && (!self.analysis_info.valid || self.analysis_info.tonality > 0.3)
@@ -783,28 +871,16 @@ impl Encoder {
         self.prefilter_gain = prefilter_gain;
         self.prefilter_tapset = prefilter_tapset;
         for c in 0..self.channels {
-            self.overlap_mem[c].copy_from_slice(&inputs[c][n..n + overlap]);
+            self.overlap_mem[c].copy_from_slice(&scratch.inputs[c][n..n + overlap]);
         }
-        let transient = Self::transient_analysis(
-            &inputs,
-            self.channels,
-            n + overlap,
-            &mut self.transient_scratch,
-        );
-        config.is_transient = lm > 0 && transient.is_transient && (frame_bytes * 8) as i32 >= 16;
-        config.tf_estimate = transient.tf_estimate;
-        config.tf_chan = if stream_channels == 1 {
-            0
-        } else {
-            transient.tf_chan.min(stream_channels - 1)
-        };
 
-        let mut freq = vec![0.0f32; self.channels * n];
+        scratch.freq.resize(self.channels * n, 0.0);
+        scratch.freq[..self.channels * n].fill(0.0);
         let short_blocks = if config.is_transient { m } else { 0 };
         Self::compute_mdcts(
             &self.mode,
-            &inputs,
-            &mut freq,
+            &scratch.inputs,
+            &mut scratch.freq,
             self.channels,
             stream_channels,
             lm,
@@ -812,20 +888,30 @@ impl Encoder {
             &mut self.mdct_scratch,
         );
         let eff_end = self.mode.eff_ebands;
-        let mut band_e = vec![0.0f32; stream_channels * self.mode.nb_ebands];
-        compute_band_energies(&self.mode, &freq, &mut band_e, eff_end, stream_channels, lm);
-        let mut band_log_e = vec![0.0f32; stream_channels * self.mode.nb_ebands];
+        let band_count = stream_channels * self.mode.nb_ebands;
+        scratch.band_e.resize(band_count, 0.0);
+        scratch.band_e[..band_count].fill(0.0);
+        compute_band_energies(
+            &self.mode,
+            &scratch.freq,
+            &mut scratch.band_e,
+            eff_end,
+            stream_channels,
+            lm,
+        );
+        scratch.band_log_e.resize(band_count, 0.0);
+        scratch.band_log_e[..band_count].fill(0.0);
         amp2_log2(
             &self.mode,
             eff_end,
             config.end,
-            &band_e,
-            &mut band_log_e,
+            &scratch.band_e,
+            &mut scratch.band_log_e,
             stream_channels,
         );
         let temporal_vbr = if allow_vbr_shrink && self.vbr {
             self.temporal_vbr(
-                &band_log_e,
+                &scratch.band_log_e,
                 config.start,
                 config.end,
                 stream_channels,
@@ -840,7 +926,7 @@ impl Encoder {
             let mut long_freq = vec![0.0f32; self.channels * n];
             Self::compute_mdcts(
                 &self.mode,
-                &inputs,
+                &scratch.inputs,
                 &mut long_freq,
                 self.channels,
                 stream_channels,
@@ -874,17 +960,18 @@ impl Encoder {
             band_log_e2 = Some(long_band_log_e);
         } else if lm > 0
             && Self::patch_transient_decision(
-                &band_log_e,
+                &scratch.band_log_e,
                 &self.old_band_e,
                 self.mode.nb_ebands,
                 config.start,
                 config.end,
                 stream_channels,
+                &mut scratch.transient_old,
             )
         {
             config.is_transient = true;
             config.tf_estimate = 0.2;
-            let mut long_band_log_e = band_log_e.clone();
+            let mut long_band_log_e = scratch.band_log_e.clone();
             for c in 0..stream_channels {
                 for i in 0..config.end {
                     long_band_log_e[i + c * self.mode.nb_ebands] += 0.5 * lm as f32;
@@ -893,41 +980,54 @@ impl Encoder {
             band_log_e2 = Some(long_band_log_e);
             Self::compute_mdcts(
                 &self.mode,
-                &inputs,
-                &mut freq,
+                &scratch.inputs,
+                &mut scratch.freq,
                 self.channels,
                 stream_channels,
                 lm,
                 m,
                 &mut self.mdct_scratch,
             );
-            compute_band_energies(&self.mode, &freq, &mut band_e, eff_end, stream_channels, lm);
+            compute_band_energies(
+                &self.mode,
+                &scratch.freq,
+                &mut scratch.band_e,
+                eff_end,
+                stream_channels,
+                lm,
+            );
             amp2_log2(
                 &self.mode,
                 eff_end,
                 config.end,
-                &band_e,
-                &mut band_log_e,
+                &scratch.band_e,
+                &mut scratch.band_log_e,
                 stream_channels,
             );
         }
         config.band_log_e2 = band_log_e2;
-        let mut norm = vec![0.0f32; stream_channels * n];
+        scratch.norm.resize(stream_channels * n, 0.0);
+        scratch.norm[..stream_channels * n].fill(0.0);
         normalise_bands(
             &self.mode,
-            &freq,
-            &mut norm,
-            &band_e,
+            &scratch.freq,
+            &mut scratch.norm,
+            &scratch.band_e,
             eff_end,
             stream_channels,
             m,
         );
         if !config.is_transient && frame_bytes >= 10 * stream_channels && stream_channels > 0 {
-            let spread_weight =
-                Self::spread_weights(&self.mode, &band_log_e, eff_end, stream_channels);
+            Self::spread_weights(
+                &self.mode,
+                &scratch.band_log_e,
+                eff_end,
+                stream_channels,
+                &mut scratch.spread,
+            );
             config.spread = spreading_decision(
                 &self.mode,
-                &norm,
+                &scratch.norm,
                 &mut self.tonal_average,
                 self.spread_decision,
                 &mut self.hf_average,
@@ -936,7 +1036,7 @@ impl Encoder {
                 eff_end,
                 stream_channels,
                 m,
-                &spread_weight,
+                &scratch.spread.weights,
             );
             self.spread_decision = config.spread;
         } else {
@@ -948,7 +1048,7 @@ impl Encoder {
         // spectral encoder recomputes its own copy, so mirror it here too.
         Self::apply_energy_error_feedback(
             &self.mode,
-            &mut band_log_e,
+            &mut scratch.band_log_e,
             &self.old_band_e,
             &self.energy_error,
             config.start,
@@ -959,8 +1059,8 @@ impl Encoder {
         if stream_channels == 1 {
             config.alloc_trim = Self::alloc_trim_analysis(
                 &self.mode,
-                &norm,
-                &band_log_e,
+                &scratch.norm,
+                &scratch.band_log_e,
                 config.end,
                 lm,
                 stream_channels,
@@ -973,7 +1073,7 @@ impl Encoder {
             );
         } else {
             {
-                let (left, right) = norm.split_at_mut(n);
+                let (left, right) = scratch.norm.split_at_mut(n);
                 self.intensity = hysteresis_decision(
                     (equiv_rate / 1000) as f32,
                     &INTENSITY_THRESHOLDS,
@@ -987,8 +1087,8 @@ impl Encoder {
             }
             config.alloc_trim = Self::alloc_trim_analysis(
                 &self.mode,
-                &norm,
-                &band_log_e,
+                &scratch.norm,
+                &scratch.band_log_e,
                 config.end,
                 lm,
                 stream_channels,
@@ -1023,9 +1123,9 @@ impl Encoder {
             encode_spectral_frame_with_scratch(
                 &self.mode,
                 &config,
-                &mut norm,
+                &mut scratch.norm,
                 None,
-                &band_e,
+                &scratch.band_e,
                 &mut self.old_band_e[..self.mode.nb_ebands],
                 &mut self.energy_error[..self.mode.nb_ebands],
                 &mut self.delayed_intra,
@@ -1033,13 +1133,13 @@ impl Encoder {
                 &mut self.spectral_scratch,
             )?
         } else {
-            let (left, right) = norm.split_at_mut(n);
+            let (left, right) = scratch.norm.split_at_mut(n);
             encode_spectral_frame_with_scratch(
                 &self.mode,
                 &config,
                 left,
                 Some(right),
-                &band_e,
+                &scratch.band_e,
                 &mut self.old_band_e,
                 &mut self.energy_error,
                 &mut self.delayed_intra,
@@ -1072,9 +1172,8 @@ impl Encoder {
             right[..self.mode.nb_ebands].copy_from_slice(left);
         }
 
-        let mut packet = Vec::with_capacity(1 + encoded.data.len());
-        packet.push(packet::make_celt_only_fullband_toc(lm, stream_channels)?);
-        packet.extend_from_slice(&encoded.data);
+        let mut packet = encoded.data;
+        packet.insert(0, packet::make_celt_only_fullband_toc(lm, stream_channels)?);
         Ok(packet)
     }
 
@@ -1138,6 +1237,58 @@ impl Encoder {
         result
     }
 
+    /// Encodes signed 24-bit PCM stored sign-extended in `i32` samples.
+    ///
+    /// Every sample must be in `PCM_I24_MIN..=PCM_I24_MAX`.
+    pub fn encode_i24(&mut self, pcm: &[i32], frame_size: usize) -> Result<Vec<u8>> {
+        let required = frame_size * self.channels;
+        if pcm.len() < required
+            || pcm
+                .iter()
+                .take(required)
+                .any(|&sample| !(PCM_I24_MIN..=PCM_I24_MAX).contains(&sample))
+        {
+            return Err(Error::BadArg);
+        }
+        let mut pcm_f32 = std::mem::take(&mut self.pcm_f32_scratch);
+        pcm_f32.resize(required, 0.0);
+        for (dst, src) in pcm_f32.iter_mut().zip(pcm.iter().take(required)) {
+            *dst = *src as f32 / 8_388_608.0;
+        }
+        let result = self.encode_f32(&pcm_f32, frame_size);
+        self.pcm_f32_scratch = pcm_f32;
+        result
+    }
+
+    /// Encodes signed 24-bit PCM to an exact compressed-frame byte budget.
+    ///
+    /// Samples are stored sign-extended in `i32` and must be in
+    /// `PCM_I24_MIN..=PCM_I24_MAX`.
+    pub fn encode_i24_with_frame_bytes(
+        &mut self,
+        pcm: &[i32],
+        frame_size: usize,
+        frame_bytes: usize,
+    ) -> Result<Vec<u8>> {
+        let required = frame_size * self.channels;
+        if pcm.len() < required
+            || pcm
+                .iter()
+                .take(required)
+                .any(|&sample| !(PCM_I24_MIN..=PCM_I24_MAX).contains(&sample))
+        {
+            return Err(Error::BadArg);
+        }
+        let mut pcm_f32 = std::mem::take(&mut self.pcm_f32_scratch);
+        pcm_f32.resize(required, 0.0);
+        for (dst, src) in pcm_f32.iter_mut().zip(pcm.iter().take(required)) {
+            *dst = *src as f32 / 8_388_608.0;
+        }
+        let result = self.encode_f32_with_frame_bytes(&pcm_f32, frame_size, frame_bytes);
+        self.pcm_f32_scratch = pcm_f32;
+        result
+    }
+
     pub fn encode_f32(&mut self, pcm: &[f32], frame_size: usize) -> Result<Vec<u8>> {
         if self.sample_rate != 48_000 {
             return Err(Error::Unimplemented);
@@ -1182,5 +1333,39 @@ impl Encoder {
         );
         self.filtered_scratch = filtered;
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Encoder, ToneAnalysis};
+
+    #[test]
+    fn low_frequency_tone_clears_the_transient_metric() {
+        let mut input = vec![vec![0.0; 1_080]];
+        input[0][540] = 1.0;
+        let mut scratch = Vec::new();
+
+        let without_tone = Encoder::transient_analysis(
+            &input,
+            1,
+            input[0].len(),
+            ToneAnalysis::default(),
+            &mut scratch,
+        );
+        assert!(without_tone.tf_estimate > 0.0);
+
+        let low_tone = Encoder::transient_analysis(
+            &input,
+            1,
+            input[0].len(),
+            ToneAnalysis {
+                frequency: 0.01,
+                toneishness: 0.99,
+            },
+            &mut scratch,
+        );
+        assert!(!low_tone.is_transient);
+        assert_eq!(low_tone.tf_estimate, 0.0);
     }
 }

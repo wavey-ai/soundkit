@@ -271,7 +271,7 @@ pub fn alg_unquant(
     k: usize,
     spread: i32,
     b: usize,
-    dec: &mut RangeDecoder,
+    dec: &mut RangeDecoder<'_>,
     gain: f32,
 ) -> u32 {
     assert!(k > 0);
@@ -299,7 +299,7 @@ pub fn alg_unquant_with_scratch(
     k: usize,
     spread: i32,
     b: usize,
-    dec: &mut RangeDecoder,
+    dec: &mut RangeDecoder<'_>,
     gain: f32,
     iy_scratch: &mut Vec<i32>,
     u_scratch: &mut Vec<u32>,

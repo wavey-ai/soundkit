@@ -2,7 +2,7 @@
 //! `celt/celt_decoder.c` floating-point path.
 
 use crate::celt::bands::denormalise_bands;
-use crate::celt::mathops::float_to_i16;
+use crate::celt::mathops::{float_to_i16, float_to_i24};
 use crate::celt::mdct::{clt_mdct_backward_with_scratch, MdctScratch};
 use crate::celt::modes::CeltMode;
 use crate::{Error, Result};
@@ -232,6 +232,26 @@ pub fn deemphasis_interleaved_i16_into(
     let c_count = channels.len();
     let coef0 = mode.preemph[0];
     pcm.resize(n * c_count, 0);
+
+    if c_count == 2 {
+        let mut mem0 = preemph_mem[0];
+        let mut mem1 = preemph_mem[1];
+        for (output, (&sample0, &sample1)) in pcm
+            .chunks_exact_mut(2)
+            .zip(channels[0].iter().zip(&channels[1]))
+        {
+            let tmp0 = sample0 + 1e-30f32 + mem0;
+            let tmp1 = sample1 + 1e-30f32 + mem1;
+            mem0 = coef0 * tmp0;
+            mem1 = coef0 * tmp1;
+            output[0] = float_to_i16(tmp0 / CELT_SIG_SCALE);
+            output[1] = float_to_i16(tmp1 / CELT_SIG_SCALE);
+        }
+        preemph_mem[0] = mem0;
+        preemph_mem[1] = mem1;
+        return Ok(());
+    }
+
     for c in 0..c_count {
         let mut mem = preemph_mem[c];
         for j in 0..n {
@@ -242,4 +262,74 @@ pub fn deemphasis_interleaved_i16_into(
         preemph_mem[c] = mem;
     }
     Ok(())
+}
+
+pub fn deemphasis_interleaved_i24_into(
+    mode: &CeltMode,
+    channels: &[Vec<f32>],
+    preemph_mem: &mut [f32],
+    pcm: &mut Vec<i32>,
+) -> Result<()> {
+    if channels.is_empty() || channels.len() > 2 || preemph_mem.len() < channels.len() {
+        return Err(Error::BadArg);
+    }
+    let n = channels[0].len();
+    if channels.iter().any(|channel| channel.len() != n) {
+        return Err(Error::BadArg);
+    }
+
+    let c_count = channels.len();
+    let coef0 = mode.preemph[0];
+    pcm.resize(n * c_count, 0);
+
+    for c in 0..c_count {
+        let mut mem = preemph_mem[c];
+        for j in 0..n {
+            let tmp = channels[c][j] + 1e-30f32 + mem;
+            mem = coef0 * tmp;
+            pcm[j * c_count + c] = float_to_i24(tmp / CELT_SIG_SCALE);
+        }
+        preemph_mem[c] = mem;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{deemphasis_interleaved_i16_into, CELT_SIG_SCALE};
+    use crate::celt::mathops::float_to_i16;
+    use crate::celt::modes::CeltMode;
+
+    #[test]
+    fn stereo_i16_deemphasis_matches_channel_major_reference() {
+        let mode = CeltMode::standard_48k();
+        let channels = vec![
+            (0..240)
+                .map(|index| 12_000.0 * (index as f32 * 0.071).sin())
+                .collect::<Vec<_>>(),
+            (0..240)
+                .map(|index| 10_000.0 * (index as f32 * 0.053 + 0.4).cos())
+                .collect::<Vec<_>>(),
+        ];
+        let initial_mem = [17.25f32, -31.5f32];
+        let mut expected_mem = initial_mem;
+        let mut expected_pcm = vec![0i16; channels[0].len() * 2];
+        for channel in 0..2 {
+            let mut mem = expected_mem[channel];
+            for sample in 0..channels[channel].len() {
+                let tmp = channels[channel][sample] + 1e-30f32 + mem;
+                mem = mode.preemph[0] * tmp;
+                expected_pcm[2 * sample + channel] = float_to_i16(tmp / CELT_SIG_SCALE);
+            }
+            expected_mem[channel] = mem;
+        }
+
+        let mut actual_mem = initial_mem;
+        let mut actual_pcm = Vec::new();
+        deemphasis_interleaved_i16_into(&mode, &channels, &mut actual_mem, &mut actual_pcm)
+            .unwrap();
+
+        assert_eq!(actual_pcm, expected_pcm);
+        assert_eq!(actual_mem, expected_mem);
+    }
 }

@@ -12,6 +12,7 @@ mod soft_clip;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod wasm;
 
+pub use constants::{PCM_I24_MAX, PCM_I24_MIN};
 pub use decoder::Decoder;
 pub use encoder::{
     Application, Encoder, CELT_FRAME_SIZES_48K, CELT_MAX_BITRATE, CELT_MAX_FRAME_BYTES,
