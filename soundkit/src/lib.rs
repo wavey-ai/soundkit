@@ -5,6 +5,7 @@ pub mod audio_pipeline;
 pub mod audio_types;
 pub mod crypto;
 pub mod frame_stream;
+pub mod media_metadata;
 pub mod ogg;
 pub mod raw_pcm;
 pub mod test_utils;

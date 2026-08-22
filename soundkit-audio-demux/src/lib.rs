@@ -1028,6 +1028,28 @@ impl Mp4MediaIndex {
         sample_index: usize,
         decoded_frames: u32,
     ) -> Result<Option<PcmPacketTrim>, String> {
+        let sample_rate = self
+            .samples
+            .get(sample_index)
+            .and_then(|sample| {
+                self.tracks
+                    .iter()
+                    .find(|track| track.track_id == sample.track_id)
+                    .and_then(|track| track.sample_rate)
+            })
+            .ok_or_else(|| format!("MP4 sample {sample_index} has no sample rate"))?;
+        self.pcm_packet_trim_at_sample_rate(sample_index, decoded_frames, sample_rate)
+    }
+
+    /// Resolve edit-list trimming using the decoder's actual PCM output rate.
+    /// This differs from the MP4 sample-entry rate for codecs such as HE-AAC,
+    /// whose SBR stage doubles the AAC core sample rate.
+    pub fn pcm_packet_trim_at_sample_rate(
+        &self,
+        sample_index: usize,
+        decoded_frames: u32,
+        decoded_sample_rate: u32,
+    ) -> Result<Option<PcmPacketTrim>, String> {
         let sample = self
             .samples
             .get(sample_index)
@@ -1047,7 +1069,7 @@ impl Mp4MediaIndex {
                 sample.duration,
                 decoded_frames,
                 track.timescale,
-                track.sample_rate.unwrap_or(track.timescale),
+                decoded_sample_rate,
             ),
             None if decoded_frames == 0 => Ok(None),
             None => Ok(Some(PcmPacketTrim {

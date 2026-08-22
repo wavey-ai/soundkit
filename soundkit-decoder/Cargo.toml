@@ -22,7 +22,12 @@ soundkit-aiff = { path = "../soundkit-aiff" }
 soundkit-ac3 = { path = "../soundkit-ac3" }
 soundkit-mp3 = { path = "../soundkit-mp3", default-features = false }
 soundkit-aac = { path = "../soundkit-aac", features = ["mp4-decoder"] }
-soundkit-flac = { path = "../soundkit-flac", features = ["claxon-decoder"] }
+soundkit-aac-lc = { path = "../soundkit-aac-lc" }
+symphonia-codec-aac = { git = "https://github.com/wavey-ai/Symphonia.git", branch = "main" }
+symphonia-bundle-mp3 = { git = "https://github.com/wavey-ai/Symphonia.git", branch = "main", default-features = false, features = ["mp2"] }
+symphonia-core = { git = "https://github.com/wavey-ai/Symphonia.git", branch = "main" }
+soundkit-audio-demux = { path = "../soundkit-audio-demux", default-features = false, features = ["mp4", "mpeg-ts", "mxf"] }
+soundkit-flac = { path = "../soundkit-flac", features = ["wavey-codec"] }
 soundkit-opus = { path = "../soundkit-opus" }
 soundkit-ogg-opus = { path = "../soundkit-ogg-opus" }
 soundkit-webm = { path = "../soundkit-webm" }

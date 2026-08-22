@@ -8,6 +8,6 @@ repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
 frame-header = "0.2.1"
-lewton = "0.10.2"
+lewton = { git = "https://github.com/wavey-ai/lewton.git", branch = "main" }
 memchr = "2"
 soundkit = { path = "../soundkit" }

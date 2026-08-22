@@ -52,7 +52,7 @@ use soundkit_audio_demux::{
     PcmEndianness,
 };
 #[cfg(feature = "flac")]
-use soundkit_flac::{FlacDecoderClaxon, FlacEncoder};
+use soundkit_flac::{FlacDecoder, FlacEncoder};
 #[cfg(feature = "mp3")]
 use soundkit_mp3::Mp3Decoder;
 #[cfg(feature = "ogg-opus")]
@@ -613,7 +613,7 @@ enum FormatDecoder {
     #[cfg(all(feature = "aac-lc", feature = "aac-debox", not(feature = "m4a")))]
     AacLcMp4(Box<AacLcMp4Decoder>),
     #[cfg(feature = "flac")]
-    Flac(Box<FlacDecoderClaxon>),
+    Flac(Box<FlacDecoder>),
     #[cfg(feature = "mp3")]
     Mp3(Box<Mp3Decoder>),
     #[cfg(feature = "ogg-opus")]
@@ -4888,7 +4888,7 @@ fn decoder_for_format(format: &str) -> Result<FormatDecoder, String> {
         "alac" | "caf-alac" => Err(SEEKABLE_ALAC_REQUIRED.to_string()),
         #[cfg(feature = "flac")]
         "flac" => {
-            let mut decoder = FlacDecoderClaxon::new();
+            let mut decoder = FlacDecoder::new();
             decoder.init()?;
             Ok(FormatDecoder::Flac(Box::new(decoder)))
         }

@@ -75,8 +75,9 @@ the container layout can require enough metadata/media to be buffered first.
 | WAV / RIFF PCM | `soundkit::wav` | Auto | Yes | Emits complete PCM frame runs after the `data` chunk starts. |
 | MP3 | `soundkit-mp3` / `nanomp3` | Auto | Yes | Pure Rust decode; native decoder output is `f32`. |
 | AAC ADTS | `soundkit-aac` / `fdk-aac` | Auto | Yes | Frame-stream friendly C FFI path. Use `soundkit-aac-lc` for the controlled pure Rust stereo profile. |
-| AAC in M4A/MP4 | `soundkit-aac` / Rust MP4 demux + `fdk-aac` | Auto or seekable MP4 index | Yes | Fast-start files stream sequentially. Tail-`moov` files use one bounded packet range at a time. |
-| FLAC | `soundkit-flac` / `claxon` | Auto | Yes | Pure Rust decode retains metadata state and only the current incomplete compressed frame. |
+| AAC-LC/HE-AAC in M4A/MP4/MOV or Matroska | `soundkit-decoder` / Rust demux + Wavey Symphonia fork | Complete-file/seekable index | Limited | Pure Rust LC/SBR/PS decode; regular, fragmented, CMAF, DASH, and Matroska fixtures are FFmpeg-differential tested. |
+| MP2 in MPEG-TS | `soundkit-decoder` / Rust TS demux + Wavey Symphonia fork | Complete-file | EOF | Pure Rust; collected TS fixture measures 50.36 dB against FFmpeg. |
+| FLAC | `soundkit-flac` / `wavey-flac` | Auto | Yes | Unified pure-Rust encode/decode retains metadata state and only the current incomplete compressed frame. |
 | Raw Opus stream | `soundkit-opus` / `libopus` | Auto | Yes | Soundkit `OpusHead` plus length-prefixed packets. |
 | Ogg Opus | `soundkit-ogg-opus` / Ogg parser + `libopus` | Auto | Yes | Ogg pages parsed incrementally. |
 | WebM Opus | `soundkit-webm` / EBML parser + `libopus` | Auto | Yes | Known and unknown-size clusters emit bounded blocks before cluster EOF. |
@@ -103,12 +104,12 @@ boundary is narrower:
 | --- | --- | --- | --- |
 | AAC ADTS | `soundkit-aac` / `fdk-aac` | No | Frame streaming is supported, but the production AAC codec decode is FDK-AAC C FFI. |
 | AAC-LC raw access units | `soundkit-aac-lc` + `soundkit-wasm` | Controlled production profile | Pure Rust decoding supports stereo AAC-LC at 44.1 and 48 kHz. Other profiles return explicit fallback errors. See [`AAC_LC_PRODUCTION_STATUS.md`](AAC_LC_PRODUCTION_STATUS.md). |
-| AAC in M4A/MP4 | `mp4` demux + `fdk-aac` | No | MP4 demux/debox can be Rust, but production AAC frame decode still uses FDK-AAC. |
+| AAC-LC/HE-AAC in MP4/MOV/Matroska | owned demux + Wavey Symphonia fork | Yes | AAC-LC measures 75.45-80.56 dB and the collected HE-AAC/SBR case 68.59 dB against FFmpeg. |
 | AMR-NB | OpenCORE AMR-NB | No | Requires the native `opencore-amrnb` library via `pkg-config`. |
 | G.729 | `g729-sys` | No | Uses a native codec binding. |
 | GSM 06.10 / WAV-49 | `gsm-sys` / `libgsm` | No | Uses the native libgsm codec. |
 | Opus / Ogg Opus / WebM Opus | `soundkit-opus` pure Rust backend | Partial | Supported for the current packet path, but FEC is not implemented and the backend is not full libopus parity yet. |
-| FLAC | `claxon` in `soundkit-decoder` | Yes | The aggregate decoder selects pure Rust `claxon`; the standalone `soundkit-flac` crate defaults to libFLAC unless `claxon-decoder` is selected. |
+| FLAC | `wavey-flac` | Yes | SoundKit uses the standalone Wavey-owned pure-Rust codec for both encoding and decoding. |
 | H.264, HEVC, VP9, AV1, ProRes | `soundkit-video` | Yes | Rust produces bounded planar frames on native and WASM targets. |
 | DNxHD and DNxHR | `soundkit-dnx` | Yes | Rust supports progressive DNxHD and current DNxHR delivery profiles. |
 
@@ -175,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | WAV / RF64 | `WavStreamEncoder` / `WasmWavEncoder` | Yes | Emits an exact header, then bounded interleaved PCM chunks. Uses RF64 beyond 4 GiB. |
 | MP3 | `mp3lame` | Yes | Feature-gated encoder path. |
 | AAC ADTS | `fdk-aac` | Yes | ADTS output. |
-| FLAC | `flacenc` | Yes | The default encoder is pure Rust. Enable `oxideav-encoder` only for compatibility tests. |
+| FLAC | `wavey-flac` | Yes | The default encoder and decoder come from the standalone Wavey-owned codec. |
 | Opus | `libopus` | Yes | Packet encoder. |
 | AMR-NB | OpenCORE AMR-NB | Yes | 160-sample speech frames. |
 | G.711 / G.722 / G.726 / G.729 / GSM | Codec crates | Yes | Frame or sample streaming, depending on codec. |

@@ -8,5 +8,6 @@ publish = false
 frame-header = "0.2.2"
 sha2 = "0.10"
 soundkit = { path = "../soundkit" }
+soundkit-aac-lc = { path = "../soundkit-aac-lc" }
 soundkit-decoder = { path = "../soundkit-decoder" }
 soundkit-video = { path = "../soundkit-video" }

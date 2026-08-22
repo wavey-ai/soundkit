@@ -21,8 +21,10 @@ containers and exposes explicit spawn paths for headerless telephony codecs.
 | WAV / RIFF PCM | `spawn()` | Auto | Yes | `WavStreamProcessor` |
 | MP3 | `spawn()` | Auto | Yes | `soundkit-mp3` / `nanomp3` |
 | AAC ADTS | `spawn()` | Auto | Yes | `soundkit-aac` / `fdk-aac` |
-| AAC in M4A/MP4 | `spawn()` | Auto | Limited | `mp4` + `fdk-aac` |
-| FLAC | `spawn()` | Auto | Yes | `soundkit-flac` / `claxon` |
+| AAC-LC/HE-AAC in M4A/MP4/MOV or Matroska | `decode_audio_file()` | Auto | EOF/Limited | owned Rust demux + Wavey Symphonia fork |
+| MP2 in MPEG-TS | `decode_audio_file()` | Auto | EOF | owned Rust TS demux + Wavey Symphonia fork |
+| PCM in AVI; DVD LPCM in MPEG-PS/VOB | `decode_audio_file()` | Auto | EOF | owned Rust demux/PCM conversion |
+| FLAC | `spawn()` | Auto | Yes | `soundkit-flac` / `wavey-flac` |
 | Raw Opus stream | `spawn()` | Auto | Yes | `soundkit-opus` / `libopus` |
 | Ogg Opus | `spawn()` | Auto | Yes | `soundkit-ogg-opus` + `libopus` |
 | WebM Opus / Vorbis | `spawn()` | Auto | Yes | `soundkit-webm` + `libopus` / `lewton` |
@@ -37,6 +39,24 @@ containers and exposes explicit spawn paths for headerless telephony codecs.
 | G.726 16/24/32/40 | `spawn_g726_with_rate(rate, packing)` | Explicit | Yes | `soundkit-g726` |
 | G.729 | `spawn_g729()` | Explicit | Yes | `soundkit-g729` / `g729-sys` |
 | GSM 06.10 / WAV-49 | `spawn_gsm(variant)` | Explicit | Yes | `soundkit-gsm` / `libgsm` |
+
+For complete files, prefer `decode_audio_file`. It returns `DecodedAudioFile`,
+which contains normalized `MediaMetadata`, the selected container track when
+applicable, and decoded PCM frames. This path handles regular and fragmented
+MP4/MOV, Matroska AAC, CAF, AVI, MPEG-PS/VOB, MXF, and MPEG-TS layouts that
+require packet metadata:
+
+```rust
+use soundkit_decoder::{decode_audio_file, DecodeOptions};
+
+let source = std::fs::read("video.mp4")?;
+let decoded = decode_audio_file(&source, DecodeOptions {
+    output_bits_per_sample: Some(16),
+    ..DecodeOptions::default()
+})?;
+println!("{:?} / {:?}", decoded.metadata.artists.first(), decoded.metadata.title);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 ## Usage
 
@@ -84,7 +104,8 @@ let pipeline = DecodePipeline::spawn_with_options(DecodeOptions {
 
 | Format family | Detection path |
 | --- | --- |
-| MP3, AAC ADTS, M4A/MP4 AAC, FLAC, Opus, Ogg Opus, Ogg Vorbis, Ogg Speex, WebM, WAV, ALAC, AIFF/AIFF-C, AC-3 | `access-unit` detection. |
+| MP3, AAC ADTS, M4A/MP4 AAC, FLAC, Opus, Ogg Opus, Ogg Vorbis, Ogg Speex, WebM, WAV, ALAC, AIFF/AIFF-C, AC-3 | `access-unit` detection plus owned container probes. |
+| AVI, MPEG-PS/VOB, MPEG-TS/M2TS, CAF, and MXF | `decode_audio_file` container probes and bounded Rust demuxers. |
 | Headerless PCM and telephony codecs | Explicit spawn APIs because metadata is not present in the byte stream. |
 
 ## YouTube Audio Itags
@@ -94,7 +115,8 @@ container and audio codec, which covers the common YouTube audio itag families:
 
 | YouTube audio family | Example itags | Decode path |
 | --- | --- | --- |
-| MP4 AAC-LC / HE-AAC | `139`, `140`, `141`, `256`, `258`, `599` | `mp4` demux + FDK-AAC |
+| MP4 AAC-LC | `140`, `141` | owned Rust MP4 demux + Wavey pure-Rust AAC fork through `decode_audio_file` |
+| MP4 HE-AAC | `139`, `256`, `258`, `599` | same owned path with SBR/PS; the collected itag-139 fixture measures 68.59 dB against FFmpeg |
 | WebM Opus | `249`, `250`, `251`, `600`, `774` | WebM demux + `libopus` |
 | WebM Vorbis | `171`, `172` | WebM demux + pure-Rust `lewton` |
 
@@ -102,7 +124,11 @@ container and audio codec, which covers the common YouTube audio itag families:
 
 | Format | Gap |
 | --- | --- |
-| ALAC and AIFF/AIFF-C | Seek-based readers make current wrappers EOF-buffered. |
+| Streaming ALAC and AIFF/AIFF-C | Seek-based readers make the streaming wrappers EOF-buffered; complete ALAC in M4A/CAF is packet-decoded by `decode_audio_file`. |
 | AAC in M4A/MP4 | MP4 sample tables make live chunking layout-dependent; use ADTS for live AAC. |
 | MP4 AC-3 / E-AC-3 YouTube surround itags | Raw AC-3 syncframes decode, but MP4-contained AC-3/E-AC-3 is not wired yet. |
+| DTS core/ES | TS/M2TS access units are framed, but no production-quality Rust PCM decoder is connected. |
+| ASF/WMA | Metadata and artwork are parsed, but complete-file WMA PCM extraction is not connected. |
+| AVI MP3 | The collected low-rate/corrupt-packet sample decodes at only 12.49 dB against FFmpeg. |
+| 64-bit float PCM | CAF/MOV f64 is explicitly rejected; integer PCM through 32-bit and f32 are supported. |
 | APE | Deferred until fixtures can be generated with FFmpeg in this repo's test pattern. |

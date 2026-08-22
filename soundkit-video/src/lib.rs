@@ -605,6 +605,41 @@ impl VideoDecoder {
         Ok(frames)
     }
 
+    /// Decode a complete elementary stream and release each frame through
+    /// `sink` as soon as the decoder produces it.
+    ///
+    /// H.264 frames are delivered in decode order. Callers that require display
+    /// order should use [`Self::decode_stream`] or reorder by presentation time.
+    pub fn decode_stream_with(
+        &mut self,
+        stream: &[u8],
+        mut sink: impl FnMut(VideoFrame),
+    ) -> Result<usize, String> {
+        #[cfg(feature = "h264")]
+        if let DecoderState::H264(decoder) = &mut self.state {
+            let mut count = 0usize;
+            for access_unit in rusty_h264_decoder::split_access_units(stream) {
+                if let Some(frame) = decoder
+                    .decode(access_unit)
+                    .map_err(|error| format!("H.264 stream decode failed: {error}"))?
+                {
+                    let frame = h264_frame(frame, None, None);
+                    frame.validate()?;
+                    sink(frame);
+                    count += 1;
+                }
+            }
+            return Ok(count);
+        }
+
+        let frames = self.decode_stream(stream)?;
+        let count = frames.len();
+        for frame in frames {
+            sink(frame);
+        }
+        Ok(count)
+    }
+
     pub fn flush(&mut self) -> Result<Vec<VideoFrame>, String> {
         let frames: Vec<VideoFrame> = match &mut self.state {
             DecoderState::Disabled => {

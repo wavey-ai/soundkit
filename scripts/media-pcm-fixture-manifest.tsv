@@ -1,0 +1,67 @@
+# name                    kind   codec expected minimum-quality-db relative-path                                                     SHA-256
+wav-pcm-stereo            audio  auto  accept   120                wav_stereo/A_Tusk_is_used_to_make_costly_gifts.wav                 3dbc3a9a70b083735b38411bbb7ee6b6bbbbf877d7a53dceb1a27c102befd158
+mp3                       audio  auto  accept   30                 mp3/A_Tusk_is_used_to_make_costly_gifts.mp3                        40c39fe5cd4537687d57b615e6c1643713a137dc528742e6e0d0f30aa9701444
+flac                      audio  auto  accept   120                flac/A_Tusk_is_used_to_make_costly_gifts.flac                      949a726bd9e5bbf25060dae7af09c7ab3b3258f28489fa6e9c28362b1189bec2
+ogg-vorbis                audio  auto  accept   30                 vorbis/A_Tusk_is_used_to_make_costly_gifts.ogg                    9819f4e5253fb55db16fb13d5ac2e750fa0adfc6020ccbad2d495a14b9810a50
+ogg-opus                  audio  auto  accept   25                 ogg_opus/A_Tusk_is_used_to_make_costly_gifts_48khz.ogg            83f07b62e8bbe57c66c769a2f3242d57f23984753a6d612317bbea469a96eeda
+m4a-aac                   audio  auto  accept   70                 mac_aac/A_Tusk_is_used_to_make_costly_gifts.m4a                    84bd2939d7586a20e5c827d5379bdc8e4d5d89448b9d49e119286ae3d3329ed8
+m4a-alac                  audio  auto  accept   120                alac/A_Tusk_is_used_to_make_costly_gifts.m4a                       36c9fa50fc0dcc30da0759e2b7c4dcf0ac54d6fb7290d6ee915f908de6fbab47
+aiff-pcm                  audio  auto  accept   120                aiff/A_Tusk_is_used_to_make_costly_gifts.aiff                     62b6b16f34b5bda3e997051acebbf644089caf8be9a413bba7dd9ef3d1996571
+ac3                       audio  auto  accept   25                 ac3/A_Tusk_is_used_to_make_costly_gifts.ac3                       975ac3b123d6cacf5e30af3da9fb94eec165abf62e75fdb358b11ae73c31323b
+webm-vorbis               audio  auto  accept   30                 itag171/yt_itag_171_vorbis.webm                                  917a1f25b18481a2231fbe2028028a653c8c2da269f12bf5935eb9c5317605a7
+# The Wavey AAC fork raises this former 20.67 dB high-bitrate stereo gap to
+# roughly 80.5 dB across regular, fragmented, and Matroska containers.
+mp4-video-aac             audio  auto  accept   75                 video-compat/never-final/h264-high-aac.mp4                        07eaa2ef0acdc3e6b39f8d38763da7c8ee87598fb5b1cd7f2962755dadf70f3a
+mp4-fragmented-aac        audio  auto  accept   75                 video-compat/never-final/h264-aac-fragmented.mp4                  5e0b9207cee28ccdcaf0f7d5f1898a844fe07c63bdb67937a9ebcbcd29786e3a
+matroska-video-aac        audio  auto  accept   75                 video-compat/never-final/matroska-h264-aac.mkv                    5c4fff0c110438869becf04a00ba5d9c05d5150579c497f00ca44abf33cf8bc9
+webm-video-opus           audio  auto  accept   25                 video-compat/never-final/vp9-profile0-opus.webm                   22de40f91a02d9d964397ec33a3402629796215e4b98631bf372abb6d0644b77
+mp4-video-flac            audio  auto  accept   120                video-compat/never-final/h264-flac.mp4                            c2e79f6b0f20e983b3c99a9c37aac2070558ad07827d6e016a74b554bed335f4
+
+# Seekable CAF and MOV PCM representations collected for container conformance.
+caf-alac                   audio  auto  accept   120                alac/A_Tusk_is_used_to_make_costly_gifts.caf                      21ad395aa72bd316d094d9b4a313bfadb61267da8d88c16100d9f7e4153e8ce0
+caf-pcm-s16be              audio  auto  accept   120                caf/pcm-s16be.caf                                                 2edbc5f73530dec85eec1708cc7624bb6b65132976ca65668bfabfe5608064b9
+caf-pcm-s24le              audio  auto  accept   120                caf/pcm-s24le.caf                                                 d95045ad7b0ab4b046b4293239e9785340b479d0e2ee3921c757786557607540
+caf-pcm-s32be              audio  auto  accept   120                caf/pcm-s32be.caf                                                 69a2a6f2a688af530575ed77391e2aa5c3d3082c5fcd82650bf7d891a5016b93
+caf-pcm-f32le              audio  auto  accept   90                 caf/pcm-f32le.caf                                                 3de255be298faaec8419018287fe60827753bd8b5b23a9d80d872c020a9ffe94
+caf-pcm-f64be              audio  auto  reject   0                  caf/pcm-f64be.caf                                                 cd6113cc37decea876209fc2c7e72ab6cd1fe61b6c20ac1e7573aba55077d23e
+mov-pcm-s24be              audio  auto  accept   120                mov-pcm/pcm-s24be.mov                                             41eefadc14bef55ee01f68ace79c2b0aa8985eee2a365f9e4a78421d11251ba1
+mov-pcm-s24le              audio  auto  accept   120                mov-pcm/pcm-s24le.mov                                             e07c9aa4ca3abeaf7833b562570b59afeaa26e009860746dd94d679ac2d7d652
+mov-pcm-s32be              audio  auto  accept   120                mov-pcm/pcm-s32be.mov                                             c0e61f16367666aa66b98390e5310bdcc81bc03c24d06de0b62c502156d5ce71
+mov-pcm-s32le              audio  auto  accept   120                mov-pcm/pcm-s32le.mov                                             ea88de0571198be6422e0ab8245cec13008eaf6909f72bcff621401cb699b60c
+mov-pcm-f32be              audio  auto  accept   90                 mov-pcm/pcm-f32be.mov                                             fca0efe26c72f7a724119d2ac1dbce175dfd23e3f239878de4c38732b241b21f
+mov-pcm-f32le              audio  auto  accept   90                 mov-pcm/pcm-f32le.mov                                             011a843e50f4983461e4277a0f47687d9eb1d4d4e0c71349330ae92afd682d27
+mov-pcm-f64be              audio  auto  reject   0                  mov-pcm/pcm-f64be.mov                                             bda4bc9233335718bf8115c9d9fa2069851051edf6843562487636d91b790785
+mov-pcm-f64le              audio  auto  reject   0                  mov-pcm/pcm-f64le.mov                                             45c052d0287d655f186c2c74604104c44317e8e08b12a3d6c22a92dcf09f4629
+
+# Audio extraction must be independent of the video codec/profile and MP4 layout.
+mp4-cmaf-aac               audio  auto  accept   75                 video-compat/never-final/h264-aac-cmaf.mp4                        b0f538fc5eee5a0a49bc954ca252d01c9944fdeb1c88ac706ffa4270a0dd03e0
+mp4-dash-aac               audio  auto  accept   75                 video-compat/never-final/h264-aac-dash.mp4                        b54fe6f8ad0ce75257b06f1ec33f652672a4ba2d8005516247a13715fc5d22ec
+mp4-separate-moof-aac      audio  auto  accept   75                 video-compat/never-final/h264-aac-separate-moof.mp4               8dfd1e4e08f34760efedce4c7faf8c81745998fd5d397638784b5377163f94ea
+mp4-h264-high422-aac       audio  auto  accept   75                 video-compat/never-final/h264-high422-aac.mp4                     6a8050eee69eaed7cf12ee9fd5e6a886c2cd9be7099589ff8ee8b08e3ab0402d
+mp4-h264-high444-aac       audio  auto  accept   75                 video-compat/never-final/h264-high444-aac.mp4                     178d1e853b761a7b3b504e1e76f109d71606afcc23521a6e8b08433fec6b26e1
+mp4-h264-vfr-aac           audio  auto  accept   75                 video-compat/never-final/h264-vfr-aac.mp4                         8449022287131bb805769b91d519b6446bfe104d685b83457ddfe23a4d2a5d87
+mov-hevc-main-aac          audio  auto  accept   75                 video-compat/never-final/hevc-main-aac.mov                        1d151cac1f9b7ffbf2ae2cb9debd004f31ff7379f65d5a035381421ae0ea3c17
+mov-hevc-main422-aac       audio  auto  accept   75                 video-compat/never-final/hevc-main422-10-aac.mov                  f4cfccf35c96de2291c996f332bfdeb1b46fe6dff9857380b52abd50908335bb
+mov-hevc-main444-aac       audio  auto  accept   75                 video-compat/never-final/hevc-main444-10-aac.mov                  2caf011794987b462a5ad51393705b66eee63c26993699eaad84b12bcf20e0b2
+matroska-hevc-aac          audio  auto  accept   75                 video-compat/never-final/matroska-hevc-aac.mkv                    00a4622c39f38914f5b2e3ee28b92fade758c1e44420c2ef22fb5a502daeee87
+webm-av1-opus             audio  auto  accept   25                 video-compat/never-final/av1-main-opus.webm                       609fc3b601badab08942d51a9400815f13a5a7bdf707d1be5727f09148d13057
+webm-av1-main10-opus      audio  auto  accept   25                 video-compat/never-final/av1-main10-opus.webm                     a7d3a21423d8fdad5e011f9f23b1cdc3631cea69b5b9a6ca87a02e5a8e8fcb15
+webm-vp9-main10-opus      audio  auto  accept   25                 video-compat/never-final/vp9-profile2-10bit-opus.webm             268660a724a30cd67a5e4972ca8b8f754e630ba48f6a2d40a73e4640f657106c
+mov-hevc-main10-pcm       audio  auto  accept   120                video-compat/never-final/hevc-main10-pcm.mov                      7c0baed7b17626c8e7bb8059d7eb5f65553334b6d8dab679f50a13fdd7573380
+mov-dnxhr-hq-pcm          audio  auto  accept   120                video-compat/never-final/dnxhr-hq-pcm.mov                         fa5f6a5da00c0cf4f70d319fad717bcf23dec3f16c63047f77b81ebcae57c8a2
+mov-prores-hq-pcm         audio  auto  accept   120                video-compat/never-final/prores-422-hq-pcm.mov                    39fc612ffe7718bada49dec4b0838bcc16000c12c931d041224ae5b58e37c809
+
+# MPEG transport streams and explicit codec gaps.
+mpeg-ts-aac               audio  auto  accept   35                 mpeg-ts/aac-stereo-48k.ts                                        92d1fdc51f925de12f56294f14ac134618d9ad6860b4876aca5a17eb9e08dc8e
+m2ts-aac                  audio  auto  accept   35                 mpeg-ts/aac-stereo-48k.m2ts                                      443540b05358818709fa49da3be04fb4721abaf5e2b5ce65456fcdaa3f4fd711
+m2ts-lpcm                 audio  auto  accept   120                mpeg-ts/lpcm-stereo-48k.m2ts                                     d4457974cab36ddb7babd0ce1dc87d13de1469db12453bb7d279cd67a45884ab
+mp4-he-aac                audio  auto  accept   60                 itag139/yt_itag_139_he_aac.mp4                                  93573721e003d3f13a5472461e7c0739eb516cf422f709e08b7e158af60aea17
+mpeg-ts-mp2               audio  auto  accept   45                 mpeg-ts/mp2-stereo-48k.ts                                        3409957fe29cd270b137cd14dff7a182e7b292b39f3f06269c98e9fa571a0c8c
+m2ts-dts                  audio  auto  reject   0                  mpeg-ts/dts-stereo-48k.m2ts                                      f9adf85f8be1e4d2c76ef4adf49222c602ba7f7beb271ab19f0b8e063776bd85
+
+# MXF PCM: OP-Atom, OP1a, and D-10 AES3 source packing.
+mxf-avid-pcm              audio  auto  accept   120                mxf-avid/Avid-00005.mxf                                           84852d300e9ea6b2c84b416add4a34fe93df98ca0b391eb687daea1e211da6cd
+mxf-d10-aes3-pcm          audio  auto  accept   120                mxf-avid/d10-aes3-stereo-16bit.mxf                                f74cd89d702f46d695770f7845943bae03359f0e8360092febb62081ab719863
+mxf-avid-track-pcm        audio  auto  accept   120                mxf-avid/track_02_a01.mxf                                         4d00abfc2f45e404b964c477f08ed186d3866814539c7bd48b9555ca79d84085
+mxf-opatom-pcm24          audio  auto  accept   120                mxf-opatom/pcm24-mono-48k.mxf                                     aedfba2377da01721eecd7d475962c63b12f4f258915c468bb0ede5c395d847e
+mxf-op1a-video-pcm        audio  auto  accept   120                video-compat/never-final/dnxhr-hqx-pcm.mxf                       2676aa9bbbcf63fd9c4453a3a30be653c3ffafbec0cc8bd5b7f6132947fa2525

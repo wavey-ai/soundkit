@@ -1,7 +1,10 @@
 use frame_header::Endianness;
 use sha2::{Digest, Sha256};
 use soundkit::audio_types::AudioData;
-use soundkit_decoder::{Bytes, DecodeError, DecodeOptions, DecodePipeline, DecodePipelineHandle};
+use soundkit_aac_lc::AacLcDecoder;
+use soundkit_decoder::{
+    decode_audio_file, Bytes, DecodeError, DecodeOptions, DecodePipeline, DecodePipelineHandle,
+};
 use soundkit_video::{ChromaSampling, VideoCodec, VideoColorModel, VideoDecoder, VideoFrame};
 use std::env;
 use std::fs;
@@ -59,6 +62,23 @@ struct Quality {
     db: f64,
     aligned_frames: isize,
     compared_samples: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AdtsFrame<'a> {
+    raw: &'a [u8],
+    audio_object_type: u8,
+    sample_rate_index: u8,
+    channels: u8,
+}
+
+impl AdtsFrame<'_> {
+    fn audio_specific_config(self) -> [u8; 2] {
+        [
+            (self.audio_object_type << 3) | (self.sample_rate_index >> 1),
+            ((self.sample_rate_index & 1) << 7) | (self.channels << 3),
+        ]
+    }
 }
 
 fn parse_manifest(path: &Path) -> Result<Vec<Case>, String> {
@@ -171,14 +191,18 @@ fn send_audio(
     }
 }
 
-fn decode_audio_soundkit(data: &[u8], codec: &str) -> Result<AudioPcm, String> {
+fn decode_audio_frames_soundkit(data: &[u8], codec: &str) -> Result<Vec<AudioData>, String> {
     let options = DecodeOptions {
         output_bits_per_sample: Some(16),
         output_sample_rate: None,
         output_channels: None,
     };
+    if codec == "auto" {
+        return decode_audio_file(data, options)
+            .map(|decoded| decoded.frames)
+            .map_err(|error| error.to_string());
+    }
     let mut pipeline = match codec {
-        "auto" => DecodePipeline::spawn_with_buffers_and_options(256, 4_096, options),
         "amr-nb" => {
             DecodePipeline::spawn_amr_nb_with_options(options).map_err(|error| error.to_string())?
         }
@@ -192,9 +216,21 @@ fn decode_audio_soundkit(data: &[u8], codec: &str) -> Result<AudioPcm, String> {
     while let Some(output) = pipeline.recv() {
         frames.push(output.map_err(|error| error.to_string())?);
     }
-    if frames.is_empty() {
-        return Err("SoundKit emitted no audio frames".to_owned());
+    (!frames.is_empty())
+        .then_some(frames)
+        .ok_or_else(|| "SoundKit emitted no audio frames".to_owned())
+}
+
+fn decode_audio_soundkit(data: &[u8], codec: &str) -> Result<AudioPcm, String> {
+    if codec == "aac-rust-adts" {
+        return decode_aac_lc_soundkit(data, true).map(|decoded| AudioPcm {
+            samples: decoded.0,
+            sample_rate: decoded.1,
+            channels: decoded.2,
+        });
     }
+
+    let frames = decode_audio_frames_soundkit(data, codec)?;
 
     let sample_rate = frames[0].sampling_rate();
     let channels = frames[0].channel_count();
@@ -227,6 +263,81 @@ fn decode_audio_soundkit(data: &[u8], codec: &str) -> Result<AudioPcm, String> {
     })
 }
 
+fn parse_adts_frames(data: &[u8]) -> Result<Vec<AdtsFrame<'_>>, String> {
+    let mut frames = Vec::new();
+    let mut offset = 0usize;
+    while offset + 7 <= data.len() {
+        if data[offset] != 0xff || data[offset + 1] & 0xf0 != 0xf0 {
+            return Err(format!("invalid ADTS sync word at byte {offset}"));
+        }
+        let protection_absent = data[offset + 1] & 1 != 0;
+        let header_len = if protection_absent { 7 } else { 9 };
+        let frame_len = (((data[offset + 3] & 0x03) as usize) << 11)
+            | ((data[offset + 4] as usize) << 3)
+            | ((data[offset + 5] as usize) >> 5);
+        if frame_len <= header_len || offset + frame_len > data.len() {
+            return Err(format!("invalid ADTS frame length at byte {offset}"));
+        }
+        frames.push(AdtsFrame {
+            raw: &data[offset + header_len..offset + frame_len],
+            audio_object_type: ((data[offset + 2] & 0xc0) >> 6) + 1,
+            sample_rate_index: (data[offset + 2] & 0x3c) >> 2,
+            channels: ((data[offset + 2] & 1) << 2) | ((data[offset + 3] & 0xc0) >> 6),
+        });
+        offset += frame_len;
+    }
+    if offset != data.len() || frames.is_empty() {
+        return Err("ADTS stream is empty or has trailing bytes".to_owned());
+    }
+    Ok(frames)
+}
+
+fn float_to_i16(sample: f32) -> i16 {
+    let sample = if sample.is_finite() {
+        sample.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let scaled = if sample < 0.0 {
+        f64::from(sample) * 32_768.0
+    } else {
+        f64::from(sample) * 32_767.0
+    };
+    (scaled.round() as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+fn decode_aac_lc_soundkit(data: &[u8], capture_pcm: bool) -> Result<(Vec<i16>, u32, u8), String> {
+    let frames = parse_adts_frames(data)?;
+    let first = frames[0];
+    let mut decoder = AacLcDecoder::from_audio_specific_config(&first.audio_specific_config())
+        .map_err(|error| format!("create Rust AAC-LC decoder: {error}"))?;
+    let info = decoder.frame_info();
+    let channels = u8::try_from(info.channels).map_err(|_| "AAC channel count overflow")?;
+    let mut samples = if capture_pcm {
+        Vec::with_capacity(frames.len() * info.frames * info.channels)
+    } else {
+        Vec::new()
+    };
+    for (index, frame) in frames.iter().enumerate() {
+        if frame.audio_specific_config() != first.audio_specific_config() {
+            return Err(format!("AAC configuration changed at frame {index}"));
+        }
+        let decoded = decoder
+            .decode_access_unit(frame.raw)
+            .map_err(|error| format!("Rust AAC-LC decode failed at frame {index}: {error}"))?;
+        if capture_pcm {
+            for frame_index in 0..decoded.frames() {
+                for channel in decoded.channels() {
+                    samples.push(float_to_i16(channel[frame_index]));
+                }
+            }
+        } else {
+            std::hint::black_box(decoded.frames());
+        }
+    }
+    Ok((samples, info.sample_rate, channels))
+}
+
 fn command_output(mut command: Command, description: &str) -> Result<Output, String> {
     let output = command
         .output()
@@ -241,8 +352,15 @@ fn command_output(mut command: Command, description: &str) -> Result<Output, Str
 }
 
 fn prepare_soundkit_input(case: &Case, path: &Path, source: &[u8]) -> Result<Vec<u8>, String> {
+    if case.codec == "aac-rust-adts"
+        && source.len() >= 2
+        && source[0] == 0xff
+        && source[1] & 0xf0 == 0xf0
+    {
+        return Ok(source.to_vec());
+    }
     let (stream, format) = match case.codec.as_str() {
-        "aac-adts" => ("0:a:0", "adts"),
+        "aac-adts" | "aac-rust-adts" => ("0:a:0", "adts"),
         "opus-ogg" => ("0:a:0", "opus"),
         "vp9-webm" => ("0:v:0", "ivf"),
         _ => return Ok(source.to_vec()),
@@ -306,7 +424,24 @@ fn ffprobe_audio(path: &Path) -> Result<(u32, u8), String> {
         .arg(path);
     let output = command_output(command, "FFprobe audio metadata")?;
     let text = String::from_utf8_lossy(&output.stdout);
-    let fields = text.trim().split(',').collect::<Vec<_>>();
+    // MPEG-TS can make ffprobe print the same selected stream once through
+    // the program and once through the global stream list. Treat identical
+    // non-empty records as one stream.
+    let records = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let Some(record) = records.first() else {
+        return Err("FFprobe emitted no audio metadata".to_owned());
+    };
+    if records.iter().any(|candidate| candidate != record) {
+        return Err(format!(
+            "FFprobe selected inconsistent audio metadata: {}",
+            text.trim()
+        ));
+    }
+    let fields = record.split(',').collect::<Vec<_>>();
     if fields.len() != 2 {
         return Err(format!(
             "unexpected FFprobe audio metadata: {}",
@@ -331,17 +466,69 @@ fn best_audio_quality(soundkit: &[i16], reference: &[i16], channels: usize) -> Q
     let mut best_shift = 0isize;
     let mut best_error = f64::INFINITY;
 
+    // Align on an energetic interior section. Codec delay and MP4 edit lists
+    // commonly leave the first few thousand frames silent; probing only that
+    // prefix makes unrelated shifts look equally perfect and can select a
+    // false alignment for otherwise sample-identical decodes.
+    let probe_frames = ALIGNMENT_PROBE_FRAMES
+        .min(soundkit_frames)
+        .min(reference_frames);
+    let stable_probe_start = {
+        let lower = maximum_shift;
+        let upper = reference_frames.saturating_sub(probe_frames).min(
+            soundkit_frames
+                .saturating_sub(probe_frames)
+                .saturating_sub(maximum_shift),
+        );
+        (lower <= upper).then(|| {
+            let mut prefix_energy = Vec::with_capacity(reference_frames + 1);
+            prefix_energy.push(0_f64);
+            for frame in reference.chunks_exact(channels) {
+                let energy = frame
+                    .iter()
+                    .map(|sample| {
+                        let sample = f64::from(*sample);
+                        sample * sample
+                    })
+                    .sum::<f64>();
+                prefix_energy.push(prefix_energy.last().copied().unwrap_or(0.0) + energy);
+            }
+            (lower..=upper)
+                .max_by(|left, right| {
+                    let left_energy = prefix_energy[left + probe_frames] - prefix_energy[*left];
+                    let right_energy = prefix_energy[right + probe_frames] - prefix_energy[*right];
+                    left_energy.total_cmp(&right_energy)
+                })
+                .unwrap_or(lower)
+        })
+    };
+
     for shift in -(maximum_shift as isize)..=(maximum_shift as isize) {
-        let (soundkit_start, reference_start) = if shift >= 0 {
-            (shift as usize * channels, 0)
-        } else {
-            (0, shift.unsigned_abs() * channels)
-        };
-        let count = soundkit
-            .len()
-            .saturating_sub(soundkit_start)
-            .min(reference.len().saturating_sub(reference_start))
-            .min(ALIGNMENT_PROBE_FRAMES * channels);
+        let (soundkit_start, reference_start, count) =
+            if let Some(reference_start) = stable_probe_start {
+                let soundkit_start = usize::try_from(reference_start as isize + shift)
+                    .expect("stable alignment probe is in bounds");
+                (
+                    soundkit_start * channels,
+                    reference_start * channels,
+                    probe_frames * channels,
+                )
+            } else if shift >= 0 {
+                let soundkit_start = shift as usize * channels;
+                let count = soundkit
+                    .len()
+                    .saturating_sub(soundkit_start)
+                    .min(reference.len())
+                    .min(ALIGNMENT_PROBE_FRAMES * channels);
+                (soundkit_start, 0, count)
+            } else {
+                let reference_start = shift.unsigned_abs() * channels;
+                let count = soundkit
+                    .len()
+                    .min(reference.len().saturating_sub(reference_start))
+                    .min(ALIGNMENT_PROBE_FRAMES * channels);
+                (0, reference_start, count)
+            };
         if count < channels * 32 {
             continue;
         }
@@ -354,7 +541,9 @@ fn best_audio_quality(soundkit: &[i16], reference: &[i16], channels: usize) -> Q
             })
             .sum::<f64>()
             / count as f64;
-        if error < best_error {
+        if error < best_error
+            || (error == best_error && shift.unsigned_abs() < best_shift.unsigned_abs())
+        {
             best_error = error;
             best_shift = shift;
         }
@@ -426,7 +615,7 @@ fn decode_ivf(decoder: &mut VideoDecoder, data: &[u8]) -> Result<Vec<VideoFrame>
     Ok(frames)
 }
 
-fn decode_video_soundkit(data: &[u8], codec_name: &str) -> Result<VideoPixels, String> {
+fn decode_video_frames_soundkit(data: &[u8], codec_name: &str) -> Result<Vec<VideoFrame>, String> {
     let codec = VideoCodec::parse(codec_name)
         .ok_or_else(|| format!("unknown SoundKit video codec {codec_name}"))?;
     let mut decoder = VideoDecoder::new(codec)?;
@@ -444,6 +633,13 @@ fn decode_video_soundkit(data: &[u8], codec_name: &str) -> Result<VideoPixels, S
     if codec != VideoCodec::Vp9 && codec != VideoCodec::Av1 {
         frames.extend(decoder.flush()?);
     }
+    (!frames.is_empty())
+        .then_some(frames)
+        .ok_or_else(|| "SoundKit emitted no video frames".to_owned())
+}
+
+fn decode_video_soundkit(data: &[u8], codec_name: &str) -> Result<VideoPixels, String> {
+    let frames = decode_video_frames_soundkit(data, codec_name)?;
     let first = frames
         .first()
         .ok_or_else(|| "SoundKit emitted no video frames".to_owned())?;
@@ -591,8 +787,13 @@ fn check_case(root: &Path, case: &Case) -> Result<(), String> {
             );
             if quality.db < case.minimum_quality_db {
                 return Err(format!(
-                    "audio SNR {:.2} dB is below {:.2} dB",
-                    quality.db, case.minimum_quality_db
+                    "audio SNR {:.2} dB is below {:.2} dB (align={:+} frames, compared={} samples, SoundKit={} samples, FFmpeg={} samples)",
+                    quality.db,
+                    case.minimum_quality_db,
+                    quality.aligned_frames,
+                    quality.compared_samples,
+                    soundkit.samples.len(),
+                    reference.len(),
                 ));
             }
             println!(
@@ -743,10 +944,125 @@ fn soundkit_benchmark(data: &[u8], case: &Case) -> Result<Duration, String> {
     let started = Instant::now();
     match case.kind {
         MediaKind::Audio => {
-            let _ = decode_audio_soundkit(data, soundkit_audio_codec(&case.codec))?;
+            let codec = soundkit_audio_codec(&case.codec);
+            if codec == "aac-rust-adts" {
+                let decoded = decode_aac_lc_soundkit(data, false)?;
+                std::hint::black_box((decoded.1, decoded.2));
+            } else {
+                let options = DecodeOptions {
+                    output_bits_per_sample: Some(16),
+                    output_sample_rate: None,
+                    output_channels: None,
+                };
+                let mut pipeline = match codec {
+                    "auto" => DecodePipeline::spawn_with_buffers_and_options(256, 4_096, options),
+                    "amr-nb" => DecodePipeline::spawn_amr_nb_with_options(options)
+                        .map_err(|error| error.to_string())?,
+                    other => return Err(format!("unknown audio decoder {other}")),
+                };
+                let mut pending = Vec::new();
+                let mut output_bytes = 0usize;
+                let mut output_frames = 0usize;
+                for chunk in data.chunks(AUDIO_CHUNK_BYTES) {
+                    send_audio(&mut pipeline, Bytes::copy_from_slice(chunk), &mut pending)?;
+                    drain_audio(&mut pipeline, &mut pending)?;
+                    output_frames += pending.len();
+                    output_bytes += pending
+                        .iter()
+                        .map(|frame| frame.data().len())
+                        .sum::<usize>();
+                    pending.clear();
+                }
+                send_audio(&mut pipeline, Bytes::new(), &mut pending)?;
+                output_frames += pending.len();
+                output_bytes += pending
+                    .iter()
+                    .map(|frame| frame.data().len())
+                    .sum::<usize>();
+                while let Some(output) = pipeline.recv() {
+                    let frame = output.map_err(|error| error.to_string())?;
+                    output_frames += 1;
+                    output_bytes += frame.data().len();
+                }
+                if output_frames == 0 {
+                    return Err("SoundKit emitted no audio frames".to_owned());
+                }
+                std::hint::black_box((output_frames, output_bytes));
+            }
         }
         MediaKind::Video => {
-            let _ = decode_video_soundkit(data, soundkit_video_codec(&case.codec))?;
+            let codec_name = soundkit_video_codec(&case.codec);
+            let codec = VideoCodec::parse(codec_name)
+                .ok_or_else(|| format!("unknown SoundKit video codec {codec_name}"))?;
+            let mut decoder = VideoDecoder::new(codec)?;
+            let mut output_frames = 0usize;
+            let mut output_bytes = 0usize;
+            let mut consume = |frames: Vec<VideoFrame>| {
+                output_frames += frames.len();
+                output_bytes += frames
+                    .iter()
+                    .flat_map(|frame| &frame.planes)
+                    .map(|plane| plane.data.len())
+                    .sum::<usize>();
+            };
+            match codec {
+                VideoCodec::H264 => {
+                    output_frames += decoder.decode_stream_with(data, |frame| {
+                        output_bytes += frame
+                            .planes
+                            .iter()
+                            .map(|plane| plane.data.len())
+                            .sum::<usize>();
+                    })?;
+                }
+                VideoCodec::Hevc => {
+                    consume(decoder.decode(data, None, None)?);
+                    consume(decoder.flush()?);
+                }
+                VideoCodec::Vp9 | VideoCodec::Av1 => {
+                    if data.len() < 32 || &data[..4] != b"DKIF" {
+                        return Err("invalid IVF stream header".to_owned());
+                    }
+                    let mut cursor = usize::from(u16::from_le_bytes([data[6], data[7]]));
+                    while cursor < data.len() {
+                        if data.len() - cursor < 12 {
+                            return Err("truncated IVF frame header".to_owned());
+                        }
+                        let size = u32::from_le_bytes(
+                            data[cursor..cursor + 4]
+                                .try_into()
+                                .map_err(|_| "invalid IVF frame size")?,
+                        ) as usize;
+                        let timestamp = u64::from_le_bytes(
+                            data[cursor + 4..cursor + 12]
+                                .try_into()
+                                .map_err(|_| "invalid IVF timestamp")?,
+                        );
+                        cursor += 12;
+                        let end = cursor
+                            .checked_add(size)
+                            .filter(|end| *end <= data.len())
+                            .ok_or_else(|| "truncated IVF frame payload".to_owned())?;
+                        consume(decoder.decode(
+                            &data[cursor..end],
+                            i64::try_from(timestamp).ok(),
+                            None,
+                        )?);
+                        cursor = end;
+                    }
+                    consume(decoder.flush()?);
+                }
+                _ => {
+                    return Err(format!(
+                        "FATE runner does not handle {} yet",
+                        codec.as_str()
+                    ))
+                }
+            }
+            if output_frames == 0 {
+                return Err("SoundKit emitted no video frames".to_owned());
+            }
+            std::hint::black_box((output_frames, output_bytes));
         }
     }
     Ok(started.elapsed())
@@ -837,5 +1153,24 @@ fn main() {
     if let Err(error) = result {
         eprintln!("{error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_alignment_ignores_silent_lead_ambiguity() {
+        let mut reference = vec![0_i16; 3_000];
+        reference.extend((0..8_000).map(|sample| {
+            (((sample as f64 * 0.071).sin() * 20_000.0).round() as i32)
+                .clamp(i16::MIN as i32, i16::MAX as i32) as i16
+        }));
+        let soundkit = reference.clone();
+
+        let quality = best_audio_quality(&soundkit, &reference, 1);
+        assert_eq!(quality.aligned_frames, 0);
+        assert!(quality.db.is_infinite());
     }
 }

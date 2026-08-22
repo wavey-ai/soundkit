@@ -178,6 +178,7 @@ impl AacLcDecoder {
         let stream = IndividualChannelStream::read(reader, None, &mut scale_factor_decoder)?;
 
         self.decode_channel_spectrum(0, reader, &stream, false)?;
+        self.apply_channel_tns(0, &stream)?;
         self.synthesize_channel(0, &stream.prefix.ics_info)?;
         Ok(())
     }
@@ -206,6 +207,11 @@ impl AacLcDecoder {
         self.decode_channel_spectrum(1, reader, &right, true)?;
 
         self.apply_common_stereo_tools(&header, &left.prefix.ics_info, &left, &right)?;
+        // TNS filters the reconstructed left/right spectra. Applying it to
+        // mid/side or intensity-coded spectra produces a channel-dependent
+        // error even when the noiseless coefficients are correct.
+        self.apply_channel_tns(0, &left)?;
+        self.apply_channel_tns(1, &right)?;
         self.synthesize_channel(0, &left.prefix.ics_info)?;
         self.synthesize_channel(1, &right.prefix.ics_info)?;
         Ok(())
@@ -234,7 +240,16 @@ impl AacLcDecoder {
             &mut self.pns_state,
         )?;
 
+        Ok(())
+    }
+
+    fn apply_channel_tns(
+        &mut self,
+        channel: usize,
+        stream: &IndividualChannelStream,
+    ) -> Result<()> {
         if let Some(tns) = stream.tns_data {
+            let layout = self.band_layout(&stream.prefix.ics_info)?;
             let max_tns_bands = lc_tns_max_bands(
                 self.config.sampling_frequency,
                 stream.prefix.ics_info.window_sequence,

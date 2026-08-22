@@ -7,26 +7,13 @@ description = "FLAC packet codec support for Soundkit"
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-access-unit = { git = "https://github.com/wavey-ai/access-unit.git", branch = "main" }
-libc = "0.2.158"
-libflac-sys = { version = "0.3.4", optional = true }
-claxon = { version = "0.4", optional = true }
-flacenc = { git = "https://github.com/wavey-ai/flacenc-rs.git", branch = "main", default-features = false, optional = true }
-oxideav-core = { version = "0.1.26", optional = true }
-oxideav-flac = { version = "0.0.11", optional = true }
 soundkit = { path = "../soundkit" }
-tracing = "0.1.40"
+wavey-flac = { git = "https://github.com/wavey-ai/flac.git", branch = "main", default-features = false, optional = true }
 
 [features]
-default = ["libflac", "flacenc-encoder"]
-libflac = ["libflac-sys"]
-claxon-decoder = ["claxon"]
-oxideav-encoder = ["dep:oxideav-core", "dep:oxideav-flac"]
-flacenc-encoder = ["dep:flacenc"]
-packet-codec = ["dep:flacenc", "dep:oxideav-core", "dep:oxideav-flac"]
-
-[dev-dependencies]
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+default = ["wavey-codec"]
+wavey-codec = ["dep:wavey-flac"]
+packet-codec = ["wavey-codec"]
 
 [[example]]
 name = "flac_frame_cost"

@@ -48,12 +48,32 @@ codec-fate-corpus:
 
 .PHONY: codec-fate-test
 codec-fate-test: codec-fate-corpus
-	cargo run --release -p soundkit-codec-fate -- \
+	cargo run --release -p soundkit-codec-fate --bin soundkit-codec-fate -- \
 		check build/fate-codec-corpus scripts/ffmpeg-fate-codec-manifest.tsv
+
+.PHONY: media-pcm-fixtures
+media-pcm-fixtures:
+	cargo run --release -p soundkit-codec-fate --bin soundkit-codec-fate -- \
+		check testdata scripts/media-pcm-fixture-manifest.tsv
+
+.PHONY: media-audio-fuzz
+media-audio-fuzz:
+	cargo run --release -p soundkit-codec-fate --bin audio-fuzz -- \
+		testdata scripts/media-pcm-fixture-manifest.tsv
+
+.PHONY: media-metadata-fate
+media-metadata-fate:
+	cargo run --release -p soundkit-codec-fate --bin metadata -- \
+		check build/ffmpeg-fate-suite scripts/media-metadata-fate-manifest.tsv
+
+.PHONY: media-metadata-sweep
+media-metadata-sweep:
+	cargo run --release -p soundkit-codec-fate --bin metadata -- \
+		sweep build/ffmpeg-fate-suite
 
 .PHONY: codec-fate-bench
 codec-fate-bench: codec-fate-corpus
-	cargo run --release -p soundkit-codec-fate -- \
+	cargo run --release -p soundkit-codec-fate --bin soundkit-codec-fate -- \
 		bench build/fate-codec-corpus scripts/ffmpeg-fate-codec-manifest.tsv \
 		$(or $(CODEC_FATE_BENCH_ITERATIONS),5)
 

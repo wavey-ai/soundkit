@@ -42,10 +42,12 @@ A panic, hang, checksum change, or silent profile substitution fails the suite.
 
 | Codec | FATE baseline | Oracle result |
 | --- | --- | --- |
-| AAC-LC | mono MP4, extracted losslessly to ADTS | 78.35 dB SNR |
+| AAC-LC | stereo ADTS decoded by SoundKit's Rust AAC-LC decoder | validated against FFmpeg PCM |
 | MP3 Layer III | mono conformance bitstream | 80.03 dB SNR |
 | Vorbis | stereo Ogg | 54.66 dB SNR |
 | AMR-NB | 12.2 kbit/s | 30.92 dB SNR |
+| AVI PCM | signed 16-bit and unsigned 8-bit | sample-exact |
+| MPEG-PS DVD LPCM | 16-bit and 24-bit | sample-exact after s16 conversion |
 | H.264 | constrained baseline, progressive 4:2:0 | pixel-exact |
 | HEVC | Main, 8-bit 4:2:0 IPCM | pixel-exact |
 | VP9 | profile 0, static-resolution 4:2:0 | pixel-exact |
@@ -55,19 +57,21 @@ A panic, hang, checksum change, or silent profile substitution fails the suite.
 
 | Codec surface | Reproduced gap |
 | --- | --- |
-| AC-3 stereo | Decodes, but output is -9.33 dB SNR against FFmpeg. |
-| Opus stereo | Decodes, but output is 11.47 dB SNR against FFmpeg. |
+| AVI MP3 | Decodes, but output is 12.49 dB SNR against FFmpeg. |
+| AC-3 stereo | Decodes, but output is -8.70 dB SNR against FFmpeg. |
+| Opus stereo | Decodes, but output is 9.67 dB SNR against FFmpeg. |
 | Opus surround | Rejects mapping family 1. |
 | E-AC-3 | No decoded audio output. |
 | DTS-ES | No decoded audio output. |
+| ASF/WMA2 | ASF metadata is parsed, but no production WMA PCM decoder is connected. |
 | AMR-WB | No decoded audio output. |
 | H.264 | Rejects interlaced/field coding and a 4:2:0 8-bit to 4:4:4 10-bit transition. |
 | HEVC | A Main-profile merge vector decodes incorrectly; one Main10 stream fails `cu_qp_delta`; 4:2:2 10-bit RExt is unsupported. |
 | VP9 | A midstream resolution change emits the wrong output extent. |
 
-A green run currently means all eight accepted baselines agree with FFmpeg and
-all twelve declared gaps reproduce. It does not mean every SoundKit codec or
-profile is represented yet.
+A green run currently means all twelve accepted baselines agree with FFmpeg
+and all fourteen declared mismatches/rejections reproduce. It does not mean
+every SoundKit codec or profile is represented yet.
 
 ## Local benchmark
 

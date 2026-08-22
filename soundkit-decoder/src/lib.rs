@@ -5,19 +5,23 @@ use frame_header::{EncodingFlag, Endianness};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
-use soundkit::audio_bytes::s32le_to_i32;
 use soundkit::audio_packet::Decoder;
-use soundkit::audio_pipeline::{deserialize_audio, vec_i16_to_f32, vec_i32_to_f32};
-use soundkit::audio_types::{AudioData, PcmData};
+use soundkit::audio_types::AudioData;
 use soundkit::raw_pcm::RawPcmStreamProcessor;
 pub use soundkit::raw_pcm::{RawPcmFormat, RawPcmSampleFormat};
 use soundkit::wav::WavStreamProcessor;
 use soundkit_aac::{AacDecoder, AacDecoderMp4};
+use soundkit_aac_lc::AacLcDecoder;
 use soundkit_ac3::Ac3Decoder;
 use soundkit_aiff::AiffDecoder;
-use soundkit_alac::AlacDecoder;
+use soundkit_alac::{AlacDecoder, AlacPacketDecoder};
 use soundkit_amr::AmrNbDecoder;
-use soundkit_flac::FlacDecoderClaxon;
+use soundkit_audio_demux::{
+    AudioCodec, AudioDemuxEvent, AudioPacketFormat, AudioTrackConfig, AudioTrackDemuxer,
+    CafAudioIndex, MediaTrackConfig, MediaTrackKind, Mp4MediaDemuxEvent, Mp4MediaDemuxer,
+    Mp4MediaIndex, MxfMediaIndex, PcmEndianness,
+};
+use soundkit_flac::FlacDecoder;
 use soundkit_g711::G711Decoder;
 pub use soundkit_g711::G711Law;
 use soundkit_g722::G722Decoder;
@@ -31,11 +35,27 @@ use soundkit_ogg_opus::OggOpusDecoder;
 use soundkit_opus::OpusStreamDecoder;
 use soundkit_speex::SpeexDecoder;
 use soundkit_vorbis::VorbisDecoder;
-use soundkit_webm::WebmDecoder;
+use soundkit_webm::{
+    WebmDecoder, WebmMediaDemuxEvent, WebmMediaDemuxer, WebmMediaTrackConfig, WebmTrackKind,
+};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::Arc;
 use std::thread;
+use symphonia_bundle_mp3::MpaDecoder as SymphoniaMpaDecoder;
+use symphonia_codec_aac::AacDecoder as SymphoniaAacDecoder;
+use symphonia_core::audio::{
+    Channels as SymphoniaChannels, GenericAudioBufferRef as SymphoniaAudioBufferRef,
+};
+use symphonia_core::codecs::audio::well_known::{
+    CODEC_ID_AAC as SYMPHONIA_CODEC_ID_AAC, CODEC_ID_MP2 as SYMPHONIA_CODEC_ID_MP2,
+};
+use symphonia_core::codecs::audio::{
+    AudioCodecParameters as SymphoniaAudioCodecParameters, AudioDecoder as SymphoniaAudioDecoder,
+    AudioDecoderOptions as SymphoniaAudioDecoderOptions,
+};
+use symphonia_core::packet::Packet as SymphoniaPacket;
+use symphonia_core::units::{Duration as SymphoniaDuration, Timestamp as SymphoniaTimestamp};
 
 /// Unified streaming decoder trait - all decoders implement this interface.
 /// This eliminates the need for codec-specific process_* and flush_* functions.
@@ -60,6 +80,7 @@ const RESAMPLE_CHUNK_SIZE: usize = 4096;
 const MAX_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_QUEUED_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const DECODER_SCRATCH_SAMPLES: usize = 262_144;
+const MAX_SEEKABLE_PACKET_SAMPLES: usize = 65_536 * 8;
 
 #[derive(Default)]
 struct DecoderScratch {
@@ -127,6 +148,1769 @@ pub struct DecodeOptions {
     pub output_bits_per_sample: Option<u8>,
     pub output_sample_rate: Option<u32>,
     pub output_channels: Option<u8>,
+}
+
+/// PCM and descriptive metadata extracted from one complete media file.
+///
+/// `selected_track` is populated for seekable containers such as MOV/MP4.
+/// Elementary streams and simple audio containers are decoded through the
+/// incremental pipeline and therefore do not currently expose a container
+/// track record here.
+#[derive(Debug)]
+pub struct DecodedAudioFile {
+    pub metadata: soundkit::media_metadata::MediaMetadata,
+    pub selected_track: Option<MediaTrackConfig>,
+    pub frames: Vec<AudioData>,
+}
+
+/// Decode the first supported audio track from a complete audio or video file.
+///
+/// Unlike [`DecodePipeline`], this entry point can seek through an in-memory
+/// source. That is required for ordinary MOV/MP4 files whose `moov` metadata
+/// follows `mdat`, and for packet codecs such as ALAC and FLAC-in-MP4.
+pub fn decode_audio_file(
+    data: &[u8],
+    options: DecodeOptions,
+) -> Result<DecodedAudioFile, DecodeError> {
+    if data.is_empty() {
+        return Err(DecodeError::InvalidInputFormat(
+            "media file is empty".to_owned(),
+        ));
+    }
+    let mut metadata = soundkit::media_metadata::extract_metadata(data).unwrap_or_default();
+    if looks_like_iso_bmff(data) {
+        let (selected_track, tracks, frames) = decode_seekable_mp4_audio(data, &options)?;
+        populate_mp4_track_metadata(&mut metadata, &tracks);
+        return Ok(DecodedAudioFile {
+            metadata,
+            selected_track: Some(selected_track),
+            frames,
+        });
+    }
+    if data.starts_with(b"caff") {
+        let (config, frames) = decode_seekable_caf_audio(data, &options)?;
+        populate_caf_track_metadata(&mut metadata, &config, &frames);
+        return Ok(DecodedAudioFile {
+            metadata,
+            selected_track: None,
+            frames,
+        });
+    }
+    if looks_like_avi(data) {
+        let (track, frames) = decode_avi_audio(data, &options)?;
+        metadata.container = Some("avi".to_owned());
+        metadata.audio_tracks = vec![track];
+        return Ok(DecodedAudioFile {
+            metadata,
+            selected_track: None,
+            frames,
+        });
+    }
+    if looks_like_mpeg_ps(data) {
+        let (track, frames) = decode_mpeg_ps_audio(data, &options)?;
+        metadata.container = Some("mpeg-ps".to_owned());
+        metadata.audio_tracks = vec![track];
+        return Ok(DecodedAudioFile {
+            metadata,
+            selected_track: None,
+            frames,
+        });
+    }
+    if looks_like_mpeg_ts(data) {
+        let (config, frames) = decode_mpeg_ts_audio(data, &options)?;
+        populate_transport_track_metadata(&mut metadata, &config, &frames);
+        return Ok(DecodedAudioFile {
+            metadata,
+            selected_track: None,
+            frames,
+        });
+    }
+    if looks_like_mxf(data) {
+        let (selected_track, tracks, frames) = decode_seekable_mxf_audio(data, &options)?;
+        populate_mp4_track_metadata(&mut metadata, &tracks);
+        metadata.container = Some("mxf".to_owned());
+        return Ok(DecodedAudioFile {
+            metadata,
+            selected_track: Some(selected_track),
+            frames,
+        });
+    }
+    if looks_like_ebml(data) {
+        if let Some((tracks, frames)) = decode_matroska_aac_audio(data, &options)? {
+            populate_webm_track_metadata(&mut metadata, &tracks);
+            return Ok(DecodedAudioFile {
+                metadata,
+                selected_track: None,
+                frames,
+            });
+        }
+    }
+
+    let frames = decode_complete_stream(data, options)?;
+    Ok(DecodedAudioFile {
+        metadata,
+        selected_track: None,
+        frames,
+    })
+}
+
+fn looks_like_avi(data: &[u8]) -> bool {
+    data.starts_with(b"RIFF") && data.get(8..12) == Some(b"AVI ")
+}
+
+#[derive(Clone, Debug)]
+struct AviAudioFormat {
+    stream_index: usize,
+    format_tag: u16,
+    channels: u8,
+    sample_rate: u32,
+    bits_per_sample: u8,
+}
+
+fn decode_avi_audio(
+    data: &[u8],
+    options: &DecodeOptions,
+) -> Result<(soundkit::media_metadata::AudioTrackMetadata, Vec<AudioData>), DecodeError> {
+    let format = parse_avi_audio_format(data)?;
+    let mut encoded = Vec::new();
+    for_each_avi_riff(data, |kind, payload| {
+        if kind == b"movi" {
+            collect_avi_audio_chunks(payload, format.stream_index, &mut encoded, 0)?;
+        }
+        Ok(())
+    })?;
+    if encoded.is_empty() {
+        return Err(DecodeError::InvalidInputFormat(
+            "AVI audio track contains no packets".to_owned(),
+        ));
+    }
+
+    let codec = match format.format_tag {
+        0x0001 => "pcm",
+        0x0003 => "pcm-float",
+        0x0055 => "mp3",
+        0x2000 => "ac3",
+        0x0160..=0x0163 => "wma",
+        other => {
+            return Err(DecodeError::InvalidInputFormat(format!(
+                "unsupported AVI audio format tag 0x{other:04x}"
+            )))
+        }
+    };
+    let frames = match format.format_tag {
+        0x0055 | 0x2000 => decode_complete_stream(&encoded, *options)?,
+        0x0001 | 0x0003 => decode_avi_pcm(&format, encoded, options)?,
+        _ => {
+            return Err(DecodeError::InvalidInputFormat(
+                "AVI WMA decoding is not implemented".to_owned(),
+            ))
+        }
+    };
+    if frames.is_empty() {
+        return Err(DecodeError::DecodingFailed(
+            "AVI audio track emitted no frames".to_owned(),
+        ));
+    }
+    let duration_micros = frames.first().and_then(|first| {
+        let total = frames.iter().try_fold(0u64, |sum, frame| {
+            decoded_audio_frame_count(frame)
+                .ok()
+                .and_then(|count| sum.checked_add(u64::from(count)))
+        })?;
+        Some(total.saturating_mul(1_000_000) / u64::from(first.sampling_rate()))
+    });
+    Ok((
+        soundkit::media_metadata::AudioTrackMetadata {
+            id: Some(format.stream_index as u64),
+            codec: Some(codec.to_owned()),
+            codec_id: Some(format!("0x{:04x}", format.format_tag)),
+            sample_rate: Some(format.sample_rate),
+            channels: Some(u16::from(format.channels)),
+            bits_per_sample: Some(format.bits_per_sample),
+            duration_micros,
+            ..soundkit::media_metadata::AudioTrackMetadata::default()
+        },
+        frames,
+    ))
+}
+
+fn decode_avi_pcm(
+    format: &AviAudioFormat,
+    encoded: Vec<u8>,
+    options: &DecodeOptions,
+) -> Result<Vec<AudioData>, DecodeError> {
+    if format.format_tag == 0x0003 && format.bits_per_sample != 32 {
+        return Err(DecodeError::InvalidInputFormat(format!(
+            "unsupported AVI float PCM depth {}",
+            format.bits_per_sample
+        )));
+    }
+    if format.format_tag == 0x0001 && !matches!(format.bits_per_sample, 8 | 16 | 24 | 32) {
+        return Err(DecodeError::InvalidInputFormat(format!(
+            "unsupported AVI integer PCM depth {}",
+            format.bits_per_sample
+        )));
+    }
+    let bytes_per_frame = usize::from(format.channels)
+        .checked_mul(usize::from(format.bits_per_sample.div_ceil(8)))
+        .ok_or_else(|| DecodeError::InvalidInputFormat("AVI PCM frame size overflow".to_owned()))?;
+    if bytes_per_frame == 0 || encoded.len() % bytes_per_frame != 0 {
+        return Err(DecodeError::InvalidInputFormat(
+            "AVI PCM ends with a partial sample frame".to_owned(),
+        ));
+    }
+    let audio = if format.bits_per_sample == 8 {
+        let samples = encoded
+            .into_iter()
+            .map(|sample| (i16::from(sample) - 128) << 8)
+            .collect::<Vec<_>>();
+        create_audio_data_i16(format.sample_rate, format.channels, &samples)
+    } else {
+        AudioData::new(
+            format.bits_per_sample,
+            format.channels,
+            format.sample_rate,
+            encoded,
+            if format.format_tag == 0x0003 {
+                EncodingFlag::PCMFloat
+            } else {
+                EncodingFlag::PCMSigned
+            },
+            Endianness::LittleEndian,
+        )
+    };
+    let mut resampler = None;
+    let mut frames = apply_output_options(audio, options, &mut resampler)?;
+    if let Some(pending) = resampler {
+        frames.extend(flush_resampler_frames(pending)?);
+    }
+    Ok(frames)
+}
+
+fn parse_avi_audio_format(data: &[u8]) -> Result<AviAudioFormat, DecodeError> {
+    let mut format = None;
+    let mut stream_index = 0usize;
+    for_each_avi_riff(data, |kind, payload| {
+        if kind == b"hdrl" && format.is_none() {
+            for_each_riff_chunk(payload, |id, chunk| {
+                if id == b"LIST" && chunk.get(..4) == Some(b"strl") {
+                    let this_stream = stream_index;
+                    stream_index += 1;
+                    if format.is_none() {
+                        format = parse_avi_stream_list(&chunk[4..], this_stream)?;
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
+    })?;
+    format.ok_or_else(|| DecodeError::InvalidInputFormat("AVI has no audio stream".to_owned()))
+}
+
+fn parse_avi_stream_list(
+    bytes: &[u8],
+    stream_index: usize,
+) -> Result<Option<AviAudioFormat>, String> {
+    let mut audio = false;
+    let mut wave = None;
+    for_each_riff_chunk(bytes, |id, payload| {
+        if id == b"strh" {
+            audio = payload.get(..4) == Some(b"auds");
+        } else if id == b"strf" {
+            wave = Some(payload.to_vec());
+        }
+        Ok(())
+    })?;
+    if !audio {
+        return Ok(None);
+    }
+    let wave = wave.ok_or_else(|| "AVI audio stream has no strf format".to_owned())?;
+    if wave.len() < 16 {
+        return Err("AVI WAVEFORMAT is truncated".to_owned());
+    }
+    let channels = u16::from_le_bytes(wave[2..4].try_into().unwrap());
+    let channels = u8::try_from(channels)
+        .ok()
+        .filter(|channels| *channels != 0)
+        .ok_or_else(|| "AVI channel count is invalid".to_owned())?;
+    let sample_rate = u32::from_le_bytes(wave[4..8].try_into().unwrap());
+    if sample_rate == 0 {
+        return Err("AVI sample rate is zero".to_owned());
+    }
+    Ok(Some(AviAudioFormat {
+        stream_index,
+        format_tag: u16::from_le_bytes(wave[..2].try_into().unwrap()),
+        channels,
+        sample_rate,
+        bits_per_sample: u16::from_le_bytes(wave[14..16].try_into().unwrap()).min(255) as u8,
+    }))
+}
+
+fn for_each_avi_riff(
+    bytes: &[u8],
+    mut visit_list: impl FnMut(&[u8; 4], &[u8]) -> Result<(), String>,
+) -> Result<(), DecodeError> {
+    let mut offset = 0usize;
+    let mut forms = 0usize;
+    while offset + 12 <= bytes.len() {
+        if bytes.get(offset..offset + 4) != Some(b"RIFF") {
+            if forms != 0 {
+                break;
+            }
+            return Err(DecodeError::InvalidInputFormat(
+                "AVI contains data outside a RIFF form".to_owned(),
+            ));
+        }
+        forms += 1;
+        let length = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        let declared_end = offset
+            .checked_add(8)
+            .and_then(|start| start.checked_add(length))
+            .ok_or_else(|| {
+                DecodeError::InvalidInputFormat("AVI RIFF form size overflows".to_owned())
+            })?;
+        // FATE contains deliberately prefix-truncated AVI samples. Parse the
+        // complete chunks present in such a prefix, but never manufacture the
+        // incomplete final packet.
+        let end = declared_end.min(bytes.len());
+        if !matches!(bytes.get(offset + 8..offset + 12), Some(b"AVI " | b"AVIX")) {
+            return Err(DecodeError::InvalidInputFormat(
+                "invalid AVI RIFF form type".to_owned(),
+            ));
+        }
+        for_each_riff_chunk(&bytes[offset + 12..end], |id, payload| {
+            if id == b"LIST" {
+                let kind: &[u8; 4] = payload
+                    .get(..4)
+                    .ok_or_else(|| "AVI LIST type is truncated".to_owned())?
+                    .try_into()
+                    .unwrap();
+                visit_list(kind, &payload[4..])?;
+            }
+            Ok(())
+        })
+        .map_err(DecodeError::InvalidInputFormat)?;
+        if declared_end > bytes.len() {
+            break;
+        }
+        offset = end + (length & 1);
+    }
+    Ok(())
+}
+
+fn for_each_riff_chunk(
+    bytes: &[u8],
+    mut visit: impl FnMut(&[u8; 4], &[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut offset = 0usize;
+    let mut chunks = 0usize;
+    while offset + 8 <= bytes.len() {
+        chunks += 1;
+        if chunks > 1_000_000 {
+            return Err("AVI chunk count exceeds budget".to_owned());
+        }
+        let id: &[u8; 4] = bytes[offset..offset + 4].try_into().unwrap();
+        let length = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        let start = offset + 8;
+        let declared_end = start
+            .checked_add(length)
+            .ok_or_else(|| "AVI chunk size overflows".to_owned())?;
+        if declared_end > bytes.len() {
+            // A truncated LIST can still contain many complete media chunks.
+            // Expose its available prefix; truncated leaf chunks are skipped.
+            if id == b"LIST" && bytes.len().saturating_sub(start) >= 4 {
+                visit(id, &bytes[start..])?;
+            }
+            return Ok(());
+        }
+        visit(id, &bytes[start..declared_end])?;
+        offset = declared_end + (length & 1);
+    }
+    if offset != bytes.len() && !bytes[offset..].iter().all(|byte| *byte == 0) {
+        return Err("AVI chunk table has trailing data".to_owned());
+    }
+    Ok(())
+}
+
+fn collect_avi_audio_chunks(
+    bytes: &[u8],
+    stream_index: usize,
+    output: &mut Vec<u8>,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > 8 {
+        return Err("AVI record nesting exceeds budget".to_owned());
+    }
+    for_each_riff_chunk(bytes, |id, payload| {
+        if id == b"LIST" && payload.len() >= 4 {
+            collect_avi_audio_chunks(&payload[4..], stream_index, output, depth + 1)?;
+        } else if &id[2..] == b"wb" && avi_stream_id(&id[..2]) == Some(stream_index) {
+            output
+                .len()
+                .checked_add(payload.len())
+                .filter(|length| *length <= 512 * 1024 * 1024)
+                .ok_or_else(|| "AVI audio payload exceeds budget".to_owned())?;
+            output.extend_from_slice(payload);
+        }
+        Ok(())
+    })
+}
+
+fn avi_stream_id(bytes: &[u8]) -> Option<usize> {
+    bytes.iter().try_fold(0usize, |value, byte| {
+        let digit = match byte {
+            b'0'..=b'9' => usize::from(byte - b'0'),
+            b'A'..=b'F' => usize::from(byte - b'A' + 10),
+            b'a'..=b'f' => usize::from(byte - b'a' + 10),
+            _ => return None,
+        };
+        Some(value * 16 + digit)
+    })
+}
+
+fn looks_like_mpeg_ps(data: &[u8]) -> bool {
+    data.starts_with(b"\0\0\x01\xba")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DvdLpcmFormat {
+    sample_rate: u32,
+    channels: u8,
+    bits_per_sample: u8,
+}
+
+fn decode_mpeg_ps_audio(
+    data: &[u8],
+    options: &DecodeOptions,
+) -> Result<(soundkit::media_metadata::AudioTrackMetadata, Vec<AudioData>), DecodeError> {
+    let mut format = None;
+    let mut packed = Vec::new();
+    let mut offset = 0usize;
+    while let Some(start) = find_start_code(data, offset) {
+        let code = data[start + 3];
+        if code == 0xbd {
+            let header = data.get(start + 4..start + 6).ok_or_else(|| {
+                DecodeError::InvalidInputFormat("MPEG-PS PES length is truncated".to_owned())
+            })?;
+            let length = u16::from_be_bytes(header.try_into().unwrap()) as usize;
+            let end = (start + 6)
+                .checked_add(length)
+                .filter(|end| *end <= data.len())
+                .ok_or_else(|| {
+                    DecodeError::InvalidInputFormat("MPEG-PS PES packet is truncated".to_owned())
+                })?;
+            if let Some(payload) = parse_mpeg_pes_payload(&data[start + 6..end])? {
+                if matches!(payload.first(), Some(0xa0..=0xaf)) && payload.len() >= 7 {
+                    // private_stream_1: substream id + 3-byte DVD substream
+                    // header, followed by the decoder's 3-byte LPCM header.
+                    let packet = &payload[4..];
+                    let packet_format = parse_dvd_lpcm_header(&packet[..3])?;
+                    if let Some(existing) = format {
+                        if existing != packet_format {
+                            return Err(DecodeError::InvalidInputFormat(
+                                "DVD LPCM format changes mid-stream".to_owned(),
+                            ));
+                        }
+                    } else {
+                        format = Some(packet_format);
+                    }
+                    packed
+                        .len()
+                        .checked_add(packet.len() - 3)
+                        .filter(|length| *length <= 512 * 1024 * 1024)
+                        .ok_or_else(|| {
+                            DecodeError::InvalidInputFormat(
+                                "MPEG-PS audio payload exceeds budget".to_owned(),
+                            )
+                        })?;
+                    packed.extend_from_slice(&packet[3..]);
+                }
+            }
+            offset = end;
+        } else {
+            offset = start + 4;
+        }
+    }
+    let format = format.ok_or_else(|| {
+        DecodeError::InvalidInputFormat("MPEG-PS has no supported DVD LPCM track".to_owned())
+    })?;
+    let pcm = unpack_dvd_lpcm(&packed, format)?;
+    let audio = AudioData::new(
+        format.bits_per_sample,
+        format.channels,
+        format.sample_rate,
+        pcm,
+        EncodingFlag::PCMSigned,
+        Endianness::LittleEndian,
+    );
+    let mut resampler = None;
+    let mut frames = apply_output_options(audio, options, &mut resampler)?;
+    if let Some(pending) = resampler {
+        frames.extend(flush_resampler_frames(pending)?);
+    }
+    if frames.is_empty() {
+        return Err(DecodeError::DecodingFailed(
+            "MPEG-PS DVD LPCM track emitted no frames".to_owned(),
+        ));
+    }
+    let total_frames = frames.iter().try_fold(0u64, |sum, frame| {
+        decoded_audio_frame_count(frame)
+            .ok()
+            .and_then(|count| sum.checked_add(u64::from(count)))
+    });
+    Ok((
+        soundkit::media_metadata::AudioTrackMetadata {
+            codec: Some("pcm-dvd".to_owned()),
+            codec_id: Some("private_stream_1/lpcm".to_owned()),
+            sample_rate: Some(format.sample_rate),
+            channels: Some(u16::from(format.channels)),
+            bits_per_sample: Some(format.bits_per_sample),
+            duration_micros: total_frames
+                .map(|frames| frames.saturating_mul(1_000_000) / u64::from(format.sample_rate)),
+            ..soundkit::media_metadata::AudioTrackMetadata::default()
+        },
+        frames,
+    ))
+}
+
+fn find_start_code(bytes: &[u8], offset: usize) -> Option<usize> {
+    bytes
+        .get(offset..)?
+        .windows(3)
+        .position(|window| window == b"\0\0\x01")
+        .map(|position| offset + position)
+        .filter(|start| start + 3 < bytes.len())
+}
+
+fn parse_mpeg_pes_payload(packet: &[u8]) -> Result<Option<&[u8]>, DecodeError> {
+    let mut cursor = 0usize;
+    while packet.get(cursor) == Some(&0xff) {
+        cursor += 1;
+    }
+    let Some(&first) = packet.get(cursor) else {
+        return Ok(None);
+    };
+    if first & 0xc0 == 0x80 {
+        let header = packet.get(cursor..cursor + 3).ok_or_else(|| {
+            DecodeError::InvalidInputFormat("MPEG-2 PES header is truncated".to_owned())
+        })?;
+        cursor = cursor
+            .checked_add(3 + usize::from(header[2]))
+            .filter(|cursor| *cursor <= packet.len())
+            .ok_or_else(|| {
+                DecodeError::InvalidInputFormat(
+                    "MPEG-2 PES optional header is truncated".to_owned(),
+                )
+            })?;
+    } else {
+        if first & 0xc0 == 0x40 {
+            cursor = cursor.checked_add(2).ok_or_else(|| {
+                DecodeError::InvalidInputFormat("MPEG-1 PES header overflows".to_owned())
+            })?;
+        }
+        let first = *packet.get(cursor).ok_or_else(|| {
+            DecodeError::InvalidInputFormat("MPEG-1 PES header is truncated".to_owned())
+        })?;
+        cursor = match first & 0xf0 {
+            0x20 => cursor + 5,
+            0x30 => cursor + 10,
+            _ if first == 0x0f => cursor + 1,
+            _ => return Ok(None),
+        };
+        if cursor > packet.len() {
+            return Err(DecodeError::InvalidInputFormat(
+                "MPEG-1 PES timestamp is truncated".to_owned(),
+            ));
+        }
+    }
+    Ok(Some(&packet[cursor..]))
+}
+
+fn parse_dvd_lpcm_header(header: &[u8]) -> Result<DvdLpcmFormat, DecodeError> {
+    if header.len() != 3 {
+        return Err(DecodeError::InvalidInputFormat(
+            "DVD LPCM header is truncated".to_owned(),
+        ));
+    }
+    let bits_per_sample = 16 + ((header[1] >> 6) & 3) * 4;
+    if !matches!(bits_per_sample, 16 | 20 | 24) {
+        return Err(DecodeError::InvalidInputFormat(format!(
+            "unsupported DVD LPCM sample depth {bits_per_sample}"
+        )));
+    }
+    let sample_rate = [48_000, 96_000, 44_100, 32_000][usize::from((header[1] >> 4) & 3)];
+    Ok(DvdLpcmFormat {
+        sample_rate,
+        channels: (header[1] & 7) + 1,
+        bits_per_sample,
+    })
+}
+
+fn unpack_dvd_lpcm(packed: &[u8], format: DvdLpcmFormat) -> Result<Vec<u8>, DecodeError> {
+    let channels = usize::from(format.channels);
+    if format.bits_per_sample == 16 {
+        let block_size = channels * 2;
+        if packed.len() % block_size != 0 {
+            return Err(DecodeError::InvalidInputFormat(
+                "DVD LPCM ends with a partial sample block".to_owned(),
+            ));
+        }
+        let mut output = Vec::with_capacity(packed.len());
+        for sample in packed.chunks_exact(2) {
+            output.extend_from_slice(&[sample[1], sample[0]]);
+        }
+        return Ok(output);
+    }
+    if format.bits_per_sample == 20 {
+        return Err(DecodeError::InvalidInputFormat(
+            "20-bit DVD LPCM decoding is not implemented".to_owned(),
+        ));
+    }
+
+    let (groups_per_block, samples_per_block) = match channels {
+        1 | 2 | 4 => (1usize, 4 / channels),
+        8 => (2, 1),
+        _ => (channels, 4),
+    };
+    let block_size = if matches!(channels, 1 | 2 | 4) {
+        12
+    } else if channels == 8 {
+        24
+    } else {
+        channels * 12
+    };
+    if packed.len() % block_size != 0 {
+        return Err(DecodeError::InvalidInputFormat(
+            "DVD LPCM ends with a partial 24-bit sample block".to_owned(),
+        ));
+    }
+    let samples_per_group = 4usize;
+    let samples_per_output_block = channels * samples_per_block;
+    let mut output = Vec::with_capacity(packed.len());
+    for block in packed.chunks_exact(block_size) {
+        let mut cursor = 0usize;
+        for _ in 0..groups_per_block {
+            let high = &block[cursor..cursor + samples_per_group * 2];
+            let low = &block[cursor + samples_per_group * 2..cursor + samples_per_group * 3];
+            for sample in 0..samples_per_group {
+                output.extend_from_slice(&[low[sample], high[sample * 2 + 1], high[sample * 2]]);
+            }
+            cursor += samples_per_group * 3;
+        }
+        debug_assert_eq!(output.len() % (samples_per_output_block * 3), 0);
+    }
+    Ok(output)
+}
+
+fn looks_like_mxf(data: &[u8]) -> bool {
+    data.windows(4)
+        .take(65_537)
+        .any(|window| window == [0x06, 0x0e, 0x2b, 0x34])
+}
+
+fn decode_seekable_mxf_audio(
+    data: &[u8],
+    options: &DecodeOptions,
+) -> Result<(MediaTrackConfig, Vec<MediaTrackConfig>, Vec<AudioData>), DecodeError> {
+    let index = MxfMediaIndex::from_file(data).map_err(DecodeError::InvalidInputFormat)?;
+    let track = index
+        .tracks
+        .iter()
+        .find(|track| track.kind == MediaTrackKind::Audio && track.codec == "pcm")
+        .cloned()
+        .ok_or_else(|| {
+            DecodeError::InvalidInputFormat("MXF has no supported PCM audio track".to_owned())
+        })?;
+    let mut frames = Vec::new();
+    let mut resampler = None;
+    for sample in index
+        .samples
+        .iter()
+        .filter(|sample| sample.kind == MediaTrackKind::Audio && sample.track_id == track.track_id)
+    {
+        let packet = index
+            .sample_data(data, sample)
+            .map_err(DecodeError::InvalidInputFormat)?;
+        let frame = make_container_pcm_audio(&track, packet)?;
+        frames.extend(apply_output_options(frame, options, &mut resampler)?);
+    }
+    if let Some(pending) = resampler.take() {
+        frames.extend(flush_resampler_frames(pending)?);
+    }
+    if frames.is_empty() {
+        return Err(DecodeError::DecodingFailed(
+            "MXF PCM track emitted no audio frames".to_owned(),
+        ));
+    }
+    Ok((track, index.tracks, frames))
+}
+
+fn looks_like_mpeg_ts(data: &[u8]) -> bool {
+    [(188_usize, 0_usize), (192, 4)]
+        .into_iter()
+        .any(|(stride, prefix)| {
+            (0..3).all(|packet| data.get(prefix + packet * stride) == Some(&0x47))
+        })
+}
+
+enum TransportAudioDecoder {
+    Aac(Option<AacLcDecoder>),
+    Mp2(WaveyMp2Decoder),
+    Pcm,
+}
+
+struct WaveyMp2Decoder {
+    decoder: SymphoniaMpaDecoder,
+}
+
+impl WaveyMp2Decoder {
+    fn new(config: &AudioTrackConfig) -> Result<Self, DecodeError> {
+        let mut params = SymphoniaAudioCodecParameters::new();
+        params.for_codec(SYMPHONIA_CODEC_ID_MP2);
+        if let Some(sample_rate) = config.sample_rate {
+            params.with_sample_rate(sample_rate);
+        }
+        if let Some(channels) = config.channels {
+            params.with_channels(SymphoniaChannels::Discrete(u16::from(channels)));
+        }
+        let decoder =
+            SymphoniaMpaDecoder::try_new(&params, &SymphoniaAudioDecoderOptions::default())
+                .map_err(|error| DecodeError::DecoderInitFailed(error.to_string()))?;
+        Ok(Self { decoder })
+    }
+
+    fn decode_frame(&mut self, frame: &[u8]) -> Result<AudioData, DecodeError> {
+        let packet = SymphoniaPacket::new(
+            0,
+            SymphoniaTimestamp::ZERO,
+            SymphoniaDuration::ZERO,
+            frame.to_vec(),
+        );
+        let decoded = self
+            .decoder
+            .decode(&packet)
+            .map_err(|error| DecodeError::DecodingFailed(error.to_string()))?;
+        symphonia_audio_to_i16(decoded)
+    }
+}
+
+fn decode_mpeg_ts_audio(
+    data: &[u8],
+    options: &DecodeOptions,
+) -> Result<(AudioTrackConfig, Vec<AudioData>), DecodeError> {
+    let mut demuxer =
+        AudioTrackDemuxer::new_with_format("mpeg-ts").map_err(DecodeError::DecoderInitFailed)?;
+    let mut config = None;
+    let mut decoder = None;
+    let mut frames = Vec::new();
+    let mut resampler = None;
+    for chunk in data.chunks(64 * 1024) {
+        let events = demuxer
+            .push(chunk)
+            .map_err(DecodeError::InvalidInputFormat)?;
+        consume_mpeg_ts_events(
+            events,
+            options,
+            &mut config,
+            &mut decoder,
+            &mut frames,
+            &mut resampler,
+        )?;
+    }
+    let events = demuxer.flush().map_err(DecodeError::InvalidInputFormat)?;
+    consume_mpeg_ts_events(
+        events,
+        options,
+        &mut config,
+        &mut decoder,
+        &mut frames,
+        &mut resampler,
+    )?;
+    if let Some(pending) = resampler.take() {
+        frames.extend(flush_resampler_frames(pending)?);
+    }
+    let config = config.ok_or_else(|| {
+        DecodeError::InvalidInputFormat("MPEG-TS has no supported audio track".to_owned())
+    })?;
+    if frames.is_empty() {
+        return Err(DecodeError::DecodingFailed(format!(
+            "MPEG-TS {} track emitted no audio frames",
+            config.codec.as_str()
+        )));
+    }
+    Ok((config, frames))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn consume_mpeg_ts_events(
+    events: Vec<AudioDemuxEvent>,
+    options: &DecodeOptions,
+    selected: &mut Option<AudioTrackConfig>,
+    decoder: &mut Option<TransportAudioDecoder>,
+    frames: &mut Vec<AudioData>,
+    resampler: &mut Option<StreamingResampler>,
+) -> Result<(), DecodeError> {
+    for event in events {
+        match event {
+            AudioDemuxEvent::Config(config) if selected.is_none() => {
+                *decoder = match config.codec {
+                    AudioCodec::Aac if config.packet_format == Some(AudioPacketFormat::Adts) => {
+                        Some(TransportAudioDecoder::Aac(None))
+                    }
+                    AudioCodec::Unknown(ref codec) if codec == "mpeg-audio" || codec == "mp2" => {
+                        Some(TransportAudioDecoder::Mp2(WaveyMp2Decoder::new(&config)?))
+                    }
+                    AudioCodec::Pcm => Some(TransportAudioDecoder::Pcm),
+                    _ => None,
+                };
+                if decoder.is_some() {
+                    *selected = Some(config);
+                } else {
+                    return Err(DecodeError::InvalidInputFormat(format!(
+                        "unsupported MPEG-TS audio codec {}",
+                        config.codec.as_str()
+                    )));
+                }
+            }
+            AudioDemuxEvent::Packet(packet) => {
+                let Some(config) = selected.as_ref() else {
+                    continue;
+                };
+                let state = decoder.as_mut().ok_or_else(|| {
+                    DecodeError::DecoderInitFailed(
+                        "MPEG-TS audio decoder is not initialized".to_owned(),
+                    )
+                })?;
+                let frame = match state {
+                    TransportAudioDecoder::Aac(decoder) => {
+                        let (asc, access_unit) = parse_adts_access_unit(&packet.data)?;
+                        if decoder.is_none() {
+                            *decoder =
+                                Some(AacLcDecoder::from_audio_specific_config(&asc).map_err(
+                                    |error| DecodeError::DecoderInitFailed(error.to_string()),
+                                )?);
+                        }
+                        decode_aac_access_unit(decoder.as_mut().unwrap(), access_unit)?
+                    }
+                    TransportAudioDecoder::Mp2(decoder) => decoder.decode_frame(&packet.data)?,
+                    TransportAudioDecoder::Pcm => make_audio_track_pcm_audio(config, packet.data)?,
+                };
+                frames.extend(apply_output_options(frame, options, resampler)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn parse_adts_access_unit(data: &[u8]) -> Result<([u8; 2], &[u8]), DecodeError> {
+    if data.len() < 7 || data[0] != 0xff || data[1] & 0xf6 != 0xf0 {
+        return Err(DecodeError::InvalidInputFormat(
+            "invalid ADTS access unit".to_owned(),
+        ));
+    }
+    let audio_object_type = ((data[2] >> 6) & 0x03) + 1;
+    let sample_rate_index = (data[2] >> 2) & 0x0f;
+    let channels = ((data[2] & 1) << 2) | (data[3] >> 6);
+    let header_bytes = if data[1] & 1 != 0 { 7 } else { 9 };
+    if data.len() < header_bytes {
+        return Err(DecodeError::InvalidInputFormat(
+            "truncated ADTS header".to_owned(),
+        ));
+    }
+    let asc = [
+        (audio_object_type << 3) | (sample_rate_index >> 1),
+        ((sample_rate_index & 1) << 7) | (channels << 3),
+    ];
+    Ok((asc, &data[header_bytes..]))
+}
+
+fn decode_seekable_caf_audio(
+    data: &[u8],
+    options: &DecodeOptions,
+) -> Result<(AudioTrackConfig, Vec<AudioData>), DecodeError> {
+    let index = CafAudioIndex::from_file(data).map_err(DecodeError::InvalidInputFormat)?;
+    let mut alac = match index.config.codec {
+        AudioCodec::Alac => Some(
+            AlacPacketDecoder::new(&index.config.codec_private)
+                .map_err(DecodeError::DecoderInitFailed)?,
+        ),
+        AudioCodec::Pcm => None,
+        ref codec => {
+            return Err(DecodeError::InvalidInputFormat(format!(
+                "unsupported CAF audio codec {}",
+                codec.as_str()
+            )))
+        }
+    };
+    let mut frames = Vec::new();
+    let mut resampler = None;
+    for (sample_index, sample) in index.packets.iter().enumerate() {
+        let start = usize::try_from(sample.absolute_offset).map_err(|_| {
+            DecodeError::InvalidInputFormat("CAF packet offset exceeds this platform".to_owned())
+        })?;
+        let end = start.checked_add(sample.size as usize).ok_or_else(|| {
+            DecodeError::InvalidInputFormat("CAF packet byte range overflow".to_owned())
+        })?;
+        let source = data.get(start..end).ok_or_else(|| {
+            DecodeError::InvalidInputFormat(format!(
+                "CAF packet {sample_index} extends past the source"
+            ))
+        })?;
+        let packet = index
+            .packet_from_sample_bytes(sample_index, source)
+            .map_err(DecodeError::InvalidInputFormat)?;
+        let frame = match alac.as_mut() {
+            Some(decoder) => decoder
+                .decode_packet(&packet.data)
+                .map_err(DecodeError::DecodingFailed)?,
+            None => make_audio_track_pcm_audio(&index.config, packet.data)?,
+        };
+        let decoded_frames = decoded_audio_frame_count(&frame)?;
+        let Some(trim) = index
+            .pcm_packet_trim(sample_index, decoded_frames)
+            .map_err(DecodeError::InvalidInputFormat)?
+        else {
+            continue;
+        };
+        let Some(frame) = trim_interleaved_audio(frame, trim.source_frame_start, trim.frame_count)?
+        else {
+            continue;
+        };
+        frames.extend(apply_output_options(frame, options, &mut resampler)?);
+    }
+    if let Some(pending) = resampler.take() {
+        frames.extend(flush_resampler_frames(pending)?);
+    }
+    if frames.is_empty() {
+        return Err(DecodeError::DecodingFailed(
+            "CAF track emitted no audio frames".to_owned(),
+        ));
+    }
+    Ok((index.config, frames))
+}
+
+fn make_audio_track_pcm_audio(
+    config: &AudioTrackConfig,
+    data: Vec<u8>,
+) -> Result<AudioData, DecodeError> {
+    let sample_rate = config.sample_rate.ok_or_else(|| {
+        DecodeError::InvalidInputFormat("container PCM has no sample rate".to_owned())
+    })?;
+    let channels = config.channels.ok_or_else(|| {
+        DecodeError::InvalidInputFormat("container PCM has no channel count".to_owned())
+    })?;
+    let bits = config.bits_per_sample.ok_or_else(|| {
+        DecodeError::InvalidInputFormat("container PCM has no sample depth".to_owned())
+    })?;
+    if !matches!(
+        (config.pcm_float, bits),
+        (Some(false), 16 | 24 | 32) | (Some(true), 32)
+    ) {
+        return Err(DecodeError::InvalidInputFormat(format!(
+            "unsupported container PCM format: float={} bits={bits}",
+            config.pcm_float.unwrap_or(false)
+        )));
+    }
+    Ok(AudioData::new(
+        bits,
+        channels,
+        sample_rate,
+        data,
+        if config.pcm_float == Some(true) {
+            EncodingFlag::PCMFloat
+        } else {
+            EncodingFlag::PCMSigned
+        },
+        if config.pcm_endianness == Some(PcmEndianness::Big) {
+            Endianness::BigEndian
+        } else {
+            Endianness::LittleEndian
+        },
+    ))
+}
+
+fn populate_transport_track_metadata(
+    metadata: &mut soundkit::media_metadata::MediaMetadata,
+    config: &AudioTrackConfig,
+    frames: &[AudioData],
+) {
+    metadata.container = Some(config.container.as_str().to_owned());
+    populate_audio_track_metadata(metadata, config, frames);
+}
+
+fn populate_caf_track_metadata(
+    metadata: &mut soundkit::media_metadata::MediaMetadata,
+    config: &AudioTrackConfig,
+    frames: &[AudioData],
+) {
+    metadata.container = Some("caf".to_owned());
+    populate_audio_track_metadata(metadata, config, frames);
+}
+
+fn populate_audio_track_metadata(
+    metadata: &mut soundkit::media_metadata::MediaMetadata,
+    config: &AudioTrackConfig,
+    frames: &[AudioData],
+) {
+    let duration_micros = frames.first().and_then(|first| {
+        let total_frames = frames.iter().try_fold(0_u64, |total, frame| {
+            decoded_audio_frame_count(frame)
+                .ok()
+                .and_then(|count| total.checked_add(u64::from(count)))
+        })?;
+        Some(total_frames.saturating_mul(1_000_000) / u64::from(first.sampling_rate()))
+    });
+    metadata.audio_tracks = vec![soundkit::media_metadata::AudioTrackMetadata {
+        id: config.track_id,
+        codec: Some(config.codec.as_str().to_owned()),
+        codec_id: config.codec_id.clone(),
+        sample_rate: config.sample_rate,
+        channels: config.channels.map(u16::from),
+        bits_per_sample: config.bits_per_sample,
+        duration_micros,
+        ..soundkit::media_metadata::AudioTrackMetadata::default()
+    }];
+}
+
+fn looks_like_ebml(data: &[u8]) -> bool {
+    data.starts_with(&[0x1a, 0x45, 0xdf, 0xa3])
+}
+
+fn decode_matroska_aac_audio(
+    data: &[u8],
+    options: &DecodeOptions,
+) -> Result<Option<(Vec<WebmMediaTrackConfig>, Vec<AudioData>)>, DecodeError> {
+    let mut demuxer = WebmMediaDemuxer::new();
+    let mut tracks = Vec::new();
+    let mut selected_track_number = None;
+    let mut decoder = None;
+    let mut frames = Vec::new();
+    let mut resampler = None;
+
+    for chunk in data.chunks(64 * 1024) {
+        let events = demuxer
+            .add(chunk)
+            .map_err(DecodeError::InvalidInputFormat)?;
+        consume_matroska_aac_events(
+            events,
+            options,
+            &mut tracks,
+            &mut selected_track_number,
+            &mut decoder,
+            &mut frames,
+            &mut resampler,
+        )?;
+    }
+    let events = demuxer.finish().map_err(DecodeError::InvalidInputFormat)?;
+    consume_matroska_aac_events(
+        events,
+        options,
+        &mut tracks,
+        &mut selected_track_number,
+        &mut decoder,
+        &mut frames,
+        &mut resampler,
+    )?;
+
+    let Some(track_number) = selected_track_number else {
+        return Ok(None);
+    };
+    if let Some(pending) = resampler.take() {
+        frames.extend(flush_resampler_frames(pending)?);
+    }
+    if frames.is_empty() {
+        return Err(DecodeError::DecodingFailed(format!(
+            "Matroska AAC track {track_number} emitted no audio frames"
+        )));
+    }
+    Ok(Some((tracks, frames)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn consume_matroska_aac_events(
+    events: Vec<WebmMediaDemuxEvent>,
+    options: &DecodeOptions,
+    tracks: &mut Vec<WebmMediaTrackConfig>,
+    selected_track_number: &mut Option<u64>,
+    decoder: &mut Option<WaveyAacDecoder>,
+    frames: &mut Vec<AudioData>,
+    resampler: &mut Option<StreamingResampler>,
+) -> Result<(), DecodeError> {
+    for event in events {
+        match event {
+            WebmMediaDemuxEvent::Config { track, .. } => {
+                if selected_track_number.is_none()
+                    && track.kind == WebmTrackKind::Audio
+                    && track.codec_id == "A_AAC"
+                {
+                    *decoder = Some(WaveyAacDecoder::new(
+                        &track.codec_private,
+                        track.sample_rate,
+                        track.channels,
+                    )?);
+                    *selected_track_number = Some(track.track_number);
+                }
+                if !tracks
+                    .iter()
+                    .any(|known| known.track_number == track.track_number)
+                {
+                    tracks.push(track);
+                }
+            }
+            WebmMediaDemuxEvent::Packet {
+                track_number,
+                kind: WebmTrackKind::Audio,
+                codec_id,
+                data,
+                ..
+            } if selected_track_number == &Some(track_number) && codec_id == "A_AAC" => {
+                let decoder = decoder.as_mut().ok_or_else(|| {
+                    DecodeError::DecoderInitFailed(
+                        "Matroska AAC decoder is not initialized".to_owned(),
+                    )
+                })?;
+                let frame = decoder.decode_access_unit(&data)?;
+                frames.extend(apply_output_options(frame, options, resampler)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn looks_like_iso_bmff(data: &[u8]) -> bool {
+    let mut position = 0usize;
+    let limit = data.len().min(64 * 1024);
+    for _ in 0..16 {
+        let Some(header) = data.get(position..position.saturating_add(8)) else {
+            return false;
+        };
+        let size = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+        let box_type = &header[4..8];
+        match box_type {
+            b"ftyp" | b"moov" | b"mdat" => return true,
+            b"free" | b"wide" | b"skip" => {}
+            _ => return false,
+        }
+        if size < 8 || position.saturating_add(size) > limit {
+            return false;
+        }
+        position += size;
+    }
+    false
+}
+
+fn decode_complete_stream(
+    data: &[u8],
+    options: DecodeOptions,
+) -> Result<Vec<AudioData>, DecodeError> {
+    let mut pipeline = DecodePipeline::spawn_with_buffers_and_options(256, 4_096, options);
+    let mut frames = Vec::new();
+    for chunk in data.chunks(64 * 1024) {
+        let bytes = Bytes::copy_from_slice(chunk);
+        loop {
+            match pipeline.send(bytes.clone()) {
+                Ok(()) => break,
+                Err(DecodeError::InputBufferFull) => {
+                    while let Some(frame) = pipeline.try_recv() {
+                        frames.push(frame?);
+                    }
+                    thread::yield_now();
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        while let Some(frame) = pipeline.try_recv() {
+            frames.push(frame?);
+        }
+    }
+    loop {
+        match pipeline.finish() {
+            Ok(()) => break,
+            Err(DecodeError::InputBufferFull) => {
+                while let Some(frame) = pipeline.try_recv() {
+                    frames.push(frame?);
+                }
+                thread::yield_now();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    while let Some(frame) = pipeline.recv() {
+        frames.push(frame?);
+    }
+    if frames.is_empty() {
+        return Err(DecodeError::DecodingFailed(
+            "SoundKit emitted no audio frames".to_owned(),
+        ));
+    }
+    Ok(frames)
+}
+
+enum SeekableAudioDecoder {
+    WaveyAac(WaveyAacDecoder),
+    Alac(AlacPacketDecoder),
+    Flac(FlacDecoder),
+    Pcm,
+}
+
+struct WaveyAacDecoder {
+    decoder: SymphoniaAacDecoder,
+}
+
+impl WaveyAacDecoder {
+    fn new(
+        decoder_configuration: &[u8],
+        sample_rate: Option<u32>,
+        channels: Option<u8>,
+    ) -> Result<Self, DecodeError> {
+        if decoder_configuration.is_empty() {
+            return Err(DecodeError::DecoderInitFailed(
+                "container AAC track has no AudioSpecificConfig".to_owned(),
+            ));
+        }
+
+        let mut params = SymphoniaAudioCodecParameters::new();
+        params
+            .for_codec(SYMPHONIA_CODEC_ID_AAC)
+            .with_extra_data(decoder_configuration.to_vec().into_boxed_slice());
+        if let Some(sample_rate) = sample_rate {
+            params.with_sample_rate(sample_rate);
+        }
+        if let Some(channels) = channels {
+            params.with_channels(SymphoniaChannels::Discrete(u16::from(channels)));
+        }
+
+        let decoder =
+            SymphoniaAacDecoder::try_new(&params, &SymphoniaAudioDecoderOptions::default())
+                .map_err(|error| DecodeError::DecoderInitFailed(error.to_string()))?;
+        Ok(Self { decoder })
+    }
+
+    fn decode_access_unit(&mut self, access_unit: &[u8]) -> Result<AudioData, DecodeError> {
+        let packet = SymphoniaPacket::new(
+            0,
+            SymphoniaTimestamp::ZERO,
+            SymphoniaDuration::ZERO,
+            access_unit.to_vec(),
+        );
+        let decoded = self
+            .decoder
+            .decode(&packet)
+            .map_err(|error| DecodeError::DecodingFailed(error.to_string()))?;
+        symphonia_audio_to_i16(decoded)
+    }
+}
+
+fn symphonia_audio_to_i16(decoded: SymphoniaAudioBufferRef<'_>) -> Result<AudioData, DecodeError> {
+    let sample_rate = decoded.spec().rate();
+    let channels = u8::try_from(decoded.num_planes())
+        .map_err(|_| DecodeError::DecodingFailed("decoded channel count exceeds u8".to_owned()))?;
+    let mut float_samples = Vec::with_capacity(decoded.samples_interleaved());
+    decoded.copy_to_vec_interleaved::<f32>(&mut float_samples);
+    let interleaved = float_samples
+        .into_iter()
+        .map(float_sample_to_i16)
+        .collect::<Vec<_>>();
+    Ok(create_audio_data_i16(sample_rate, channels, &interleaved))
+}
+
+fn make_aac_audio_decoder(track: &MediaTrackConfig) -> Result<SeekableAudioDecoder, DecodeError> {
+    WaveyAacDecoder::new(
+        &track.decoder_configuration,
+        track.sample_rate,
+        track.channels,
+    )
+    .map(SeekableAudioDecoder::WaveyAac)
+}
+
+fn decode_seekable_mp4_audio(
+    data: &[u8],
+    options: &DecodeOptions,
+) -> Result<(MediaTrackConfig, Vec<MediaTrackConfig>, Vec<AudioData>), DecodeError> {
+    let index = Mp4MediaIndex::from_file(data)
+        .map_err(|error| DecodeError::InvalidInputFormat(error.to_string()))?;
+    let track = index
+        .tracks
+        .iter()
+        .find(|track| {
+            track.kind == MediaTrackKind::Audio
+                && matches!(track.codec.as_str(), "aac" | "alac" | "flac" | "pcm")
+        })
+        .cloned()
+        .ok_or_else(|| {
+            let codecs = index
+                .tracks
+                .iter()
+                .filter(|track| track.kind == MediaTrackKind::Audio)
+                .map(|track| track.codec.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            DecodeError::UnsupportedFormat(if codecs.is_empty() {
+                AudioType::Unknown
+            } else {
+                detect_audio(data)
+            })
+        })?;
+    if !index
+        .samples
+        .iter()
+        .any(|sample| sample.kind == MediaTrackKind::Audio && sample.track_id == track.track_id)
+    {
+        return decode_fragmented_mp4_audio(data, options);
+    }
+    let mut decoder = match track.codec.as_str() {
+        "aac" => make_aac_audio_decoder(&track)?,
+        "alac" => SeekableAudioDecoder::Alac(
+            AlacPacketDecoder::new(&track.codec_private).map_err(DecodeError::DecoderInitFailed)?,
+        ),
+        "flac" => {
+            let mut decoder = FlacDecoder::new();
+            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+            let mut scratch = vec![0_i32; MAX_SEEKABLE_PACKET_SAMPLES];
+            let written = decoder
+                .decode_i32(&track.decoder_configuration, &mut scratch, false)
+                .map_err(DecodeError::DecoderInitFailed)?;
+            if written != 0 {
+                return Err(DecodeError::DecoderInitFailed(
+                    "MP4 FLAC configuration unexpectedly contained audio frames".to_owned(),
+                ));
+            }
+            SeekableAudioDecoder::Flac(decoder)
+        }
+        "pcm" => SeekableAudioDecoder::Pcm,
+        _ => unreachable!("filtered supported codec"),
+    };
+
+    let mut frames = Vec::new();
+    let mut resampler = None;
+    for (sample_index, sample) in index.samples.iter().enumerate() {
+        if sample.kind != MediaTrackKind::Audio || sample.track_id != track.track_id {
+            continue;
+        }
+        let start = usize::try_from(sample.absolute_offset).map_err(|_| {
+            DecodeError::InvalidInputFormat("MP4 sample offset exceeds this platform".to_owned())
+        })?;
+        let end = start.checked_add(sample.size as usize).ok_or_else(|| {
+            DecodeError::InvalidInputFormat("MP4 sample byte range overflow".to_owned())
+        })?;
+        let source = data.get(start..end).ok_or_else(|| {
+            DecodeError::InvalidInputFormat(format!(
+                "MP4 sample {sample_index} extends past the source"
+            ))
+        })?;
+        let packet = index
+            .packet_from_sample_bytes(sample_index, source)
+            .map_err(DecodeError::InvalidInputFormat)?;
+        let decoded = decode_seekable_packet(&mut decoder, &track, &packet.data)?;
+        for frame in decoded {
+            let decoded_frames = decoded_audio_frame_count(&frame)?;
+            let Some(trim) = index
+                .pcm_packet_trim_at_sample_rate(sample_index, decoded_frames, frame.sampling_rate())
+                .map_err(DecodeError::InvalidInputFormat)?
+            else {
+                continue;
+            };
+            let Some(frame) =
+                trim_interleaved_audio(frame, trim.source_frame_start, trim.frame_count)?
+            else {
+                continue;
+            };
+            frames.extend(apply_output_options(frame, options, &mut resampler)?);
+        }
+    }
+    if let SeekableAudioDecoder::Flac(decoder) = &decoder {
+        decoder.finish().map_err(DecodeError::DecodingFailed)?;
+    }
+    if let Some(pending) = resampler.take() {
+        frames.extend(flush_resampler_frames(pending)?);
+    }
+    if frames.is_empty() {
+        return Err(DecodeError::DecodingFailed(format!(
+            "MP4 {} track emitted no audio frames",
+            track.codec
+        )));
+    }
+    Ok((track, index.tracks, frames))
+}
+
+fn decode_fragmented_mp4_audio(
+    data: &[u8],
+    options: &DecodeOptions,
+) -> Result<(MediaTrackConfig, Vec<MediaTrackConfig>, Vec<AudioData>), DecodeError> {
+    let mut demuxer = Mp4MediaDemuxer::new();
+    let mut tracks = Vec::new();
+    let mut selected = None;
+    let mut decoder = None;
+    let mut frames = Vec::new();
+    let mut resampler = None;
+    for chunk in data.chunks(64 * 1024) {
+        let events = demuxer
+            .push(chunk)
+            .map_err(DecodeError::InvalidInputFormat)?;
+        consume_fragmented_mp4_events(
+            events,
+            options,
+            &mut tracks,
+            &mut selected,
+            &mut decoder,
+            &mut frames,
+            &mut resampler,
+        )?;
+    }
+    let events = demuxer.flush().map_err(DecodeError::InvalidInputFormat)?;
+    consume_fragmented_mp4_events(
+        events,
+        options,
+        &mut tracks,
+        &mut selected,
+        &mut decoder,
+        &mut frames,
+        &mut resampler,
+    )?;
+    if let Some(SeekableAudioDecoder::Flac(decoder)) = decoder.as_ref() {
+        decoder.finish().map_err(DecodeError::DecodingFailed)?;
+    }
+    if let Some(pending) = resampler.take() {
+        frames.extend(flush_resampler_frames(pending)?);
+    }
+    let selected = selected.ok_or_else(|| {
+        DecodeError::InvalidInputFormat("fragmented MP4 has no supported audio track".to_owned())
+    })?;
+    if frames.is_empty() {
+        return Err(DecodeError::DecodingFailed(format!(
+            "fragmented MP4 {} track emitted no audio frames",
+            selected.codec
+        )));
+    }
+    Ok((selected, tracks, frames))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn consume_fragmented_mp4_events(
+    events: Vec<Mp4MediaDemuxEvent>,
+    options: &DecodeOptions,
+    tracks: &mut Vec<MediaTrackConfig>,
+    selected: &mut Option<MediaTrackConfig>,
+    decoder: &mut Option<SeekableAudioDecoder>,
+    frames: &mut Vec<AudioData>,
+    resampler: &mut Option<StreamingResampler>,
+) -> Result<(), DecodeError> {
+    for event in events {
+        match event {
+            Mp4MediaDemuxEvent::Config(track) => {
+                if selected.is_none()
+                    && track.kind == MediaTrackKind::Audio
+                    && matches!(track.codec.as_str(), "aac" | "alac" | "flac" | "pcm")
+                {
+                    *decoder = Some(make_seekable_audio_decoder(&track)?);
+                    *selected = Some(track.clone());
+                }
+                if !tracks.iter().any(|known| known.track_id == track.track_id) {
+                    tracks.push(track);
+                }
+            }
+            Mp4MediaDemuxEvent::Packet(packet) => {
+                let Some(track) = selected.as_ref() else {
+                    continue;
+                };
+                if packet.kind != MediaTrackKind::Audio || packet.track_id != track.track_id {
+                    continue;
+                }
+                let state = decoder.as_mut().ok_or_else(|| {
+                    DecodeError::DecoderInitFailed(
+                        "fragmented MP4 audio decoder is not initialized".to_owned(),
+                    )
+                })?;
+                for frame in decode_seekable_packet(state, track, &packet.data)? {
+                    frames.extend(apply_output_options(frame, options, resampler)?);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn make_seekable_audio_decoder(
+    track: &MediaTrackConfig,
+) -> Result<SeekableAudioDecoder, DecodeError> {
+    match track.codec.as_str() {
+        "aac" => make_aac_audio_decoder(track),
+        "alac" => AlacPacketDecoder::new(&track.codec_private)
+            .map(SeekableAudioDecoder::Alac)
+            .map_err(DecodeError::DecoderInitFailed),
+        "flac" => {
+            let mut decoder = FlacDecoder::new();
+            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
+            let mut scratch = vec![0_i32; MAX_SEEKABLE_PACKET_SAMPLES];
+            let written = decoder
+                .decode_i32(&track.decoder_configuration, &mut scratch, false)
+                .map_err(DecodeError::DecoderInitFailed)?;
+            if written != 0 {
+                return Err(DecodeError::DecoderInitFailed(
+                    "MP4 FLAC configuration unexpectedly contained audio frames".to_owned(),
+                ));
+            }
+            Ok(SeekableAudioDecoder::Flac(decoder))
+        }
+        "pcm" => Ok(SeekableAudioDecoder::Pcm),
+        codec => Err(DecodeError::InvalidInputFormat(format!(
+            "unsupported MP4 audio codec {codec}"
+        ))),
+    }
+}
+
+fn populate_mp4_track_metadata(
+    metadata: &mut soundkit::media_metadata::MediaMetadata,
+    tracks: &[MediaTrackConfig],
+) {
+    metadata.audio_tracks.clear();
+    metadata.video_tracks.clear();
+    for track in tracks {
+        let duration_micros = track.timeline.and_then(|timeline| {
+            (track.timescale != 0)
+                .then(|| timeline.duration.saturating_mul(1_000_000) / u64::from(track.timescale))
+        });
+        match track.kind {
+            MediaTrackKind::Audio => {
+                metadata
+                    .audio_tracks
+                    .push(soundkit::media_metadata::AudioTrackMetadata {
+                        id: Some(track.track_id),
+                        codec: Some(track.codec.clone()),
+                        codec_id: Some(track.codec_id.clone()),
+                        sample_rate: track.sample_rate,
+                        channels: track.channels.map(u16::from),
+                        bits_per_sample: track.bits_per_sample,
+                        duration_micros,
+                        ..soundkit::media_metadata::AudioTrackMetadata::default()
+                    })
+            }
+            MediaTrackKind::Video => {
+                metadata
+                    .video_tracks
+                    .push(soundkit::media_metadata::VideoTrackMetadata {
+                        id: Some(track.track_id),
+                        codec: Some(track.codec.clone()),
+                        codec_id: Some(track.codec_id.clone()),
+                        width: track.width,
+                        height: track.height,
+                        duration_micros,
+                        ..soundkit::media_metadata::VideoTrackMetadata::default()
+                    })
+            }
+        }
+    }
+}
+
+fn populate_webm_track_metadata(
+    metadata: &mut soundkit::media_metadata::MediaMetadata,
+    tracks: &[WebmMediaTrackConfig],
+) {
+    metadata.audio_tracks.clear();
+    metadata.video_tracks.clear();
+    for track in tracks {
+        match track.kind {
+            WebmTrackKind::Audio => {
+                metadata
+                    .audio_tracks
+                    .push(soundkit::media_metadata::AudioTrackMetadata {
+                        id: Some(track.track_number),
+                        codec: Some(track.codec_id.clone()),
+                        codec_id: Some(track.codec_id.clone()),
+                        sample_rate: track.sample_rate,
+                        channels: track.channels.map(u16::from),
+                        ..soundkit::media_metadata::AudioTrackMetadata::default()
+                    })
+            }
+            WebmTrackKind::Video => {
+                metadata
+                    .video_tracks
+                    .push(soundkit::media_metadata::VideoTrackMetadata {
+                        id: Some(track.track_number),
+                        codec: Some(track.codec_id.clone()),
+                        codec_id: Some(track.codec_id.clone()),
+                        width: track.width,
+                        height: track.height,
+                        ..soundkit::media_metadata::VideoTrackMetadata::default()
+                    })
+            }
+        }
+    }
+}
+
+fn decode_seekable_packet(
+    decoder: &mut SeekableAudioDecoder,
+    track: &MediaTrackConfig,
+    packet: &[u8],
+) -> Result<Vec<AudioData>, DecodeError> {
+    match decoder {
+        SeekableAudioDecoder::WaveyAac(decoder) => {
+            decoder.decode_access_unit(packet).map(|frame| vec![frame])
+        }
+        SeekableAudioDecoder::Alac(decoder) => decoder
+            .decode_packet(packet)
+            .map(|frame| vec![frame])
+            .map_err(DecodeError::DecodingFailed),
+        SeekableAudioDecoder::Flac(decoder) => {
+            let mut scratch = vec![0_i32; MAX_SEEKABLE_PACKET_SAMPLES];
+            let mut input = packet;
+            let mut output = Vec::new();
+            loop {
+                let written = decoder
+                    .decode_i32(input, &mut scratch, false)
+                    .map_err(DecodeError::DecodingFailed)?;
+                input = &[];
+                if written == 0 {
+                    break;
+                }
+                let sample_rate = decoder.sample_rate().ok_or_else(|| {
+                    DecodeError::DecodingFailed("MP4 FLAC has no sample rate".to_owned())
+                })?;
+                let channels = decoder.channels().ok_or_else(|| {
+                    DecodeError::DecodingFailed("MP4 FLAC has no channel count".to_owned())
+                })?;
+                let bits = decoder.bits_per_sample().ok_or_else(|| {
+                    DecodeError::DecodingFailed("MP4 FLAC has no sample depth".to_owned())
+                })?;
+                output.push(create_audio_data_i32_with_bits(
+                    sample_rate,
+                    channels,
+                    bits,
+                    &scratch[..written],
+                ));
+            }
+            Ok(output)
+        }
+        SeekableAudioDecoder::Pcm => {
+            make_container_pcm_audio(track, packet.to_vec()).map(|f| vec![f])
+        }
+    }
+}
+
+fn decode_aac_access_unit(
+    decoder: &mut AacLcDecoder,
+    packet: &[u8],
+) -> Result<AudioData, DecodeError> {
+    let info = decoder.frame_info();
+    let decoded = decoder
+        .decode_access_unit(packet)
+        .map_err(|error| DecodeError::DecodingFailed(error.to_string()))?;
+    let mut interleaved = Vec::with_capacity(decoded.frames() * info.channels);
+    for frame in 0..decoded.frames() {
+        for channel in decoded.channels() {
+            interleaved.push(float_sample_to_i16(channel[frame]));
+        }
+    }
+    Ok(create_audio_data_i16(
+        info.sample_rate,
+        u8::try_from(info.channels)
+            .map_err(|_| DecodeError::DecodingFailed("AAC channel count exceeds u8".to_owned()))?,
+        &interleaved,
+    ))
+}
+
+fn float_sample_to_i16(sample: f32) -> i16 {
+    let finite = if sample.is_finite() {
+        sample.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let scaled = if finite < 0.0 {
+        f64::from(finite) * 32_768.0
+    } else {
+        f64::from(finite) * 32_767.0
+    };
+    (scaled.round() as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+fn make_container_pcm_audio(
+    track: &MediaTrackConfig,
+    data: Vec<u8>,
+) -> Result<AudioData, DecodeError> {
+    let sample_rate = track.sample_rate.ok_or_else(|| {
+        DecodeError::InvalidInputFormat("container PCM has no sample rate".to_owned())
+    })?;
+    let channels = track.channels.ok_or_else(|| {
+        DecodeError::InvalidInputFormat("container PCM has no channel count".to_owned())
+    })?;
+    let bits = track.bits_per_sample.ok_or_else(|| {
+        DecodeError::InvalidInputFormat("container PCM has no sample depth".to_owned())
+    })?;
+    if !matches!(bits, 16 | 24 | 32) {
+        return Err(DecodeError::InvalidInputFormat(format!(
+            "unsupported container PCM sample depth: {bits}"
+        )));
+    }
+    Ok(AudioData::new(
+        bits,
+        channels,
+        sample_rate,
+        data,
+        if track.pcm_float == Some(true) {
+            EncodingFlag::PCMFloat
+        } else {
+            EncodingFlag::PCMSigned
+        },
+        if track.pcm_endianness == Some(PcmEndianness::Big) {
+            Endianness::BigEndian
+        } else {
+            Endianness::LittleEndian
+        },
+    ))
+}
+
+fn decoded_audio_frame_count(audio: &AudioData) -> Result<u32, DecodeError> {
+    let bytes_per_sample = usize::from(audio.bits_per_sample().div_ceil(8));
+    let bytes_per_frame = bytes_per_sample
+        .checked_mul(usize::from(audio.channel_count()))
+        .ok_or_else(|| DecodeError::DecodingFailed("PCM frame size overflow".to_owned()))?;
+    if bytes_per_frame == 0 || audio.data().len() % bytes_per_frame != 0 {
+        return Err(DecodeError::DecodingFailed(
+            "decoder returned misaligned PCM".to_owned(),
+        ));
+    }
+    u32::try_from(audio.data().len() / bytes_per_frame)
+        .map_err(|_| DecodeError::DecodingFailed("PCM frame count exceeds u32".to_owned()))
+}
+
+fn trim_interleaved_audio(
+    audio: AudioData,
+    source_frame_start: u32,
+    frame_count: u32,
+) -> Result<Option<AudioData>, DecodeError> {
+    if frame_count == 0 {
+        return Ok(None);
+    }
+    let bytes_per_sample = usize::from(audio.bits_per_sample().div_ceil(8));
+    let bytes_per_frame = bytes_per_sample
+        .checked_mul(usize::from(audio.channel_count()))
+        .ok_or_else(|| DecodeError::DecodingFailed("PCM frame size overflow".to_owned()))?;
+    if bytes_per_frame == 0 || audio.data().len() % bytes_per_frame != 0 {
+        return Err(DecodeError::DecodingFailed(
+            "decoder returned misaligned PCM".to_owned(),
+        ));
+    }
+    let start = source_frame_start as usize;
+    let count = frame_count as usize;
+    let end = start
+        .checked_add(count)
+        .ok_or_else(|| DecodeError::DecodingFailed("PCM trim range overflow".to_owned()))?;
+    if end > audio.data().len() / bytes_per_frame {
+        return Err(DecodeError::DecodingFailed(
+            "PCM trim exceeds decoded packet".to_owned(),
+        ));
+    }
+    Ok(Some(AudioData::new(
+        audio.bits_per_sample(),
+        audio.channel_count(),
+        audio.sampling_rate(),
+        audio.data()[start * bytes_per_frame..end * bytes_per_frame].to_vec(),
+        audio.audio_format(),
+        audio.endianness(),
+    )))
 }
 
 /// Persistent resampler that preserves sinc filter state across decoded frames.
@@ -290,8 +2074,8 @@ enum FormatDecoder {
     Aac(Box<AacDecoder>),
     /// AAC decoder for M4A/MP4 containers
     M4a(Box<AacDecoderMp4>),
-    /// FLAC decoder using pure-Rust claxon (avoids libFLAC FFI release-mode bug)
-    Flac(Box<FlacDecoderClaxon>),
+    /// FLAC decoder using the unified Wavey pure-Rust codec
+    Flac(Box<FlacDecoder>),
     /// Raw Opus stream decoder
     Opus(Box<OpusStreamDecoder>),
     /// Ogg-wrapped Opus decoder
@@ -1274,8 +3058,7 @@ fn detect_and_init_decoder(buffer: &[u8]) -> Result<FormatDecoder, DecodeError> 
             Ok(FormatDecoder::M4a(Box::new(decoder)))
         }
         AudioType::FLAC => {
-            // Use pure-Rust claxon decoder (avoids libFLAC FFI release-mode bug)
-            let mut decoder = FlacDecoderClaxon::new();
+            let mut decoder = FlacDecoder::new();
             decoder.init().map_err(DecodeError::DecoderInitFailed)?;
             Ok(FormatDecoder::Flac(Box::new(decoder)))
         }
@@ -1561,6 +3344,17 @@ fn apply_output_options(
         return Ok(vec![audio_data]);
     }
 
+    // Preserve lossless integer PCM when only reducing sample depth. Going
+    // through f32 introduces avoidable one-LSB differences for 24-bit FLAC.
+    if target_sample_rate == audio_data.sampling_rate()
+        && target_channels == audio_data.channel_count()
+        && target_bits_per_sample == 16
+        && audio_data.audio_format() == EncodingFlag::PCMSigned
+        && matches!(audio_data.bits_per_sample(), 24 | 32)
+    {
+        return exact_signed_pcm_to_i16(audio_data).map(|frame| vec![frame]);
+    }
+
     if target_sample_rate == 0 {
         return Err(DecodeError::DecodingFailed(
             "Output sample rate must be > 0".to_string(),
@@ -1661,6 +3455,39 @@ fn apply_output_options(
     )])
 }
 
+fn exact_signed_pcm_to_i16(audio: AudioData) -> Result<AudioData, DecodeError> {
+    let bytes_per_sample = usize::from(audio.bits_per_sample() / 8);
+    if audio.data().len() % bytes_per_sample != 0 {
+        return Err(DecodeError::DecodingFailed(
+            "integer PCM contains a partial sample".to_owned(),
+        ));
+    }
+    let shift = u32::from(audio.bits_per_sample() - 16);
+    let mut output = Vec::with_capacity(audio.data().len() / bytes_per_sample * 2);
+    for bytes in audio.data().chunks_exact(bytes_per_sample) {
+        let sample = match (audio.bits_per_sample(), audio.endianness()) {
+            (24, Endianness::LittleEndian) => {
+                (i32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]) << 8) >> 8
+            }
+            (24, Endianness::BigEndian) => {
+                (i32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]]) << 8) >> 8
+            }
+            (32, Endianness::LittleEndian) => i32::from_le_bytes(bytes.try_into().unwrap()),
+            (32, Endianness::BigEndian) => i32::from_be_bytes(bytes.try_into().unwrap()),
+            _ => unreachable!("validated signed PCM depth"),
+        };
+        output.extend_from_slice(&((sample >> shift) as i16).to_le_bytes());
+    }
+    Ok(AudioData::new(
+        16,
+        audio.channel_count(),
+        audio.sampling_rate(),
+        output,
+        EncodingFlag::PCMSigned,
+        Endianness::LittleEndian,
+    ))
+}
+
 /// Downmix multiple channels to target channel count
 fn downmix_channels(channels: &[Vec<f32>], target_channels: u8) -> Vec<Vec<f32>> {
     if channels.is_empty() || target_channels == 0 {
@@ -1738,29 +3565,55 @@ fn audio_data_to_f32_channels(audio_data: &AudioData) -> Result<Vec<Vec<f32>>, S
     if channel_count == 0 {
         return Err("Channel count must be > 0".to_string());
     }
-
-    if audio_data.bits_per_sample() == 32 && audio_data.audio_format() != EncodingFlag::PCMFloat {
-        let interleaved = s32le_to_i32(audio_data.data());
-        let mut channels =
-            vec![Vec::with_capacity(interleaved.len() / channel_count); channel_count];
-        for (index, sample) in interleaved.into_iter().enumerate() {
-            channels[index % channel_count].push(sample);
-        }
-        return Ok(channels.into_iter().map(vec_i32_to_f32).collect());
+    let bytes_per_sample = usize::from(audio_data.bits_per_sample().div_ceil(8));
+    if !matches!(audio_data.bits_per_sample(), 16 | 24 | 32)
+        || audio_data.data().len() % bytes_per_sample != 0
+        || audio_data.data().len() / bytes_per_sample % channel_count != 0
+    {
+        return Err("PCM data is unsupported or contains a partial frame".to_owned());
+    }
+    if audio_data.audio_format() == EncodingFlag::PCMFloat && audio_data.bits_per_sample() != 32 {
+        return Err("floating-point PCM must contain 32-bit samples".to_owned());
     }
 
-    let pcm_data = deserialize_audio(
-        audio_data.data(),
-        audio_data.bits_per_sample(),
-        audio_data.channel_count(),
-    )
-    .map_err(|e| format!("deserialize_audio failed: {}", e))?;
-
-    match pcm_data {
-        PcmData::I16(data) => Ok(data.into_iter().map(vec_i16_to_f32).collect()),
-        PcmData::I32(data) => Ok(data.into_iter().map(vec_i32_to_f32).collect()),
-        PcmData::F32(data) => Ok(data),
+    let sample_count = audio_data.data().len() / bytes_per_sample;
+    let mut channels = vec![Vec::with_capacity(sample_count / channel_count); channel_count];
+    for (sample_index, bytes) in audio_data.data().chunks_exact(bytes_per_sample).enumerate() {
+        let sample = match (audio_data.audio_format(), audio_data.bits_per_sample()) {
+            (EncodingFlag::PCMFloat, 32) => match audio_data.endianness() {
+                Endianness::LittleEndian => f32::from_le_bytes(bytes.try_into().unwrap()),
+                Endianness::BigEndian => f32::from_be_bytes(bytes.try_into().unwrap()),
+            },
+            (_, 16) => {
+                let value = match audio_data.endianness() {
+                    Endianness::LittleEndian => i16::from_le_bytes(bytes.try_into().unwrap()),
+                    Endianness::BigEndian => i16::from_be_bytes(bytes.try_into().unwrap()),
+                };
+                f32::from(value) / 32_768.0
+            }
+            (_, 24) => {
+                let value = match audio_data.endianness() {
+                    Endianness::LittleEndian => {
+                        (i32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]) << 8) >> 8
+                    }
+                    Endianness::BigEndian => {
+                        (i32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]]) << 8) >> 8
+                    }
+                };
+                value as f32 / 8_388_608.0
+            }
+            (_, 32) => {
+                let value = match audio_data.endianness() {
+                    Endianness::LittleEndian => i32::from_le_bytes(bytes.try_into().unwrap()),
+                    Endianness::BigEndian => i32::from_be_bytes(bytes.try_into().unwrap()),
+                };
+                value as f32 / 2_147_483_648.0
+            }
+            _ => unreachable!("validated PCM representation"),
+        };
+        channels[sample_index % channel_count].push(if sample.is_finite() { sample } else { 0.0 });
     }
+    Ok(channels)
 }
 
 fn f32_channels_to_bytes(
@@ -1789,7 +3642,7 @@ fn f32_channels_to_bytes(
             let mut output = Vec::with_capacity(sample_count * channels.len() * 2);
             for sample_index in 0..sample_count {
                 for channel in channels {
-                    let sample = (channel[sample_index].clamp(-1.0, 1.0) * 32767.0) as i16;
+                    let sample = float_sample_to_i16(channel[sample_index]);
                     output.extend_from_slice(&sample.to_le_bytes());
                 }
             }
@@ -2719,7 +4572,7 @@ mod tests {
     fn test_decode_ogg_opus() {
         let data = Bytes::from(
             fs::read(testdata_path(
-                "ogg_opus/A_Tusk_is_used_to_make_costly_gifts_48khz.ogg",
+                "ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg",
             ))
             .unwrap(),
         );
