@@ -29,7 +29,7 @@ members = [
   "lori-asha-premix-bench",
   "aac-wasm-bench",
 ]
-exclude = ["vendor/rusty_av1d"]
+exclude = ["vendor/rusty_av1d", "vendor/rusty_h264-decoder"]
 
 [patch.crates-io]
 rusty_av1d = { path = "vendor/rusty_av1d" }

@@ -240,7 +240,7 @@ impl OggOpusDecoder {
                 let info = parse_head(&packet)?;
                 // RFC 7845 defines the OpusHead input rate as informational.
                 // Ogg Opus granule positions and pre-skip use the 48 kHz clock.
-                let mut opus = OpusDecoder::new(48_000, info.channels as usize)?;
+                let mut opus = OpusDecoder::new_full(48_000, info.channels as usize)?;
                 opus.init()?;
                 self.pre_skip_remaining = info.pre_skip as usize;
                 self.opus = Some(opus);
@@ -620,13 +620,6 @@ mod tests {
     }
 
     #[cfg(feature = "decode")]
-    fn outputs_path(file: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("outputs")
-            .join(file)
-    }
-
-    #[cfg(feature = "decode")]
     fn golden_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -694,7 +687,7 @@ mod tests {
 
     #[cfg(feature = "decode")]
     #[test]
-    fn decoded_length_matches_eos_granule_after_pre_skip() {
+    fn decoded_length_and_quality_match_source_after_pre_skip() {
         let data = fs::read(testdata_path(
             "ogg_opus/A_Tusk_is_used_to_make_costly_gifts_48khz.ogg",
         ))
@@ -732,10 +725,42 @@ mod tests {
             decoded_frames as u64,
             final_granule.unwrap() - u64::from(pre_skip)
         );
-        assert_eq!(
-            pcm_bytes.as_slice(),
-            include_bytes!("../outputs/A_Tusk_is_used_to_make_costly_gifts.s16le"),
-            "decoded amplitude or trimming changed from the pinned libopus reference"
+        let reference =
+            include_bytes!("../../testdata/linear16_48/A_Tusk_is_used_to_make_costly_gifts.s16le");
+        assert_eq!(pcm_bytes.len(), reference.len());
+        let mut signal_energy = 0.0_f64;
+        let mut decoded_energy = 0.0_f64;
+        let mut error_energy = 0.0_f64;
+        let mut dot_product = 0.0_f64;
+        let mut max_error = 0_i32;
+        for (decoded, expected) in pcm_bytes.chunks_exact(2).zip(reference.chunks_exact(2)) {
+            let decoded = f64::from(i16::from_le_bytes([decoded[0], decoded[1]]));
+            let expected = f64::from(i16::from_le_bytes([expected[0], expected[1]]));
+            let error = decoded - expected;
+            signal_energy += expected * expected;
+            decoded_energy += decoded * decoded;
+            error_energy += error * error;
+            dot_product += decoded * expected;
+            max_error = max_error.max(error.abs() as i32);
+        }
+        let gain_delta_db = 10.0 * (decoded_energy / signal_energy).log10();
+        let signal_to_noise_db = 10.0 * (signal_energy / error_energy).log10();
+        let correlation = dot_product / (decoded_energy * signal_energy).sqrt();
+        assert!(
+            gain_delta_db.abs() < 0.1,
+            "decoded gain changed by {gain_delta_db:.3} dB"
+        );
+        assert!(
+            signal_to_noise_db > 20.0,
+            "decoded signal-to-noise ratio fell to {signal_to_noise_db:.2} dB"
+        );
+        assert!(
+            correlation > 0.995,
+            "decoded waveform correlation fell to {correlation:.6}"
+        );
+        assert!(
+            max_error <= 1_024,
+            "decoded sample error increased to {max_error}"
         );
     }
 
@@ -819,10 +844,7 @@ mod tests {
             "no samples decoded from ogg opus stream"
         );
 
-        // Save PCM output for inspection
-        let output_path = outputs_path("A_Tusk_is_used_to_make_costly_gifts.s16le");
-        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
-        fs::write(&output_path, decoded).unwrap();
+        assert!(decoded.iter().any(|sample| *sample != 0));
     }
 
     #[cfg(feature = "decode")]

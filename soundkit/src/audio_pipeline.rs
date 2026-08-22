@@ -2,13 +2,16 @@ use crate::audio_bytes::*;
 use crate::audio_packet::{encode_audio_packet, Encoder};
 use crate::audio_types::*;
 use crate::wav::WavStreamProcessor;
-use frame_header::{EncodingFlag, FrameHeader};
+use frame_header::{EncodingFlag, Endianness, FrameHeader};
+#[cfg(feature = "sinc-resampler")]
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 
+#[cfg(feature = "sinc-resampler")]
 const COMMON_SAMPLE_RATES: [u32; 9] =
     [8000, 16000, 22050, 24000, 32000, 44100, 48000, 88200, 96000];
+#[cfg(feature = "sinc-resampler")]
 const COMMON_BITS_PER_SAMPLE: [u8; 3] = [16, 24, 32];
 
 pub fn vec_f32_to_i16(input: Vec<f32>) -> Vec<i16> {
@@ -127,6 +130,100 @@ pub fn mixdown_to_mono_f32(channels: &[Vec<f32>]) -> Result<Vec<f32>, String> {
     Ok(mono)
 }
 
+fn audio_to_stereo_f32(audio: &AudioData) -> Result<(Vec<f32>, Vec<f32>), String> {
+    let channels = audio.channel_count() as usize;
+    let sample_bytes = match audio.bits_per_sample() {
+        16 => 2usize,
+        24 => 3usize,
+        32 => 4usize,
+        bits => return Err(format!("unsupported PCM bit depth {bits}")),
+    };
+    if channels == 0 {
+        return Err("decoded audio contained no channels".to_owned());
+    }
+    let frame_bytes = sample_bytes
+        .checked_mul(channels)
+        .ok_or_else(|| "decoded PCM frame size overflowed".to_owned())?;
+    if audio.data().is_empty() || !audio.data().len().is_multiple_of(frame_bytes) {
+        return Err("decoded audio contained an incomplete PCM frame".to_owned());
+    }
+    let frames = audio.data().len() / frame_bytes;
+    let mut left = Vec::with_capacity(frames);
+    let mut right = Vec::with_capacity(frames);
+    for frame in audio.data().chunks_exact(frame_bytes) {
+        let left_sample = pcm_sample_to_f32(
+            &frame[..sample_bytes],
+            audio.bits_per_sample(),
+            audio.audio_format(),
+            audio.endianness(),
+        )?;
+        let right_sample = if channels > 1 {
+            pcm_sample_to_f32(
+                &frame[sample_bytes..sample_bytes * 2],
+                audio.bits_per_sample(),
+                audio.audio_format(),
+                audio.endianness(),
+            )?
+        } else {
+            left_sample
+        };
+        left.push(finite_pcm(left_sample));
+        right.push(finite_pcm(right_sample));
+    }
+    Ok((left, right))
+}
+
+fn pcm_sample_to_f32(
+    bytes: &[u8],
+    bits_per_sample: u8,
+    encoding: EncodingFlag,
+    endianness: Endianness,
+) -> Result<f32, String> {
+    let big_endian = endianness == Endianness::BigEndian;
+    match (bits_per_sample, encoding) {
+        (16, _) => {
+            let bytes = [bytes[0], bytes[1]];
+            let sample = if big_endian {
+                i16::from_be_bytes(bytes)
+            } else {
+                i16::from_le_bytes(bytes)
+            };
+            Ok(sample as f32 / 32_768.0)
+        }
+        (24, _) => {
+            let unsigned = if big_endian {
+                u32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]])
+            } else {
+                u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0])
+            };
+            let signed = if unsigned & 0x80_0000 != 0 {
+                (unsigned | 0xff00_0000) as i32
+            } else {
+                unsigned as i32
+            };
+            Ok(signed as f32 / 8_388_608.0)
+        }
+        (32, EncodingFlag::PCMFloat) => {
+            let bytes = [bytes[0], bytes[1], bytes[2], bytes[3]];
+            Ok(if big_endian {
+                f32::from_be_bytes(bytes)
+            } else {
+                f32::from_le_bytes(bytes)
+            })
+        }
+        (32, _) => {
+            let bytes = [bytes[0], bytes[1], bytes[2], bytes[3]];
+            let sample = if big_endian {
+                i32::from_be_bytes(bytes)
+            } else {
+                i32::from_le_bytes(bytes)
+            };
+            Ok(sample as f32 / 2_147_483_648.0)
+        }
+        _ => Err("unsupported PCM sample format".to_owned()),
+    }
+}
+
 /// One bounded block of the library's canonical 48 kHz stereo PCM.
 ///
 /// This type deliberately stays inside Rust. Browser adapters can feed its
@@ -207,11 +304,7 @@ impl StreamingStereo48kNormalizer {
             ));
         }
 
-        let channels = audio_to_f32_channels(audio)?;
-        let left = channels
-            .first()
-            .ok_or_else(|| "decoded audio contained no channels".to_owned())?;
-        let right = channels.get(1).unwrap_or(left);
+        let (left, right) = audio_to_stereo_f32(audio)?;
         if left.is_empty() || right.len() != left.len() {
             return Err("decoded audio contained an invalid PCM block".to_owned());
         }
@@ -220,16 +313,15 @@ impl StreamingStereo48kNormalizer {
         let end_frame = start_frame
             .checked_add(frame_count)
             .ok_or_else(|| "decoded audio frame count overflowed".to_owned())?;
+        let final_left = *left.last().expect("non-empty channel checked above");
+        let final_right = *right.last().expect("non-empty channel checked above");
 
         let block = if sample_rate == 48_000 {
             self.output_frames = self
                 .output_frames
                 .checked_add(frame_count)
                 .ok_or_else(|| "normalized audio frame count overflowed".to_owned())?;
-            Stereo48kBlock {
-                left: left.iter().map(|sample| finite_pcm(*sample)).collect(),
-                right: right.iter().map(|sample| finite_pcm(*sample)).collect(),
-            }
+            Stereo48kBlock { left, right }
         } else {
             let maximum_output = ((frame_count * 48_000).div_ceil(u64::from(sample_rate)) + 4)
                 .try_into()
@@ -244,10 +336,10 @@ impl StreamingStereo48kNormalizer {
                     break;
                 }
                 let fraction = (source_position - lower as f64) as f32;
-                let left_lower = stream_sample(left, self.previous_left, start_frame, lower);
-                let right_lower = stream_sample(right, self.previous_right, start_frame, lower);
-                let left_upper = stream_sample(left, self.previous_left, start_frame, upper);
-                let right_upper = stream_sample(right, self.previous_right, start_frame, upper);
+                let left_lower = stream_sample(&left, self.previous_left, start_frame, lower);
+                let right_lower = stream_sample(&right, self.previous_right, start_frame, lower);
+                let left_upper = stream_sample(&left, self.previous_left, start_frame, upper);
+                let right_upper = stream_sample(&right, self.previous_right, start_frame, upper);
                 output_left.push(finite_pcm(
                     left_lower + ((left_upper - left_lower) * fraction),
                 ));
@@ -263,8 +355,8 @@ impl StreamingStereo48kNormalizer {
         };
 
         self.source_frames = end_frame;
-        self.previous_left = finite_pcm(*left.last().expect("non-empty channel checked above"));
-        self.previous_right = finite_pcm(*right.last().expect("non-empty channel checked above"));
+        self.previous_left = final_left;
+        self.previous_right = final_right;
         self.has_previous = true;
         Ok((!block.is_empty()).then_some(block))
     }
@@ -343,6 +435,7 @@ pub fn f32s_from_le_bytes(bytes: &[u8]) -> Result<Vec<f32>, String> {
     Ok(samples)
 }
 
+#[cfg(feature = "sinc-resampler")]
 pub fn downsample_audio(audio: &AudioData, sampling_rate: usize) -> Result<Vec<Vec<f32>>, String> {
     let channel_count = audio.channel_count() as usize;
     if channel_count == 0 {
@@ -529,13 +622,19 @@ impl<E: Encoder> AudioEncoder<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "sinc-resampler")]
     use crate::wav::generate_wav_buffer;
     use frame_header::{EncodingFlag, Endianness};
+    #[cfg(feature = "sinc-resampler")]
     use std::fs::File;
+    #[cfg(feature = "sinc-resampler")]
     use std::io::Read;
+    #[cfg(feature = "sinc-resampler")]
     use std::io::Write;
+    #[cfg(feature = "sinc-resampler")]
     use std::path::PathBuf;
 
+    #[cfg(feature = "sinc-resampler")]
     fn testdata_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -543,6 +642,7 @@ mod tests {
             .join(file)
     }
 
+    #[cfg(feature = "sinc-resampler")]
     #[test]
     fn test_downsample_audio() {
         let file_path = testdata_path("wav_32f/A_Tusk_is_used_to_make_costly_gifts.wav");
@@ -610,6 +710,48 @@ mod tests {
         assert_eq!(mono.len(), 2);
         assert!(mono[0].abs() < 0.01);
         assert!(mono[1].abs() < 0.01);
+    }
+
+    #[test]
+    fn streaming_normalizer_converts_pcm_without_intermediate_channel_planes() {
+        let mut normalizer = StreamingStereo48kNormalizer::new();
+        let big_endian = AudioData::new(
+            16,
+            2,
+            48_000,
+            [i16::MAX.to_be_bytes(), i16::MIN.to_be_bytes()].concat(),
+            EncodingFlag::PCMSigned,
+            Endianness::BigEndian,
+        );
+        let block = normalizer.push(&big_endian).unwrap().unwrap();
+        assert!((block.left[0] - 32_767.0 / 32_768.0).abs() < f32::EPSILON);
+        assert_eq!(block.right[0], -1.0);
+
+        let mut normalizer = StreamingStereo48kNormalizer::new();
+        let signed_24 = AudioData::new(
+            24,
+            2,
+            48_000,
+            vec![0xff, 0xff, 0x7f, 0x00, 0x00, 0x80],
+            EncodingFlag::PCMSigned,
+            Endianness::LittleEndian,
+        );
+        let block = normalizer.push(&signed_24).unwrap().unwrap();
+        assert!((block.left[0] - 8_388_607.0 / 8_388_608.0).abs() < f32::EPSILON);
+        assert_eq!(block.right[0], -1.0);
+
+        let mut normalizer = StreamingStereo48kNormalizer::new();
+        let float_mono = AudioData::new(
+            32,
+            1,
+            48_000,
+            f32::NAN.to_le_bytes().to_vec(),
+            EncodingFlag::PCMFloat,
+            Endianness::LittleEndian,
+        );
+        let block = normalizer.push(&float_mono).unwrap().unwrap();
+        assert_eq!(block.left, vec![0.0]);
+        assert_eq!(block.right, block.left);
     }
 
     #[test]

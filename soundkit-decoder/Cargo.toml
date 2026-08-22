@@ -7,7 +7,7 @@ description = "Streaming audio decoder pipeline with automatic format detection"
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-soundkit = { path = "../soundkit" }
+soundkit = { path = "../soundkit", features = ["sinc-resampler"] }
 access-unit = { git = "https://github.com/wavey-ai/access-unit.git" }
 soundkit-amr = { path = "../soundkit-amr" }
 soundkit-g711 = { path = "../soundkit-g711" }
@@ -26,7 +26,6 @@ soundkit-flac = { path = "../soundkit-flac", features = ["claxon-decoder"] }
 soundkit-opus = { path = "../soundkit-opus" }
 soundkit-ogg-opus = { path = "../soundkit-ogg-opus" }
 soundkit-webm = { path = "../soundkit-webm" }
-rtrb = "0.3"
 frame-header = "0.2.1"
 bytes = "1"
 rubato = "0.14.1"

@@ -11,7 +11,8 @@ readme = "README.md"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = [
+default = ["browser-audio", "video"]
+browser-audio = [
   "detect",
   "raw-pcm",
   "wav",
@@ -29,7 +30,6 @@ default = [
   "aac-lc",
   "audio-demux",
   "ac3",
-  "video",
 ]
 detect = ["dep:access-unit"]
 audio-demux = ["dep:soundkit-audio-demux"]

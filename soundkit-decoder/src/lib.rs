@@ -2,13 +2,12 @@ use access_unit::{detect_audio, AudioType};
 pub use bytes::Bytes;
 use bytes::BytesMut;
 use frame_header::{EncodingFlag, Endianness};
-use rtrb::{Consumer, Producer, RingBuffer};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
-use soundkit::audio_bytes::{interleave_vecs_i16, s32le_to_i32};
+use soundkit::audio_bytes::s32le_to_i32;
 use soundkit::audio_packet::Decoder;
-use soundkit::audio_pipeline::{deserialize_audio, vec_f32_to_i16, vec_i16_to_f32, vec_i32_to_f32};
+use soundkit::audio_pipeline::{deserialize_audio, vec_i16_to_f32, vec_i32_to_f32};
 use soundkit::audio_types::{AudioData, PcmData};
 use soundkit::raw_pcm::RawPcmStreamProcessor;
 pub use soundkit::raw_pcm::{RawPcmFormat, RawPcmSampleFormat};
@@ -33,6 +32,9 @@ use soundkit_opus::OpusStreamDecoder;
 use soundkit_speex::SpeexDecoder;
 use soundkit_vorbis::VorbisDecoder;
 use soundkit_webm::WebmDecoder;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::Arc;
 use std::thread;
 
 /// Unified streaming decoder trait - all decoders implement this interface.
@@ -40,18 +42,46 @@ use std::thread;
 trait StreamingDecoder {
     /// Process a chunk of input data and return decoded audio frames.
     /// An empty chunk signals EOF but does not trigger flush.
-    fn process(&mut self, chunk: &[u8]) -> Result<Vec<AudioData>, String>;
+    fn process(
+        &mut self,
+        chunk: &[u8],
+        scratch: &mut DecoderScratch,
+    ) -> Result<Vec<AudioData>, String>;
 
     /// Flush any remaining buffered data after EOF.
-    fn flush(&mut self) -> Result<Vec<AudioData>, String>;
+    fn flush(&mut self, scratch: &mut DecoderScratch) -> Result<Vec<AudioData>, String>;
 }
 
 const MIN_DETECTION_BYTES: usize = 8192; // Increased for M4A/MP4 container detection
 const MAX_DETECTION_BYTES: usize = 65_536;
 const DEFAULT_INPUT_BUFFER: usize = 128;
-const DEFAULT_OUTPUT_BUFFER: usize = 128;
+const DEFAULT_OUTPUT_BUFFER: usize = 16;
 const RESAMPLE_CHUNK_SIZE: usize = 4096;
 const MAX_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+const MAX_QUEUED_INPUT_BYTES: usize = 8 * 1024 * 1024;
+const DECODER_SCRATCH_SAMPLES: usize = 262_144;
+
+#[derive(Default)]
+struct DecoderScratch {
+    i16_samples: Vec<i16>,
+    i32_samples: Vec<i32>,
+}
+
+impl DecoderScratch {
+    fn i16_samples(&mut self) -> &mut [i16] {
+        if self.i16_samples.len() < DECODER_SCRATCH_SAMPLES {
+            self.i16_samples.resize(DECODER_SCRATCH_SAMPLES, 0);
+        }
+        &mut self.i16_samples
+    }
+
+    fn i32_samples(&mut self) -> &mut [i32] {
+        if self.i32_samples.len() < DECODER_SCRATCH_SAMPLES {
+            self.i32_samples.resize(DECODER_SCRATCH_SAMPLES, 0);
+        }
+        &mut self.i32_samples
+    }
+}
 
 /// Error types for decode pipeline
 #[derive(Debug, Clone)]
@@ -60,6 +90,7 @@ pub enum DecodeError {
     DecoderInitFailed(String),
     DecodingFailed(String),
     InputBufferFull,
+    PipelineClosed,
     InputChunkTooLarge(usize),
     UnsupportedFormat(AudioType),
     InvalidInputFormat(String),
@@ -74,6 +105,7 @@ impl std::fmt::Display for DecodeError {
             }
             DecodeError::DecodingFailed(msg) => write!(f, "Decoding failed: {}", msg),
             DecodeError::InputBufferFull => write!(f, "Input buffer full"),
+            DecodeError::PipelineClosed => write!(f, "Decode pipeline is closed"),
             DecodeError::InputChunkTooLarge(bytes) => write!(
                 f,
                 "Input chunk is {bytes} bytes; the streaming limit is {MAX_INPUT_CHUNK_BYTES} bytes"
@@ -108,6 +140,7 @@ struct StreamingResampler {
     target_channels: u8,
     output_format: EncodingFlag,
     accum: Vec<Vec<f32>>,
+    accum_start: usize,
 }
 
 impl StreamingResampler {
@@ -146,6 +179,7 @@ impl StreamingResampler {
             target_channels,
             output_format,
             accum: vec![Vec::new(); channels],
+            accum_start: 0,
         })
     }
 
@@ -159,24 +193,38 @@ impl StreamingResampler {
         }
 
         for (channel, samples) in input.iter().enumerate() {
+            if samples.len() != input[0].len() {
+                return Err("Channel sample counts changed mid-stream".to_string());
+            }
             self.accum[channel].extend_from_slice(samples);
         }
 
         let mut outputs = Vec::new();
-        while self.accum[0].len() >= self.chunk_size {
-            let chunk: Vec<Vec<f32>> = self
+        while self.accum[0].len().saturating_sub(self.accum_start) >= self.chunk_size {
+            let end = self.accum_start + self.chunk_size;
+            let chunk: Vec<&[f32]> = self
                 .accum
-                .iter_mut()
-                .map(|channel| channel.drain(..self.chunk_size).collect())
+                .iter()
+                .map(|channel| &channel[self.accum_start..end])
                 .collect();
 
             let resampled = self
                 .resampler
                 .process(&chunk, None)
                 .map_err(|error| format!("Resample failed: {error}"))?;
+            self.accum_start = end;
             if resampled.iter().any(|channel| !channel.is_empty()) {
                 outputs.push(resampled);
             }
+        }
+
+        if self.accum_start >= self.chunk_size * 8
+            && self.accum_start.saturating_mul(2) >= self.accum[0].len()
+        {
+            for channel in &mut self.accum {
+                channel.drain(..self.accum_start);
+            }
+            self.accum_start = 0;
         }
 
         Ok(outputs)
@@ -185,13 +233,13 @@ impl StreamingResampler {
     fn flush(&mut self) -> Result<Vec<Vec<Vec<f32>>>, String> {
         let mut outputs = Vec::new();
 
-        if !self.accum[0].is_empty() {
-            let remaining = self.accum[0].len();
+        let remaining = self.accum[0].len().saturating_sub(self.accum_start);
+        if remaining > 0 {
             let padded_frames = self.chunk_size.saturating_sub(remaining);
-            let chunk: Vec<Vec<f32>> = self
+            let chunk: Vec<&[f32]> = self
                 .accum
-                .iter_mut()
-                .map(|channel| channel.drain(..).collect())
+                .iter()
+                .map(|channel| &channel[self.accum_start..])
                 .collect();
             let mut resampled = self
                 .resampler
@@ -209,6 +257,10 @@ impl StreamingResampler {
             if resampled.iter().any(|channel| !channel.is_empty()) {
                 outputs.push(resampled);
             }
+            for channel in &mut self.accum {
+                channel.clear();
+            }
+            self.accum_start = 0;
         } else {
             let flushed = self
                 .resampler
@@ -280,6 +332,7 @@ enum FormatDecoder {
 fn decode_with_drain<D, F>(
     decoder: &mut D,
     chunk: &[u8],
+    output: &mut [i32],
     decode_fn: F,
 ) -> Result<Vec<AudioData>, String>
 where
@@ -287,10 +340,8 @@ where
     F: Fn(&D, usize, &[i32]) -> Option<AudioData>,
 {
     let mut results = Vec::new();
-    let mut output = vec![0i32; 262144];
-
     // First call with actual data
-    let samples = decoder.decode_i32(chunk, &mut output, false)?;
+    let samples = decoder.decode_i32(chunk, output, false)?;
     if samples > 0 {
         if let Some(audio_data) = decode_fn(decoder, samples, &output) {
             results.push(audio_data);
@@ -299,7 +350,7 @@ where
 
     // Drain remaining buffered frames
     loop {
-        let samples = decoder.decode_i32(&[], &mut output, false)?;
+        let samples = decoder.decode_i32(&[], output, false)?;
         if samples == 0 {
             break;
         }
@@ -315,6 +366,7 @@ where
 fn decode_i16_with_drain<D, F>(
     decoder: &mut D,
     chunk: &[u8],
+    output: &mut [i16],
     decode_fn: F,
 ) -> Result<Vec<AudioData>, String>
 where
@@ -322,10 +374,8 @@ where
     F: Fn(&D, usize, &[i16]) -> Option<AudioData>,
 {
     let mut results = Vec::new();
-    let mut output = vec![0i16; 262144];
-
     // First call with actual data
-    let samples = decoder.decode_i16(chunk, &mut output, false)?;
+    let samples = decoder.decode_i16(chunk, output, false)?;
     if samples > 0 {
         if let Some(audio_data) = decode_fn(decoder, samples, &output) {
             results.push(audio_data);
@@ -334,7 +384,7 @@ where
 
     // Drain remaining buffered frames
     loop {
-        let samples = decoder.decode_i16(&[], &mut output, false)?;
+        let samples = decoder.decode_i16(&[], output, false)?;
         if samples == 0 {
             break;
         }
@@ -386,40 +436,56 @@ where
 }
 
 impl StreamingDecoder for FormatDecoder {
-    fn process(&mut self, chunk: &[u8]) -> Result<Vec<AudioData>, String> {
+    fn process(
+        &mut self,
+        chunk: &[u8],
+        scratch: &mut DecoderScratch,
+    ) -> Result<Vec<AudioData>, String> {
         match self {
-            FormatDecoder::Mp3(dec) => {
-                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+            FormatDecoder::Mp3(dec) => decode_i16_with_drain(
+                dec.as_mut(),
+                chunk,
+                scratch.i16_samples(),
+                |d, samples, output| {
                     let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
                     Some(create_audio_data_i16(
                         sample_rate,
                         channels,
                         &output[..samples],
                     ))
-                })
-            }
-            FormatDecoder::Aac(dec) => {
-                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                },
+            ),
+            FormatDecoder::Aac(dec) => decode_i16_with_drain(
+                dec.as_mut(),
+                chunk,
+                scratch.i16_samples(),
+                |d, samples, output| {
                     let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
                     Some(create_audio_data_i16(
                         sample_rate,
                         channels,
                         &output[..samples],
                     ))
-                })
-            }
-            FormatDecoder::M4a(dec) => {
-                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                },
+            ),
+            FormatDecoder::M4a(dec) => decode_i16_with_drain(
+                dec.as_mut(),
+                chunk,
+                scratch.i16_samples(),
+                |d, samples, output| {
                     let (sample_rate, channels) = (d.sample_rate()?, d.channels()?);
                     Some(create_audio_data_i16(
                         sample_rate,
                         channels,
                         &output[..samples],
                     ))
-                })
-            }
-            FormatDecoder::Flac(dec) => {
-                decode_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                },
+            ),
+            FormatDecoder::Flac(dec) => decode_with_drain(
+                dec.as_mut(),
+                chunk,
+                scratch.i32_samples(),
+                |d, samples, output| {
                     let (sample_rate, channels, bits) =
                         (d.sample_rate()?, d.channels()?, d.bits_per_sample()?);
                     Some(create_audio_data_i32_with_bits(
@@ -428,8 +494,8 @@ impl StreamingDecoder for FormatDecoder {
                         bits,
                         &output[..samples],
                     ))
-                })
-            }
+                },
+            ),
             FormatDecoder::Opus(dec) => {
                 process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
             }
@@ -445,60 +511,78 @@ impl StreamingDecoder for FormatDecoder {
             FormatDecoder::RawPcm(dec) => {
                 process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
             }
-            FormatDecoder::AmrNb(dec) => {
-                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+            FormatDecoder::AmrNb(dec) => decode_i16_with_drain(
+                dec.as_mut(),
+                chunk,
+                scratch.i16_samples(),
+                |d, samples, output| {
                     Some(create_audio_data_i16(
                         d.sample_rate(),
                         d.channels(),
                         &output[..samples],
                     ))
-                })
-            }
-            FormatDecoder::G711(dec) => {
-                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                },
+            ),
+            FormatDecoder::G711(dec) => decode_i16_with_drain(
+                dec.as_mut(),
+                chunk,
+                scratch.i16_samples(),
+                |d, samples, output| {
                     Some(create_audio_data_i16(
                         d.sample_rate(),
                         d.channels(),
                         &output[..samples],
                     ))
-                })
-            }
-            FormatDecoder::G722(dec) => {
-                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                },
+            ),
+            FormatDecoder::G722(dec) => decode_i16_with_drain(
+                dec.as_mut(),
+                chunk,
+                scratch.i16_samples(),
+                |d, samples, output| {
                     Some(create_audio_data_i16(
                         d.sample_rate(),
                         d.channels(),
                         &output[..samples],
                     ))
-                })
-            }
-            FormatDecoder::G726(dec) => {
-                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                },
+            ),
+            FormatDecoder::G726(dec) => decode_i16_with_drain(
+                dec.as_mut(),
+                chunk,
+                scratch.i16_samples(),
+                |d, samples, output| {
                     Some(create_audio_data_i16(
                         d.sample_rate(),
                         d.channels(),
                         &output[..samples],
                     ))
-                })
-            }
-            FormatDecoder::G729(dec) => {
-                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                },
+            ),
+            FormatDecoder::G729(dec) => decode_i16_with_drain(
+                dec.as_mut(),
+                chunk,
+                scratch.i16_samples(),
+                |d, samples, output| {
                     Some(create_audio_data_i16(
                         d.sample_rate(),
                         d.channels(),
                         &output[..samples],
                     ))
-                })
-            }
-            FormatDecoder::Gsm(dec) => {
-                decode_i16_with_drain(dec.as_mut(), chunk, |d, samples, output| {
+                },
+            ),
+            FormatDecoder::Gsm(dec) => decode_i16_with_drain(
+                dec.as_mut(),
+                chunk,
+                scratch.i16_samples(),
+                |d, samples, output| {
                     Some(create_audio_data_i16(
                         d.sample_rate(),
                         d.channels(),
                         &output[..samples],
                     ))
-                })
-            }
+                },
+            ),
             FormatDecoder::Speex(dec) => {
                 process_with_add_api(dec.as_mut(), chunk, |d, data| d.add(data))
             }
@@ -517,13 +601,13 @@ impl StreamingDecoder for FormatDecoder {
         }
     }
 
-    fn flush(&mut self) -> Result<Vec<AudioData>, String> {
+    fn flush(&mut self, scratch: &mut DecoderScratch) -> Result<Vec<AudioData>, String> {
         match self {
             FormatDecoder::M4a(decoder) => {
                 let mut results = Vec::new();
-                let mut output = vec![0_i16; 262_144];
+                let output = scratch.i16_samples();
                 loop {
-                    let samples = decoder.finish_i16(&mut output)?;
+                    let samples = decoder.finish_i16(output)?;
                     if samples == 0 {
                         break;
                     }
@@ -555,7 +639,7 @@ impl StreamingDecoder for FormatDecoder {
                 dec.flush()?;
                 Ok(Vec::new())
             }
-            _ => self.process(&[]),
+            _ => self.process(&[], scratch),
         }
     }
 }
@@ -886,26 +970,41 @@ impl DecodePipeline {
         options: DecodeOptions,
         initial_decoder: Option<FormatDecoder>,
     ) -> DecodePipelineHandle {
-        let (input_tx, input_rx) = RingBuffer::<Bytes>::new(input_buffer);
-        let (output_tx, output_rx) = RingBuffer::<DecodeOutput>::new(output_buffer);
+        let (input_tx, input_rx) = mpsc::sync_channel::<Bytes>(input_buffer.max(1));
+        let (output_tx, output_rx) = mpsc::sync_channel::<DecodeOutput>(output_buffer.max(1));
+        let queued_input_bytes = Arc::new(AtomicUsize::new(0));
+        let worker_queued_input_bytes = Arc::clone(&queued_input_bytes);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
 
         let worker = thread::spawn(move || {
-            pipeline_worker(input_rx, output_tx, options, initial_decoder);
+            pipeline_worker(
+                input_rx,
+                output_tx,
+                options,
+                initial_decoder,
+                worker_queued_input_bytes,
+                worker_cancelled,
+            );
         });
 
         DecodePipelineHandle {
-            input_tx,
-            output_rx,
-            _worker: Some(worker),
+            input_tx: Some(input_tx),
+            output_rx: Some(output_rx),
+            worker: Some(worker),
+            queued_input_bytes,
+            cancelled,
         }
     }
 }
 
 /// Handle for interacting with the pipeline
 pub struct DecodePipelineHandle {
-    input_tx: Producer<Bytes>,
-    output_rx: Consumer<DecodeOutput>,
-    _worker: Option<thread::JoinHandle<()>>,
+    input_tx: Option<SyncSender<Bytes>>,
+    output_rx: Option<Receiver<DecodeOutput>>,
+    worker: Option<thread::JoinHandle<()>>,
+    queued_input_bytes: Arc<AtomicUsize>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl DecodePipelineHandle {
@@ -916,52 +1015,105 @@ impl DecodePipelineHandle {
         if data.len() > MAX_INPUT_CHUNK_BYTES {
             return Err(DecodeError::InputChunkTooLarge(data.len()));
         }
-        self.input_tx
-            .push(data)
-            .map_err(|_| DecodeError::InputBufferFull)
+        let byte_len = data.len();
+        if byte_len > 0
+            && self
+                .queued_input_bytes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                    queued
+                        .checked_add(byte_len)
+                        .filter(|next| *next <= MAX_QUEUED_INPUT_BYTES)
+                })
+                .is_err()
+        {
+            return Err(DecodeError::InputBufferFull);
+        }
+
+        let Some(input_tx) = self.input_tx.as_ref() else {
+            if byte_len > 0 {
+                self.queued_input_bytes
+                    .fetch_sub(byte_len, Ordering::AcqRel);
+            }
+            return Err(DecodeError::PipelineClosed);
+        };
+        match input_tx.try_send(data) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(data)) => {
+                if !data.is_empty() {
+                    self.queued_input_bytes
+                        .fetch_sub(data.len(), Ordering::AcqRel);
+                }
+                Err(DecodeError::InputBufferFull)
+            }
+            Err(TrySendError::Disconnected(data)) => {
+                if !data.is_empty() {
+                    self.queued_input_bytes
+                        .fetch_sub(data.len(), Ordering::AcqRel);
+                }
+                Err(DecodeError::PipelineClosed)
+            }
+        }
+    }
+
+    /// Signal end-of-stream after all encoded bytes have been sent.
+    pub fn finish(&mut self) -> Result<(), DecodeError> {
+        self.send(Bytes::new())
     }
 
     /// Try to receive a decoded audio frame without blocking
     ///
     /// Returns `None` if no data is available
     pub fn try_recv(&mut self) -> Option<DecodeOutput> {
-        self.output_rx.pop().ok()
+        match self.output_rx.as_ref()?.try_recv() {
+            Ok(output) => Some(output),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
+        }
     }
 
     /// Receive a decoded audio frame, blocking until available
     ///
-    /// Spins until data is available or the pipeline is closed
+    /// Wait until data is available or the pipeline is closed.
     pub fn recv(&mut self) -> Option<DecodeOutput> {
-        loop {
-            if let Ok(output) = self.output_rx.pop() {
-                return Some(output);
-            }
-            if let Some(worker) = self._worker.as_ref() {
-                if worker.is_finished() {
-                    return None;
-                }
-            }
-            // Small sleep to avoid busy-waiting
-            std::thread::sleep(std::time::Duration::from_micros(100));
-        }
+        self.output_rx.as_ref()?.recv().ok()
     }
 
-    /// Get the input producer (for sharing with other threads)
-    ///
-    /// Note: rtrb doesn't support cloning producers, so this consumes self
-    pub fn split(self) -> (Producer<Bytes>, Consumer<DecodeOutput>) {
-        (self.input_tx, self.output_rx)
+    /// Cancel pending work and join the decoder worker.
+    pub fn cancel(&mut self) {
+        self.shutdown();
+    }
+
+    /// Return the encoded bytes that are waiting in the bounded input queue.
+    pub fn queued_input_bytes(&self) -> usize {
+        self.queued_input_bytes.load(Ordering::Acquire)
+    }
+
+    fn shutdown(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.output_rx.take();
+        self.input_tx.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for DecodePipelineHandle {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
 /// Main worker thread function
 fn pipeline_worker(
-    mut input_rx: Consumer<Bytes>,
-    mut output_tx: Producer<DecodeOutput>,
+    input_rx: Receiver<Bytes>,
+    output_tx: SyncSender<DecodeOutput>,
     options: DecodeOptions,
     initial_decoder: Option<FormatDecoder>,
+    queued_input_bytes: Arc<AtomicUsize>,
+    cancelled: Arc<AtomicBool>,
 ) {
     let mut resampler: Option<StreamingResampler> = None;
+    let mut decoder_scratch = DecoderScratch::default();
     let mut state = match initial_decoder {
         Some(decoder) => PipelineState::Decoding { decoder },
         None => PipelineState::Detecting {
@@ -970,15 +1122,19 @@ fn pipeline_worker(
     };
 
     loop {
-        // Try to get next chunk
-        let chunk = match input_rx.pop() {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        let chunk = match input_rx.recv() {
             Ok(chunk) => chunk,
-            Err(_) => {
-                // Small sleep to avoid busy-waiting
-                std::thread::sleep(std::time::Duration::from_micros(100));
-                continue;
-            }
+            Err(_) => break,
         };
+        if !chunk.is_empty() {
+            queued_input_bytes.fetch_sub(chunk.len(), Ordering::AcqRel);
+        }
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
 
         // Empty chunk signals end-of-stream, initiate flush
         let is_eof = chunk.is_empty();
@@ -990,17 +1146,25 @@ fn pipeline_worker(
                     // Some formats (like Opus) can be detected with very little data
                     match detect_and_init_decoder(buffer.as_ref()) {
                         Ok(mut decoder) => {
-                            process_with_decoder(
+                            if process_with_decoder(
                                 &mut decoder,
                                 buffer.as_ref(),
-                                &mut output_tx,
+                                &output_tx,
                                 &options,
                                 &mut resampler,
-                            );
-                            flush_decoder(&mut decoder, &mut output_tx, &options, &mut resampler);
+                                &mut decoder_scratch,
+                            ) {
+                                flush_decoder(
+                                    &mut decoder,
+                                    &output_tx,
+                                    &options,
+                                    &mut resampler,
+                                    &mut decoder_scratch,
+                                );
+                            }
                         }
                         Err(e) => {
-                            push_output(&mut output_tx, Err(e.clone()));
+                            push_output(&output_tx, Err(e.clone()));
                         }
                     }
                     None
@@ -1016,23 +1180,28 @@ fn pipeline_worker(
                         match detect_and_init_decoder(buffer.as_ref()) {
                             Ok(mut decoder) => {
                                 // Feed accumulated buffer to decoder
-                                process_with_decoder(
+                                let first_ok = process_with_decoder(
                                     &mut decoder,
                                     buffer.as_ref(),
-                                    &mut output_tx,
+                                    &output_tx,
                                     &options,
                                     &mut resampler,
+                                    &mut decoder_scratch,
                                 );
-                                if probe_bytes < chunk.len() {
+                                let remainder_ok = if first_ok && probe_bytes < chunk.len() {
                                     process_with_decoder(
                                         &mut decoder,
                                         &chunk[probe_bytes..],
-                                        &mut output_tx,
+                                        &output_tx,
                                         &options,
                                         &mut resampler,
-                                    );
-                                }
-                                Some(PipelineState::Decoding { decoder })
+                                        &mut decoder_scratch,
+                                    )
+                                } else {
+                                    first_ok
+                                };
+                                (first_ok && remainder_ok)
+                                    .then_some(PipelineState::Decoding { decoder })
                             }
                             Err(_e) if new_bytes_collected < MAX_DETECTION_BYTES => {
                                 // Need more data
@@ -1040,7 +1209,7 @@ fn pipeline_worker(
                             }
                             Err(e) => {
                                 // Failed detection
-                                push_output(&mut output_tx, Err(e.clone()));
+                                push_output(&output_tx, Err(e.clone()));
                                 None
                             }
                         }
@@ -1052,17 +1221,27 @@ fn pipeline_worker(
 
             PipelineState::Decoding { mut decoder } => {
                 if is_eof {
-                    flush_decoder(&mut decoder, &mut output_tx, &options, &mut resampler);
-                    None
-                } else {
-                    process_with_decoder(
+                    flush_decoder(
                         &mut decoder,
-                        chunk.as_ref(),
-                        &mut output_tx,
+                        &output_tx,
                         &options,
                         &mut resampler,
+                        &mut decoder_scratch,
                     );
-                    Some(PipelineState::Decoding { decoder })
+                    None
+                } else {
+                    if process_with_decoder(
+                        &mut decoder,
+                        chunk.as_ref(),
+                        &output_tx,
+                        &options,
+                        &mut resampler,
+                        &mut decoder_scratch,
+                    ) {
+                        Some(PipelineState::Decoding { decoder })
+                    } else {
+                        None
+                    }
                 }
             }
         };
@@ -1152,18 +1331,23 @@ fn detect_and_init_decoder(buffer: &[u8]) -> Result<FormatDecoder, DecodeError> 
 fn process_with_decoder(
     decoder: &mut FormatDecoder,
     chunk: &[u8],
-    output_tx: &mut Producer<DecodeOutput>,
+    output_tx: &SyncSender<DecodeOutput>,
     options: &DecodeOptions,
     resampler: &mut Option<StreamingResampler>,
-) {
-    match decoder.process(chunk) {
+    scratch: &mut DecoderScratch,
+) -> bool {
+    match decoder.process(chunk, scratch) {
         Ok(audio_frames) => {
             for audio_data in audio_frames {
-                push_audio_data(output_tx, audio_data, options, resampler);
+                if !push_audio_data(output_tx, audio_data, options, resampler) {
+                    return false;
+                }
             }
+            true
         }
         Err(e) => {
-            push_output(output_tx, Err(DecodeError::DecodingFailed(e)));
+            let _ = push_output(output_tx, Err(DecodeError::DecodingFailed(e)));
+            false
         }
     }
 }
@@ -1171,23 +1355,33 @@ fn process_with_decoder(
 /// Flush remaining samples from decoder using the unified StreamingDecoder trait.
 fn flush_decoder(
     decoder: &mut FormatDecoder,
-    output_tx: &mut Producer<DecodeOutput>,
+    output_tx: &SyncSender<DecodeOutput>,
     options: &DecodeOptions,
     resampler: &mut Option<StreamingResampler>,
-) {
-    match decoder.flush() {
+    scratch: &mut DecoderScratch,
+) -> bool {
+    let decoded = match decoder.flush(scratch) {
         Ok(audio_frames) => {
             for audio_data in audio_frames {
-                push_audio_data(output_tx, audio_data, options, resampler);
+                if !push_audio_data(output_tx, audio_data, options, resampler) {
+                    return false;
+                }
             }
+            true
         }
         Err(e) => {
-            push_output(output_tx, Err(DecodeError::DecodingFailed(e)));
+            let _ = push_output(output_tx, Err(DecodeError::DecodingFailed(e)));
+            false
         }
+    };
+    if !decoded {
+        return false;
     }
 
     if let Some(pending) = resampler.take() {
-        flush_pending_resampler(output_tx, pending);
+        flush_pending_resampler(output_tx, pending)
+    } else {
+        true
     }
 }
 
@@ -1258,32 +1452,24 @@ fn create_audio_data_i32_with_bits(
     )
 }
 
-fn push_output(output_tx: &mut Producer<DecodeOutput>, output: DecodeOutput) {
-    // Retry push with backoff instead of silently dropping frames
-    let mut item = output;
-    loop {
-        match output_tx.push(item) {
-            Ok(_) => return,
-            Err(rtrb::PushError::Full(returned_item)) => {
-                // Buffer is full, retry with the returned item
-                item = returned_item;
-                std::thread::sleep(std::time::Duration::from_micros(100));
-            }
-        }
-    }
+fn push_output(output_tx: &SyncSender<DecodeOutput>, output: DecodeOutput) -> bool {
+    output_tx.send(output).is_ok()
 }
 
 fn push_audio_data(
-    output_tx: &mut Producer<DecodeOutput>,
+    output_tx: &SyncSender<DecodeOutput>,
     audio_data: AudioData,
     options: &DecodeOptions,
     resampler: &mut Option<StreamingResampler>,
-) {
+) -> bool {
     match apply_output_options(audio_data, options, resampler) {
         Ok(frames) => {
             for frame in frames {
-                push_output(output_tx, Ok(frame));
+                if !push_output(output_tx, Ok(frame)) {
+                    return false;
+                }
             }
+            true
         }
         Err(error) => push_output(output_tx, Err(error)),
     }
@@ -1335,12 +1521,18 @@ fn flush_resampler_frames(
     )
 }
 
-fn flush_pending_resampler(output_tx: &mut Producer<DecodeOutput>, resampler: StreamingResampler) {
+fn flush_pending_resampler(
+    output_tx: &SyncSender<DecodeOutput>,
+    resampler: StreamingResampler,
+) -> bool {
     match flush_resampler_frames(resampler) {
         Ok(frames) => {
             for frame in frames {
-                push_output(output_tx, Ok(frame));
+                if !push_output(output_tx, Ok(frame)) {
+                    return false;
+                }
             }
+            true
         }
         Err(error) => push_output(output_tx, Err(error)),
     }
@@ -1594,88 +1786,47 @@ fn f32_channels_to_bytes(
 
     match bits_per_sample {
         16 => {
-            let channels_i16: Vec<Vec<i16>> =
-                channels.iter().map(|c| vec_f32_to_i16(c.clone())).collect();
-            Ok(interleave_vecs_i16(&channels_i16))
+            let mut output = Vec::with_capacity(sample_count * channels.len() * 2);
+            for sample_index in 0..sample_count {
+                for channel in channels {
+                    let sample = (channel[sample_index].clamp(-1.0, 1.0) * 32767.0) as i16;
+                    output.extend_from_slice(&sample.to_le_bytes());
+                }
+            }
+            Ok(output)
         }
         24 => {
-            let channels_i32: Vec<Vec<i32>> = channels.iter().map(|c| vec_f32_to_s24(c)).collect();
-            Ok(interleave_vecs_s24(channels_i32.as_slice()))
+            let mut output = Vec::with_capacity(sample_count * channels.len() * 3);
+            for sample_index in 0..sample_count {
+                for channel in channels {
+                    let clamped = channel[sample_index].clamp(-1.0, 1.0);
+                    let sample = if clamped >= 0.0 {
+                        (clamped * 8_388_607.0) as i32
+                    } else {
+                        (clamped * 8_388_608.0) as i32
+                    };
+                    output.extend_from_slice(&sample.to_le_bytes()[..3]);
+                }
+            }
+            Ok(output)
         }
         32 => {
-            let channels_i32: Vec<Vec<i32>> = channels.iter().map(|c| vec_f32_to_i32(c)).collect();
-            Ok(interleave_vecs_i32(channels_i32.as_slice()))
+            let mut output = Vec::with_capacity(sample_count * channels.len() * 4);
+            for sample_index in 0..sample_count {
+                for channel in channels {
+                    let clamped = channel[sample_index].clamp(-1.0, 1.0);
+                    let sample = if clamped >= 0.0 {
+                        (clamped * i32::MAX as f32) as i32
+                    } else {
+                        (clamped * -(i32::MIN as f32)) as i32
+                    };
+                    output.extend_from_slice(&sample.to_le_bytes());
+                }
+            }
+            Ok(output)
         }
         bits => Err(format!("Unsupported output bits per sample: {}", bits)),
     }
-}
-
-fn vec_f32_to_i32(input: &[f32]) -> Vec<i32> {
-    let mut output = Vec::with_capacity(input.len());
-    for &value in input {
-        let clamped = value.clamp(-1.0, 1.0);
-        let sample = if clamped >= 0.0 {
-            (clamped * i32::MAX as f32) as i32
-        } else {
-            (clamped * -(i32::MIN as f32)) as i32
-        };
-        output.push(sample);
-    }
-    output
-}
-
-fn vec_f32_to_s24(input: &[f32]) -> Vec<i32> {
-    let mut output = Vec::with_capacity(input.len());
-    let s24_max = 8_388_607.0;
-
-    for &value in input {
-        let clamped = value.clamp(-1.0, 1.0);
-        let sample = if clamped >= 0.0 {
-            (clamped * s24_max) as i32
-        } else {
-            (clamped * (s24_max + 1.0)) as i32
-        };
-        output.push(sample);
-    }
-    output
-}
-
-fn interleave_vecs_i32(channels: &[Vec<i32>]) -> Vec<u8> {
-    if channels.is_empty() {
-        return Vec::new();
-    }
-
-    let channel_count = channels.len();
-    let sample_count = channels[0].len();
-    let mut result = Vec::with_capacity(channel_count * sample_count * 4);
-
-    for i in 0..sample_count {
-        for channel in channels {
-            result.extend_from_slice(&channel[i].to_le_bytes());
-        }
-    }
-
-    result
-}
-
-fn interleave_vecs_s24(channels: &[Vec<i32>]) -> Vec<u8> {
-    if channels.is_empty() {
-        return Vec::new();
-    }
-
-    let channel_count = channels.len();
-    let sample_count = channels[0].len();
-    let mut result = Vec::with_capacity(channel_count * sample_count * 3);
-
-    for i in 0..sample_count {
-        for channel in channels {
-            let sample = channel[i].clamp(-8_388_608, 8_388_607);
-            let bytes = sample.to_le_bytes();
-            result.extend_from_slice(&bytes[..3]);
-        }
-    }
-
-    result
 }
 
 fn interleave_vecs_f32(channels: &[Vec<f32>]) -> Vec<u8> {
@@ -1802,6 +1953,73 @@ mod tests {
             Err(DecodeError::InputChunkTooLarge(bytes))
                 if bytes == MAX_INPUT_CHUNK_BYTES + 1
         ));
+    }
+
+    #[test]
+    fn pipeline_caps_queued_input_bytes() {
+        let decoder = FormatDecoder::RawPcm(Box::new(RawPcmStreamProcessor::new(
+            RawPcmFormat::linear16(48_000, 2).unwrap(),
+        )));
+        let mut pipeline = DecodePipeline::spawn_with_initial_decoder(
+            64,
+            1,
+            DecodeOptions::default(),
+            Some(decoder),
+        );
+        let maximum_chunk = Bytes::from(vec![0_u8; MAX_INPUT_CHUNK_BYTES]);
+        let mut reached_budget = false;
+
+        for _ in 0..16 {
+            match pipeline.send(maximum_chunk.clone()) {
+                Ok(()) => {}
+                Err(DecodeError::InputBufferFull) => {
+                    reached_budget = true;
+                    break;
+                }
+                Err(error) => panic!("unexpected queue error: {error}"),
+            }
+        }
+
+        assert!(reached_budget, "the byte budget did not apply backpressure");
+        assert!(pipeline.queued_input_bytes() <= MAX_QUEUED_INPUT_BYTES);
+    }
+
+    #[test]
+    fn dropping_pipeline_unblocks_a_worker_with_full_output() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let format = RawPcmFormat::linear16(48_000, 2).unwrap();
+            let mut pipeline = DecodePipeline::spawn_raw_pcm(format);
+            let chunk = Bytes::from(vec![0_u8; 4096]);
+            for _ in 0..64 {
+                loop {
+                    match pipeline.send(chunk.clone()) {
+                        Ok(()) => break,
+                        Err(DecodeError::InputBufferFull) => std::thread::yield_now(),
+                        Err(error) => panic!("unexpected queue error: {error}"),
+                    }
+                }
+            }
+            drop(pipeline);
+            done_tx.send(()).unwrap();
+        });
+
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("dropping the pipeline did not join its blocked worker");
+    }
+
+    #[test]
+    fn cancel_closes_pipeline_input_and_output() {
+        let format = RawPcmFormat::linear16(48_000, 2).unwrap();
+        let mut pipeline = DecodePipeline::spawn_raw_pcm(format);
+        pipeline.cancel();
+
+        assert!(matches!(
+            pipeline.send(Bytes::from_static(&[0, 0, 0, 0])),
+            Err(DecodeError::PipelineClosed)
+        ));
+        assert!(pipeline.recv().is_none());
     }
 
     #[test]
@@ -2964,58 +3182,54 @@ mod tests {
             let data = Bytes::from(data);
             total_bytes += data.len() as u64;
 
-            let pipeline = match options {
+            let mut pipeline = match options {
                 Some(opts) => DecodePipeline::spawn_with_buffers_and_options(256, 256, opts),
                 None => DecodePipeline::spawn_with_buffers(256, 256),
             };
-            let (mut producer, mut consumer) = pipeline.split();
-
-            // Consumer thread to drain output
-            let (done_tx, done_rx) = std::sync::mpsc::channel();
-            let consumer_thread = thread::spawn(move || {
-                let mut frame_count = 0;
-                loop {
-                    // Check if we should stop
-                    if done_rx.try_recv().is_ok() {
-                        // Drain remaining frames
-                        while consumer.pop().is_ok() {
-                            frame_count += 1;
-                        }
-                        break;
-                    }
-
-                    // Keep draining
-                    while consumer.pop().is_ok() {
-                        frame_count += 1;
-                    }
-
-                    std::thread::sleep(std::time::Duration::from_micros(10));
-                }
-                frame_count
-            });
+            let mut frame_count = 0usize;
 
             // Stream data in chunks
             let chunk_size = 4096;
             for start in (0..data.len()).step_by(chunk_size) {
                 let end = (start + chunk_size).min(data.len());
-                while producer.push(data.slice(start..end)).is_err() {
-                    // Buffer full, yield thread
-                    std::thread::yield_now();
+                let chunk = data.slice(start..end);
+                loop {
+                    match pipeline.send(chunk.clone()) {
+                        Ok(()) => break,
+                        Err(DecodeError::InputBufferFull) => {
+                            while let Some(output) = pipeline.try_recv() {
+                                output.expect("benchmark decode failed");
+                                frame_count += 1;
+                            }
+                            std::thread::yield_now();
+                        }
+                        Err(error) => panic!("benchmark input failed: {error}"),
+                    }
                 }
             }
 
-            while producer.push(Bytes::new()).is_err() {
-                std::thread::yield_now();
+            loop {
+                match pipeline.finish() {
+                    Ok(()) => break,
+                    Err(DecodeError::InputBufferFull) => {
+                        while let Some(output) = pipeline.try_recv() {
+                            output.expect("benchmark decode failed");
+                            frame_count += 1;
+                        }
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("benchmark finish failed: {error}"),
+                }
             }
 
-            // Wait for processing to complete
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            while let Some(output) = pipeline.recv() {
+                output.expect("benchmark decode failed");
+                frame_count += 1;
+            }
 
-            // Signal consumer to finish and wait
-            let _ = done_tx.send(());
-            let _ = consumer_thread.join();
-
-            successful_files += 1;
+            if frame_count > 0 {
+                successful_files += 1;
+            }
         }
 
         let elapsed = start.elapsed();

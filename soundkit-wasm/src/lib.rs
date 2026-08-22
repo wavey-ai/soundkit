@@ -14,7 +14,9 @@ use soundkit::audio_content_crypto::{AudioContentCipher, AudioGroupMetadata};
 use soundkit::audio_packet::Decoder;
 #[cfg(any(feature = "flac", feature = "opus"))]
 use soundkit::audio_packet::Encoder;
-use soundkit::audio_pipeline::{audio_to_f32_channels, StreamingStereo48kNormalizer};
+use soundkit::audio_pipeline::{
+    audio_to_f32_channels, Stereo48kBlock, StreamingStereo48kNormalizer,
+};
 use soundkit::audio_types::AudioData;
 use soundkit::crypto::ChaCha20Poly1305PacketCipher;
 use soundkit::frame_stream::{SoundKitFrame, SoundKitFrameStream, SoundKitFrameStreamOptions};
@@ -70,6 +72,9 @@ use soundkit_webm::{WebmOpusDemuxEvent, WebmOpusDemuxer};
 const MIN_DETECTION_BYTES: usize = 8192;
 const MAX_DETECTION_BYTES: usize = 65_536;
 const MAX_STREAM_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+const CANONICAL_PCM_BLOCK_FRAMES: usize = 96_000;
+#[cfg(feature = "opus")]
+const MAX_OPUS_PACKET_FRAMES: usize = 5_760;
 #[cfg(any(feature = "aac", feature = "m4a", feature = "mp3", feature = "flac"))]
 const DEFAULT_SCRATCH_SAMPLES: usize = 262_144;
 
@@ -239,6 +244,41 @@ pub fn build_audio_group_associated_data(
 #[wasm_bindgen]
 pub struct WasmMusicDecoder {
     state: DecoderState,
+    scratch: DecoderScratch,
+}
+
+/// A bounded canonical PCM block for browser and native stream adapters.
+#[derive(Debug)]
+pub struct CanonicalPcmBlock {
+    pub start_frame: u64,
+    pub frame_count: u32,
+    /// Planar stereo signed 16-bit PCM: all left samples, then all right samples.
+    pub pcm_s16_planar: Vec<u8>,
+}
+
+/// One bounded result from the canonical 48 kHz stereo decoder.
+#[derive(Debug)]
+pub struct CanonicalDecodeBatch {
+    pub blocks: Vec<CanonicalPcmBlock>,
+    pub done: bool,
+    pub frame_count: u64,
+    pub source_sample_rate: u32,
+    pub source_channels: u8,
+    pub source_frame_count: u64,
+    pub source_identity: Option<String>,
+}
+
+/// Format-detecting decode, normalization, and hashing in one bounded session.
+#[wasm_bindgen]
+pub struct WasmCanonicalPcmDecoder {
+    decoder: WasmMusicDecoder,
+    normalizer: StreamingStereo48kNormalizer,
+    source_digest: Option<Sha256>,
+    pending_left: Vec<i16>,
+    pending_right: Vec<i16>,
+    pending_start: usize,
+    emitted_frames: u64,
+    finished: bool,
 }
 
 /// Incremental RIFF/RF64 PCM writer. The final frame count makes the first
@@ -535,6 +575,7 @@ struct ContainerAudioDecoder {
     demuxer: AudioTrackDemuxer,
     decoder: Option<FormatDecoder>,
     config: Option<AudioTrackConfig>,
+    scratch: DecoderScratch,
 }
 
 #[cfg(all(feature = "audio-demux", feature = "aac-lc"))]
@@ -572,9 +613,34 @@ enum FormatDecoder {
     Wav(Box<WavStreamProcessor>),
 }
 
+#[derive(Default)]
+struct DecoderScratch {
+    i16_samples: Vec<i16>,
+    i32_samples: Vec<i32>,
+}
+
+impl DecoderScratch {
+    #[cfg(any(feature = "aac", feature = "m4a", feature = "mp3"))]
+    fn i16_samples(&mut self) -> &mut [i16] {
+        if self.i16_samples.len() < DEFAULT_SCRATCH_SAMPLES {
+            self.i16_samples.resize(DEFAULT_SCRATCH_SAMPLES, 0);
+        }
+        &mut self.i16_samples
+    }
+
+    #[cfg(feature = "flac")]
+    fn i32_samples(&mut self) -> &mut [i32] {
+        if self.i32_samples.len() < DEFAULT_SCRATCH_SAMPLES {
+            self.i32_samples.resize(DEFAULT_SCRATCH_SAMPLES, 0);
+        }
+        &mut self.i32_samples
+    }
+}
+
 #[cfg(all(feature = "aac-lc", not(feature = "aac")))]
 struct AacLcAdtsDecoder {
     buffer: Vec<u8>,
+    buffer_start: usize,
     decoder: Option<AacLcDecoder>,
     audio_specific_config: Option<[u8; 2]>,
 }
@@ -584,13 +650,16 @@ impl AacLcAdtsDecoder {
     fn new() -> Self {
         Self {
             buffer: Vec::with_capacity(16 * 1024),
+            buffer_start: 0,
             decoder: None,
             audio_specific_config: None,
         }
     }
 
     fn process(&mut self, bytes: &[u8], finalizing: bool) -> Result<Vec<AudioData>, String> {
-        if self.buffer.len().saturating_add(bytes.len()) > MAX_STREAM_INPUT_CHUNK_BYTES {
+        self.compact_buffer(false);
+        let buffered_bytes = self.buffer.len().saturating_sub(self.buffer_start);
+        if buffered_bytes.saturating_add(bytes.len()) > MAX_STREAM_INPUT_CHUNK_BYTES {
             return Err("AAC-LC ADTS buffer exceeded the streaming budget".to_owned());
         }
         self.buffer.extend_from_slice(bytes);
@@ -598,33 +667,37 @@ impl AacLcAdtsDecoder {
         loop {
             let Some(sync) = self
                 .buffer
+                .get(self.buffer_start..)
+                .unwrap_or_default()
                 .windows(2)
                 .position(|bytes| bytes[0] == 0xff && (bytes[1] & 0xf6) == 0xf0)
             else {
-                let keep = self.buffer.len().min(1);
-                self.buffer.drain(..self.buffer.len().saturating_sub(keep));
+                let keep = self.buffer.len().saturating_sub(self.buffer_start).min(1);
+                self.buffer_start = self.buffer.len().saturating_sub(keep);
                 break;
             };
             if sync > 0 {
-                self.buffer.drain(..sync);
+                self.buffer_start += sync;
             }
-            if self.buffer.len() < 7 {
+            if self.buffer.len().saturating_sub(self.buffer_start) < 7 {
                 break;
             }
-            let protection_absent = self.buffer[1] & 1 != 0;
+            let base = self.buffer_start;
+            let protection_absent = self.buffer[base + 1] & 1 != 0;
             let header_len = if protection_absent { 7 } else { 9 };
-            let frame_len = (((self.buffer[3] & 3) as usize) << 11)
-                | ((self.buffer[4] as usize) << 3)
-                | ((self.buffer[5] as usize) >> 5);
+            let frame_len = (((self.buffer[base + 3] & 3) as usize) << 11)
+                | ((self.buffer[base + 4] as usize) << 3)
+                | ((self.buffer[base + 5] as usize) >> 5);
             if frame_len <= header_len || frame_len > 8191 {
                 return Err("AAC-LC ADTS frame has an invalid length".to_owned());
             }
-            if self.buffer.len() < frame_len {
+            if self.buffer.len().saturating_sub(base) < frame_len {
                 break;
             }
-            let object_type = ((self.buffer[2] & 0xc0) >> 6) + 1;
-            let sample_rate_index = (self.buffer[2] & 0x3c) >> 2;
-            let channels = ((self.buffer[2] & 1) << 2) | ((self.buffer[3] & 0xc0) >> 6);
+            let object_type = ((self.buffer[base + 2] & 0xc0) >> 6) + 1;
+            let sample_rate_index = (self.buffer[base + 2] & 0x3c) >> 2;
+            let channels =
+                ((self.buffer[base + 2] & 1) << 2) | ((self.buffer[base + 3] & 0xc0) >> 6);
             let config = [
                 (object_type << 3) | (sample_rate_index >> 1),
                 ((sample_rate_index & 1) << 7) | (channels << 3),
@@ -644,29 +717,51 @@ impl AacLcAdtsDecoder {
                 .as_mut()
                 .ok_or_else(|| "AAC-LC decoder was not initialized".to_owned())?;
             let info = decoder.frame_info();
-            let mut interleaved = Vec::with_capacity(info.frames * info.channels);
+            let mut pcm = Vec::with_capacity(info.frames * info.channels * 2);
             {
                 let decoded = decoder
-                    .decode_access_unit(&self.buffer[header_len..frame_len])
+                    .decode_access_unit(&self.buffer[base + header_len..base + frame_len])
                     .map_err(|error| error.to_string())?;
                 for frame in 0..decoded.frames() {
                     for channel in decoded.channels() {
-                        interleaved.push(library_float_to_i16(channel[frame]));
+                        pcm.extend_from_slice(&library_float_to_i16(channel[frame]).to_le_bytes());
                     }
                 }
             }
-            frames.push(audio_data_i16(
-                info.sample_rate,
+            frames.push(AudioData::new(
+                16,
                 u8::try_from(info.channels)
                     .map_err(|_| "AAC-LC channel count exceeds SoundKit".to_owned())?,
-                &interleaved,
+                info.sample_rate,
+                pcm,
+                frame_header::EncodingFlag::PCMSigned,
+                frame_header::Endianness::LittleEndian,
             ));
-            self.buffer.drain(..frame_len);
+            self.buffer_start += frame_len;
         }
+        self.compact_buffer(finalizing);
         if finalizing && !self.buffer.is_empty() {
             return Err("AAC-LC ADTS stream ends with a truncated frame".to_owned());
         }
         Ok(frames)
+    }
+
+    fn compact_buffer(&mut self, force: bool) {
+        if self.buffer_start == 0 {
+            return;
+        }
+        if self.buffer_start == self.buffer.len() {
+            self.buffer.clear();
+            self.buffer_start = 0;
+            return;
+        }
+        if force
+            || (self.buffer_start >= 16 * 1024
+                && self.buffer_start.saturating_mul(2) >= self.buffer.len())
+        {
+            self.buffer.drain(..self.buffer_start);
+            self.buffer_start = 0;
+        }
     }
 }
 
@@ -751,6 +846,165 @@ impl WasmSha256 {
     }
 }
 
+impl WasmCanonicalPcmDecoder {
+    fn from_music_decoder(decoder: WasmMusicDecoder) -> Self {
+        Self {
+            decoder,
+            normalizer: StreamingStereo48kNormalizer::new(),
+            source_digest: Some(Sha256::new()),
+            pending_left: Vec::with_capacity(CANONICAL_PCM_BLOCK_FRAMES),
+            pending_right: Vec::with_capacity(CANONICAL_PCM_BLOCK_FRAMES),
+            pending_start: 0,
+            emitted_frames: 0,
+            finished: false,
+        }
+    }
+
+    pub fn push_rust(&mut self, bytes: &[u8]) -> Result<CanonicalDecodeBatch, String> {
+        if self.finished {
+            return Err("canonical PCM decoder is already finished".to_owned());
+        }
+        validate_stream_input_chunk(bytes)?;
+        self.source_digest
+            .as_mut()
+            .ok_or_else(|| "canonical source identity is already finished".to_owned())?
+            .update(bytes);
+        let frames = match self.decoder.push_frames(bytes) {
+            Ok(frames) => frames,
+            Err(error) => {
+                self.finished = true;
+                return Err(error);
+            }
+        };
+        let blocks = self.normalize_frames(frames)?;
+        Ok(self.batch(blocks, false, None))
+    }
+
+    pub fn finish_rust(&mut self) -> Result<CanonicalDecodeBatch, String> {
+        if self.finished {
+            return Err("canonical PCM decoder is already finished".to_owned());
+        }
+        self.finished = true;
+        let frames = self.decoder.flush_frames()?;
+        let mut blocks = self.normalize_frames(frames)?;
+        if let Some(tail) = self.normalizer.finish()? {
+            self.append_normalized_block(tail, &mut blocks)?;
+        }
+        self.emit_pending_blocks(&mut blocks, true)?;
+        let identity = self
+            .source_digest
+            .take()
+            .ok_or_else(|| "canonical source identity is already finished".to_owned())?;
+        Ok(self.batch(
+            blocks,
+            true,
+            Some(format!("sha256:{:x}", identity.finalize())),
+        ))
+    }
+
+    fn normalize_frames(
+        &mut self,
+        frames: Vec<AudioData>,
+    ) -> Result<Vec<CanonicalPcmBlock>, String> {
+        let mut blocks = Vec::new();
+        for frame in frames {
+            if let Some(block) = self.normalizer.push(&frame)? {
+                self.append_normalized_block(block, &mut blocks)?;
+            }
+        }
+        Ok(blocks)
+    }
+
+    fn append_normalized_block(
+        &mut self,
+        block: Stereo48kBlock,
+        blocks: &mut Vec<CanonicalPcmBlock>,
+    ) -> Result<(), String> {
+        if block.left.len() != block.right.len() {
+            return Err("canonical PCM normalizer returned unequal channels".to_owned());
+        }
+        self.pending_left
+            .extend(block.left.into_iter().map(canonical_float_to_i16));
+        self.pending_right
+            .extend(block.right.into_iter().map(canonical_float_to_i16));
+        self.emit_pending_blocks(blocks, false)
+    }
+
+    fn emit_pending_blocks(
+        &mut self,
+        blocks: &mut Vec<CanonicalPcmBlock>,
+        finalizing: bool,
+    ) -> Result<(), String> {
+        loop {
+            let available = self.pending_left.len().saturating_sub(self.pending_start);
+            if available == 0 || (!finalizing && available < CANONICAL_PCM_BLOCK_FRAMES) {
+                break;
+            }
+            let frame_count = available.min(CANONICAL_PCM_BLOCK_FRAMES);
+            let end = self.pending_start + frame_count;
+            let mut pcm = Vec::with_capacity(frame_count * 2 * std::mem::size_of::<i16>());
+            for sample in &self.pending_left[self.pending_start..end] {
+                pcm.extend_from_slice(&sample.to_le_bytes());
+            }
+            for sample in &self.pending_right[self.pending_start..end] {
+                pcm.extend_from_slice(&sample.to_le_bytes());
+            }
+            let start_frame = self.emitted_frames;
+            self.emitted_frames = self
+                .emitted_frames
+                .checked_add(frame_count as u64)
+                .ok_or_else(|| "canonical PCM frame count overflowed".to_owned())?;
+            blocks.push(CanonicalPcmBlock {
+                start_frame,
+                frame_count: frame_count
+                    .try_into()
+                    .map_err(|_| "canonical PCM block exceeds u32".to_owned())?,
+                pcm_s16_planar: pcm,
+            });
+            self.pending_start = end;
+        }
+        if self.pending_start == self.pending_left.len() {
+            self.pending_left.clear();
+            self.pending_right.clear();
+            self.pending_start = 0;
+        } else if self.pending_start >= CANONICAL_PCM_BLOCK_FRAMES * 4
+            && self.pending_start.saturating_mul(2) >= self.pending_left.len()
+        {
+            self.pending_left.drain(..self.pending_start);
+            self.pending_right.drain(..self.pending_start);
+            self.pending_start = 0;
+        }
+        Ok(())
+    }
+
+    fn batch(
+        &self,
+        blocks: Vec<CanonicalPcmBlock>,
+        done: bool,
+        source_identity: Option<String>,
+    ) -> CanonicalDecodeBatch {
+        CanonicalDecodeBatch {
+            blocks,
+            done,
+            frame_count: self.emitted_frames,
+            source_sample_rate: self.normalizer.source_sample_rate(),
+            source_channels: self.normalizer.source_channels(),
+            source_frame_count: self.normalizer.source_frames(),
+            source_identity,
+        }
+    }
+}
+
+fn canonical_float_to_i16(sample: f32) -> i16 {
+    let sample = if sample.is_finite() {
+        sample.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let scale = if sample < 0.0 { 32_768.0 } else { 32_767.0 };
+    ((f64::from(sample) * scale).round() as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
 #[wasm_bindgen]
 impl WasmMusicDecoder {
     #[wasm_bindgen(constructor)]
@@ -762,6 +1016,7 @@ impl WasmMusicDecoder {
     pub fn new_auto() -> Self {
         Self {
             state: DecoderState::Detecting { buffer: Vec::new() },
+            scratch: DecoderScratch::default(),
         }
     }
 
@@ -770,6 +1025,7 @@ impl WasmMusicDecoder {
         let decoder = decoder_for_format(format).map_err(js_error)?;
         Ok(Self {
             state: DecoderState::Decoding { decoder },
+            scratch: DecoderScratch::default(),
         })
     }
 
@@ -780,6 +1036,7 @@ impl WasmMusicDecoder {
             state: DecoderState::Decoding {
                 decoder: FormatDecoder::RawPcm(Box::new(RawPcmStreamProcessor::new(format))),
             },
+            scratch: DecoderScratch::default(),
         })
     }
 
@@ -790,6 +1047,7 @@ impl WasmMusicDecoder {
             state: DecoderState::Decoding {
                 decoder: FormatDecoder::RawPcm(Box::new(RawPcmStreamProcessor::new(format))),
             },
+            scratch: DecoderScratch::default(),
         })
     }
 
@@ -806,6 +1064,46 @@ impl WasmMusicDecoder {
     pub fn flush(&mut self) -> Result<Array, JsValue> {
         let frames = self.flush_frames().map_err(js_error)?;
         audio_frames_to_js(frames)
+    }
+}
+
+#[wasm_bindgen]
+impl WasmCanonicalPcmDecoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self::new_auto()
+    }
+
+    #[wasm_bindgen(js_name = newAuto)]
+    pub fn new_auto() -> Self {
+        Self::from_music_decoder(WasmMusicDecoder::new_auto())
+    }
+
+    #[wasm_bindgen(js_name = newWithFormat)]
+    pub fn new_with_format(format: &str) -> Result<WasmCanonicalPcmDecoder, JsValue> {
+        Ok(Self::from_music_decoder(WasmMusicDecoder::new_with_format(
+            format,
+        )?))
+    }
+
+    #[wasm_bindgen(js_name = newRawLinear16)]
+    pub fn new_raw_linear16(
+        sample_rate: u32,
+        channels: u8,
+    ) -> Result<WasmCanonicalPcmDecoder, JsValue> {
+        Ok(Self::from_music_decoder(
+            WasmMusicDecoder::new_raw_linear16(sample_rate, channels)?,
+        ))
+    }
+
+    /// Decode one bounded source byte range.
+    pub fn push(&mut self, bytes: &[u8]) -> Result<JsValue, JsValue> {
+        canonical_decode_batch_to_js(self.push_rust(bytes).map_err(js_error)?)
+    }
+
+    /// Drain decoder and normalizer tails and finalize the source identity.
+    pub fn finish(&mut self) -> Result<JsValue, JsValue> {
+        canonical_decode_batch_to_js(self.finish_rust().map_err(js_error)?)
     }
 }
 
@@ -895,6 +1193,7 @@ impl ContainerAudioDecoder {
             demuxer: AudioTrackDemuxer::new_with_format(format)?,
             decoder: None,
             config: None,
+            scratch: DecoderScratch::default(),
         })
     }
 
@@ -922,7 +1221,7 @@ impl ContainerAudioDecoder {
                                     .ok_or_else(|| {
                                         "container audio decoder has no codec".to_owned()
                                     })?
-                                    .process(&packet.data)?,
+                                    .process(&packet.data, &mut self.scratch)?,
                             );
                         }
                     }
@@ -931,7 +1230,7 @@ impl ContainerAudioDecoder {
         }
         if finalizing {
             if let Some(decoder) = self.decoder.as_mut() {
-                frames.extend(decoder.flush()?);
+                frames.extend(decoder.flush(&mut self.scratch)?);
             }
         }
         Ok(frames)
@@ -3626,13 +3925,31 @@ impl WasmOpusDecoder {
         sample_rate: i32,
         frame_size: usize,
     ) -> Result<WasmOpusDecoder, JsValue> {
-        if sample_rate != 48_000 {
-            return Err(js_error(
-                "soundkit wasm currently supports 48 kHz CELT-only Opus decode".to_string(),
-            ));
-        }
-        let mut decoder = OpusDecoder::new(sample_rate as usize, channels).map_err(js_error)?;
+        let mut decoder =
+            OpusDecoder::new_full(sample_rate as usize, channels).map_err(js_error)?;
         decoder.init().map_err(js_error)?;
+        Self::with_decoder(decoder, channels, frame_size.max(MAX_OPUS_PACKET_FRAMES))
+    }
+
+    /// Uses the allocation-light CELT decoder for SoundKit-owned cache
+    /// streams. It rejects SILK or hybrid packets.
+    #[wasm_bindgen(js_name = forSoundKitStream)]
+    pub fn for_soundkit_stream(
+        channels: usize,
+        sample_rate: i32,
+        frame_size: usize,
+    ) -> Result<WasmOpusDecoder, JsValue> {
+        let mut decoder =
+            OpusDecoder::new_celt_only(sample_rate as usize, channels).map_err(js_error)?;
+        decoder.init().map_err(js_error)?;
+        Self::with_decoder(decoder, channels, frame_size)
+    }
+
+    fn with_decoder(
+        decoder: OpusDecoder,
+        channels: usize,
+        frame_size: usize,
+    ) -> Result<WasmOpusDecoder, JsValue> {
         let output_len = frame_size.saturating_mul(channels).max(channels.max(1));
         Ok(Self {
             decoder,
@@ -3724,9 +4041,10 @@ impl WasmMusicDecoder {
 
                 match detect_and_init_decoder(&buffer) {
                     Ok(mut decoder) => {
-                        let mut frames = decoder.process(&buffer)?;
+                        let mut frames = decoder.process(&buffer, &mut self.scratch)?;
                         if probe_bytes < bytes.len() {
-                            frames.extend(decoder.process(&bytes[probe_bytes..])?);
+                            frames
+                                .extend(decoder.process(&bytes[probe_bytes..], &mut self.scratch)?);
                         }
                         self.state = DecoderState::Decoding { decoder };
                         Ok(frames)
@@ -3747,7 +4065,7 @@ impl WasmMusicDecoder {
                 }
             }
             DecoderState::Decoding { mut decoder } => {
-                let frames = decoder.process(bytes)?;
+                let frames = decoder.process(bytes, &mut self.scratch)?;
                 self.state = DecoderState::Decoding { decoder };
                 Ok(frames)
             }
@@ -3760,11 +4078,11 @@ impl WasmMusicDecoder {
         match state {
             DecoderState::Detecting { buffer } => {
                 let mut decoder = detect_and_init_decoder(&buffer)?;
-                let mut frames = decoder.process(&buffer)?;
-                frames.extend(decoder.flush()?);
+                let mut frames = decoder.process(&buffer, &mut self.scratch)?;
+                frames.extend(decoder.flush(&mut self.scratch)?);
                 Ok(frames)
             }
-            DecoderState::Decoding { mut decoder } => decoder.flush(),
+            DecoderState::Decoding { mut decoder } => decoder.flush(&mut self.scratch),
             DecoderState::Finished => Ok(Vec::new()),
         }
     }
@@ -3906,22 +4224,32 @@ impl WasmAacDeboxer {
 }
 
 impl FormatDecoder {
-    fn process(&mut self, bytes: &[u8]) -> Result<Vec<AudioData>, String> {
+    fn process(
+        &mut self,
+        bytes: &[u8],
+        scratch: &mut DecoderScratch,
+    ) -> Result<Vec<AudioData>, String> {
         match self {
             #[cfg(feature = "aac")]
-            FormatDecoder::Aac(decoder) => {
-                decode_i16_with_drain(decoder.as_mut(), bytes, |decoder, samples, output| {
+            FormatDecoder::Aac(decoder) => decode_i16_with_drain(
+                decoder.as_mut(),
+                bytes,
+                scratch.i16_samples(),
+                |decoder, samples, output| {
                     let (sample_rate, channels) = (decoder.sample_rate()?, decoder.channels()?);
                     Some(audio_data_i16(sample_rate, channels, &output[..samples]))
-                })
-            }
+                },
+            ),
             #[cfg(feature = "m4a")]
-            FormatDecoder::M4a(decoder) => {
-                decode_i16_with_drain(decoder.as_mut(), bytes, |decoder, samples, output| {
+            FormatDecoder::M4a(decoder) => decode_i16_with_drain(
+                decoder.as_mut(),
+                bytes,
+                scratch.i16_samples(),
+                |decoder, samples, output| {
                     let (sample_rate, channels) = (decoder.sample_rate()?, decoder.channels()?);
                     Some(audio_data_i16(sample_rate, channels, &output[..samples]))
-                })
-            }
+                },
+            ),
             #[cfg(feature = "aiff")]
             FormatDecoder::Aiff(decoder) => {
                 process_single_add_api(decoder.as_mut(), bytes, |d, data| d.add(data))
@@ -3935,8 +4263,11 @@ impl FormatDecoder {
             #[cfg(all(feature = "aac-lc", feature = "aac-debox", not(feature = "m4a")))]
             FormatDecoder::AacLcMp4(decoder) => decoder.process(bytes, false),
             #[cfg(feature = "flac")]
-            FormatDecoder::Flac(decoder) => {
-                decode_i32_with_drain(decoder.as_mut(), bytes, |decoder, samples, output| {
+            FormatDecoder::Flac(decoder) => decode_i32_with_drain(
+                decoder.as_mut(),
+                bytes,
+                scratch.i32_samples(),
+                |decoder, samples, output| {
                     let (sample_rate, channels, bits) = (
                         decoder.sample_rate()?,
                         decoder.channels()?,
@@ -3948,15 +4279,18 @@ impl FormatDecoder {
                         bits,
                         &output[..samples],
                     ))
-                })
-            }
+                },
+            ),
             #[cfg(feature = "mp3")]
-            FormatDecoder::Mp3(decoder) => {
-                decode_i16_with_drain(decoder.as_mut(), bytes, |decoder, samples, output| {
+            FormatDecoder::Mp3(decoder) => decode_i16_with_drain(
+                decoder.as_mut(),
+                bytes,
+                scratch.i16_samples(),
+                |decoder, samples, output| {
                     let (sample_rate, channels) = (decoder.sample_rate()?, decoder.channels()?);
                     Some(audio_data_i16(sample_rate, channels, &output[..samples]))
-                })
-            }
+                },
+            ),
             #[cfg(feature = "ogg-opus")]
             FormatDecoder::OggOpus(decoder) => {
                 process_add_api(decoder.as_mut(), bytes, |d, data| d.add(data))
@@ -3986,7 +4320,7 @@ impl FormatDecoder {
         }
     }
 
-    fn flush(&mut self) -> Result<Vec<AudioData>, String> {
+    fn flush(&mut self, scratch: &mut DecoderScratch) -> Result<Vec<AudioData>, String> {
         match self {
             #[cfg(all(feature = "aac-lc", not(feature = "aac")))]
             FormatDecoder::AacLcAdts(decoder) => decoder.process(&[], true),
@@ -3999,7 +4333,7 @@ impl FormatDecoder {
             FormatDecoder::RawPcm(decoder) => {
                 decoder.flush().map(|frame| frame.into_iter().collect())
             }
-            _ => self.process(&[]),
+            _ => self.process(&[], scratch),
         }
     }
 }
@@ -4044,6 +4378,7 @@ where
 fn decode_i16_with_drain<D, F>(
     decoder: &mut D,
     bytes: &[u8],
+    output: &mut [i16],
     frame: F,
 ) -> Result<Vec<AudioData>, String>
 where
@@ -4051,9 +4386,7 @@ where
     F: Fn(&D, usize, &[i16]) -> Option<AudioData>,
 {
     let mut frames = Vec::new();
-    let mut output = vec![0i16; DEFAULT_SCRATCH_SAMPLES];
-
-    let samples = decoder.decode_i16(bytes, &mut output, false)?;
+    let samples = decoder.decode_i16(bytes, output, false)?;
     if samples > 0 {
         if let Some(audio) = frame(decoder, samples, &output) {
             frames.push(audio);
@@ -4061,7 +4394,7 @@ where
     }
 
     loop {
-        let samples = decoder.decode_i16(&[], &mut output, false)?;
+        let samples = decoder.decode_i16(&[], output, false)?;
         if samples == 0 {
             break;
         }
@@ -4077,6 +4410,7 @@ where
 fn decode_i32_with_drain<D, F>(
     decoder: &mut D,
     bytes: &[u8],
+    output: &mut [i32],
     frame: F,
 ) -> Result<Vec<AudioData>, String>
 where
@@ -4084,9 +4418,7 @@ where
     F: Fn(&D, usize, &[i32]) -> Option<AudioData>,
 {
     let mut frames = Vec::new();
-    let mut output = vec![0i32; DEFAULT_SCRATCH_SAMPLES];
-
-    let samples = decoder.decode_i32(bytes, &mut output, false)?;
+    let samples = decoder.decode_i32(bytes, output, false)?;
     if samples > 0 {
         if let Some(audio) = frame(decoder, samples, &output) {
             frames.push(audio);
@@ -4094,7 +4426,7 @@ where
     }
 
     loop {
-        let samples = decoder.decode_i32(&[], &mut output, false)?;
+        let samples = decoder.decode_i32(&[], output, false)?;
         if samples == 0 {
             break;
         }
@@ -4590,6 +4922,74 @@ fn audio_frames_to_js(frames: Vec<AudioData>) -> Result<Array, JsValue> {
         array.push(&audio_frame_to_js(&frame)?);
     }
     Ok(array)
+}
+
+fn canonical_decode_batch_to_js(batch: CanonicalDecodeBatch) -> Result<JsValue, JsValue> {
+    let object = Object::new();
+    let blocks = Array::new();
+    for block in batch.blocks {
+        let item = Object::new();
+        Reflect::set(
+            &item,
+            &JsValue::from_str("startFrame"),
+            &JsValue::from_f64(block.start_frame as f64),
+        )?;
+        Reflect::set(
+            &item,
+            &JsValue::from_str("frameCount"),
+            &JsValue::from_f64(f64::from(block.frame_count)),
+        )?;
+        Reflect::set(
+            &item,
+            &JsValue::from_str("pcmS16Planar"),
+            &Uint8Array::from(block.pcm_s16_planar.as_slice()),
+        )?;
+        blocks.push(&item);
+    }
+    Reflect::set(&object, &JsValue::from_str("blocks"), &blocks)?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("done"),
+        &JsValue::from_bool(batch.done),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("frameCount"),
+        &JsValue::from_f64(batch.frame_count as f64),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("sampleRate"),
+        &JsValue::from_f64(48_000.0),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("channels"),
+        &JsValue::from_f64(2.0),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("sourceSampleRate"),
+        &JsValue::from_f64(f64::from(batch.source_sample_rate)),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("sourceChannels"),
+        &JsValue::from_f64(f64::from(batch.source_channels)),
+    )?;
+    Reflect::set(
+        &object,
+        &JsValue::from_str("sourceFrameCount"),
+        &JsValue::from_f64(batch.source_frame_count as f64),
+    )?;
+    if let Some(identity) = batch.source_identity {
+        Reflect::set(
+            &object,
+            &JsValue::from_str("sourceSha256"),
+            &JsValue::from_str(&identity),
+        )?;
+    }
+    Ok(object.into())
 }
 
 #[cfg(any(feature = "video", feature = "audio-demux"))]
@@ -5825,6 +6225,61 @@ mod tests {
         frames
     }
 
+    fn decode_canonical_raw_mono(
+        data: &[u8],
+        chunk_size: usize,
+    ) -> (Vec<i16>, Vec<i16>, u64, String, Vec<u32>) {
+        let mut decoder = WasmCanonicalPcmDecoder::new_raw_linear16(44_100, 1).unwrap();
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        let mut block_sizes = Vec::new();
+        let mut expected_start = 0_u64;
+        let mut identity = None;
+
+        let mut collect = |batch: CanonicalDecodeBatch| {
+            for block in batch.blocks {
+                assert_eq!(block.start_frame, expected_start);
+                assert!(block.frame_count as usize <= CANONICAL_PCM_BLOCK_FRAMES);
+                block_sizes.push(block.frame_count);
+                let channel_bytes = block.frame_count as usize * std::mem::size_of::<i16>();
+                assert_eq!(block.pcm_s16_planar.len(), channel_bytes * 2);
+                left.extend(
+                    block.pcm_s16_planar[..channel_bytes]
+                        .chunks_exact(2)
+                        .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]])),
+                );
+                right.extend(
+                    block.pcm_s16_planar[channel_bytes..]
+                        .chunks_exact(2)
+                        .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]])),
+                );
+                expected_start += u64::from(block.frame_count);
+            }
+            if batch.done {
+                identity = batch.source_identity;
+            } else {
+                assert!(batch.source_identity.is_none());
+            }
+            assert_eq!(batch.frame_count, expected_start);
+            if expected_start > 0 {
+                assert_eq!(batch.source_sample_rate, 44_100);
+                assert_eq!(batch.source_channels, 1);
+            }
+        };
+
+        for chunk in data.chunks(chunk_size) {
+            collect(decoder.push_rust(chunk).unwrap());
+        }
+        collect(decoder.finish_rust().unwrap());
+        (
+            left,
+            right,
+            expected_start,
+            identity.expect("finished canonical source identity"),
+            block_sizes,
+        )
+    }
+
     fn pcm_caf_fixture(frame_count: usize) -> Vec<u8> {
         fn chunk(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
             let mut bytes = Vec::new();
@@ -5902,6 +6357,44 @@ mod tests {
             DecoderState::Finished => {}
             _ => panic!("the detector must finish after its bounded probe"),
         }
+    }
+
+    #[test]
+    fn canonical_pcm_is_chunk_invariant_and_bounded() {
+        let source_frames = 4_410usize;
+        let mut source = Vec::with_capacity(source_frames * 2);
+        for frame in 0..source_frames {
+            let sample = (((frame * 97) % 65_535) as i32 - 32_767) as i16;
+            source.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        let reference = decode_canonical_raw_mono(&source, 65_536);
+        assert_eq!(reference.0, reference.1);
+        assert_eq!(reference.2, 4_800);
+        assert!(reference.3.starts_with("sha256:"));
+        assert_eq!(reference.4, vec![4_800]);
+        for chunk_size in [1, 7, 256, 997, 4_096] {
+            assert_eq!(
+                decode_canonical_raw_mono(&source, chunk_size),
+                reference,
+                "canonical output changed for {chunk_size}-byte chunks"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_pcm_block_boundaries_do_not_follow_input_chunks() {
+        let source_frames = 110_250usize;
+        let mut source = Vec::with_capacity(source_frames * 2);
+        for frame in 0..source_frames {
+            source.extend_from_slice(&((frame as i32 % 32_000) as i16).to_le_bytes());
+        }
+
+        let small_chunks = decode_canonical_raw_mono(&source, 997);
+        let large_chunks = decode_canonical_raw_mono(&source, 65_536);
+        assert_eq!(small_chunks, large_chunks);
+        assert_eq!(small_chunks.2, 120_000);
+        assert_eq!(small_chunks.4, vec![96_000, 24_000]);
     }
 
     #[cfg(feature = "aiff")]

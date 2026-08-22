@@ -8,13 +8,12 @@ repository = "https://github.com/wavey-ai/soundkit"
 readme = "README.md"
 
 [dependencies]
-# Pure-Rust Opus (no opus-sys / C). The source imports `libopus_rs`, which this
-# crate provides; the previous `libopus` (opus-rs) git dep was the C-FFI build
-# and its API had drifted, so the opus feature never compiled.
-libopus-rs = "0.0.2"
+# Full SILK, hybrid, and CELT coverage for general Opus containers.
+ropus = "0.12.18"
 soundkit = { path = "../soundkit" }
 frame-header = "0.2.2"
 tracing = "0.1.40"
+opus-rs-full = { package = "opus-rs", version = "=0.1.31" }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -16,8 +16,8 @@ prores = ["dep:oxideav-core", "dep:oxideav-prores"]
 dnx = ["dep:soundkit-dnx"]
 
 [dependencies]
-rusty_h264-decoder = { version = "0.10.0", default-features = false, optional = true }
-rusty_h264-common = { version = "0.10.0", optional = true }
+rusty_h264-decoder = { path = "../vendor/rusty_h264-decoder", default-features = false, optional = true }
+rusty_h264-common = { version = "0.10.0", default-features = false, optional = true }
 rust_h265 = { git = "https://github.com/roticv/rust_h265.git", rev = "8db4fb4321a801fb1b734a009739317d67034d9c", optional = true }
 vp9dec = { version = "0.1.1", optional = true }
 rusty_av1d = { version = "1.2.0", default-features = false, features = ["bitdepth_8", "bitdepth_16"], optional = true }

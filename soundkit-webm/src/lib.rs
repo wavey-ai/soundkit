@@ -2528,7 +2528,7 @@ impl WebmDecoder {
                     debug!(pre_skip = pre_skip, "parsed OpusHead pre-skip");
                 }
 
-                let mut decoder = OpusDecoder::new(sample_rate as usize, channels as usize)?;
+                let mut decoder = OpusDecoder::new_full(sample_rate as usize, channels as usize)?;
                 decoder.init()?;
 
                 debug!(
@@ -2937,7 +2937,7 @@ impl WebmDecoder {
                         config.mapping_family, config.channels
                     ));
                 }
-                let mut decoder = OpusDecoder::new(48_000, usize::from(config.channels))?;
+                let mut decoder = OpusDecoder::new_full(48_000, usize::from(config.channels))?;
                 decoder.init()?;
                 self.pre_skip_remaining = usize::from(config.pre_skip.unwrap_or(0));
                 self.decoder = Some(WebmAudioDecoder::Opus(decoder));
@@ -3430,12 +3430,6 @@ mod tests {
     }
 
     #[cfg(feature = "opus")]
-    fn outputs_path(file: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("outputs")
-            .join(file)
-    }
-
     #[test]
     fn test_webm_opus_demux() {
         let test_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3596,12 +3590,7 @@ mod tests {
             }
         }
 
-        if !decoded.is_empty() {
-            let output_path = outputs_path("test.s16le");
-            fs::create_dir_all(output_path.parent().unwrap()).unwrap();
-            fs::write(&output_path, &decoded).unwrap();
-            println!("Decoded {} bytes from WebM", decoded.len());
-        }
+        assert!(!decoded.is_empty(), "decoder produced no PCM samples");
     }
 
     #[cfg(feature = "vorbis")]
