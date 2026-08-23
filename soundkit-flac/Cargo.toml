@@ -1,24 +1,38 @@
 [package]
 name = "soundkit-flac"
-version = "0.12.3"
+version = "0.13.0"
+
 edition = "2021"
-license = "MIT"
-description = "FLAC packet codec support for Soundkit"
+license = "Apache-2.0"
+description = "Pure-Rust FLAC encoding and decoding for SoundKit"
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
 soundkit = { path = "../soundkit" }
-wavey-flac = { git = "https://github.com/wavey-ai/flac.git", branch = "main", default-features = false, optional = true }
+heapless = "0.8.0"
+md-5 = "0.10.6"
+num-traits = "0.2"
+rustversion = "1.0"
+seq-macro = "0.3"
 
 [features]
-default = ["wavey-codec"]
-wavey-codec = ["dep:wavey-flac"]
-packet-codec = ["wavey-codec"]
+default = []
+packet-codec = []
+simd-nightly = []
+decode-trace = []
 
 [[example]]
 name = "flac_frame_cost"
-required-features = ["packet-codec"]
 
 [[example]]
 name = "flac_frame_file"
-required-features = ["packet-codec"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(fuzzing)',
+  'cfg(feature, values("serde", "experimental", "par", "decode"))',
+] }
+
+[dev-dependencies]
+rand = "0.8.5"
+hound = "3.5"

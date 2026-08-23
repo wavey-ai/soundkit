@@ -1,35 +1,106 @@
-//! SoundKit adapters for the Wavey pure-Rust FLAC codec.
+//! Pure-Rust FLAC encoding and decoding for SoundKit.
+//!
+//! This crate vendors a complete FLAC codec and adapts it to SoundKit's
+//! audio-packet contracts. The codec is independently framed: each packet is
+//! one raw FLAC frame, and stream geometry travels out of band through
+//! [`FlacEncoder::stream_header`] so containers can backpatch `STREAMINFO`
+//! after the final frame.
 
-use soundkit::audio_packet::{Decoder as SoundKitDecoder, Encoder as SoundKitEncoder};
-use wavey_flac::stream::{Decoder as WaveyDecoder, Encoder as WaveyEncoder};
+#![cfg_attr(feature = "simd-nightly", feature(portable_simd))]
+#![cfg_attr(all(test, feature = "simd-nightly"), feature(test))]
 
-pub use wavey_flac::frame::{
+use soundkit::audio_packet::{Decoder as PacketDecoder, Encoder as PacketEncoder};
+
+/// Expands import statements for `fakesimd` or `std::simd`.
+macro_rules! import_simd {
+    (as $modalias:ident) => {
+        #[cfg(feature = "simd-nightly")]
+        use std::simd as $modalias;
+        #[cfg(not(feature = "simd-nightly"))]
+        use $crate::fakesimd as $modalias;
+
+        #[allow(unused_imports)]
+        use simd::prelude::*;
+
+        #[allow(unused_imports)]
+        use simd::StdFloat;
+    };
+}
+
+/// Sets up the thread-local re-usable storage for avoiding reallocation.
+///
+/// This provides a short-cut for the common pattern using [`thread_local!`]
+/// and [`RefCell`].
+macro_rules! reusable {
+    ($key:ident: $t:ty) => {
+        thread_local! {
+            static $key: std::cell::RefCell<$t> = std::cell::RefCell::new(Default::default());
+        }
+    };
+    ($key:ident: $t:ty = $init:expr) => {
+        thread_local! {
+            static $key: std::cell::RefCell<$t> = std::cell::RefCell::new($init);
+        }
+    };
+}
+
+/// Macro used when using a storage declared using [`reusable!`].
+macro_rules! reuse {
+    ($key:ident, $fn:expr) => {{
+        #[allow(clippy::redundant_closure_call)]
+        $key.with(|cell| $fn(&mut cell.borrow_mut()))
+    }};
+}
+
+
+#[cfg(not(feature = "simd-nightly"))]
+mod fakesimd;
+
+mod arrayutils;
+mod coding;
+pub mod bitsink;
+pub mod component;
+pub mod config;
+pub mod constant;
+pub mod crc;
+pub mod decode;
+pub mod error;
+pub mod frame;
+mod lpc;
+pub mod rice;
+pub mod source;
+pub mod stream;
+mod repeat;
+
+pub use coding::encode_fixed_size_frame;
+pub use frame::{
     DecodedFlacFrame, EncodedFlacFrame, FlacFrameConfig, FlacFrameDecoder, FlacFrameEncoder,
     FlacFrameError, FlacProfile,
 };
+pub use stream::{Decoder, Encoder};
 
-/// SoundKit's streaming encoder contract backed by `wavey-flac`.
+fn profile_for_compression_level(compression_level: u32) -> FlacProfile {
+    match compression_level {
+        0..=4 => FlacProfile::Realtime,
+        5..=8 => FlacProfile::Balanced,
+        _ => FlacProfile::Maximum,
+    }
+}
+
+/// SoundKit's streaming encoder contract backed by the vendored FLAC codec.
 pub struct FlacEncoder {
-    inner: WaveyEncoder,
+    inner: stream::Encoder,
     scratch: Vec<u8>,
 }
 
 impl FlacEncoder {
-    fn profile(compression_level: u32) -> FlacProfile {
-        match compression_level {
-            0..=4 => FlacProfile::Realtime,
-            5..=8 => FlacProfile::Balanced,
-            _ => FlacProfile::Maximum,
-        }
-    }
-
     fn make_inner(
         sample_rate: u32,
         bits_per_sample: u32,
         channels: u32,
         frame_length: u32,
         compression_level: u32,
-    ) -> Result<WaveyEncoder, String> {
+    ) -> Result<stream::Encoder, String> {
         let channels =
             u16::try_from(channels).map_err(|_| format!("Channel count {channels} exceeds u16"))?;
         let bits_per_sample = u8::try_from(bits_per_sample)
@@ -39,10 +110,10 @@ impl FlacEncoder {
             channels,
             bits_per_sample,
             frame_length,
-            Self::profile(compression_level),
+            profile_for_compression_level(compression_level),
         )
         .map_err(|error| error.to_string())?;
-        WaveyEncoder::new(config).map_err(|error| error.to_string())
+        stream::Encoder::new(config).map_err(|error| error.to_string())
     }
 
     fn copy_encoded(&self, output: &mut [u8]) -> Result<usize, String> {
@@ -70,7 +141,7 @@ impl FlacEncoder {
     }
 }
 
-impl SoundKitEncoder for FlacEncoder {
+impl PacketEncoder for FlacEncoder {
     fn new(
         sample_rate: u32,
         bits_per_sample: u32,
@@ -118,9 +189,9 @@ impl SoundKitEncoder for FlacEncoder {
     }
 }
 
-/// SoundKit's incremental decoder contract backed by `wavey-flac`.
+/// SoundKit's incremental decoder contract backed by the vendored FLAC codec.
 pub struct FlacDecoder {
-    inner: WaveyDecoder,
+    inner: stream::Decoder,
     scratch: Vec<i32>,
 }
 
@@ -133,7 +204,7 @@ impl Default for FlacDecoder {
 impl FlacDecoder {
     pub fn new() -> Self {
         Self {
-            inner: WaveyDecoder::new(),
+            inner: stream::Decoder::new(),
             scratch: Vec::new(),
         }
     }
@@ -177,7 +248,7 @@ impl FlacDecoder {
     }
 }
 
-impl SoundKitDecoder for FlacDecoder {
+impl PacketDecoder for FlacDecoder {
     fn decode_i16(
         &mut self,
         input: &[u8],
@@ -218,8 +289,8 @@ impl SoundKitDecoder for FlacDecoder {
     }
 }
 
-/// Compatibility name for callers that previously selected the Claxon
-/// backend directly. It now uses the unified Wavey codec.
+/// Legacy name for callers that selected a backend explicitly. There is one
+/// codec now; this alias remains for source compatibility.
 pub type FlacDecoderClaxon = FlacDecoder;
 
 #[cfg(test)]
