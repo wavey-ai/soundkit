@@ -91,3 +91,6 @@ cargo run --release -p soundkit-flac --example flac_frame_cost -- \
 
 `examples/flac_packet_fixture.rs` produces identical PCM and packet fixtures
 for the direct libFLAC encode and FFmpeg decode harnesses in `scripts/`.
+
+See [`BENCHMARK_WESTSIDE_2026-08-24.md`](BENCHMARK_WESTSIDE_2026-08-24.md) for
+the full-song Apple M1 and GCP results.
