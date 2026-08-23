@@ -72,7 +72,12 @@ The deterministic `never-final.mov` matrix covers common artist delivery and upl
 | IVF | AV1 Main 10-bit monochrome | None | Passing |
 | Annex B | HEVC Main10 HDR10 4:2:0 | None | Passing |
 
-FLAC decode and streaming encode are required pipeline capabilities. MP4 `dfLa` metadata is normalized into a decoder-ready FLAC stream in Rust. Streaming encoders must call `finish()` once, then use the final `streamHeader()` metadata.
+FLAC decode and frame-at-a-time encode are required pipeline capabilities. MP4
+`dfLa` supplies the out-of-band geometry for raw FLAC access units, which are
+decoded directly. Indexed SoundKit-v2 library packets likewise contain exactly
+one raw FLAC frame and use approximately 5 ms PCM blocks. Only the explicit
+native-file export API calls `finish()` and consumes the final `streamHeader()`
+metadata.
 
 ## Reproduce
 

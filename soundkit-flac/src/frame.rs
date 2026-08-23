@@ -9,13 +9,10 @@
 use crate::bitsink::ByteSink;
 use crate::component::{BitRepr, Stream, StreamInfo};
 use crate::config;
-use crate::decode::frame::FrameReader;
-use crate::decode::Block;
 use crate::error::{Verified, Verify};
 use crate::source::{Context, Fill, FrameBuf};
 use std::error::Error;
 use std::fmt;
-use std::io::Cursor;
 
 const FLAC_MAX_CHANNELS: u16 = 8;
 const FLAC_MIN_BLOCK_SIZE: u32 = 32;
@@ -27,12 +24,19 @@ const MAX_PACKET_EXPANSION_RATIO: usize = 8;
 /// Encoding effort for one independently framed packet.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FlacProfile {
-    /// Bounded predictor search intended for live per-track encoding.
+    /// Match libFLAC compression level 0: fixed predictors through order four
+    /// with independent channel coding.
     #[default]
     Realtime,
-    /// Evaluate the normal fixed predictors but skip the heavier LPC search.
+    /// Match libFLAC compression level 2: fixed predictors through order four
+    /// plus per-frame stereo decorrelation.
+    ///
+    /// This is the recommended profile for the optimized 5 ms packet path.
     Balanced,
-    /// Use the upstream encoder's complete default search.
+    /// Use the generic encoder's complete LPC search.
+    ///
+    /// This profile is retained for compatibility and does not use the
+    /// specialized 5 ms packet encoder.
     Maximum,
 }
 
@@ -222,6 +226,8 @@ pub struct FlacFrameEncoder {
     frame_buffer: FrameBuf,
     converted_samples: Vec<i32>,
     context: Context,
+    packet_encoder: crate::packet::PacketEncoder,
+    track_stream_info: bool,
     next_sequence: u32,
 }
 
@@ -258,6 +264,8 @@ impl FlacFrameEncoder {
                 usize::from(config.bits_per_sample),
                 usize::from(config.channels),
             ),
+            packet_encoder: crate::packet::PacketEncoder::new(config),
+            track_stream_info: false,
             next_sequence: 0,
         })
     }
@@ -268,6 +276,13 @@ impl FlacFrameEncoder {
 
     pub fn next_sequence(&self) -> u32 {
         self.next_sequence
+    }
+
+    /// Enables STREAMINFO statistics and PCM MD5 tracking for the native
+    /// stream wrapper. Independently framed packet encoders leave this off so
+    /// file-level bookkeeping is not part of each latency-sensitive call.
+    pub(crate) fn enable_stream_info_tracking(&mut self) {
+        self.track_stream_info = true;
     }
 
     /// Resets only this track's FLAC continuity segment.
@@ -287,6 +302,21 @@ impl FlacFrameEncoder {
     }
 
     pub fn encode_i16(&mut self, interleaved: &[i16]) -> Result<EncodedFlacFrame, FlacFrameError> {
+        let sequence = self.next_sequence;
+        let mut payload = Vec::new();
+        self.encode_i16_into(interleaved, &mut payload)?;
+        self.owned_frame(sequence, self.config.frame_length, payload)
+    }
+
+    /// Encodes one S16 frame into caller-owned reusable packet storage.
+    ///
+    /// `output` is cleared before encoding. Its allocation is retained when it
+    /// is large enough for the next packet.
+    pub fn encode_i16_into(
+        &mut self,
+        interleaved: &[i16],
+        output: &mut Vec<u8>,
+    ) -> Result<usize, FlacFrameError> {
         if self.config.bits_per_sample != 16 {
             return Err(FlacFrameError::FormatMismatch(format!(
                 "encoder is configured for {}-bit samples, not S16",
@@ -297,10 +327,26 @@ impl FlacFrameEncoder {
         self.converted_samples.clear();
         self.converted_samples
             .extend(interleaved.iter().copied().map(i32::from));
-        self.encode_converted(self.config.frame_length)
+        self.encode_converted_into(self.config.frame_length, output)
     }
 
     pub fn encode_s24le(&mut self, interleaved: &[u8]) -> Result<EncodedFlacFrame, FlacFrameError> {
+        let sequence = self.next_sequence;
+        let mut payload = Vec::new();
+        self.encode_s24le_into(interleaved, &mut payload)?;
+        self.owned_frame(sequence, self.config.frame_length, payload)
+    }
+
+    /// Encodes one packed S24LE frame into caller-owned reusable packet
+    /// storage.
+    ///
+    /// `output` is cleared before encoding. Its allocation is retained when it
+    /// is large enough for the next packet.
+    pub fn encode_s24le_into(
+        &mut self,
+        interleaved: &[u8],
+        output: &mut Vec<u8>,
+    ) -> Result<usize, FlacFrameError> {
         if self.config.bits_per_sample != 24 {
             return Err(FlacFrameError::FormatMismatch(format!(
                 "encoder is configured for {}-bit samples, not packed S24",
@@ -326,13 +372,26 @@ impl FlacFrameEncoder {
             };
             self.converted_samples.push(signed);
         }
-        self.encode_converted(self.config.frame_length)
+        self.encode_converted_into(self.config.frame_length, output)
     }
 
     /// Encodes interleaved signed samples, clipping to the configured bit depth.
     pub fn encode_i32(&mut self, interleaved: &[i32]) -> Result<EncodedFlacFrame, FlacFrameError> {
         validate_sample_len(self.config, interleaved.len())?;
         self.encode_i32_block(interleaved)
+    }
+
+    /// Encodes one full i32 frame into caller-owned reusable packet storage.
+    ///
+    /// `output` is cleared before encoding. Its allocation is retained when it
+    /// is large enough for the next packet.
+    pub fn encode_i32_into(
+        &mut self,
+        interleaved: &[i32],
+        output: &mut Vec<u8>,
+    ) -> Result<usize, FlacFrameError> {
+        validate_sample_len(self.config, interleaved.len())?;
+        self.encode_i32_block_into(interleaved, output)
     }
 
     /// Encodes one complete stream block up to the configured frame length.
@@ -344,18 +403,45 @@ impl FlacFrameEncoder {
         interleaved: &[i32],
     ) -> Result<EncodedFlacFrame, FlacFrameError> {
         let channels = usize::from(self.config.channels);
+        let frame_length = u32::try_from(interleaved.len() / channels)
+            .map_err(|_| FlacFrameError::Overflow("FLAC frame length"))?;
+        let sequence = self.next_sequence;
+        let mut payload = Vec::new();
+        self.encode_i32_block_into(interleaved, &mut payload)?;
+        self.owned_frame(sequence, frame_length, payload)
+    }
+
+    /// Encodes a complete stream block into caller-owned reusable packet
+    /// storage. This compatibility variant accepts a shorter final block.
+    pub fn encode_i32_block_into(
+        &mut self,
+        interleaved: &[i32],
+        output: &mut Vec<u8>,
+    ) -> Result<usize, FlacFrameError> {
+        let channels = usize::from(self.config.channels);
         if interleaved.len() % channels != 0 {
             return Err(FlacFrameError::InvalidInput(format!(
                 "interleaved block has {} samples, which is not divisible by {channels} channels",
                 interleaved.len()
             )));
         }
-        let frame_length = interleaved.len() / channels;
-        if !(FLAC_MIN_BLOCK_SIZE..=self.config.frame_length).contains(&(frame_length as u32)) {
+        let frame_length = u32::try_from(interleaved.len() / channels)
+            .map_err(|_| FlacFrameError::Overflow("FLAC frame length"))?;
+        if !(FLAC_MIN_BLOCK_SIZE..=self.config.frame_length).contains(&frame_length) {
             return Err(FlacFrameError::InvalidInput(format!(
                 "stream block has {frame_length} frames, expected {FLAC_MIN_BLOCK_SIZE}..={}",
                 self.config.frame_length
             )));
+        }
+        if !self.track_stream_info
+            && frame_length == self.config.frame_length
+            && self.packet_encoder.supports()
+        {
+            self.packet_encoder
+                .encode(interleaved, self.next_sequence, output);
+            self.validate_packet_size(output, interleaved.len())?;
+            self.next_sequence = (self.next_sequence + 1) & 0x7fff_ffff;
+            return Ok(output.len());
         }
         let (minimum, maximum) = sample_limits(self.config.bits_per_sample);
         self.converted_samples.clear();
@@ -364,10 +450,25 @@ impl FlacFrameEncoder {
                 .iter()
                 .map(|sample| sample.clamp(&minimum, &maximum)),
         );
-        self.encode_converted(frame_length as u32)
+        self.encode_converted_into(frame_length, output)
     }
 
-    fn encode_converted(&mut self, frame_length: u32) -> Result<EncodedFlacFrame, FlacFrameError> {
+    fn encode_converted_into(
+        &mut self,
+        frame_length: u32,
+        output: &mut Vec<u8>,
+    ) -> Result<usize, FlacFrameError> {
+        if !self.track_stream_info
+            && frame_length == self.config.frame_length
+            && self.packet_encoder.supports()
+        {
+            self.packet_encoder
+                .encode(&self.converted_samples, self.next_sequence, output);
+            self.validate_packet_size(output, self.converted_samples.len())?;
+            self.next_sequence = (self.next_sequence + 1) & 0x7fff_ffff;
+            return Ok(output.len());
+        }
+
         let mut final_frame_buffer;
         let frame_buffer = if frame_length == self.config.frame_length {
             self.frame_buffer
@@ -391,37 +492,58 @@ impl FlacFrameEncoder {
             &self.stream_info,
         )
         .map_err(|error| FlacFrameError::Encode(error.to_string()))?;
-        let mut sink = ByteSink::with_capacity(frame.count_bits());
-        frame
-            .write(&mut sink)
-            .map_err(|error| FlacFrameError::Encode(error.to_string()))?;
-        let payload = sink.into_inner();
-        if payload.is_empty() {
+        let mut sink = ByteSink::from_storage(std::mem::take(output));
+        sink.reserve(frame.count_bits());
+        let write_result = frame.write(&mut sink);
+        *output = sink.into_inner();
+        write_result.map_err(|error| FlacFrameError::Encode(error.to_string()))?;
+        self.validate_packet_size(output, self.converted_samples.len())?;
+        if self.track_stream_info {
+            self.stream_info.update_frame_info(&frame);
+            self.context
+                .fill_interleaved(&self.converted_samples)
+                .map_err(|error| FlacFrameError::Encode(error.to_string()))?;
+        }
+        self.next_sequence = (self.next_sequence + 1) & 0x7fff_ffff;
+        Ok(output.len())
+    }
+
+    fn validate_packet_size(
+        &self,
+        output: &[u8],
+        sample_count: usize,
+    ) -> Result<(), FlacFrameError> {
+        if output.is_empty() {
             return Err(FlacFrameError::Encode(
                 "encoder returned an empty FLAC frame".to_string(),
             ));
         }
-        let pcm_bytes = self
-            .converted_samples
-            .len()
+        let pcm_bytes = sample_count
             .checked_mul(usize::from(self.config.bits_per_sample / 8))
             .ok_or(FlacFrameError::Overflow("FLAC PCM byte count"))?;
         let maximum_packet_bytes = pcm_bytes
             .checked_mul(MAX_PACKET_EXPANSION_RATIO)
             .and_then(|bytes| bytes.checked_add(MAX_PACKET_OVERHEAD_BYTES))
             .ok_or(FlacFrameError::Overflow("FLAC packet size limit"))?;
-        if payload.len() > maximum_packet_bytes {
+        if output.len() > maximum_packet_bytes {
             return Err(FlacFrameError::Encode(format!(
-                "encoded frame has {} bytes, exceeding the defensive {} byte limit",
-                payload.len(),
-                maximum_packet_bytes
+                "encoded frame has {} bytes, exceeding the defensive {maximum_packet_bytes} byte limit",
+                output.len()
             )));
         }
-        self.stream_info.update_frame_info(&frame);
-        self.context
-            .fill_interleaved(&self.converted_samples)
-            .map_err(|error| FlacFrameError::Encode(error.to_string()))?;
-        self.next_sequence = (self.next_sequence + 1) & 0x7fff_ffff;
+        Ok(())
+    }
+
+    fn owned_frame(
+        &self,
+        sequence: u32,
+        frame_length: u32,
+        payload: Vec<u8>,
+    ) -> Result<EncodedFlacFrame, FlacFrameError> {
+        let pcm_bytes = (frame_length as usize)
+            .checked_mul(usize::from(self.config.channels))
+            .and_then(|samples| samples.checked_mul(usize::from(self.config.bits_per_sample / 8)))
+            .ok_or(FlacFrameError::Overflow("FLAC PCM byte count"))?;
         Ok(EncodedFlacFrame {
             sequence,
             sample_rate: self.config.sample_rate,
@@ -433,8 +555,8 @@ impl FlacFrameEncoder {
         })
     }
 
-    /// Returns the FLAC metadata block for the frames encoded so far.
-    pub fn stream_header(&self) -> Result<Vec<u8>, FlacFrameError> {
+    /// Returns metadata for the explicit native-stream compatibility wrapper.
+    pub(crate) fn stream_header(&self) -> Result<Vec<u8>, FlacFrameError> {
         let mut stream_info = self.stream_info.clone();
         if self.context.total_samples() > 0 {
             stream_info.set_total_samples(self.context.total_samples());
@@ -456,6 +578,8 @@ impl FlacFrameEncoder {
 /// Persistent per-track pure-Rust decoder.
 pub struct FlacFrameDecoder {
     config: FlacFrameConfig,
+    frame_buffer: Vec<i32>,
+    verify_checksums: bool,
 }
 
 impl fmt::Debug for FlacFrameDecoder {
@@ -470,19 +594,231 @@ impl fmt::Debug for FlacFrameDecoder {
 impl FlacFrameDecoder {
     pub fn new(config: FlacFrameConfig) -> Result<Self, FlacFrameError> {
         config.validate()?;
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            frame_buffer: Vec::with_capacity(config.sample_count()?),
+            // FFmpeg's FLAC packet decoder does not verify the frame CRC. Raw
+            // packets normally have integrity protection at the transport
+            // layer; callers that need standalone FLAC validation can opt in.
+            verify_checksums: false,
+        })
     }
 
     pub fn config(&self) -> FlacFrameConfig {
         self.config
     }
 
+    /// Enables or disables FLAC header and frame checksum verification.
+    ///
+    /// Independently framed packet decoding defaults to `false`, matching
+    /// FFmpeg's FLAC decoder. Native stream decoding continues to verify by
+    /// default.
+    pub fn set_verify_checksums(&mut self, enabled: bool) {
+        self.verify_checksums = enabled;
+    }
+
+    pub fn verify_checksums(&self) -> bool {
+        self.verify_checksums
+    }
+
     /// Resets the decoder at a packet boundary.
     pub fn reset(&mut self) -> Result<(), FlacFrameError> {
+        self.frame_buffer.clear();
         Ok(())
     }
 
     pub fn decode(&mut self, payload: &[u8]) -> Result<DecodedFlacFrame, FlacFrameError> {
+        let mut samples = vec![0; self.config.sample_count()?];
+        self.decode_into(payload, &mut samples)?;
+        Ok(DecodedFlacFrame {
+            sample_rate: self.config.sample_rate,
+            channels: self.config.channels,
+            bits_per_sample: self.config.bits_per_sample,
+            frame_count: self.config.frame_length,
+            samples,
+        })
+    }
+
+    /// Decodes one raw FLAC frame into caller-owned interleaved sample
+    /// storage, returning the number of samples written.
+    pub fn decode_into(
+        &mut self,
+        payload: &[u8],
+        output: &mut [i32],
+    ) -> Result<usize, FlacFrameError> {
+        let expected_samples = self.config.sample_count()?;
+        if output.len() < expected_samples {
+            return Err(FlacFrameError::InvalidInput(format!(
+                "decoded output has room for {} samples, expected at least {expected_samples}",
+                output.len()
+            )));
+        }
+        self.decode_i32_impl(payload, output, false)
+    }
+
+    /// Decodes one raw FLAC frame whose block length may be shorter than the
+    /// configured packet length. This is intended for a transport's final
+    /// packet; all ordinary packets should use [`Self::decode_into`].
+    pub fn decode_i32_block_into(
+        &mut self,
+        payload: &[u8],
+        output: &mut [i32],
+    ) -> Result<usize, FlacFrameError> {
+        self.decode_i32_impl(payload, output, true)
+    }
+
+    /// Decodes one full S16 FLAC packet directly into reusable interleaved
+    /// sample storage.
+    pub fn decode_i16_into(
+        &mut self,
+        payload: &[u8],
+        output: &mut [i16],
+    ) -> Result<usize, FlacFrameError> {
+        if self.config.bits_per_sample != 16 {
+            return Err(FlacFrameError::FormatMismatch(format!(
+                "decoder is configured for {}-bit samples, not S16",
+                self.config.bits_per_sample
+            )));
+        }
+        let expected_samples = self.config.sample_count()?;
+        if output.len() < expected_samples {
+            return Err(FlacFrameError::InvalidInput(format!(
+                "decoded S16 output has room for {} samples, expected at least {expected_samples}",
+                output.len()
+            )));
+        }
+        self.decode_i16_impl(payload, output, false)
+    }
+
+    /// Decodes a possibly short final S16 FLAC packet into reusable storage.
+    pub fn decode_i16_block_into(
+        &mut self,
+        payload: &[u8],
+        output: &mut [i16],
+    ) -> Result<usize, FlacFrameError> {
+        if self.config.bits_per_sample != 16 {
+            return Err(FlacFrameError::FormatMismatch(format!(
+                "decoder is configured for {}-bit samples, not S16",
+                self.config.bits_per_sample
+            )));
+        }
+        self.decode_i16_impl(payload, output, true)
+    }
+
+    /// Decodes one full S24 FLAC packet directly into caller-owned packed
+    /// little-endian storage, returning the number of bytes written.
+    pub fn decode_s24le_into(
+        &mut self,
+        payload: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize, FlacFrameError> {
+        if self.config.bits_per_sample != 24 {
+            return Err(FlacFrameError::FormatMismatch(format!(
+                "decoder is configured for {}-bit samples, not packed S24",
+                self.config.bits_per_sample
+            )));
+        }
+        let expected_bytes = self.config.raw_pcm_bytes()?;
+        if output.len() < expected_bytes {
+            return Err(FlacFrameError::InvalidInput(format!(
+                "decoded S24 output has room for {} bytes, expected at least {expected_bytes}",
+                output.len()
+            )));
+        }
+        self.decode_s24le_impl(payload, output, false)
+    }
+
+    /// Decodes a possibly short final S24 FLAC packet into caller-owned packed
+    /// little-endian storage, returning the number of bytes written.
+    pub fn decode_s24le_block_into(
+        &mut self,
+        payload: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize, FlacFrameError> {
+        if self.config.bits_per_sample != 24 {
+            return Err(FlacFrameError::FormatMismatch(format!(
+                "decoder is configured for {}-bit samples, not packed S24",
+                self.config.bits_per_sample
+            )));
+        }
+        self.decode_s24le_impl(payload, output, true)
+    }
+
+    fn decode_i32_impl(
+        &mut self,
+        payload: &[u8],
+        output: &mut [i32],
+        allow_short_block: bool,
+    ) -> Result<usize, FlacFrameError> {
+        let block = self.decode_block(payload, allow_short_block)?;
+        let samples = block.len() as usize;
+        if output.len() < samples {
+            self.frame_buffer = block.into_buffer();
+            return Err(FlacFrameError::InvalidInput(format!(
+                "decoded output has room for {} samples, packet contains {samples}",
+                output.len()
+            )));
+        }
+        for_each_interleaved_sample(&block, |index, sample| output[index] = sample);
+        self.frame_buffer = block.into_buffer();
+        Ok(samples)
+    }
+
+    fn decode_i16_impl(
+        &mut self,
+        payload: &[u8],
+        output: &mut [i16],
+        allow_short_block: bool,
+    ) -> Result<usize, FlacFrameError> {
+        let block = self.decode_block(payload, allow_short_block)?;
+        let samples = block.len() as usize;
+        if output.len() < samples {
+            self.frame_buffer = block.into_buffer();
+            return Err(FlacFrameError::InvalidInput(format!(
+                "decoded S16 output has room for {} samples, packet contains {samples}",
+                output.len()
+            )));
+        }
+        for_each_interleaved_sample(&block, |index, sample| {
+            output[index] = sample.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        });
+        self.frame_buffer = block.into_buffer();
+        Ok(samples)
+    }
+
+    fn decode_s24le_impl(
+        &mut self,
+        payload: &[u8],
+        output: &mut [u8],
+        allow_short_block: bool,
+    ) -> Result<usize, FlacFrameError> {
+        let block = self.decode_block(payload, allow_short_block)?;
+        let bytes = (block.len() as usize)
+            .checked_mul(3)
+            .ok_or(FlacFrameError::Overflow("decoded S24 byte count"))?;
+        if output.len() < bytes {
+            self.frame_buffer = block.into_buffer();
+            return Err(FlacFrameError::InvalidInput(format!(
+                "decoded S24 output has room for {} bytes, packet requires {bytes}",
+                output.len()
+            )));
+        }
+        for_each_interleaved_sample(&block, |index, sample| {
+            let sample = sample.clamp(-8_388_608, 8_388_607);
+            let offset = index * 3;
+            output[offset] = (sample & 0xff) as u8;
+            output[offset + 1] = ((sample >> 8) & 0xff) as u8;
+            output[offset + 2] = ((sample >> 16) & 0xff) as u8;
+        });
+        self.frame_buffer = block.into_buffer();
+        Ok(bytes)
+    }
+
+    fn decode_block(
+        &mut self,
+        payload: &[u8],
+        allow_short_block: bool,
+    ) -> Result<crate::decode::Block, FlacFrameError> {
         if payload.is_empty() {
             return Err(FlacFrameError::InvalidInput(
                 "compressed FLAC frame is empty".to_string(),
@@ -495,52 +831,84 @@ impl FlacFrameDecoder {
                 payload.len()
             )));
         }
-        let cursor = Cursor::new(payload);
-        let mut reader = FrameReader::with_stream_info(
-            cursor,
-            self.config.sample_rate,
-            u32::from(self.config.bits_per_sample),
+
+        let frame_buffer = std::mem::take(&mut self.frame_buffer);
+        let decoded = crate::decode::frame::decode_frame_slice(
+            payload,
+            Some(self.config.sample_rate),
+            Some(u32::from(self.config.bits_per_sample)),
+            frame_buffer,
+            self.verify_checksums,
         );
-        let block = reader
-            .read_next_or_eof(Block::empty().into_buffer())
-            .map_err(|error| FlacFrameError::Decode(error.to_string()))?
-            .ok_or_else(|| FlacFrameError::Decode("FLAC packet has no frame".to_string()))?;
-        let consumed = reader.into_inner().position() as usize;
+        let (block, consumed) = match decoded {
+            Ok(Some(decoded)) => decoded,
+            Ok(None) => {
+                self.frame_buffer = Vec::with_capacity(self.config.sample_count()?);
+                return Err(FlacFrameError::Decode(
+                    "FLAC packet has no frame".to_string(),
+                ));
+            }
+            Err(error) => {
+                self.frame_buffer = Vec::with_capacity(self.config.sample_count()?);
+                return Err(FlacFrameError::Decode(error.to_string()));
+            }
+        };
         if consumed != payload.len() {
+            self.frame_buffer = block.into_buffer();
             return Err(FlacFrameError::InvalidInput(format!(
                 "FLAC packet contains {} trailing bytes",
                 payload.len() - consumed
             )));
         }
-        if block.duration() != self.config.frame_length {
+        let valid_duration = if allow_short_block {
+            (FLAC_MIN_BLOCK_SIZE..=self.config.frame_length).contains(&block.duration())
+        } else {
+            block.duration() == self.config.frame_length
+        };
+        if !valid_duration {
+            let duration = block.duration();
+            self.frame_buffer = block.into_buffer();
             return Err(FlacFrameError::FormatMismatch(format!(
-                "decoded frame contains {} samples per channel, expected {}",
-                block.duration(),
-                self.config.frame_length
+                "decoded frame contains {duration} samples per channel, expected {}{}",
+                if allow_short_block { "32..=" } else { "" },
+                self.config.frame_length,
             )));
         }
         if block.channels() != u32::from(self.config.channels) {
+            let channels = block.channels();
+            self.frame_buffer = block.into_buffer();
             return Err(FlacFrameError::FormatMismatch(format!(
-                "decoded frame contains {} channels, expected {}",
-                block.channels(),
-                self.config.channels
+                "decoded frame contains {channels} channels, expected {}",
+                self.config.channels,
             )));
         }
-        let channels = usize::from(self.config.channels);
-        let frame_count = block.duration() as usize;
-        let mut samples = Vec::with_capacity(frame_count * channels);
-        for frame in 0..frame_count {
-            for channel in 0..channels {
-                samples.push(block.sample(channel as u32, frame as u32));
+        Ok(block)
+    }
+}
+
+#[inline]
+fn for_each_interleaved_sample(block: &crate::decode::Block, mut write: impl FnMut(usize, i32)) {
+    match block.channels() {
+        1 => {
+            for (index, &sample) in block.channel(0).iter().enumerate() {
+                write(index, sample);
             }
         }
-        Ok(DecodedFlacFrame {
-            sample_rate: self.config.sample_rate,
-            channels: self.config.channels,
-            bits_per_sample: self.config.bits_per_sample,
-            frame_count: block.duration(),
-            samples,
-        })
+        2 => {
+            for (frame, (left, right)) in block.stereo_samples().enumerate() {
+                let index = frame * 2;
+                write(index, left);
+                write(index + 1, right);
+            }
+        }
+        channels => {
+            for frame in 0..block.duration() {
+                for channel in 0..channels {
+                    let index = frame as usize * channels as usize + channel as usize;
+                    write(index, block.sample(channel, frame));
+                }
+            }
+        }
     }
 }
 
@@ -564,18 +932,20 @@ fn sample_limits(bits_per_sample: u8) -> (i32, i32) {
 fn verified_encoder_config(
     frame_config: FlacFrameConfig,
 ) -> Result<Verified<config::Encoder>, FlacFrameError> {
-    let mut encoder = config::Encoder::default();
-    encoder.block_size = frame_config.frame_length as usize;
-    encoder.multithread = false;
-    // The entropy estimate does not include the configured Rice parameter
-    // limit. For high-level 24-bit audio, it can select a fixed predictor that
-    // is larger than the verbatim subframe after the Rice value is capped.
-    // Compare the encoded bit counts so FLAC keeps its verbatim fallback.
-    encoder.subframe_coding.fixed.order_sel = config::OrderSel::BitCount;
+    let mut encoder = config::Encoder {
+        block_size: frame_config.frame_length as usize,
+        multithread: false,
+        ..config::Encoder::default()
+    };
+    // The default fixed-predictor search mirrors libFLAC's non-LPC compression
+    // levels: choose one predictor before partitioned-Rice analysis, then
+    // compare the completed subframe with verbatim.
     match frame_config.profile {
         FlacProfile::Realtime => {
             encoder.subframe_coding.use_lpc = false;
-            encoder.subframe_coding.fixed.max_order = 2;
+            encoder.stereo_coding.use_leftside = false;
+            encoder.stereo_coding.use_rightside = false;
+            encoder.stereo_coding.use_midside = false;
         }
         FlacProfile::Balanced => {
             encoder.subframe_coding.use_lpc = false;
@@ -668,6 +1038,14 @@ mod tests {
             let mut decoder = FlacFrameDecoder::new(config).unwrap();
             let decoded = decoder.decode(&encoded.payload).unwrap();
             assert_eq!(decoded.to_i16().unwrap(), samples);
+            let mut direct = vec![0_i16; samples.len()];
+            assert_eq!(
+                decoder
+                    .decode_i16_into(&encoded.payload, &mut direct)
+                    .unwrap(),
+                samples.len()
+            );
+            assert_eq!(direct, samples);
         }
     }
 
@@ -698,7 +1076,52 @@ mod tests {
             let decoded = decoder.decode(&encoded.payload).unwrap();
             assert_eq!(decoded.samples, samples);
             assert_eq!(decoded.to_s24le().unwrap(), bytes);
+            let mut direct = vec![0_u8; bytes.len()];
+            assert_eq!(
+                decoder
+                    .decode_s24le_into(&encoded.payload, &mut direct)
+                    .unwrap(),
+                bytes.len()
+            );
+            assert_eq!(direct, bytes);
         }
+    }
+
+    #[test]
+    fn raw_decoder_accepts_a_declared_short_final_block_only_via_block_api() {
+        let config = config(2, 16, 240);
+        let frames = 73usize;
+        let samples = deterministic_samples(
+            frames * usize::from(config.channels),
+            i32::from(i16::MIN),
+            i32::from(i16::MAX),
+        );
+        let packet = FlacFrameEncoder::new(config)
+            .unwrap()
+            .encode_i32_block(&samples)
+            .unwrap()
+            .payload;
+        let mut decoder = FlacFrameDecoder::new(config).unwrap();
+        let mut output = vec![0_i32; config.sample_count().unwrap()];
+        assert!(decoder.decode_into(&packet, &mut output).is_err());
+        assert_eq!(
+            decoder.decode_i32_block_into(&packet, &mut output).unwrap(),
+            samples.len()
+        );
+        assert_eq!(&output[..samples.len()], samples);
+
+        let mut direct = vec![0_i16; config.sample_count().unwrap()];
+        assert_eq!(
+            decoder.decode_i16_block_into(&packet, &mut direct).unwrap(),
+            samples.len()
+        );
+        assert_eq!(
+            &direct[..samples.len()],
+            samples
+                .iter()
+                .map(|&sample| sample as i16)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -855,6 +1278,7 @@ mod tests {
         let encoded = encoder.encode_i32(&samples).unwrap();
 
         let mut decoder = FlacFrameDecoder::new(config).unwrap();
+        decoder.set_verify_checksums(true);
         assert!(decoder.decode(&[]).is_err());
         assert!(decoder
             .decode(&encoded.payload[..encoded.payload.len() / 2])
@@ -864,6 +1288,183 @@ mod tests {
         let last = corrupted.len() - 1;
         corrupted[last] ^= 0x5a;
         assert!(decoder.decode(&corrupted).is_err());
+    }
+
+    #[test]
+    fn randomized_malformed_packet_matrix_never_panics_or_escapes_checksum_validation() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        for sample_rate in [48_000, 96_000] {
+            for channels in [1, 2, 8] {
+                for bits_per_sample in [16, 24] {
+                    let config = FlacFrameConfig::new(
+                        sample_rate,
+                        channels,
+                        bits_per_sample,
+                        sample_rate / 200,
+                        FlacProfile::Balanced,
+                    )
+                    .unwrap();
+                    let (minimum, maximum) = sample_limits(bits_per_sample);
+                    let samples =
+                        deterministic_samples(config.sample_count().unwrap(), minimum, maximum);
+                    let packet = FlacFrameEncoder::new(config)
+                        .unwrap()
+                        .encode_i32(&samples)
+                        .unwrap()
+                        .payload;
+                    let mut decoder = FlacFrameDecoder::new(config).unwrap();
+                    decoder.set_verify_checksums(true);
+                    let mut output = vec![0_i32; samples.len()];
+
+                    for length in [0, 1, 2, packet.len() / 3, packet.len() - 1] {
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            decoder.decode_into(&packet[..length], &mut output)
+                        }));
+                        assert!(result.is_ok(), "truncated packet panicked: {config:?}");
+                        assert!(
+                            result.unwrap().is_err(),
+                            "truncated packet decoded: {config:?}"
+                        );
+                    }
+
+                    let mutation_stride = (packet.len() / 31).max(1);
+                    for offset in (0..packet.len()).step_by(mutation_stride).take(32) {
+                        let mut mutated = packet.clone();
+                        mutated[offset] ^= 1 << (offset & 7);
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            decoder.decode_into(&mutated, &mut output)
+                        }));
+                        assert!(result.is_ok(), "bit mutation panicked: {config:?}/{offset}");
+                        assert!(
+                            result.unwrap().is_err(),
+                            "checksum-valid bit mutation escaped: {config:?}/{offset}"
+                        );
+                    }
+
+                    let mut state = 0x6d2b_79f5_u32 ^ sample_rate ^ u32::from(channels);
+                    for length in [3usize, 7, 31, 127, packet.len().min(1024)] {
+                        let mut garbage = vec![0_u8; length];
+                        for byte in &mut garbage {
+                            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                            *byte = (state >> 24) as u8;
+                        }
+                        let result = catch_unwind(AssertUnwindSafe(|| {
+                            decoder.decode_into(&garbage, &mut output)
+                        }));
+                        assert!(
+                            result.is_ok(),
+                            "random packet panicked: {config:?}/{length}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reusable_packet_buffers_avoid_steady_state_allocations() {
+        let config = config(2, 24, 240);
+        let samples = deterministic_samples(config.sample_count().unwrap(), -500_000, 500_000);
+        let mut encoder = FlacFrameEncoder::new(config).unwrap();
+        let mut packet = Vec::with_capacity(config.maximum_packet_bytes().unwrap());
+
+        let first_len = encoder.encode_i32_into(&samples, &mut packet).unwrap();
+        assert_eq!(first_len, packet.len());
+        let packet_allocation = packet.as_ptr();
+        let second_len = encoder.encode_i32_into(&samples, &mut packet).unwrap();
+        assert_eq!(second_len, packet.len());
+        assert_eq!(packet.as_ptr(), packet_allocation);
+
+        let mut decoder = FlacFrameDecoder::new(config).unwrap();
+        let mut decoded = vec![0; config.sample_count().unwrap()];
+        assert_eq!(
+            decoder.decode_into(&packet, &mut decoded).unwrap(),
+            decoded.len()
+        );
+        assert_eq!(decoded, samples);
+        let decode_allocation = decoder.frame_buffer.as_ptr();
+        decoder.decode_into(&packet, &mut decoded).unwrap();
+        assert_eq!(decoder.frame_buffer.as_ptr(), decode_allocation);
+    }
+
+    #[test]
+    fn raw_packet_checksum_policy_matches_ffmpeg_by_default() {
+        let config = config(2, 24, 240);
+        let samples = deterministic_samples(config.sample_count().unwrap(), -100_000, 100_000);
+        let packet = FlacFrameEncoder::new(config)
+            .unwrap()
+            .encode_i32(&samples)
+            .unwrap()
+            .payload;
+        let mut corrupted_footer = packet.clone();
+        let last = corrupted_footer.len() - 1;
+        corrupted_footer[last] ^= 0x5a;
+
+        let mut decoder = FlacFrameDecoder::new(config).unwrap();
+        assert!(!decoder.verify_checksums());
+        assert_eq!(decoder.decode(&corrupted_footer).unwrap().samples, samples);
+        decoder.set_verify_checksums(true);
+        assert!(decoder.decode(&corrupted_footer).is_err());
+    }
+
+    #[test]
+    fn packet_core_round_trips_target_geometry_matrix() {
+        for sample_rate in [48_000, 96_000] {
+            for profile in [FlacProfile::Realtime, FlacProfile::Balanced] {
+                for bits_per_sample in [16, 24] {
+                    for channels in [1, 2, 8] {
+                        let config = FlacFrameConfig::new(
+                            sample_rate,
+                            channels,
+                            bits_per_sample,
+                            sample_rate / 200,
+                            profile,
+                        )
+                        .unwrap();
+                        let (minimum, maximum) = sample_limits(bits_per_sample);
+                        let mut samples =
+                            deterministic_samples(config.sample_count().unwrap(), minimum, maximum);
+                        samples[0] = minimum;
+                        samples[1] = maximum;
+
+                        let mut packet = Vec::with_capacity(config.maximum_packet_bytes().unwrap());
+                        let mut encoder = FlacFrameEncoder::new(config).unwrap();
+                        encoder.encode_i32_into(&samples, &mut packet).unwrap();
+                        let mut decoder = FlacFrameDecoder::new(config).unwrap();
+                        decoder.set_verify_checksums(true);
+                        let mut output = vec![0; samples.len()];
+                        assert_eq!(
+                            decoder.decode_into(&packet, &mut output).unwrap(),
+                            samples.len()
+                        );
+                        assert_eq!(output, samples);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packet_core_encodes_all_sequence_width_boundaries() {
+        let config = config(2, 24, 240);
+        let samples = deterministic_samples(config.sample_count().unwrap(), -50_000, 50_000);
+        let mut encoder = FlacFrameEncoder::new(config).unwrap();
+        let mut decoder = FlacFrameDecoder::new(config).unwrap();
+        decoder.set_verify_checksums(true);
+        let mut packet = Vec::new();
+        let mut output = vec![0; samples.len()];
+
+        for sequence in [0, 0x7f, 0x80, 0x7ff, 0x800, 0xffff, 0x1_0000, 0x7fff_ffff] {
+            encoder.next_sequence = sequence;
+            encoder.encode_i32_into(&samples, &mut packet).unwrap();
+            decoder.decode_into(&packet, &mut output).unwrap();
+            assert_eq!(output, samples, "sequence={sequence}");
+            assert_eq!(
+                encoder.next_sequence(),
+                sequence.wrapping_add(1) & 0x7fff_ffff
+            );
+        }
     }
 
     #[test]

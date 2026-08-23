@@ -68,6 +68,7 @@ use super::constant::qlpc::DEFAULT_TUKEY_ALPHA;
 use super::constant::qlpc::MAX_ORDER as MAX_LPC_ORDER;
 use super::constant::qlpc::MAX_PRECISION as QLPC_MAX_PRECISION;
 use super::constant::rice::MAX_RICE_PARAMETER;
+#[cfg(feature = "serde")]
 use super::constant::DEFAULT_ENTROPY_ESTIMATOR_PARTITIONS;
 use super::constant::MAX_BLOCK_SIZE;
 use super::constant::MAX_ENTROPY_ESTIMATOR_PARTITIONS;
@@ -400,6 +401,9 @@ const fn default_partition_count() -> usize {
 pub enum OrderSel {
     /// Performs actual encoding and count bits.
     BitCount,
+    /// Chooses one fixed predictor from its mean absolute residual, matching
+    /// libFLAC's default non-exhaustive search.
+    ApproxAbs,
     /// Estimates the number of bits using partitioned entropy estimation.
     ApproxEnt {
         /// The number of partitions used for estimation.
@@ -410,16 +414,14 @@ pub enum OrderSel {
 
 impl Default for OrderSel {
     fn default() -> Self {
-        Self::ApproxEnt {
-            partitions: DEFAULT_ENTROPY_ESTIMATOR_PARTITIONS,
-        }
+        Self::ApproxAbs
     }
 }
 
 impl Verify for OrderSel {
     fn verify(&self) -> Result<(), VerifyError> {
         match *self {
-            Self::BitCount => Ok(()),
+            Self::BitCount | Self::ApproxAbs => Ok(()),
             Self::ApproxEnt { partitions } => {
                 verify_range!(
                     "ApproxEnt.partitions",

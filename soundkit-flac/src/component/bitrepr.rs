@@ -36,7 +36,6 @@ use super::datatype::StreamInfo;
 use super::datatype::SubFrame;
 use super::datatype::Verbatim;
 
-
 pub mod seal_bit_repr {
     pub trait Sealed {}
     impl Sealed for super::Stream {}

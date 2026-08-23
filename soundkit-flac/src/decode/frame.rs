@@ -10,8 +10,8 @@
 use std::i32;
 use std::io;
 
-use crate::decode::bitstream::{BitReader, Bitstream, ReadBytes};
 use crate::crc::{crc16_flac, crc8_flac, Crc16Reader, Crc8Reader};
+use crate::decode::bitstream::{BitReader, Bitstream, ReadBytes};
 use crate::decode::error::{fmt_err, Error, Result};
 use crate::decode::subframe;
 

@@ -1,8 +1,10 @@
-//! Incremental FLAC encoding and decoding.
+//! Native FLAC stream compatibility.
 //!
 //! The encoder emits complete FLAC frames and exposes the current `STREAMINFO`
 //! metadata separately so seekable files and containers can backpatch it after
 //! the final frame. The decoder accepts arbitrarily chunked native FLAC input.
+//! Latency-sensitive packet transports should use [`crate::FlacFrameEncoder`]
+//! and [`crate::FlacFrameDecoder`] directly.
 
 use crate::decode::frame::FrameReader;
 use crate::decode::metadata::{self, MetadataBlock, StreamInfo};
@@ -24,7 +26,8 @@ pub struct Encoder {
 impl Encoder {
     /// Creates an encoder for a fixed stream geometry.
     pub fn new(config: FlacFrameConfig) -> Result<Self, FlacFrameError> {
-        let inner = FlacFrameEncoder::new(config)?;
+        let mut inner = FlacFrameEncoder::new(config)?;
+        inner.enable_stream_info_tracking();
         let stream_header = inner.stream_header()?;
         Ok(Self {
             inner,

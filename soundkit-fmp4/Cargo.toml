@@ -16,7 +16,7 @@ soundkit = { path = "../soundkit", version = "0.12.3" }
 [dev-dependencies]
 criterion = "0.5"
 hound = "3.5"
-soundkit-flac = { path = "../soundkit-flac", default-features = false, features = ["packet-codec"] }
+soundkit-flac = { path = "../soundkit-flac", default-features = false }
 soundkit-opus = { path = "../soundkit-opus" }
 
 [[bench]]

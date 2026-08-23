@@ -1,10 +1,13 @@
 //! Pure-Rust FLAC encoding and decoding for SoundKit.
 //!
-//! This crate vendors a complete FLAC codec and adapts it to SoundKit's
-//! audio-packet contracts. The codec is independently framed: each packet is
-//! one raw FLAC frame, and stream geometry travels out of band through
-//! [`FlacEncoder::stream_header`] so containers can backpatch `STREAMINFO`
-//! after the final frame.
+//! [`FlacFrameEncoder`] and [`FlacFrameDecoder`] are the primary low-latency
+//! API. Each call encodes or decodes one raw FLAC frame, with stream geometry
+//! carried out of band by the surrounding transport. The hot path is tuned for
+//! 5 ms frames at 48 and 96 kHz.
+//!
+//! The SoundKit [`FlacEncoder`] adapter follows the packet contract and emits
+//! raw frames. The [`stream`] module and [`FlacDecoder`] retain explicit native
+//! stream compatibility for file import/export.
 
 #![cfg_attr(feature = "simd-nightly", feature(portable_simd))]
 #![cfg_attr(all(test, feature = "simd-nightly"), feature(test))]
@@ -52,13 +55,12 @@ macro_rules! reuse {
     }};
 }
 
-
 #[cfg(not(feature = "simd-nightly"))]
 mod fakesimd;
 
 mod arrayutils;
-mod coding;
 pub mod bitsink;
+mod coding;
 pub mod component;
 pub mod config;
 pub mod constant;
@@ -67,10 +69,11 @@ pub mod decode;
 pub mod error;
 pub mod frame;
 mod lpc;
+mod packet;
+mod repeat;
 pub mod rice;
 pub mod source;
 pub mod stream;
-mod repeat;
 
 pub use coding::encode_fixed_size_frame;
 pub use frame::{
@@ -81,15 +84,15 @@ pub use stream::{Decoder, Encoder};
 
 fn profile_for_compression_level(compression_level: u32) -> FlacProfile {
     match compression_level {
-        0..=4 => FlacProfile::Realtime,
-        5..=8 => FlacProfile::Balanced,
+        0 => FlacProfile::Realtime,
+        1..=8 => FlacProfile::Balanced,
         _ => FlacProfile::Maximum,
     }
 }
 
-/// SoundKit's streaming encoder contract backed by the vendored FLAC codec.
+/// SoundKit's packet encoder contract backed by the raw frame codec.
 pub struct FlacEncoder {
-    inner: stream::Encoder,
+    inner: FlacFrameEncoder,
     scratch: Vec<u8>,
 }
 
@@ -100,7 +103,7 @@ impl FlacEncoder {
         channels: u32,
         frame_length: u32,
         compression_level: u32,
-    ) -> Result<stream::Encoder, String> {
+    ) -> Result<FlacFrameEncoder, String> {
         let channels =
             u16::try_from(channels).map_err(|_| format!("Channel count {channels} exceeds u16"))?;
         let bits_per_sample = u8::try_from(bits_per_sample)
@@ -113,7 +116,7 @@ impl FlacEncoder {
             profile_for_compression_level(compression_level),
         )
         .map_err(|error| error.to_string())?;
-        stream::Encoder::new(config).map_err(|error| error.to_string())
+        FlacFrameEncoder::new(config).map_err(|error| error.to_string())
     }
 
     fn copy_encoded(&self, output: &mut [u8]) -> Result<usize, String> {
@@ -128,16 +131,9 @@ impl FlacEncoder {
         Ok(self.scratch.len())
     }
 
-    /// Finalizes STREAMINFO. FLAC frames are emitted immediately, so no audio
-    /// bytes are written during finalization.
+    /// Raw packet encoding has no buffered tail or stream metadata to finish.
     pub fn finish(&mut self, _output: &mut [u8]) -> Result<usize, String> {
-        self.inner.finish().map_err(|error| error.to_string())?;
         Ok(0)
-    }
-
-    /// Returns the current STREAMINFO metadata without the `fLaC` marker.
-    pub fn stream_header(&self) -> &[u8] {
-        self.inner.stream_header()
     }
 }
 
@@ -170,7 +166,7 @@ impl PacketEncoder for FlacEncoder {
     fn encode_i16(&mut self, input: &[i16], output: &mut [u8]) -> Result<usize, String> {
         self.scratch.clear();
         self.inner
-            .encode_i16(input, &mut self.scratch)
+            .encode_i16_into(input, &mut self.scratch)
             .map_err(|error| error.to_string())?;
         self.copy_encoded(output)
     }
@@ -178,14 +174,15 @@ impl PacketEncoder for FlacEncoder {
     fn encode_i32(&mut self, input: &[i32], output: &mut [u8]) -> Result<usize, String> {
         self.scratch.clear();
         self.inner
-            .encode_i32(input, &mut self.scratch)
+            .encode_i32_block_into(input, &mut self.scratch)
             .map_err(|error| error.to_string())?;
         self.copy_encoded(output)
     }
 
     fn reset(&mut self) -> Result<(), String> {
         self.scratch.clear();
-        self.inner.reset().map_err(|error| error.to_string())
+        self.inner.reset();
+        Ok(())
     }
 }
 
@@ -237,6 +234,14 @@ impl FlacDecoder {
         self.inner
             .stream_info()
             .and_then(|info| u8::try_from(info.bits_per_sample).ok())
+    }
+
+    pub fn minimum_block_size(&self) -> Option<u16> {
+        self.inner.stream_info().map(|info| info.min_block_size)
+    }
+
+    pub fn maximum_block_size(&self) -> Option<u16> {
+        self.inner.stream_info().map(|info| info.max_block_size)
     }
 
     pub fn buffered_bytes(&self) -> usize {
@@ -295,8 +300,8 @@ pub type FlacDecoderClaxon = FlacDecoder;
 
 #[cfg(test)]
 mod tests {
-    use super::{FlacDecoder, FlacEncoder};
-    use soundkit::audio_packet::{Decoder, Encoder};
+    use super::{FlacEncoder, FlacFrameConfig, FlacFrameDecoder, FlacProfile};
+    use soundkit::audio_packet::Encoder;
 
     #[test]
     fn soundkit_adapter_round_trips_a_short_final_block() {
@@ -317,23 +322,24 @@ mod tests {
         }
         assert_eq!(encoder.finish(&mut []).unwrap(), 0);
 
-        let header = encoder.stream_header();
-        let mut file = b"fLaC".to_vec();
-        file.extend_from_slice(header);
-        file.extend_from_slice(&packets[0][header.len()..]);
-        for packet in &packets[1..] {
-            file.extend_from_slice(packet);
+        assert!(packets
+            .iter()
+            .all(|packet| packet.starts_with(&[0xff, 0xf8])));
+        let config = FlacFrameConfig::new(
+            48_000,
+            channels as u16,
+            16,
+            frame_length as u32,
+            FlacProfile::Balanced,
+        )
+        .unwrap();
+        let mut decoder = FlacFrameDecoder::new(config).unwrap();
+        let mut decoded = Vec::with_capacity(samples.len());
+        for packet in &packets {
+            let mut block = vec![0_i32; frame_length * channels];
+            let written = decoder.decode_i32_block_into(packet, &mut block).unwrap();
+            decoded.extend_from_slice(&block[..written]);
         }
-
-        let mut decoder = FlacDecoder::new();
-        decoder.init().unwrap();
-        let mut decoded = vec![0_i32; samples.len()];
-        let written = decoder.decode_i32(&file, &mut decoded, false).unwrap();
-        assert_eq!(written, samples.len());
         assert_eq!(decoded, samples);
-        decoder.finish().unwrap();
-        assert_eq!(decoder.sample_rate(), Some(48_000));
-        assert_eq!(decoder.channels(), Some(2));
-        assert_eq!(decoder.bits_per_sample(), Some(16));
     }
 }

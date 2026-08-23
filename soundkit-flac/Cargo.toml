@@ -17,7 +17,6 @@ seq-macro = "0.3"
 
 [features]
 default = []
-packet-codec = []
 simd-nightly = []
 decode-trace = []
 

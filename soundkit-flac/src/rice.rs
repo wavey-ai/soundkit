@@ -15,154 +15,11 @@
 
 //! Functions for partitioned rice coding (PRC).
 
-use super::arrayutils::unaligned_map_and_update;
-use super::constant::rice::MAX_PARTITIONS as MAX_RICE_PARTITIONS;
 use super::constant::rice::MAX_PARTITION_ORDER as MAX_RICE_PARTITION_ORDER;
 use super::constant::rice::MAX_RICE_PARAMETER;
 use super::constant::rice::MIN_PARTITION_SIZE as MIN_RICE_PARTITION_SIZE;
-use super::repeat::repeat;
 
 import_simd!(as simd);
-
-/// Table that contains the numbers of bits needed for a partition.
-/// Supports rice parameters 0..=30 using two 16-wide SIMD vectors.
-#[derive(Clone, Debug, PartialEq, PartialOrd)]
-struct PrcBitTable {
-    p_to_bits_lo: simd::u32x16, // params 0..15
-    p_to_bits_hi: simd::u32x16, // params 16..31
-}
-
-static ZEROS: simd::u32x16 = simd::u32x16::from_array([0u32; 16]);
-static INDEX: simd::u32x16 =
-    simd::u32x16::from_array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
-static INDEX_HI: simd::u32x16 = simd::u32x16::from_array([
-    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-]);
-static INDEX1: simd::u32x16 =
-    simd::u32x16::from_array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
-static INDEX1_HI: simd::u32x16 = simd::u32x16::from_array([
-    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
-]);
-static MAXES: simd::u32x16 = simd::u32x16::from_array([u32::MAX; 16]);
-
-// max value of p_to_bits is chosen so that an estimate doesn't overflow after
-// being added 2^4 = 16 times each other at maximum.
-// With RICE2, minimizer packs bits with << 5, so max safe value is (1 << 27) - 1.
-static MAX_P_TO_BITS: u32 = (1 << 27) - 1;
-static MAX_P_TO_BITS_VEC: simd::u32x16 = simd::u32x16::from_array([MAX_P_TO_BITS; 16]);
-
-const PRC_BIT_TABLE_FROM_ERRORS_UNROLL_N: usize = 16; // must be up to 16.
-
-impl PrcBitTable {
-    #[cfg(test)]
-    pub fn zero() -> Self {
-        Self {
-            p_to_bits_lo: ZEROS,
-            p_to_bits_hi: ZEROS,
-        }
-    }
-
-    pub fn from_errors(errors: &[u32], offset: usize) -> Self {
-        // ensure that there's no overflow.
-        debug_assert!(offset < (1 << 31));
-        let offset_lo =
-            simd::u32x16::splat(offset as u32) + simd::u32x16::splat(errors.len() as u32) * INDEX1;
-        let offset_hi = simd::u32x16::splat(offset as u32)
-            + simd::u32x16::splat(errors.len() as u32) * INDEX1_HI;
-        let mut p_to_bits_lo = ZEROS;
-        let mut p_to_bits_hi = ZEROS;
-
-        for chunk in errors.chunks(PRC_BIT_TABLE_FROM_ERRORS_UNROLL_N) {
-            if chunk.len() == PRC_BIT_TABLE_FROM_ERRORS_UNROLL_N {
-                repeat!(n to PRC_BIT_TABLE_FROM_ERRORS_UNROLL_N => {
-                    let v = simd::Simd::splat(chunk[n]);
-                    p_to_bits_lo += v >> INDEX;
-                    p_to_bits_hi += v >> INDEX_HI;
-                });
-            } else {
-                repeat!(
-                    n to PRC_BIT_TABLE_FROM_ERRORS_UNROLL_N;
-                    while n < chunk.len() => {
-                        let v = simd::Simd::splat(chunk[n]);
-                        p_to_bits_lo += v >> INDEX;
-                        p_to_bits_hi += v >> INDEX_HI;
-                    }
-                );
-            }
-            p_to_bits_lo = p_to_bits_lo.simd_min(MAX_P_TO_BITS_VEC);
-            p_to_bits_hi = p_to_bits_hi.simd_min(MAX_P_TO_BITS_VEC);
-        }
-        p_to_bits_lo += offset_lo;
-        p_to_bits_lo = p_to_bits_lo.simd_min(MAX_P_TO_BITS_VEC);
-        p_to_bits_hi += offset_hi;
-        p_to_bits_hi = p_to_bits_hi.simd_min(MAX_P_TO_BITS_VEC);
-        Self {
-            p_to_bits_lo,
-            p_to_bits_hi,
-        }
-    }
-
-    #[cfg(test)]
-    pub fn bits(&self, p: usize) -> usize {
-        if p < 16 {
-            self.p_to_bits_lo[p] as usize
-        } else {
-            self.p_to_bits_hi[p - 16] as usize
-        }
-    }
-
-    #[inline]
-    pub fn minimizer(&self, max_p: usize) -> (usize, usize) {
-        debug_assert!(max_p <= MAX_RICE_PARAMETER);
-
-        // Search low half (params 0..15)
-        let five = simd::u32x16::splat(5);
-
-        let lo_max = std::cmp::min(max_p, 15);
-        let mask_lo = INDEX.simd_le(simd::u32x16::splat(lo_max as u32));
-        let packed_lo = (mask_lo.select(self.p_to_bits_lo, MAXES) << five) | INDEX;
-        let minim_lo = packed_lo.reduce_min();
-
-        if max_p > 15 {
-            // Also search high half (params 16..31)
-            let mask_hi = INDEX_HI.simd_le(simd::u32x16::splat(max_p as u32));
-            let packed_hi = (mask_hi.select(self.p_to_bits_hi, MAXES) << five) | INDEX_HI;
-            let minim_hi = packed_hi.reduce_min();
-
-            let minim = std::cmp::min(minim_lo, minim_hi);
-            let ret_bits = minim >> 5;
-            let ret_p = minim & 0x1F;
-            (ret_p as usize, ret_bits as usize)
-        } else {
-            let ret_bits = minim_lo >> 5;
-            let ret_p = minim_lo & 0x1F;
-            (ret_p as usize, ret_bits as usize)
-        }
-    }
-
-    #[inline]
-    pub fn merge(&self, other: &Self, offset: usize) -> Self {
-        let offset = simd::u32x16::splat(offset as u32);
-        Self {
-            p_to_bits_lo: (self.p_to_bits_lo + other.p_to_bits_lo - offset)
-                .simd_min(MAX_P_TO_BITS_VEC),
-            p_to_bits_hi: (self.p_to_bits_hi + other.p_to_bits_hi - offset)
-                .simd_min(MAX_P_TO_BITS_VEC),
-        }
-    }
-}
-
-/// Finds the number of finest partitions.
-#[inline]
-fn finest_partition_order(size: usize, min_part_size: usize) -> usize {
-    assert!(min_part_size >= 1);
-    let max_splits: u32 = (size / min_part_size) as u32;
-    let max_order_for_min_part = (32 - max_splits.leading_zeros() - 1) as usize;
-    std::cmp::min(
-        MAX_RICE_PARTITION_ORDER,
-        std::cmp::min(max_order_for_min_part, size.trailing_zeros() as usize),
-    )
-}
 
 /// Encodes the sign bit into its LSB (for Rice coding).
 #[inline]
@@ -186,34 +43,138 @@ pub const fn decode_signbit(v: u32) -> i32 {
     }
 }
 
-/// Computes the storage bits with given the slice of `RicePerformanceTable`s.
-///
-/// NOTE: API design of this function looks a bit strange but is intended to
-/// minimize heap allocation.
-fn eval_partitions(tables: &[PrcBitTable], ps: &mut [usize], max_p: usize) -> usize {
-    assert!(ps.len() >= tables.len());
-    let mut sum_bits = 0;
-    for (dest, t) in ps.iter_mut().zip(tables) {
-        let (p, bits) = t.minimizer(max_p);
-        sum_bits += bits;
-        *dest = p;
-    }
-    sum_bits
+/// Computes the number of the finest partitions.
+#[inline]
+fn finest_partition_order(size: usize, min_part_size: usize) -> usize {
+    assert!(min_part_size >= 1);
+    let max_splits: u32 = (size / min_part_size) as u32;
+    let max_order_for_min_part = (32 - max_splits.leading_zeros() - 1) as usize;
+    std::cmp::min(
+        MAX_RICE_PARTITION_ORDER,
+        std::cmp::min(max_order_for_min_part, size.trailing_zeros() as usize),
+    )
 }
 
-/// Merges `RicePerformanceTable`s and overwrites the table with merged values.
-///
-/// NOTE: API design of this function looks a bit strange but is intended to
-/// minimize heap allocation.
-fn merge_partitions(tables: &mut [PrcBitTable]) -> usize {
-    assert!(tables.len() < MAX_RICE_PARTITIONS);
-    let merged_len = tables.len() / 2;
+/// Bit estimate overhead of one partition header in the residual bitstream.
+const PRC_HEADER_BITS: u64 = 4;
 
-    for part_id in 0..merged_len {
-        tables[part_id] = tables[part_id * 2].merge(&tables[part_id * 2 + 1], 4);
-    }
-    merged_len
+/// Helper object that holds pre-allocated buffers for PRC optimization.
+///
+/// The estimator keeps one accumulator per partition at the finest order.
+/// As in libFLAC, the accumulator holds the sum of absolute residuals, which
+/// is enough to estimate a Rice parameter and its encoded size in closed form:
+///
+///   bits(0) ~= header + n + 2 * sum - n / 2
+///   bits(p) ~= header + n * (p + 1) + sum >> (p - 1) - n / 2
+///
+/// Coarser orders reuse the same accumulators by merging partition pairs,
+/// so a block needs a single pass over the samples regardless of how many
+/// partition orders get evaluated. This trades a small amount of ratio
+/// against the exact per-parameter counting it replaces, matching the
+/// strategy used by the reference encoder.
+#[derive(Default)]
+struct PrcParameterFinder {
+    sums: Vec<u64>,
+    counts: Vec<u64>,
+    ps: Vec<u8>,
+    best_ps: Vec<u8>,
 }
+
+impl PrcParameterFinder {
+    /// Selects and scores one partition using libFLAC's default estimator.
+    /// libFLAC derives the parameter from the mean absolute residual and,
+    /// unless built with its optional Rice search, scores only that value.
+    #[inline]
+    fn select_param(sum: u64, n: u64, max_p: u64) -> (u8, u64) {
+        if n == 0 {
+            return (0, PRC_HEADER_BITS);
+        }
+        let mean = sum.saturating_sub(1) / n;
+        let p = if sum < 2 || mean == 0 {
+            0
+        } else {
+            u64::from(64 - mean.leading_zeros())
+        }
+        .min(max_p);
+        let folded_sum = if p == 0 { sum << 1 } else { sum >> (p - 1) };
+        let bits = PRC_HEADER_BITS + n * (p + 1) + folded_sum - (n >> 1);
+        (p as u8, bits)
+    }
+
+    pub fn find(&mut self, signal: &[i32], warmup_length: usize, max_p: usize) -> PrcParameter {
+        debug_assert!(max_p <= MAX_RICE_PARAMETER);
+
+        let mut partition_order = finest_partition_order(
+            signal.len(),
+            std::cmp::max(MIN_RICE_PARTITION_SIZE, warmup_length),
+        );
+        let nparts = 1usize << partition_order;
+        let part_size = signal.len() >> partition_order;
+        debug_assert_eq!(nparts * part_size, signal.len());
+
+        // Single streaming pass over the samples fills the finest-level
+        // sums and sample counts. Partitions before the warm-up boundary
+        // stay empty, mirroring the ranges that the bitstream writer uses.
+        self.sums.clear();
+        self.sums.resize(nparts, 0);
+        self.counts.clear();
+        self.counts.resize(nparts, 0);
+        {
+            let sums = &mut self.sums[..];
+            let counts = &mut self.counts[..];
+            for p in 0..nparts {
+                let start =
+                    std::cmp::min(std::cmp::max(p * part_size, warmup_length), signal.len());
+                let end = (p + 1) * part_size;
+                if end <= start {
+                    continue;
+                }
+                let mut acc = 0_u64;
+                for &x in &signal[start..end] {
+                    acc += u64::from(x.unsigned_abs());
+                }
+                sums[p] = acc;
+                counts[p] = (end - start) as u64;
+            }
+        }
+
+        let max_p = max_p as u64;
+        let mut min_bits = u64::MAX;
+        let mut min_order: usize = 0;
+        loop {
+            let nparts = 1usize << partition_order;
+            self.ps.clear();
+            let mut total = 0_u64;
+            for i in 0..nparts {
+                let (p, bits) = Self::select_param(self.sums[i], self.counts[i], max_p);
+                total += bits;
+                self.ps.push(p);
+            }
+            if total < min_bits {
+                min_bits = total;
+                min_order = partition_order;
+                std::mem::swap(&mut self.best_ps, &mut self.ps);
+            }
+            if partition_order == 0 {
+                break;
+            }
+            // Merge partition pairs for the next coarser order.
+            for i in 0..(nparts >> 1) {
+                self.sums[i] = self.sums[2 * i] + self.sums[2 * i + 1];
+                self.counts[i] = self.counts[2 * i] + self.counts[2 * i + 1];
+            }
+            partition_order -= 1;
+        }
+
+        PrcParameter::new(
+            min_order,
+            self.best_ps[..1 << min_order].to_vec(),
+            min_bits as usize,
+        )
+    }
+}
+
+reusable!(PRC_FINDER: PrcParameterFinder);
 
 /// Parameter for PRC (partitioned Rice-coding).
 #[derive(Clone, Debug)]
@@ -233,73 +194,6 @@ impl PrcParameter {
     }
 }
 
-/// Helper object that holds pre-allocated buffer for PRC optimization.
-#[derive(Default)]
-struct PrcParameterFinder {
-    pub errors: Vec<u32>,
-    pub tables: Vec<PrcBitTable>,
-    pub ps: Vec<usize>,
-    pub min_ps: Vec<usize>,
-}
-
-impl PrcParameterFinder {
-    pub fn find(&mut self, signal: &[i32], warmup_length: usize, max_p: usize) -> PrcParameter {
-        let mut partition_order = finest_partition_order(
-            signal.len(),
-            std::cmp::max(MIN_RICE_PARTITION_SIZE, warmup_length),
-        );
-        let mut nparts = 1 << (partition_order as i32);
-
-        self.tables.clear();
-        self.min_ps.resize(nparts, 0);
-        self.errors.clear();
-        self.errors.resize(signal.len(), 0u32);
-        unaligned_map_and_update::<u32, 64, _, _, _>(
-            signal,
-            &mut self.errors,
-            #[inline]
-            |p, x| {
-                *p = encode_signbit(x);
-            },
-            #[inline]
-            |pv, v| {
-                *pv = encode_signbit_simd(v);
-            },
-        );
-
-        let part_size = signal.len() / nparts;
-        for p in 0..nparts {
-            let start = std::cmp::max(p * part_size, warmup_length);
-            let end = (p + 1) * part_size;
-            let table = PrcBitTable::from_errors(&self.errors[start..end], 4);
-            self.tables.push(table);
-        }
-        let mut min_bits = eval_partitions(&self.tables, &mut self.min_ps, max_p);
-        let mut min_order: usize = partition_order;
-
-        while nparts > 1 {
-            nparts = merge_partitions(&mut self.tables[0..nparts]);
-            partition_order -= 1;
-            self.ps.resize(nparts, 0);
-            let next_bits = eval_partitions(&self.tables[0..nparts], &mut self.ps, max_p);
-            if next_bits < min_bits {
-                min_bits = next_bits;
-                self.min_ps.clear();
-                self.min_ps.extend_from_slice(&self.ps);
-                min_order = partition_order;
-            }
-        }
-        self.min_ps.truncate(1usize << min_order);
-        PrcParameter::new(
-            min_order,
-            self.min_ps.iter().map(|x| *x as u8).collect(),
-            min_bits,
-        )
-    }
-}
-
-reusable!(PRC_FINDER: PrcParameterFinder);
-
 pub fn find_partitioned_rice_parameter(
     signal: &[i32],
     warmup_length: usize,
@@ -308,4 +202,102 @@ pub fn find_partitioned_rice_parameter(
     reuse!(PRC_FINDER, |finder: &mut PrcParameterFinder| {
         finder.find(signal, warmup_length, max_p)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Brute-force reference that mirrors the exact per-parameter bit
+    /// accounting of the old table-based estimator.
+    fn reference_find(signal: &[i32], warmup_length: usize, max_p: usize) -> PrcParameter {
+        let order = finest_partition_order(
+            signal.len(),
+            std::cmp::max(MIN_RICE_PARTITION_SIZE, warmup_length),
+        );
+        let part_size = signal.len() >> order;
+        let mut best_bits = usize::MAX;
+        let mut best_order = 0;
+        let mut best_ps = Vec::new();
+        for level in 0..=order {
+            let nparts = 1usize << (order - level);
+            let mut ps = Vec::new();
+            let mut total = 0usize;
+            for p in 0..nparts {
+                let start = std::cmp::min(
+                    std::cmp::max((p * part_size) << level, warmup_length),
+                    signal.len(),
+                );
+                let end = std::cmp::min((p + 1) * (part_size << level), signal.len());
+                let n = end.saturating_sub(start);
+                let mut best_p = 0usize;
+                let mut best = usize::MAX;
+                for cand in 0..=max_p {
+                    let mut bits = 4 + n * (cand + 1);
+                    for &x in &signal[start..end] {
+                        bits += (encode_signbit(x) >> cand) as usize;
+                    }
+                    if bits < best {
+                        best = bits;
+                        best_p = cand;
+                    }
+                }
+                total += best;
+                ps.push(best_p as u8);
+            }
+            if total < best_bits {
+                best_bits = total;
+                best_order = order - level;
+                best_ps = ps;
+            }
+        }
+        PrcParameter::new(best_order, best_ps, best_bits)
+    }
+
+    /// Counts the exact bits that `param` would spend on `signal` using
+    /// the same per-sample accounting as the bitstream writer.
+    fn exact_cost(param: &PrcParameter, signal: &[i32], warmup_length: usize) -> usize {
+        let size = signal.len() >> param.order;
+        let mut total = 0usize;
+        for (p, &choice) in param.ps.iter().enumerate() {
+            let start = std::cmp::min(std::cmp::max(p * size, warmup_length), signal.len());
+            let end = std::cmp::min((p + 1) * size, signal.len());
+            total += 4 + (end - start) * (choice as usize + 1);
+            for &x in &signal[start..end] {
+                total += (encode_signbit(x) >> choice) as usize;
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn stays_near_exact_optimum_on_structured_inputs() {
+        let mut state = 0x12345678_u32;
+        let mut next = move || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            ((state >> 16) as i32) - 32768
+        };
+        for len in [128usize, 256, 512, 4096] {
+            for warmup in [0usize, 4, 32, 128] {
+                // Constant runs, alternating ramps, and pseudo-random noise
+                // cover the degenerate and the typical cases.
+                for kind in 0..3 {
+                    let signal: Vec<i32> = match kind {
+                        0 => vec![next() / 1048576; len],
+                        1 => (0..len).map(|i| ((i as i32 % 97) - 48) * 512).collect(),
+                        _ => (0..len).map(|_| next()).collect(),
+                    };
+                    let got = find_partitioned_rice_parameter(&signal, warmup, 30);
+                    let want = reference_find(&signal, warmup, 30);
+                    assert_eq!(got.ps.len(), 1 << got.order);
+                    let spent = exact_cost(&got, &signal, warmup);
+                    let optimum = exact_cost(&want, &signal, warmup);
+                    assert!(
+                        spent <= optimum + (optimum / 20) + 64,
+                        "len={len} warmup={warmup} kind={kind}: spent {spent} vs optimum {optimum}"
+                    );
+                }
+            }
+        }
+    }
 }

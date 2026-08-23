@@ -212,7 +212,8 @@ fn estimate_entropy(errors: &[i32], warmup_len: usize, partitions: usize) -> usi
         let partition_len = end - offset;
         if end >= warmup_len {
             let sample_count = std::cmp::min(end - warmup_len, partition_len);
-            let sum_errors = find_sum_abs_f32::<16>(&errors[offset..end]);
+            let start = std::cmp::max(offset, warmup_len);
+            let sum_errors = find_sum_abs_f32::<16>(&errors[start..end]);
             let avg_errors = sum_errors * 2.0 / (sample_count as f32 + 0.00001);
             let geom_p = 1.0 / (avg_errors + 1.0);
             let xent = avg_errors.mul_add(-(1.0 - geom_p).log2(), -geom_p.log2());
@@ -236,6 +237,9 @@ where
 {
     let max_rice_p = prc_config.max_parameter;
     match *order_sel {
+        config::OrderSel::ApproxAbs => {
+            unreachable!("ApproxAbs uses the single-pass fixed predictor path")
+        }
         config::OrderSel::BitCount => errors
             .map(
                 #[inline]
@@ -284,6 +288,64 @@ where
     }
 }
 
+/// Computes a fixed-predictor residual with wrapping arithmetic.
+#[inline]
+fn fixed_error(signal: &[i32], index: usize, order: usize) -> i32 {
+    let x = signal[index];
+    match order {
+        0 => x,
+        1 => x.wrapping_sub(signal[index - 1]),
+        2 => x
+            .wrapping_sub(signal[index - 1].wrapping_mul(2))
+            .wrapping_add(signal[index - 2]),
+        3 => x
+            .wrapping_sub(signal[index - 1].wrapping_mul(3))
+            .wrapping_add(signal[index - 2].wrapping_mul(3))
+            .wrapping_sub(signal[index - 3]),
+        4 => x
+            .wrapping_sub(signal[index - 1].wrapping_mul(4))
+            .wrapping_add(signal[index - 2].wrapping_mul(6))
+            .wrapping_sub(signal[index - 3].wrapping_mul(4))
+            .wrapping_add(signal[index - 4]),
+        _ => unreachable!("FLAC fixed predictor order exceeds four"),
+    }
+}
+
+/// Chooses one fixed predictor using the same absolute-residual criterion as
+/// libFLAC. All candidates are compared over the same sample range so higher
+/// orders do not win merely because they have more warm-up samples.
+fn select_fixed_order(signal: &[i32], max_order: usize) -> usize {
+    debug_assert!(max_order <= MAX_FIXED_LPC_ORDER);
+    let mut totals = [0_u64; MAX_FIXED_LPC_ORDER + 1];
+    for index in max_order..signal.len() {
+        for (order, total) in totals.iter_mut().enumerate().take(max_order + 1) {
+            *total += u64::from(fixed_error(signal, index, order).unsigned_abs());
+        }
+    }
+    totals[..=max_order]
+        .iter()
+        .enumerate()
+        .min_by_key(|(order, total)| (**total, *order))
+        .map_or(0, |(order, _)| order)
+}
+
+reusable!(FIXED_LPC_ERROR: Vec<i32>);
+
+fn encode_approx_fixed_residual(
+    config: &config::SubFrameCoding,
+    signal: &[i32],
+    order: usize,
+) -> Residual {
+    reuse!(FIXED_LPC_ERROR, |errors: &mut Vec<i32>| {
+        errors.clear();
+        errors.resize(signal.len(), 0);
+        for index in order..signal.len() {
+            errors[index] = fixed_error(signal, index, order);
+        }
+        encode_residual(&config.prc, errors, order)
+    })
+}
+
 /// Tries `0..=4`-th order fixed LPC and returns the smallest `SubFrame`.
 ///
 /// # Panics
@@ -300,6 +362,19 @@ fn fixed_lpc(
 ) -> Option<SubFrame> {
     assert!(bits_per_sample < 30);
     let max_order = config.fixed.max_order;
+
+    if matches!(config.fixed.order_sel, config::OrderSel::ApproxAbs) {
+        let order = select_fixed_order(signal, max_order);
+        let residual = encode_approx_fixed_residual(config, signal, order);
+        let candidate: SubFrame = FixedLpc::from_parts(
+            heapless::Vec::from_slice(&signal[..order])
+                .expect("Exceeded maximum order for FixedLpc component."),
+            residual,
+            bits_per_sample,
+        )
+        .into();
+        return (candidate.count_bits() < baseline_bits).then_some(candidate);
+    }
 
     reuse!(FIXED_LPC_ERRORS, |errors: &mut FixedLpcErrors| {
         reset_fixed_lpc_errors(errors, signal);

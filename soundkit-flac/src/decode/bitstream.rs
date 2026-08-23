@@ -999,7 +999,9 @@ impl<'a> BitReader<'a> {
         let word = if whole == 8 {
             // A single unaligned big-endian load; `whole` proved all eight
             // bytes readable.
-            unsafe { u64::from_be((self.bytes.as_ptr().add(self.pos) as *const u64).read_unaligned()) }
+            unsafe {
+                u64::from_be((self.bytes.as_ptr().add(self.pos) as *const u64).read_unaligned())
+            }
         } else {
             let mut tail = [0_u8; 8];
             tail[..whole].copy_from_slice(&self.bytes[self.pos..self.pos + whole]);

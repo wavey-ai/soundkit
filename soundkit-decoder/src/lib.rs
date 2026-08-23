@@ -21,7 +21,7 @@ use soundkit_audio_demux::{
     CafAudioIndex, MediaTrackConfig, MediaTrackKind, Mp4MediaDemuxEvent, Mp4MediaDemuxer,
     Mp4MediaIndex, MxfMediaIndex, PcmEndianness,
 };
-use soundkit_flac::FlacDecoder;
+use soundkit_flac::{FlacDecoder, FlacFrameConfig, FlacFrameDecoder, FlacProfile};
 use soundkit_g711::G711Decoder;
 pub use soundkit_g711::G711Law;
 use soundkit_g722::G722Decoder;
@@ -80,7 +80,6 @@ const RESAMPLE_CHUNK_SIZE: usize = 4096;
 const MAX_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 const MAX_QUEUED_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const DECODER_SCRATCH_SAMPLES: usize = 262_144;
-const MAX_SEEKABLE_PACKET_SAMPLES: usize = 65_536 * 8;
 
 #[derive(Default)]
 struct DecoderScratch {
@@ -1352,8 +1351,85 @@ fn decode_complete_stream(
 enum SeekableAudioDecoder {
     WaveyAac(WaveyAacDecoder),
     Alac(AlacPacketDecoder),
-    Flac(FlacDecoder),
+    Flac(FlacPacketDecoder),
     Pcm,
+}
+
+struct FlacPacketDecoder {
+    decoder: FlacFrameDecoder,
+    scratch: Vec<i32>,
+    sample_rate: u32,
+    channels: u8,
+    bits_per_sample: u8,
+}
+
+impl FlacPacketDecoder {
+    fn new(track: &MediaTrackConfig) -> Result<Self, DecodeError> {
+        let mut metadata = FlacDecoder::new();
+        metadata.init().map_err(DecodeError::DecoderInitFailed)?;
+        let written = metadata
+            .decode_i32(&track.decoder_configuration, &mut [], false)
+            .map_err(DecodeError::DecoderInitFailed)?;
+        if written != 0 {
+            return Err(DecodeError::DecoderInitFailed(
+                "MP4 FLAC configuration unexpectedly contained audio frames".to_owned(),
+            ));
+        }
+        let sample_rate = metadata.sample_rate().ok_or_else(|| {
+            DecodeError::DecoderInitFailed("MP4 FLAC has no sample rate".to_owned())
+        })?;
+        let channels = metadata.channels().ok_or_else(|| {
+            DecodeError::DecoderInitFailed("MP4 FLAC has no channel count".to_owned())
+        })?;
+        let bits_per_sample = metadata.bits_per_sample().ok_or_else(|| {
+            DecodeError::DecoderInitFailed("MP4 FLAC has no sample depth".to_owned())
+        })?;
+        let frame_length = metadata.maximum_block_size().ok_or_else(|| {
+            DecodeError::DecoderInitFailed("MP4 FLAC has no maximum block size".to_owned())
+        })?;
+        let config = FlacFrameConfig::new(
+            sample_rate,
+            u16::from(channels),
+            bits_per_sample,
+            u32::from(frame_length),
+            FlacProfile::Realtime,
+        )
+        .map_err(|error| DecodeError::DecoderInitFailed(error.to_string()))?;
+        let sample_capacity = config
+            .sample_count()
+            .map_err(|error| DecodeError::DecoderInitFailed(error.to_string()))?;
+        Ok(Self {
+            decoder: FlacFrameDecoder::new(config)
+                .map_err(|error| DecodeError::DecoderInitFailed(error.to_string()))?,
+            scratch: vec![0; sample_capacity],
+            sample_rate,
+            channels,
+            bits_per_sample,
+        })
+    }
+
+    fn decode(&mut self, packet: &[u8]) -> Result<AudioData, DecodeError> {
+        let packet = raw_flac_frame_payload(packet).ok_or_else(|| {
+            DecodeError::DecodingFailed("MP4 sample contains no raw FLAC frame".to_owned())
+        })?;
+        let written = self
+            .decoder
+            .decode_i32_block_into(packet, &mut self.scratch)
+            .map_err(|error| DecodeError::DecodingFailed(error.to_string()))?;
+        Ok(create_audio_data_i32_with_bits(
+            self.sample_rate,
+            self.channels,
+            self.bits_per_sample,
+            &self.scratch[..written],
+        ))
+    }
+}
+
+fn raw_flac_frame_payload(packet: &[u8]) -> Option<&[u8]> {
+    packet
+        .windows(2)
+        .position(|bytes| bytes[0] == 0xff && bytes[1] & 0xfc == 0xf8)
+        .map(|offset| &packet[offset..])
 }
 
 struct WaveyAacDecoder {
@@ -1466,20 +1542,7 @@ fn decode_seekable_mp4_audio(
         "alac" => SeekableAudioDecoder::Alac(
             AlacPacketDecoder::new(&track.codec_private).map_err(DecodeError::DecoderInitFailed)?,
         ),
-        "flac" => {
-            let mut decoder = FlacDecoder::new();
-            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
-            let mut scratch = vec![0_i32; MAX_SEEKABLE_PACKET_SAMPLES];
-            let written = decoder
-                .decode_i32(&track.decoder_configuration, &mut scratch, false)
-                .map_err(DecodeError::DecoderInitFailed)?;
-            if written != 0 {
-                return Err(DecodeError::DecoderInitFailed(
-                    "MP4 FLAC configuration unexpectedly contained audio frames".to_owned(),
-                ));
-            }
-            SeekableAudioDecoder::Flac(decoder)
-        }
+        "flac" => SeekableAudioDecoder::Flac(FlacPacketDecoder::new(&track)?),
         "pcm" => SeekableAudioDecoder::Pcm,
         _ => unreachable!("filtered supported codec"),
     };
@@ -1520,9 +1583,6 @@ fn decode_seekable_mp4_audio(
             };
             frames.extend(apply_output_options(frame, options, &mut resampler)?);
         }
-    }
-    if let SeekableAudioDecoder::Flac(decoder) = &decoder {
-        decoder.finish().map_err(DecodeError::DecodingFailed)?;
     }
     if let Some(pending) = resampler.take() {
         frames.extend(flush_resampler_frames(pending)?);
@@ -1570,9 +1630,6 @@ fn decode_fragmented_mp4_audio(
         &mut frames,
         &mut resampler,
     )?;
-    if let Some(SeekableAudioDecoder::Flac(decoder)) = decoder.as_ref() {
-        decoder.finish().map_err(DecodeError::DecodingFailed)?;
-    }
     if let Some(pending) = resampler.take() {
         frames.extend(flush_resampler_frames(pending)?);
     }
@@ -1641,20 +1698,7 @@ fn make_seekable_audio_decoder(
         "alac" => AlacPacketDecoder::new(&track.codec_private)
             .map(SeekableAudioDecoder::Alac)
             .map_err(DecodeError::DecoderInitFailed),
-        "flac" => {
-            let mut decoder = FlacDecoder::new();
-            decoder.init().map_err(DecodeError::DecoderInitFailed)?;
-            let mut scratch = vec![0_i32; MAX_SEEKABLE_PACKET_SAMPLES];
-            let written = decoder
-                .decode_i32(&track.decoder_configuration, &mut scratch, false)
-                .map_err(DecodeError::DecoderInitFailed)?;
-            if written != 0 {
-                return Err(DecodeError::DecoderInitFailed(
-                    "MP4 FLAC configuration unexpectedly contained audio frames".to_owned(),
-                ));
-            }
-            Ok(SeekableAudioDecoder::Flac(decoder))
-        }
+        "flac" => FlacPacketDecoder::new(track).map(SeekableAudioDecoder::Flac),
         "pcm" => Ok(SeekableAudioDecoder::Pcm),
         codec => Err(DecodeError::InvalidInputFormat(format!(
             "unsupported MP4 audio codec {codec}"
@@ -1754,36 +1798,7 @@ fn decode_seekable_packet(
             .decode_packet(packet)
             .map(|frame| vec![frame])
             .map_err(DecodeError::DecodingFailed),
-        SeekableAudioDecoder::Flac(decoder) => {
-            let mut scratch = vec![0_i32; MAX_SEEKABLE_PACKET_SAMPLES];
-            let mut input = packet;
-            let mut output = Vec::new();
-            loop {
-                let written = decoder
-                    .decode_i32(input, &mut scratch, false)
-                    .map_err(DecodeError::DecodingFailed)?;
-                input = &[];
-                if written == 0 {
-                    break;
-                }
-                let sample_rate = decoder.sample_rate().ok_or_else(|| {
-                    DecodeError::DecodingFailed("MP4 FLAC has no sample rate".to_owned())
-                })?;
-                let channels = decoder.channels().ok_or_else(|| {
-                    DecodeError::DecodingFailed("MP4 FLAC has no channel count".to_owned())
-                })?;
-                let bits = decoder.bits_per_sample().ok_or_else(|| {
-                    DecodeError::DecodingFailed("MP4 FLAC has no sample depth".to_owned())
-                })?;
-                output.push(create_audio_data_i32_with_bits(
-                    sample_rate,
-                    channels,
-                    bits,
-                    &scratch[..written],
-                ));
-            }
-            Ok(output)
-        }
+        SeekableAudioDecoder::Flac(decoder) => decoder.decode(packet).map(|frame| vec![frame]),
         SeekableAudioDecoder::Pcm => {
             make_container_pcm_audio(track, packet.to_vec()).map(|f| vec![f])
         }
@@ -3721,6 +3736,71 @@ mod tests {
             .join("testdata")
             .join("golden")
             .join(file)
+    }
+
+    #[test]
+    fn mp4_flac_packets_decode_without_reconstructing_a_native_stream() {
+        use soundkit_audio_demux::AudioContainer;
+        use soundkit_flac::stream::Encoder as NativeFlacEncoder;
+
+        let config = FlacFrameConfig::new(48_000, 2, 16, 240, FlacProfile::Balanced).unwrap();
+        let samples = (0..config.sample_count().unwrap())
+            .map(|index| ((index as i32 * 977) % 65_536) - 32_768)
+            .collect::<Vec<_>>();
+        let mut native = NativeFlacEncoder::new(config).unwrap();
+        let mut legacy_first_packet = Vec::new();
+        native
+            .encode_i32(&samples, &mut legacy_first_packet)
+            .unwrap();
+        let stream_header = native.finish().unwrap().to_vec();
+        let raw_offset = legacy_first_packet
+            .windows(2)
+            .position(|bytes| bytes[0] == 0xff && bytes[1] & 0xfc == 0xf8)
+            .unwrap();
+        let raw_packet = &legacy_first_packet[raw_offset..];
+        let mut decoder_configuration = b"fLaC".to_vec();
+        decoder_configuration.extend_from_slice(&stream_header);
+        let track = MediaTrackConfig {
+            container: AudioContainer::Mp4,
+            kind: MediaTrackKind::Audio,
+            track_id: 1,
+            codec: "flac".to_owned(),
+            codec_id: "fLaC".to_owned(),
+            timescale: 48_000,
+            timeline: None,
+            edit_timeline: Vec::new(),
+            sample_count: 1,
+            width: None,
+            height: None,
+            sample_rate: Some(48_000),
+            channels: Some(2),
+            bits_per_sample: Some(16),
+            pcm_endianness: None,
+            pcm_float: None,
+            pcm_signed: None,
+            pcm_packed: None,
+            pcm_aligned_high: None,
+            pcm_interleaved: None,
+            pcm_bytes_per_frame: None,
+            pcm_frames_per_packet: None,
+            codec_private: Vec::new(),
+            decoder_configuration,
+            nal_length_size: None,
+        };
+        let expected = samples
+            .iter()
+            .flat_map(|&sample| (sample as i16).to_le_bytes())
+            .collect::<Vec<_>>();
+
+        let mut raw_decoder = FlacPacketDecoder::new(&track).unwrap();
+        let decoded = raw_decoder.decode(raw_packet).unwrap();
+        assert_eq!(decoded.data().as_slice(), expected.as_slice());
+
+        // Older indexed packets prefixed the first raw frame with STREAMINFO.
+        // Keep read compatibility while all new writers emit only the frame.
+        let mut legacy_decoder = FlacPacketDecoder::new(&track).unwrap();
+        let decoded = legacy_decoder.decode(&legacy_first_packet).unwrap();
+        assert_eq!(decoded.data().as_slice(), expected.as_slice());
     }
 
     fn recv_until_done(pipeline: &mut DecodePipelineHandle) -> Vec<AudioData> {

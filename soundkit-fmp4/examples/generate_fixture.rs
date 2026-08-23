@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 const SAMPLE_RATE: u32 = 48_000;
 const CHANNELS: u8 = 2;
-const FRAME_COUNT: usize = 960;
+const OPUS_FRAME_COUNT: usize = 960;
+const FLAC_FRAME_COUNT: usize = 240;
 const OPUS_BITRATE: u32 = 192_000;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("fixture WAV must be 48 kHz stereo S16 PCM, got {spec:?}").into());
     }
     let samples = reader.samples::<i16>().collect::<Result<Vec<_>, _>>()?;
-    let samples_per_packet = FRAME_COUNT * usize::from(CHANNELS);
+    let samples_per_packet = OPUS_FRAME_COUNT * usize::from(CHANNELS);
     if samples.is_empty() || samples.len() % samples_per_packet != 0 {
         return Err("fixture WAV must contain complete 20 ms packets".into());
     }
@@ -45,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SAMPLE_RATE,
         16,
         u32::from(CHANNELS),
-        FRAME_COUNT as u32,
+        OPUS_FRAME_COUNT as u32,
         OPUS_BITRATE,
     );
     opus_encoder.init()?;
@@ -53,8 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SAMPLE_RATE,
         u16::from(CHANNELS),
         16,
-        FRAME_COUNT as u32,
-        FlacProfile::Realtime,
+        FLAC_FRAME_COUNT as u32,
+        FlacProfile::Balanced,
     )?;
     let mut flac_encoder = FlacFrameEncoder::new(flac_config)?;
     let mut opus_stream = Vec::new();
@@ -62,20 +63,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut opus_scratch = vec![0_u8; 16 * 1024];
 
     for (index, packet_samples) in samples.chunks_exact(samples_per_packet).enumerate() {
-        let pts = (index * FRAME_COUNT) as u64;
+        let pts = (index * OPUS_FRAME_COUNT) as u64;
         let opus_len = opus_encoder.encode_i16(packet_samples, &mut opus_scratch)?;
         append_v2_packet(
             &mut opus_stream,
             EncodingFlag::Opus,
             &opus_scratch[..opus_len],
+            OPUS_FRAME_COUNT as u32,
             index as u64,
             pts,
         )?;
+    }
+    let flac_samples_per_packet = FLAC_FRAME_COUNT * usize::from(CHANNELS);
+    for (index, packet_samples) in samples.chunks_exact(flac_samples_per_packet).enumerate() {
+        let pts = (index * FLAC_FRAME_COUNT) as u64;
         let flac = flac_encoder.encode_i16(packet_samples)?;
         append_v2_packet(
             &mut flac_stream,
             EncodingFlag::FLAC,
             &flac.payload,
+            FLAC_FRAME_COUNT as u32,
             index as u64,
             pts,
         )?;
@@ -87,8 +94,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&opus_path, &opus_stream)?;
     fs::write(&flac_path, &flac_stream)?;
     println!(
-        "generated {} packets: {} bytes Opus, {} bytes FLAC in {}",
+        "generated {} Opus packets and {} FLAC packets: {} bytes Opus, {} bytes FLAC in {}",
         samples.len() / samples_per_packet,
+        samples.len() / flac_samples_per_packet,
         opus_stream.len(),
         flac_stream.len(),
         output_dir.display()
@@ -100,13 +108,14 @@ fn append_v2_packet(
     output: &mut Vec<u8>,
     encoding: EncodingFlag,
     payload: &[u8],
+    frame_count: u32,
     id: u64,
     pts: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let header = FrameHeaderV2::new(
         encoding,
         u32::try_from(payload.len())?,
-        FRAME_COUNT as u32,
+        frame_count,
         SAMPLE_RATE,
         CHANNELS,
         16,

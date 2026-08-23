@@ -52,7 +52,10 @@ use soundkit_audio_demux::{
     PcmEndianness,
 };
 #[cfg(feature = "flac")]
-use soundkit_flac::{FlacDecoder, FlacEncoder};
+use soundkit_flac::{
+    stream::Encoder as FlacStreamEncoder, FlacDecoder, FlacFrameConfig, FlacFrameEncoder,
+    FlacProfile,
+};
 #[cfg(feature = "mp3")]
 use soundkit_mp3::Mp3Decoder;
 #[cfg(feature = "ogg-opus")]
@@ -432,10 +435,9 @@ pub struct WasmSha256 {
 #[cfg(feature = "flac")]
 #[wasm_bindgen]
 pub struct WasmFlacEncoder {
-    encoder: FlacEncoder,
+    encoder: FlacStreamEncoder,
     channels: u8,
     bits_per_sample: u32,
-    frame_size: u32,
 }
 
 // Opus encoder backed by soundkit-opus -> libopus-rs (Rust), so both the player
@@ -473,14 +475,13 @@ pub struct WasmPcm16WaveLibraryEncoder {
     opus_index_entries: Vec<(u64, u64)>,
     opus_encoder: Option<OpusEncoder>,
     opus_frame: Vec<i16>,
-    flac_encoder: Option<FlacEncoder>,
+    flac_encoder: Option<FlacFrameEncoder>,
     flac_frame_size: usize,
     flac_frame: Vec<i32>,
     flac_frames: u64,
     flac_stream_bytes: u64,
     flac_digest: Sha256,
     flac_index_entries: Vec<(u64, u64)>,
-    pending_flac_descriptor: Option<(u64, u32)>,
 }
 
 /// Bounded, format-detecting library import pipeline.
@@ -513,7 +514,7 @@ pub struct WasmStreamingLibraryEncoder {
     opus_index_entries: Vec<(u64, u64)>,
     opus_encoder: OpusEncoder,
     opus_frame: Vec<i16>,
-    flac_encoder: Option<FlacEncoder>,
+    flac_encoder: Option<FlacFrameEncoder>,
     flac_frame_size: usize,
     flac_frame: Vec<i32>,
     flac_sample_rate: u32,
@@ -2468,19 +2469,22 @@ impl WasmFlacEncoder {
         frame_size: u32,
         compression_level: u32,
     ) -> Result<WasmFlacEncoder, JsValue> {
-        let mut encoder = FlacEncoder::new(
+        let bits_per_sample_u8 = u8::try_from(bits_per_sample)
+            .map_err(|_| js_error(format!("FLAC bit depth {bits_per_sample} exceeds u8")))?;
+        let config = FlacFrameConfig::new(
             sample_rate,
-            bits_per_sample,
-            channels as u32,
+            u16::from(channels),
+            bits_per_sample_u8,
             frame_size,
-            compression_level,
-        );
-        encoder.init().map_err(js_error)?;
+            flac_profile_for_compression_level(compression_level),
+        )
+        .map_err(|error| js_error(error.to_string()))?;
+        let encoder =
+            FlacStreamEncoder::new(config).map_err(|error| js_error(error.to_string()))?;
         Ok(Self {
             encoder,
             channels,
             bits_per_sample,
-            frame_size,
         })
     }
 
@@ -2508,12 +2512,10 @@ impl WasmFlacEncoder {
             channels,
             self.bits_per_sample,
         )?;
-        let mut output = vec![0u8; expected.saturating_mul(8).saturating_add(4096)];
-        let encoded = self
-            .encoder
+        let mut output = Vec::with_capacity(expected.saturating_mul(8).saturating_add(4096));
+        self.encoder
             .encode_i32(&interleaved, &mut output)
-            .map_err(js_error)?;
-        output.truncate(encoded);
+            .map_err(|error| js_error(error.to_string()))?;
         Ok(Uint8Array::from(output.as_slice()))
     }
 
@@ -2521,14 +2523,10 @@ impl WasmFlacEncoder {
     /// The encoder can buffer a short final block until this call.
     #[wasm_bindgen(js_name = finish)]
     pub fn finish(&mut self) -> Result<Uint8Array, JsValue> {
-        let capacity = (self.frame_size as usize)
-            .saturating_mul(self.channels as usize)
-            .saturating_mul(8)
-            .saturating_add(4096);
-        let mut output = vec![0u8; capacity];
-        let encoded = self.encoder.finish(&mut output).map_err(js_error)?;
-        output.truncate(encoded);
-        Ok(Uint8Array::from(output.as_slice()))
+        self.encoder
+            .finish()
+            .map_err(|error| js_error(error.to_string()))?;
+        Ok(Uint8Array::new_with_length(0))
     }
 
     /// Return the current STREAMINFO metadata block. After finish() this
@@ -2539,7 +2537,9 @@ impl WasmFlacEncoder {
     }
 
     pub fn reset(&mut self) -> Result<(), JsValue> {
-        self.encoder.reset().map_err(js_error)
+        self.encoder
+            .reset()
+            .map_err(|error| js_error(error.to_string()))
     }
 }
 
@@ -2614,7 +2614,6 @@ impl WasmPcm16WaveLibraryEncoder {
             flac_stream_bytes: 0,
             flac_digest: Sha256::new(),
             flac_index_entries: Vec::new(),
-            pending_flac_descriptor: None,
         }
     }
 
@@ -2682,60 +2681,6 @@ impl WasmPcm16WaveLibraryEncoder {
             if !self.flac_frame.is_empty() {
                 self.emit_flac_packet(&mut flac_packets, true)
                     .map_err(js_error)?;
-            }
-            let mut output = vec![
-                0u8;
-                self.flac_frame_size
-                    .saturating_mul(2)
-                    .saturating_mul(8)
-                    .saturating_add(4096)
-            ];
-            let written = {
-                let encoder = self
-                    .flac_encoder
-                    .as_mut()
-                    .ok_or_else(|| js_error("WAV FLAC encoder is unavailable".to_owned()))?;
-                let written = encoder.finish(&mut output).map_err(js_error)?;
-                if encoder.stream_header().is_empty() {
-                    return Err(js_error("FLAC did not finalize STREAMINFO".to_owned()));
-                }
-                written
-            };
-            output.truncate(written);
-            match (self.pending_flac_descriptor.take(), output.is_empty()) {
-                (Some((start_frame, frame_count)), false) => {
-                    let sequence = self.flac_index_entries.len() as u64;
-                    output = frame_library_packet(
-                        frame_header::EncodingFlag::FLAC,
-                        output,
-                        frame_count,
-                        48_000,
-                        2,
-                        24,
-                        sequence,
-                        start_frame,
-                    )
-                    .map_err(js_error)?;
-                    self.flac_index_entries
-                        .push((self.flac_stream_bytes, start_frame));
-                    self.flac_digest.update(&output);
-                    self.flac_stream_bytes = self
-                        .flac_stream_bytes
-                        .checked_add(output.len() as u64)
-                        .ok_or_else(|| js_error("WAV FLAC stream length overflowed".to_owned()))?;
-                    flac_packets.push(WaveLibraryPacket {
-                        bytes: output,
-                        start_frame,
-                        frame_count,
-                    });
-                }
-                (Some(_), true) => {
-                    return Err(js_error("FLAC did not emit its final WAV block".to_owned()));
-                }
-                (None, false) => {
-                    return Err(js_error("FLAC emitted an unaccounted WAV block".to_owned()));
-                }
-                (None, true) => {}
             }
         }
         self.opus_encoder = None;
@@ -2822,11 +2767,21 @@ impl WasmPcm16WaveLibraryEncoder {
         self.opus_encoder = Some(opus);
 
         if self.preserve_lossless {
-            self.flac_frame_size = wave_library_flac_frame_size(self.total_frames, 4096)?;
+            self.flac_frame_size = wave_library_flac_frame_size(
+                self.total_frames,
+                low_latency_flac_frame_size(48_000),
+            )?;
             self.flac_frame = Vec::with_capacity(self.flac_frame_size * 2);
-            let mut flac = FlacEncoder::new(48_000, 24, 2, self.flac_frame_size as u32, 5);
-            flac.init()?;
-            self.flac_encoder = Some(flac);
+            let config = FlacFrameConfig::new(
+                48_000,
+                2,
+                24,
+                self.flac_frame_size as u32,
+                FlacProfile::Balanced,
+            )
+            .map_err(|error| error.to_string())?;
+            self.flac_encoder =
+                Some(FlacFrameEncoder::new(config).map_err(|error| error.to_string())?);
         }
         Ok(())
     }
@@ -2929,7 +2884,7 @@ impl WasmPcm16WaveLibraryEncoder {
     fn emit_flac_packet(
         &mut self,
         packets: &mut Vec<WaveLibraryPacket>,
-        final_packet: bool,
+        _final_packet: bool,
     ) -> Result<(), String> {
         let frame_count = (self.flac_frame.len() / 2) as u32;
         if frame_count == 0 {
@@ -2939,40 +2894,38 @@ impl WasmPcm16WaveLibraryEncoder {
             .flac_encoder
             .as_mut()
             .ok_or_else(|| "WAV FLAC encoder is unavailable".to_owned())?;
-        let mut output = vec![0u8; self.flac_frame.len().saturating_mul(8).saturating_add(4096)];
-        let written = encoder.encode_i32(&self.flac_frame, &mut output)?;
-        output.truncate(written);
-        let descriptor = (self.flac_frames, frame_count);
+        let mut output =
+            Vec::with_capacity(self.flac_frame.len().saturating_mul(4).saturating_add(64));
+        encoder
+            .encode_i32_block_into(&self.flac_frame, &mut output)
+            .map_err(|error| error.to_string())?;
         if output.is_empty() {
-            if !final_packet || self.pending_flac_descriptor.is_some() {
-                return Err("FLAC buffered an unexpected WAV block".to_owned());
-            }
-            self.pending_flac_descriptor = Some(descriptor);
-        } else {
-            let sequence = self.flac_index_entries.len() as u64;
-            output = frame_library_packet(
-                frame_header::EncodingFlag::FLAC,
-                output,
-                frame_count,
-                48_000,
-                2,
-                24,
-                sequence,
-                descriptor.0,
-            )?;
-            self.flac_index_entries
-                .push((self.flac_stream_bytes, descriptor.0));
-            self.flac_digest.update(&output);
-            self.flac_stream_bytes = self
-                .flac_stream_bytes
-                .checked_add(output.len() as u64)
-                .ok_or_else(|| "WAV FLAC stream length overflowed".to_owned())?;
-            packets.push(WaveLibraryPacket {
-                bytes: output,
-                start_frame: descriptor.0,
-                frame_count: descriptor.1,
-            });
+            return Err("FLAC emitted an empty WAV packet".to_owned());
         }
+        let start_frame = self.flac_frames;
+        let sequence = self.flac_index_entries.len() as u64;
+        output = frame_library_packet(
+            frame_header::EncodingFlag::FLAC,
+            output,
+            frame_count,
+            48_000,
+            2,
+            24,
+            sequence,
+            start_frame,
+        )?;
+        self.flac_index_entries
+            .push((self.flac_stream_bytes, start_frame));
+        self.flac_digest.update(&output);
+        self.flac_stream_bytes = self
+            .flac_stream_bytes
+            .checked_add(output.len() as u64)
+            .ok_or_else(|| "WAV FLAC stream length overflowed".to_owned())?;
+        packets.push(WaveLibraryPacket {
+            bytes: output,
+            start_frame,
+            frame_count,
+        });
         self.flac_frames += u64::from(frame_count);
         self.flac_frame.clear();
         Ok(())
@@ -3076,7 +3029,6 @@ impl WasmStreamingLibraryEncoder {
     pub fn new_rust(preserve_lossless: bool) -> Result<Self, String> {
         let mut opus_encoder = OpusEncoder::new(48_000, 16, 2, 960, 192_000);
         opus_encoder.init()?;
-        let flac_frame_size = 4096;
         Ok(Self {
             decoder: LibrarySourceDecoder::new(),
             alac_decoder: None,
@@ -3092,7 +3044,7 @@ impl WasmStreamingLibraryEncoder {
             opus_encoder,
             opus_frame: Vec::with_capacity(960 * 2),
             flac_encoder: None,
-            flac_frame_size,
+            flac_frame_size: 0,
             flac_frame: Vec::new(),
             flac_sample_rate: 0,
             flac_channels: 0,
@@ -3329,21 +3281,6 @@ impl WasmStreamingLibraryEncoder {
         }
         if self.preserve_lossless {
             self.finish_flac_packets(&mut flac_packets)?;
-            let mut output = vec![
-                0u8;
-                self.flac_frame_size
-                    .saturating_mul(self.flac_channels as usize)
-                    .saturating_mul(8)
-                    .saturating_add(4096)
-            ];
-            let written = self
-                .flac_encoder
-                .as_mut()
-                .ok_or_else(|| "streaming FLAC encoder is unavailable".to_owned())?
-                .finish(&mut output)?;
-            if written != 0 {
-                return Err("streaming FLAC encoder emitted an unaccounted final packet".to_owned());
-            }
         }
         let opus_index = soundkit_frame_index(
             48_000,
@@ -3509,15 +3446,17 @@ impl WasmStreamingLibraryEncoder {
             ));
         }
         if self.flac_sample_rate == 0 {
-            let mut encoder = FlacEncoder::new(
+            self.flac_frame_size = low_latency_flac_frame_size(sample_rate);
+            let config = FlacFrameConfig::new(
                 sample_rate,
+                u16::from(channels),
                 24,
-                u32::from(channels),
                 self.flac_frame_size as u32,
-                5,
-            );
-            encoder.init()?;
-            self.flac_encoder = Some(encoder);
+                FlacProfile::Balanced,
+            )
+            .map_err(|error| error.to_string())?;
+            self.flac_encoder =
+                Some(FlacFrameEncoder::new(config).map_err(|error| error.to_string())?);
             self.flac_sample_rate = sample_rate;
             self.flac_channels = channels;
             self.flac_frame =
@@ -3645,17 +3584,15 @@ impl WasmStreamingLibraryEncoder {
         if self.flac_frame.len() < sample_count {
             return Err("streaming FLAC block is incomplete".to_owned());
         }
-        let samples: Vec<i32> = self.flac_frame.drain(..sample_count).collect();
-        let mut output = vec![0u8; samples.len().saturating_mul(8).saturating_add(4096)];
-        let written = self
-            .flac_encoder
+        let mut output = Vec::with_capacity(sample_count.saturating_mul(4).saturating_add(64));
+        self.flac_encoder
             .as_mut()
             .ok_or_else(|| "streaming FLAC encoder is unavailable".to_owned())?
-            .encode_i32(&samples, &mut output)?;
-        if written == 0 {
+            .encode_i32_block_into(&self.flac_frame[..sample_count], &mut output)
+            .map_err(|error| error.to_string())?;
+        if output.is_empty() {
             return Err("FLAC emitted an empty streaming packet".to_owned());
         }
-        output.truncate(written);
         let start_frame = self.flac_frames;
         output = frame_library_packet(
             frame_header::EncodingFlag::FLAC,
@@ -3680,6 +3617,9 @@ impl WasmStreamingLibraryEncoder {
             frame_count: frame_count as u32,
         });
         self.flac_frames += frame_count as u64;
+        self.flac_frame.copy_within(sample_count.., 0);
+        self.flac_frame
+            .truncate(self.flac_frame.len() - sample_count);
         Ok(())
     }
 }
@@ -3815,6 +3755,20 @@ fn wave_library_flac_frame_size(total_frames: u64, requested: usize) -> Result<u
             final_block == 0 || final_block >= 32
         })
         .ok_or_else(|| "WAV FLAC stream could not select a valid frame size".to_owned())
+}
+
+#[cfg(feature = "flac")]
+fn flac_profile_for_compression_level(compression_level: u32) -> FlacProfile {
+    match compression_level {
+        0 => FlacProfile::Realtime,
+        1..=8 => FlacProfile::Balanced,
+        _ => FlacProfile::Maximum,
+    }
+}
+
+#[cfg(feature = "flac")]
+fn low_latency_flac_frame_size(sample_rate: u32) -> usize {
+    ((sample_rate as usize).saturating_add(100) / 200).clamp(32, 65_535)
 }
 
 #[cfg(all(feature = "wav", feature = "opus", feature = "flac"))]
@@ -6267,6 +6221,24 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(all(feature = "wav", feature = "opus", feature = "flac"))]
+    fn assert_raw_flac_library_packet(packet: &LibraryPacket) -> frame_header::FrameHeaderV2 {
+        let header = frame_header::FrameHeaderV2::decode(&mut &packet.bytes[..])
+            .expect("SoundKit-v2 FLAC header");
+        let payload = &packet.bytes[header.size()..];
+        assert_eq!(payload.len(), header.payload_size() as usize);
+        assert!(
+            payload.len() >= 2 && payload[0] == 0xff && payload[1] & 0xfc == 0xf8,
+            "library FLAC payload must begin directly with a raw frame"
+        );
+        assert_eq!(header.frame_count(), packet.frame_count);
+        assert!(
+            header.frame_count() as usize <= low_latency_flac_frame_size(header.sample_rate()),
+            "library FLAC packet exceeds the approximately 5 ms frame target"
+        );
+        header
+    }
+
     fn decode_all(format: &str, data: &[u8], chunk_size: usize) -> Vec<AudioData> {
         let mut decoder = WasmMusicDecoder::new_with_format(format).unwrap();
         let mut frames = Vec::new();
@@ -6544,6 +6516,9 @@ mod tests {
         for chunk in data.chunks(997) {
             let batch = encoder.push_rust(chunk).unwrap();
             assert!(!batch.done);
+            for packet in &batch.flac_packets {
+                assert_raw_flac_library_packet(packet);
+            }
             opus_bytes += batch
                 .opus_packets
                 .iter()
@@ -6556,13 +6531,15 @@ mod tests {
                 .sum::<usize>();
             if preservation_geometry.is_none() {
                 preservation_geometry = batch.flac_packets.first().map(|packet| {
-                    let header = frame_header::FrameHeaderV2::decode(&mut &packet.bytes[..])
-                        .expect("SoundKit-v2 FLAC header");
+                    let header = assert_raw_flac_library_packet(packet);
                     (header.sample_rate(), header.channels())
                 });
             }
         }
         let result = encoder.finish_rust().unwrap();
+        for packet in &result.flac_packets {
+            assert_raw_flac_library_packet(packet);
+        }
         opus_bytes += result
             .opus_packets
             .iter()
@@ -6575,8 +6552,7 @@ mod tests {
             .sum::<usize>();
         if preservation_geometry.is_none() {
             preservation_geometry = result.flac_packets.first().map(|packet| {
-                let header = frame_header::FrameHeaderV2::decode(&mut &packet.bytes[..])
-                    .expect("SoundKit-v2 FLAC header");
+                let header = assert_raw_flac_library_packet(packet);
                 (header.sample_rate(), header.channels())
             });
         }

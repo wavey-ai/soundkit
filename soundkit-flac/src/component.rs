@@ -19,6 +19,7 @@ mod bitrepr;
 mod datatype;
 mod verify;
 
+pub(crate) use bitrepr::encode_to_utf8like;
 pub use bitrepr::BitRepr;
 pub(crate) use datatype::BlockSizeSpec;
 pub use datatype::ChannelAssignment;

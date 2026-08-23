@@ -328,6 +328,16 @@ impl<S: Bits> MemSink<S> {
         }
     }
 
+    /// Creates an empty sink that reuses an existing allocation.
+    #[inline]
+    pub(crate) fn from_storage(mut storage: Vec<S>) -> Self {
+        storage.clear();
+        Self {
+            storage,
+            bitlength: 0,
+        }
+    }
+
     /// Clears the vector, removing all values.
     ///
     /// # Examples

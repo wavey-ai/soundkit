@@ -11,7 +11,6 @@ use crate::decode::bitstream::BitSource;
 #[cfg(test)]
 use crate::decode::bitstream::Bitstream;
 use crate::decode::error::{fmt_err, Error, Result};
-use std::num;
 
 #[derive(Clone, Copy, Debug)]
 enum SubframeType {
@@ -490,56 +489,67 @@ fn predict_fixed(order: u32, buffer: &mut [i32]) -> Result<()> {
     // 0 <= order <= 4. Still, it is good to state that assumption explicitly.
     debug_assert!(order <= 4);
 
-    // Coefficients for fitting an order n polynomial. You get these
-    // coefficients by writing down n numbers, then their differences, then the
-    // differences of the differences, etc. What results is Pascal's triangle
-    // with alternating signs.
-    let o0 = [];
-    let o1 = [1];
-    let o2 = [-1, 2];
-    let o3 = [1, -3, 3];
-    let o4 = [-1, 4, -6, 4];
-
-    // Multiplying samples with at most 6 adds 3 bits. Then summing at most 5
-    // of those values again adds at most 4 bits, so a sample type that is 7
-    // bits wider than bps should suffice. Subset FLAC supports at most 24 bits
-    // per sample, 25 for the channel delta, so using an i32 is safe here.
-
-    let coefficients: &[i32] = match order {
-        0 => &o0,
-        1 => &o1,
-        2 => &o2,
-        3 => &o3,
-        4 => &o4,
+    // Keep the previous samples in registers. The iterator-and-coefficient
+    // form used by the generic decoder repeatedly rebuilt a sliding window;
+    // these are the same fixed predictors used by FFmpeg and libFLAC, with
+    // wrapping arithmetic for malformed streams.
+    match order {
+        0 => {}
+        1 => {
+            let mut x1 = buffer[0];
+            for delta in &mut buffer[1..] {
+                let value = x1.wrapping_add(*delta);
+                *delta = value;
+                x1 = value;
+            }
+        }
+        2 => {
+            let mut x2 = buffer[0];
+            let mut x1 = buffer[1];
+            for delta in &mut buffer[2..] {
+                let prediction = x1.wrapping_mul(2).wrapping_sub(x2);
+                let value = prediction.wrapping_add(*delta);
+                *delta = value;
+                x2 = x1;
+                x1 = value;
+            }
+        }
+        3 => {
+            let mut x3 = buffer[0];
+            let mut x2 = buffer[1];
+            let mut x1 = buffer[2];
+            for delta in &mut buffer[3..] {
+                let prediction = x1
+                    .wrapping_mul(3)
+                    .wrapping_sub(x2.wrapping_mul(3))
+                    .wrapping_add(x3);
+                let value = prediction.wrapping_add(*delta);
+                *delta = value;
+                x3 = x2;
+                x2 = x1;
+                x1 = value;
+            }
+        }
+        4 => {
+            let mut x4 = buffer[0];
+            let mut x3 = buffer[1];
+            let mut x2 = buffer[2];
+            let mut x1 = buffer[3];
+            for delta in &mut buffer[4..] {
+                let prediction = x1
+                    .wrapping_mul(4)
+                    .wrapping_sub(x2.wrapping_mul(6))
+                    .wrapping_add(x3.wrapping_mul(4))
+                    .wrapping_sub(x4);
+                let value = prediction.wrapping_add(*delta);
+                *delta = value;
+                x4 = x3;
+                x3 = x2;
+                x2 = x1;
+                x1 = value;
+            }
+        }
         _ => unreachable!(),
-    };
-
-    let window_size = order as usize + 1;
-
-    // TODO: abstract away this iterating over a window into a function?
-    for i in 0..buffer.len() - order as usize {
-        // Manually do the windowing, because .windows() returns immutable slices.
-        let window = &mut buffer[i..i + window_size];
-
-        // The #coefficients elements of the window store already decoded
-        // samples, the last element of the window is the delta. Therefore,
-        // predict based on the first #coefficients samples. From the note
-        // above we know that the multiplication will not overflow for 24-bit
-        // samples, so the wrapping mul is safe. If it wraps, the file was
-        // invalid, and we make no guarantees about the decoded result. But
-        // we explicitly do not crash.
-        let prediction = coefficients
-            .iter()
-            .zip(window.iter())
-            .map(|(&c, &s)| num::Wrapping(c) * num::Wrapping(s))
-            // Rust 1.13 does not support using `sum`
-            // with `Wrapping`, so do a fold.
-            .fold(num::Wrapping(0), |a, x| a + x)
-            .0;
-
-        // The delta is stored, so the sample is the prediction + delta.
-        let delta = window[coefficients.len()];
-        window[coefficients.len()] = prediction.wrapping_add(delta);
     }
 
     Ok(())
