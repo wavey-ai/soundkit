@@ -10,12 +10,12 @@
 #![allow(clippy::manual_is_multiple_of)] // Keep the crate's Rust 1.65 MSRV.
 
 use hound::{SampleFormat, WavReader};
+use soundkit_flac::frame::{FlacFrameConfig, FlacProfile};
+use soundkit_flac::stream::{Decoder, Encoder};
 use std::env;
 use std::error::Error;
 use std::fs;
 use std::time::{Duration, Instant};
-use soundkit_flac::frame::{FlacFrameConfig, FlacProfile};
-use soundkit_flac::stream::{Decoder, Encoder};
 
 const INPUT_CHUNK_BYTES: usize = 1024 * 1024;
 const OUTPUT_CHUNK_SAMPLES: usize = 256 * 1024;
@@ -134,7 +134,7 @@ fn run_encode(
     }
     let header = encoder.finish()?;
     checksum ^= header.len() as u64;
-    *sink = checksum.wrapping_sub(*sink);
+    *sink = checksum;
     Ok(started.elapsed())
 }
 

@@ -117,8 +117,7 @@ fn parse_args() -> Result<Vec<CorpusRoot>, String> {
 /// Depth-first recursive directory walk without external dependencies.
 fn collect_files_recursive(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     for entry in fs::read_dir(root).map_err(|error| format!("walk {}: {error}", root.display()))? {
-        let entry =
-            entry.map_err(|error| format!("walk {}: {error}", root.display()))?;
+        let entry = entry.map_err(|error| format!("walk {}: {error}", root.display()))?;
         let entry_type = entry
             .file_type()
             .map_err(|error| format!("stat {}: {error}", entry.path().display()))?;
@@ -208,8 +207,8 @@ fn encode_and_verify_round_trip(path: &Path, decoded: &Decoded) -> Result<(), St
     )
     .map_err(|error| format!("{} cannot be re-encoded: {error}", path.display()))?;
 
-    let mut encoder = StreamEncoder::new(config)
-        .map_err(|error| format!("encoder setup failed: {error}"))?;
+    let mut encoder =
+        StreamEncoder::new(config).map_err(|error| format!("encoder setup failed: {error}"))?;
     let mut packets = Vec::new();
     let block = frame_length as usize * channels as usize;
     let original_frames = decoded.samples.len() / channels as usize;
@@ -241,7 +240,12 @@ fn encode_and_verify_round_trip(path: &Path, decoded: &Decoded) -> Result<(), St
     decoder.finish().map_err(|error| error.to_string())?;
     let keep = original_frames * channels as usize;
     replayed.truncate(keep);
-    compare_samples(path, &replayed, &decoded.samples, "soundkit-flac round trip")?;
+    compare_samples(
+        path,
+        &replayed,
+        &decoded.samples,
+        "soundkit-flac round trip",
+    )?;
 
     // Reference decoders must accept our encoding as conformant FLAC.
     let directory = TempDir::new("roundtrip")?;
@@ -553,9 +557,8 @@ fn check_file(path: &Path, expectation: Expectation, summary: &mut Summary) {
             .failures
             .push(format!("REJECT {}: {error}", path.display())),
         (Expectation::Required, Ok(Ok(decoded))) => {
-            let outcome = compare_reference(path, &decoded).and_then(|()| {
-                encode_and_verify_round_trip(path, &decoded)
-            });
+            let outcome = compare_reference(path, &decoded)
+                .and_then(|()| encode_and_verify_round_trip(path, &decoded));
             match outcome {
                 Ok(()) => {
                     summary.compared += 1;
@@ -569,9 +572,8 @@ fn check_file(path: &Path, expectation: Expectation, summary: &mut Summary) {
             println!("REJECT-SAFE {}: {error}", path.display());
         }
         (Expectation::Optional, Ok(Ok(decoded))) => {
-            let outcome = compare_reference(path, &decoded).and_then(|()| {
-                encode_and_verify_round_trip(path, &decoded)
-            });
+            let outcome = compare_reference(path, &decoded)
+                .and_then(|()| encode_and_verify_round_trip(path, &decoded));
             match outcome {
                 Ok(()) => {
                     summary.compared += 1;
