@@ -93,4 +93,5 @@ cargo run --release -p soundkit-flac --example flac_frame_cost -- \
 for the direct libFLAC encode and FFmpeg decode harnesses in `scripts/`.
 
 See [`BENCHMARK_WESTSIDE_2026-08-24.md`](BENCHMARK_WESTSIDE_2026-08-24.md) for
-the full-song Apple M1 and GCP results.
+the Apple M1, GCP x86-64, diverse-corpus, Node/Wasm, and Emscripten libFLAC
+results.

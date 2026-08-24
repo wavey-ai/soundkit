@@ -1,101 +1,147 @@
-# Westside five-millisecond FLAC packet benchmark — 2026-08-24
+# Five-millisecond FLAC packet benchmark — 2026-08-24
 
-This benchmark uses the full `WESTSIDE_MIX 4 CONFIRMATION_130323.wav`
-master. The source is 195.625 seconds of stereo, 48 kHz, 24-bit PCM.
+This report covers commit `a976f73`. `soundkit-flac` is optimized for one
+independently decodable raw FLAC frame per call, using a persistent codec and
+reused buffers. It is not a whole-file throughput benchmark.
 
-The test contains 39,124 complete 5 ms frames at each sample rate. A 48 kHz
-frame contains 240 samples per channel. A 96 kHz frame contains 480 samples
-per channel. The 96 kHz input is resampled from the same master.
+The main input is the full 195.62-second Westside confirmation master: 39,124
+complete stereo S24 frames at each rate. A 5 ms frame contains 240 samples per
+channel at 48 kHz or 480 samples per channel at 96 kHz. `Realtime` is compared
+with libFLAC level 0; `Balanced` is compared with libFLAC level 2.
 
-`Realtime` is compared with libFLAC level 0. `Balanced` is compared with
-libFLAC level 2. SoundKit packets are decoded by FFmpeg. libFLAC packets are
-decoded by SoundKit. All decoded PCM is bit-exact.
+All timings are median p50 microseconds per 5 ms call. “Lower” means less
+latency than the named reference. FLAC is lossless: every decoded PCM sample
+matched the source exactly. SoundKit decoded the libFLAC packets, FFmpeg
+decoded the SoundKit packets, and the Wasm packets matched native SoundKit
+byte-for-byte.
 
-## Method
+## Result summary
 
-- Keep one codec instance for all calls.
-- Reuse the packet and PCM buffers.
-- Run 1,024 warm-up calls before each timed region.
-- Run 20,000 timed calls in each round.
-- Rotate the SoundKit, libFLAC, and FFmpeg order in each round.
-- Use five rounds on Apple M1 and three rounds on GCP.
-- Report the median value for each statistic across the rounds.
-- Use CPU-only, single-threaded codec paths.
-- Build the C references with `-O3`.
-- Build Rust with release optimization and `target-cpu=native`.
+| Environment and corpus | Encode reference | Encode latency lower | Decode reference | Decode latency lower |
+|---|---|---:|---|---:|
+| Apple M1 native, full Westside | libFLAC | **60.7%** (2.56x throughput) | FFmpeg | **29.3%** (1.42x) |
+| GCP Emerald Rapids native, full Westside | libFLAC | **64.0%** (2.79x) | FFmpeg | **38.7%** (1.63x) |
+| GCP Emerald Rapids native, diverse corpus | libFLAC | **63.8%** (2.79x) | FFmpeg | **43.0%** (1.76x) |
+| Apple M1 Node/Wasm, full Westside | native libFLAC | **33.1%** | native FFmpeg | **4.4%** |
+| GCP Node/Wasm, full Westside | native libFLAC | **35.0%** | native FFmpeg | **1.7%** |
 
-FFmpeg stores decoded S24 values left-aligned in S32. The corpus preparation
-step divides those S32 values by 256. This operation restores the original
-signed 24-bit sample values before the benchmark.
+The native and Wasm cross-runtime rows answer deployment questions but are not
+strict like-for-like runtime comparisons. The direct Wasm comparison below is:
+SoundKit Wasm encoding averaged **38.6% lower latency (1.63x throughput)** than
+libFLAC 1.5.0 built with Emscripten at `-O3 -msimd128`.
 
-Timings below are microseconds per 5 ms call. A positive p50 change means that
-SoundKit is faster. A negative change means that SoundKit is slower.
+## Full Westside: Apple M1 native
 
-## Apple M1 results
+Host: Apple M1, macOS 26.5, Rust/Cargo 1.96.0, FFmpeg 8.1.2, FLAC 1.5.0.
 
-Host: Apple M1, macOS 26.5, Rust and Cargo 1.96.0, FFmpeg 8.1.2, and FLAC
-1.5.0. The C reference timer reports whole microseconds on this host. Treat
-small differences as directional results.
+| Rate and profile | SoundKit encode | libFLAC encode | Lower | SoundKit decode | FFmpeg decode | Lower |
+|---|---:|---:|---:|---:|---:|---:|
+| 48 kHz Realtime / L0 | 1.583 | 3.750 | **57.8%** | 2.334 | 3.458 | **32.5%** |
+| 48 kHz Balanced / L2 | 2.000 | 5.458 | **63.4%** | 2.416 | 3.458 | **30.1%** |
+| 96 kHz Realtime / L0 | 2.958 | 7.042 | **58.0%** | 4.875 | 6.792 | **28.2%** |
+| 96 kHz Balanced / L2 | 3.750 | 10.333 | **63.7%** | 4.875 | 6.625 | **26.4%** |
 
-### Encode
-
-| Rate and profile | SoundKit p50 / p95 / p99 | libFLAC p50 / p95 / p99 | p50 change |
-|---|---:|---:|---:|
-| 48 kHz Realtime / level 0 | 3.791 / 4.000 / 4.167 | 4 / 4 / 5 | **5.2% faster** |
-| 48 kHz Balanced / level 2 | 4.917 / 5.209 / 5.417 | 5 / 6 / 7 | **1.7% faster** |
-| 96 kHz Realtime / level 0 | 7.208 / 7.667 / 8.000 | 7 / 8 / 9 | **3.0% slower** |
-| 96 kHz Balanced / level 2 | 9.458 / 10.000 / 10.416 | 10 / 11 / 12 | **5.4% faster** |
-
-### Decode
-
-| Rate and profile | SoundKit p50 / p95 / p99 | FFmpeg p50 / p95 / p99 | p50 change |
-|---|---:|---:|---:|
-| 48 kHz Realtime | 3.292 / 3.708 / 3.917 | 3 / 4 / 4 | **9.7% slower** |
-| 48 kHz Balanced | 3.292 / 3.667 / 3.875 | 3 / 4 / 4 | **9.7% slower** |
-| 96 kHz Realtime | 6.416 / 6.875 / 7.250 | 7 / 7 / 8 | **8.3% faster** |
-| 96 kHz Balanced | 6.458 / 6.875 / 7.125 | 7 / 7 / 7 | **7.7% faster** |
-
-## GCP x86-64 results
+## Full Westside: GCP x86-64 native
 
 Host: `yl-encodec-1`, `c4-highcpu-4`, four vCPUs on Intel Xeon Platinum
-8581C (Emerald Rapids), Debian 12. Rust and Cargo are 1.97.1. FFmpeg is 5.1.9.
-FLAC is 1.4.2.
+8581C (Emerald Rapids), Debian 12, Rust/Cargo 1.97.1, FFmpeg 5.1.9, FLAC
+1.4.2.
 
-### Encode
+| Rate and profile | SoundKit encode | libFLAC encode | Lower | SoundKit decode | FFmpeg decode | Lower |
+|---|---:|---:|---:|---:|---:|---:|
+| 48 kHz Realtime / L0 | 1.739 | 4.721 | **63.2%** | 2.019 | 3.334 | **39.4%** |
+| 48 kHz Balanced / L2 | 2.119 | 6.330 | **66.5%** | 2.010 | 3.333 | **39.7%** |
+| 96 kHz Realtime / L0 | 3.265 | 8.529 | **61.7%** | 3.807 | 6.170 | **38.3%** |
+| 96 kHz Balanced / L2 | 4.022 | 11.417 | **64.8%** | 3.880 | 6.204 | **37.5%** |
 
-| Rate and profile | SoundKit p50 / p95 / p99 | libFLAC p50 / p95 / p99 | p50 change |
-|---|---:|---:|---:|
-| 48 kHz Realtime / level 0 | 3.594 / 3.861 / 3.966 | 4.838 / 5.423 / 5.725 | **25.7% faster** |
-| 48 kHz Balanced / level 2 | 4.711 / 4.947 / 5.042 | 6.488 / 7.058 / 7.431 | **27.4% faster** |
-| 96 kHz Realtime / level 0 | 6.896 / 7.387 / 7.678 | 8.822 / 9.649 / 10.051 | **21.8% faster** |
-| 96 kHz Balanced / level 2 | 9.032 / 9.577 / 9.940 | 11.660 / 13.040 / 15.629 | **22.5% faster** |
+## Diverse GCP corpus
 
-### Decode
+The wider corpus contains ten deterministic 10-second excerpts from each of
+four materially different sources, for 100 seconds (20,000 frames) per source
+and rate:
 
-| Rate and profile | SoundKit p50 / p95 / p99 | FFmpeg p50 / p95 / p99 | p50 change |
-|---|---:|---:|---:|
-| 48 kHz Realtime | 2.247 / 2.580 / 2.746 | 3.406 / 4.274 / 4.836 | **34.0% faster** |
-| 48 kHz Balanced | 2.222 / 2.512 / 2.658 | 3.406 / 4.196 / 4.682 | **34.8% faster** |
-| 96 kHz Realtime | 4.262 / 4.677 / 4.882 | 6.302 / 7.333 / 8.109 | **32.4% faster** |
-| 96 kHz Balanced | 4.356 / 4.682 / 4.824 | 6.328 / 7.364 / 8.158 | **31.2% faster** |
+- Lori Asha confirmation masters and album premixes
+- The Blue Nile, *Hats*
+- Bill Evans, *The Secret Sessions*
+- Abel Korzeniowski, *Nocturnal Animals*
 
-## Encoded size
+Each source was measured at 48/96 kHz and Realtime/Balanced. The table averages
+the four rate/profile cells after taking the median of three alternating rounds
+for each cell.
 
-The encoders produce nearly equal packet sizes for the same profile. Ratios
-are encoded bytes divided by packed S24 PCM bytes.
-
-| Rate and profile | SoundKit ratio | libFLAC ratio |
+| Source | Encode latency lower than libFLAC | Decode latency lower than FFmpeg |
 |---|---:|---:|
-| 48 kHz Realtime / level 0 | 0.7933 | 0.7932 |
-| 48 kHz Balanced / level 2 | 0.7788 | 0.7788 |
-| 96 kHz Realtime / level 0 | 0.6701 | 0.6698 |
-| 96 kHz Balanced / level 2 | 0.6549 | 0.6547 |
+| Lori Asha | **63.7%** | **39.9%** |
+| The Blue Nile — *Hats* | **63.6%** | **40.8%** |
+| Bill Evans — *The Secret Sessions* | **65.8%** | **46.0%** |
+| Abel Korzeniowski — *Nocturnal Animals* | **62.4%** | **45.5%** |
+| **All 16 cells** | **63.8%** | **43.0%** |
 
-## Result
+Across genres, the 48 kHz average was 64.6% lower for encode and 45.0% lower
+for decode. The 96 kHz average was 63.1% and 41.0%, respectively. Every one of
+the 16 cells favored SoundKit for both operations.
 
-On GCP, SoundKit is 21.8% to 27.4% faster than libFLAC for encoding. It is
-31.2% to 34.8% faster than FFmpeg for decoding.
+## Node/WebAssembly
 
-On Apple M1, encoding ranges from 3.0% slower to 5.4% faster. Decoding is 9.7%
-slower at 48 kHz and 7.7% to 8.3% faster at 96 kHz. Every p99 result remains
-far below the 5,000 microsecond PCM interval.
+The WebAssembly build used Rust `opt-level=3`, one codegen unit, SIMD128, and
+`wasm-opt`; calls used the buffered API so codec-owned linear-memory buffers
+were reused. The final optimized module is 422,169 bytes. Node was warmed up,
+and five alternating 50,000-call rounds were measured.
+
+### Apple M1, Node 26.3.0
+
+| Rate and profile | Wasm encode | native libFLAC | Lower | Wasm decode | native FFmpeg | Lower |
+|---|---:|---:|---:|---:|---:|---:|
+| 48 kHz Realtime / L0 | 2.750 | 3.750 | **26.7%** | 3.292 | 3.458 | **4.8%** |
+| 48 kHz Balanced / L2 | 3.458 | 5.458 | **36.6%** | 3.375 | 3.458 | **2.4%** |
+| 96 kHz Realtime / L0 | 4.875 | 7.042 | **30.8%** | 6.209 | 6.792 | **8.6%** |
+| 96 kHz Balanced / L2 | 6.375 | 10.333 | **38.3%** | 6.500 | 6.625 | **1.9%** |
+
+### GCP x86-64, Node 18.20.4
+
+| Rate and profile | Wasm encode | native libFLAC | Lower | Wasm decode | native FFmpeg | Lower |
+|---|---:|---:|---:|---:|---:|---:|
+| 48 kHz Realtime / L0 | 3.153 | 4.721 | **33.2%** | 3.214 | 3.334 | **3.6%** |
+| 48 kHz Balanced / L2 | 4.044 | 6.330 | **36.1%** | 3.352 | 3.333 | 0.6% higher |
+| 96 kHz Realtime / L0 | 5.579 | 8.529 | **34.6%** | 5.865 | 6.170 | **4.9%** |
+| 96 kHz Balanced / L2 | 7.314 | 11.417 | **35.9%** | 6.268 | 6.204 | 1.0% higher |
+
+The exact same Wasm binary ran on ARM64 and x86-64. WebAssembly is portable
+bytecode, but it is compiled by each engine to the host ISA, so latency still
+depends on V8/JSC version, tiering, bounds checks, and the underlying CPU.
+
+### Direct Wasm encode comparison
+
+libFLAC 1.5.0 was built with Emscripten 4.0.23 at `-O3 -msimd128`. Its C
+harness stayed inside Wasm for the timed loop, which avoids giving SoundKit an
+artificial advantage from a per-frame JavaScript boundary.
+
+| Rate and profile | SoundKit Wasm | Emscripten libFLAC | Lower |
+|---|---:|---:|---:|
+| 48 kHz Realtime / L0 | 2.750 | 4.500 | **38.9%** |
+| 48 kHz Balanced / L2 | 3.458 | 5.750 | **39.9%** |
+| 96 kHz Realtime / L0 | 4.875 | 7.958 | **38.7%** |
+| 96 kHz Balanced / L2 | 6.375 | 10.125 | **37.0%** |
+
+Compression stayed in the same ballpark and differed by at most roughly 0.04%
+of packed PCM size in this comparison. An equivalent Emscripten libFLAC decode
+harness has not yet been measured, so no direct same-runtime Wasm decode claim
+is made here.
+
+## Method and integrity
+
+- Persistent codec instances and reusable packet/PCM buffers.
+- 1,024 warm-up calls before each timed region.
+- Full Westside: five alternating 50,000-call rounds on each native host.
+- Diverse corpus: three alternating 20,000-call rounds per cell on GCP.
+- SoundKit/reference order rotated to reduce scheduler and thermal bias.
+- Single-threaded CPU paths only; no GPU or hardware codec acceleration.
+- Rust release build; C references built with `-O3`.
+- Identical input and packet fixtures for each encode/decode comparison.
+- CRC-valid raw FLAC frames and comparable encoded sizes.
+- Source PCM equality checked for every corpus frame before timing.
+
+The ignored local corpus lives at
+`testdata/flac-packet-bench/{westside,diverse-v1}` in the SoundKit workspace.
+The manifests and corpus-building script make the diverse excerpts
+deterministic; copyrighted audio is not committed.
