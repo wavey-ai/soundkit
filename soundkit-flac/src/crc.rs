@@ -122,28 +122,28 @@ pub(crate) fn crc8_flac(data: &[u8]) -> u8 {
     state
 }
 
-/// Slicing-by-16 tables for the bulk CRC-16 pass.
+/// Slicing-by-32 tables for the bulk CRC-16 pass.
 ///
 /// FLAC's CRC-16 shifts bytes in most-significant-bit first, so within a
-/// block of sixteen bytes the first data byte carries weight `x^136` and each
+/// block of thirty-two bytes the first data byte carries weight `x^264` and each
 /// later position loses one `x^8`, down to `x^16` for the last byte. Column
 /// `CRC16_SLICE[k]` holds entries `b * x^(16 + 8*k) mod P`. The incoming
-/// register carries weight `x^128` across the whole block: its high byte
-/// lands on `x^136` and its low byte on `x^128`, exactly the weights of the
+/// register carries weight `x^256` across the whole block: its high byte
+/// lands on `x^264` and its low byte on `x^256`, exactly the weights of the
 /// first two data positions, which is why those two indices fold the
 /// register bytes in. Because the CRC is linear over GF(2), the CRC of a
-/// block is the XOR of sixteen entries, replacing the serial per-byte
+/// block is the XOR of thirty-two entries, replacing the serial per-byte
 /// dependency chain with independent lookups. All columns together occupy
-/// 8 KiB, so they stay resident in L1 cache.
-static CRC16_SLICE: std::sync::OnceLock<[[u16; 256]; 16]> = std::sync::OnceLock::new();
+/// 16 KiB, so they stay resident in L1 cache.
+static CRC16_SLICE: std::sync::OnceLock<[[u16; 256]; 32]> = std::sync::OnceLock::new();
 
-fn crc16_slice_tables() -> &'static [[u16; 256]; 16] {
+fn crc16_slice_tables() -> &'static [[u16; 256]; 32] {
     CRC16_SLICE.get_or_init(|| {
-        let mut tables = [[0_u16; 256]; 16];
+        let mut tables = [[0_u16; 256]; 32];
         tables[0] = CRC16_TABLE;
         // Each next column advances the previous column's CRC by one zero
         // byte: append a zero to the sequence the entry encodes.
-        for k in 1..16 {
+        for k in 1..32 {
             for b in 0..256_usize {
                 let prev = tables[k - 1][b];
                 tables[k][b] = (prev << 8) ^ CRC16_TABLE[((prev >> 8) as u8) as usize];
@@ -155,35 +155,53 @@ fn crc16_slice_tables() -> &'static [[u16; 256]; 16] {
 
 /// Computes the FLAC CRC-16 over a byte range in a single pass.
 ///
-/// The hot loop is a slicing-by-16 implementation: it consumes sixteen bytes
-/// per step through sixteen independent table lookups, which removes most of
+/// The hot loop is a slicing-by-32 implementation: it consumes thirty-two bytes
+/// per step through thirty-two independent table lookups, which removes most of
 /// the serial dependency chain that limits the byte-at-a-time form. The
 /// tail falls back to the byte-at-a-time loop.
 pub(crate) fn crc16_flac(data: &[u8]) -> u16 {
     let tables = crc16_slice_tables();
     let mut state = 0_u16;
-    let mut chunks = data.chunks_exact(16);
+    let mut chunks = data.chunks_exact(32);
     for chunk in &mut chunks {
         let first = u64::from_be_bytes(chunk[..8].try_into().unwrap());
-        let second = u64::from_be_bytes(chunk[8..].try_into().unwrap());
+        let second = u64::from_be_bytes(chunk[8..16].try_into().unwrap());
+        let third = u64::from_be_bytes(chunk[16..24].try_into().unwrap());
+        let fourth = u64::from_be_bytes(chunk[24..].try_into().unwrap());
         let hi = (state >> 8) as usize;
         let lo = (state & 0xff) as usize;
-        state = tables[15][hi ^ ((first >> 56) & 0xff) as usize]
-            ^ tables[14][lo ^ ((first >> 48) & 0xff) as usize]
-            ^ tables[13][((first >> 40) & 0xff) as usize]
-            ^ tables[12][((first >> 32) & 0xff) as usize]
-            ^ tables[11][((first >> 24) & 0xff) as usize]
-            ^ tables[10][((first >> 16) & 0xff) as usize]
-            ^ tables[9][((first >> 8) & 0xff) as usize]
-            ^ tables[8][(first & 0xff) as usize]
-            ^ tables[7][((second >> 56) & 0xff) as usize]
-            ^ tables[6][((second >> 48) & 0xff) as usize]
-            ^ tables[5][((second >> 40) & 0xff) as usize]
-            ^ tables[4][((second >> 32) & 0xff) as usize]
-            ^ tables[3][((second >> 24) & 0xff) as usize]
-            ^ tables[2][((second >> 16) & 0xff) as usize]
-            ^ tables[1][((second >> 8) & 0xff) as usize]
-            ^ tables[0][(second & 0xff) as usize];
+        state = tables[31][hi ^ ((first >> 56) & 0xff) as usize]
+            ^ tables[30][lo ^ ((first >> 48) & 0xff) as usize]
+            ^ tables[29][((first >> 40) & 0xff) as usize]
+            ^ tables[28][((first >> 32) & 0xff) as usize]
+            ^ tables[27][((first >> 24) & 0xff) as usize]
+            ^ tables[26][((first >> 16) & 0xff) as usize]
+            ^ tables[25][((first >> 8) & 0xff) as usize]
+            ^ tables[24][(first & 0xff) as usize]
+            ^ tables[23][((second >> 56) & 0xff) as usize]
+            ^ tables[22][((second >> 48) & 0xff) as usize]
+            ^ tables[21][((second >> 40) & 0xff) as usize]
+            ^ tables[20][((second >> 32) & 0xff) as usize]
+            ^ tables[19][((second >> 24) & 0xff) as usize]
+            ^ tables[18][((second >> 16) & 0xff) as usize]
+            ^ tables[17][((second >> 8) & 0xff) as usize]
+            ^ tables[16][(second & 0xff) as usize]
+            ^ tables[15][((third >> 56) & 0xff) as usize]
+            ^ tables[14][((third >> 48) & 0xff) as usize]
+            ^ tables[13][((third >> 40) & 0xff) as usize]
+            ^ tables[12][((third >> 32) & 0xff) as usize]
+            ^ tables[11][((third >> 24) & 0xff) as usize]
+            ^ tables[10][((third >> 16) & 0xff) as usize]
+            ^ tables[9][((third >> 8) & 0xff) as usize]
+            ^ tables[8][(third & 0xff) as usize]
+            ^ tables[7][((fourth >> 56) & 0xff) as usize]
+            ^ tables[6][((fourth >> 48) & 0xff) as usize]
+            ^ tables[5][((fourth >> 40) & 0xff) as usize]
+            ^ tables[4][((fourth >> 32) & 0xff) as usize]
+            ^ tables[3][((fourth >> 24) & 0xff) as usize]
+            ^ tables[2][((fourth >> 16) & 0xff) as usize]
+            ^ tables[1][((fourth >> 8) & 0xff) as usize]
+            ^ tables[0][(fourth & 0xff) as usize];
     }
     for &byte in chunks.remainder() {
         state = (state << 8) ^ CRC16_TABLE[((state >> 8) as u8 ^ byte) as usize];
