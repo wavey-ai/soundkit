@@ -1,6 +1,6 @@
 # Five-millisecond FLAC packet benchmark — 2026-08-24
 
-This report covers commit `a976f73`. `soundkit-flac` is optimized for one
+This report covers commit `c74457f`. `soundkit-flac` is optimized for one
 independently decodable raw FLAC frame per call, using a persistent codec and
 reused buffers. It is not a whole-file throughput benchmark.
 
@@ -22,8 +22,8 @@ byte-for-byte.
 | Apple M1 native, full Westside | libFLAC | **60.7%** (2.56x throughput) | FFmpeg | **29.3%** (1.42x) |
 | GCP Emerald Rapids native, full Westside | libFLAC | **64.0%** (2.79x) | FFmpeg | **38.7%** (1.63x) |
 | GCP Emerald Rapids native, diverse corpus | libFLAC | **63.8%** (2.79x) | FFmpeg | **43.0%** (1.76x) |
-| Apple M1 Node/Wasm, full Westside | native libFLAC | **33.1%** | native FFmpeg | **4.4%** |
-| GCP Node/Wasm, full Westside | native libFLAC | **35.0%** | native FFmpeg | **1.7%** |
+| Apple M1 Node/Wasm, full Westside | native libFLAC | **33.1%** | native FFmpeg | **5.8%** |
+| GCP Node/Wasm, full Westside | native libFLAC | **35.0%** | native FFmpeg | **5.9%** |
 
 The native and Wasm cross-runtime rows answer deployment questions but are not
 strict like-for-like runtime comparisons. The direct Wasm comparison below is:
@@ -85,26 +85,26 @@ the 16 cells favored SoundKit for both operations.
 
 The WebAssembly build used Rust `opt-level=3`, one codegen unit, SIMD128, and
 `wasm-opt`; calls used the buffered API so codec-owned linear-memory buffers
-were reused. The final optimized module is 422,169 bytes. Node was warmed up,
+were reused. The final optimized module is 422,171 bytes. Node was warmed up,
 and five alternating 50,000-call rounds were measured.
 
 ### Apple M1, Node 26.3.0
 
 | Rate and profile | Wasm encode | native libFLAC | Lower | Wasm decode | native FFmpeg | Lower |
 |---|---:|---:|---:|---:|---:|---:|
-| 48 kHz Realtime / L0 | 2.750 | 3.750 | **26.7%** | 3.292 | 3.458 | **4.8%** |
-| 48 kHz Balanced / L2 | 3.458 | 5.458 | **36.6%** | 3.375 | 3.458 | **2.4%** |
-| 96 kHz Realtime / L0 | 4.875 | 7.042 | **30.8%** | 6.209 | 6.792 | **8.6%** |
-| 96 kHz Balanced / L2 | 6.375 | 10.333 | **38.3%** | 6.500 | 6.625 | **1.9%** |
+| 48 kHz Realtime / L0 | 2.750 | 3.750 | **26.7%** | 3.250 | 3.458 | **6.0%** |
+| 48 kHz Balanced / L2 | 3.458 | 5.458 | **36.6%** | 3.292 | 3.458 | **4.8%** |
+| 96 kHz Realtime / L0 | 4.875 | 7.042 | **30.8%** | 6.208 | 6.792 | **8.6%** |
+| 96 kHz Balanced / L2 | 6.375 | 10.333 | **38.3%** | 6.375 | 6.625 | **3.8%** |
 
 ### GCP x86-64, Node 18.20.4
 
 | Rate and profile | Wasm encode | native libFLAC | Lower | Wasm decode | native FFmpeg | Lower |
 |---|---:|---:|---:|---:|---:|---:|
-| 48 kHz Realtime / L0 | 3.153 | 4.721 | **33.2%** | 3.214 | 3.334 | **3.6%** |
-| 48 kHz Balanced / L2 | 4.044 | 6.330 | **36.1%** | 3.352 | 3.333 | 0.6% higher |
-| 96 kHz Realtime / L0 | 5.579 | 8.529 | **34.6%** | 5.865 | 6.170 | **4.9%** |
-| 96 kHz Balanced / L2 | 7.314 | 11.417 | **35.9%** | 6.268 | 6.204 | 1.0% higher |
+| 48 kHz Realtime / L0 | 3.153 | 4.721 | **33.2%** | 3.068 | 3.334 | **8.0%** |
+| 48 kHz Balanced / L2 | 4.044 | 6.330 | **36.1%** | 3.222 | 3.333 | **3.3%** |
+| 96 kHz Realtime / L0 | 5.579 | 8.529 | **34.6%** | 5.604 | 6.170 | **9.2%** |
+| 96 kHz Balanced / L2 | 7.314 | 11.417 | **35.9%** | 6.018 | 6.204 | **3.0%** |
 
 The exact same Wasm binary ran on ARM64 and x86-64. WebAssembly is portable
 bytecode, but it is compiled by each engine to the host ISA, so latency still
