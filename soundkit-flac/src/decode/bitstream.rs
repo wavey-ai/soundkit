@@ -1120,6 +1120,79 @@ impl<'a> BitReader<'a> {
     pub fn bits_consumed(&self) -> usize {
         self.pos * 8 - self.bits_left as usize - self.ahead_bits as usize
     }
+
+    /// Rebuilds the cached-reader state at an absolute bit position.
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    fn seek_to_bit(&mut self, bit_position: usize) -> io::Result<()> {
+        if bit_position > self.bytes.len().saturating_mul(8) {
+            return Err(eof_error());
+        }
+        let byte = bit_position >> 3;
+        let shift = (bit_position & 7) as u32;
+        self.pos = byte;
+        self.cache = 0;
+        self.bits_left = 0;
+        self.ahead = 0;
+        self.ahead_bits = 0;
+        self.fill();
+        if shift != 0 && self.try_read(shift).is_none() {
+            return Err(eof_error());
+        }
+        Ok(())
+    }
+
+    /// Apple silicon can resolve a Rice symbol cheaply from one unaligned
+    /// word. Keeping the absolute bit position in a register
+    /// removes the cached reader's per-symbol state stores; only partition
+    /// boundaries and rare 64-bit-spanning unary codes rebuild that state.
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    fn decode_rice_partition_direct<F>(
+        &mut self,
+        param_bits: u32,
+        buffer: &mut [i32],
+        mut map: F,
+    ) -> io::Result<()>
+    where
+        F: FnMut(u32) -> i32,
+    {
+        let mut bit_position = self.bits_consumed();
+        let mut index = 0;
+        while index < buffer.len() {
+            let byte = bit_position >> 3;
+            let bit_shift = (bit_position & 7) as u32;
+            if self.bytes.len().saturating_sub(byte) >= 8 {
+                let pointer = unsafe { self.bytes.as_ptr().add(byte) };
+                let high = unsafe { u64::from_be((pointer as *const u64).read_unaligned()) };
+                let window = high << bit_shift;
+                let quotient = window.leading_zeros();
+                let symbol_bits = quotient + 1 + param_bits;
+                // The low `bit_shift` bits were shifted in as zeros. They are
+                // harmless only when the complete symbol ends before them.
+                if symbol_bits <= 64 - bit_shift {
+                    let remainder = if param_bits == 0 {
+                        0
+                    } else {
+                        ((window << (quotient + 1)) >> (64 - param_bits)) as u32
+                    };
+                    let unsigned = (quotient << param_bits) | remainder;
+                    buffer[index] = map(unsigned);
+                    bit_position += symbol_bits as usize;
+                    index += 1;
+                    continue;
+                }
+            }
+
+            // Near the end of a packet, or for an exceptionally long unary
+            // quotient, use the fully checked cached reader for one symbol.
+            self.seek_to_bit(bit_position)?;
+            buffer[index] = map(read_rice_unsigned_default(self, param_bits)?);
+            bit_position = self.bits_consumed();
+            index += 1;
+        }
+        self.seek_to_bit(bit_position)
+    }
 }
 
 impl BitSource for BitReader<'_> {
@@ -1249,6 +1322,21 @@ impl BitSource for BitReader<'_> {
         read_rice_unsigned_default(self, rice_param)
     }
 
+    #[cfg(target_arch = "aarch64")]
+    fn decode_rice_partition_into<F>(
+        &mut self,
+        param_bits: u32,
+        buffer: &mut [i32],
+        map: F,
+    ) -> io::Result<()>
+    where
+        F: FnMut(u32) -> i32,
+    {
+        debug_assert!(param_bits < 31);
+        self.decode_rice_partition_direct(param_bits, buffer, map)
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
     fn decode_rice_partition_into<F>(
         &mut self,
         param_bits: u32,

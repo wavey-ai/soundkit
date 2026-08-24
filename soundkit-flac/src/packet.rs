@@ -65,13 +65,23 @@ impl PacketEncoder {
             }
             2 => {
                 let (left, right) = self.planar.split_at_mut(frame_length);
-                for (frame, samples) in interleaved.chunks_exact(2).enumerate() {
-                    let l = samples[0].clamp(minimum, maximum);
-                    let r = samples[1].clamp(minimum, maximum);
-                    left[frame] = l;
-                    right[frame] = r;
-                    self.mid[frame] = (l + r) >> 1;
-                    self.side[frame] = l - r;
+                if matches!(self.config.profile, FlacProfile::Balanced) {
+                    for (frame, samples) in interleaved.chunks_exact(2).enumerate() {
+                        let l = samples[0].clamp(minimum, maximum);
+                        let r = samples[1].clamp(minimum, maximum);
+                        left[frame] = l;
+                        right[frame] = r;
+                        self.mid[frame] = (l + r) >> 1;
+                        self.side[frame] = l - r;
+                    }
+                } else {
+                    // Realtime always writes independent stereo. Avoid filling
+                    // the two decorrelation buffers that only Balanced can
+                    // analyze and select.
+                    for (frame, samples) in interleaved.chunks_exact(2).enumerate() {
+                        left[frame] = samples[0].clamp(minimum, maximum);
+                        right[frame] = samples[1].clamp(minimum, maximum);
+                    }
                 }
             }
             _ => {
@@ -577,12 +587,7 @@ fn write_subframe(
                 let start = (partition * partition_size).max(usize::from(order));
                 let end = (partition + 1) * partition_size;
                 for &folded in &residual[start..end] {
-                    writer.write_zeros((folded >> parameter) as usize);
-                    let remainder = folded & ((1_u32 << parameter) - 1);
-                    writer.write_bits(
-                        u64::from((1_u32 << parameter) | remainder),
-                        usize::from(parameter) + 1,
-                    );
+                    writer.write_rice(folded, parameter);
                 }
             }
         }
@@ -633,6 +638,27 @@ impl BitWriter {
     fn write_signed(&mut self, value: i32, bit_count: u8) {
         let mask = (1_u64 << bit_count) - 1;
         self.write_bits(u64::from(value as u32) & mask, usize::from(bit_count));
+    }
+
+    #[inline(always)]
+    fn write_rice(&mut self, folded: u32, parameter: u8) {
+        let quotient = (folded >> parameter) as usize;
+        let tail_bits = usize::from(parameter) + 1;
+        let symbol_bits = quotient + tail_bits;
+        let available = (64 - self.used) as usize;
+        if symbol_bits <= available {
+            let remainder_mask = (1_u32 << parameter) - 1;
+            let tail = u64::from((1_u32 << parameter) | (folded & remainder_mask));
+            self.word |= tail << (available - symbol_bits);
+            self.used += symbol_bits as u32;
+            if self.used == 64 {
+                self.flush_word();
+            }
+            return;
+        }
+        self.write_zeros(quotient);
+        let remainder = folded & ((1_u32 << parameter) - 1);
+        self.write_bits(u64::from((1_u32 << parameter) | remainder), tail_bits);
     }
 
     #[inline]
