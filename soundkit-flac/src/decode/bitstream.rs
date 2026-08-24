@@ -1362,30 +1362,65 @@ impl BitSource for BitReader<'_> {
                 return Err(eof_error());
             }
 
-            // Resolve symbols while each whole symbol sits in one window:
-            // quotient and remainder resolve with shifts alone.
-            loop {
-                let zeros = self.cache.leading_zeros();
-                let symbol_bits = zeros + 1 + param_bits;
-                if symbol_bits > self.bits_left {
-                    break;
+            #[cfg(target_arch = "wasm32")]
+            {
+                // WebAssembly benefits from keeping the window state in
+                // locals across complete symbols; native x86 code generation
+                // does not, so it retains the stateful loop below.
+                let mut cache = self.cache;
+                let mut bits_left = self.bits_left;
+                loop {
+                    let zeros = cache.leading_zeros();
+                    let symbol_bits = zeros + 1 + param_bits;
+                    if symbol_bits >= bits_left || i == buffer.len() {
+                        break;
+                    }
+                    let shifted = cache << (zeros + 1);
+                    let r = if param_bits > 0 {
+                        (shifted >> shift_back) as u32
+                    } else {
+                        0
+                    };
+                    cache = shifted << param_bits;
+                    bits_left -= symbol_bits;
+                    buffer[i] = map(((zeros as u32) << param_bits) | r);
+                    i += 1;
                 }
-                let rest = (self.cache << zeros) << 1;
-                let r = if param_bits > 0 {
-                    (rest >> shift_back) as u32
-                } else {
-                    0
-                };
-                self.bits_left -= symbol_bits;
-                self.cache = if self.bits_left == 0 {
-                    0
-                } else {
-                    self.cache << symbol_bits
-                };
-                buffer[i] = map(((zeros as u32) << param_bits) | r);
-                i += 1;
+
+                self.cache = cache;
+                self.bits_left = bits_left;
                 if i == buffer.len() {
                     return Ok(());
+                }
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                // Resolve symbols while each whole symbol sits in one window:
+                // quotient and remainder resolve with shifts alone.
+                loop {
+                    let zeros = self.cache.leading_zeros();
+                    let symbol_bits = zeros + 1 + param_bits;
+                    if symbol_bits > self.bits_left {
+                        break;
+                    }
+                    let rest = (self.cache << zeros) << 1;
+                    let r = if param_bits > 0 {
+                        (rest >> shift_back) as u32
+                    } else {
+                        0
+                    };
+                    self.bits_left -= symbol_bits;
+                    self.cache = if self.bits_left == 0 {
+                        0
+                    } else {
+                        self.cache << symbol_bits
+                    };
+                    buffer[i] = map(((zeros as u32) << param_bits) | r);
+                    i += 1;
+                    if i == buffer.len() {
+                        return Ok(());
+                    }
                 }
             }
 

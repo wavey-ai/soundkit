@@ -19,9 +19,10 @@ bench_tmp=$(mktemp -d "${TMPDIR:-/tmp}/soundkit-flac-wasm-bench.XXXXXX")
 trap 'rm -rf -- "$bench_tmp"' EXIT
 
 bench_target=${SOUNDKIT_BENCH_TARGET:-"$crate_dir/target/packet-wasm-bench"}
-CARGO_TARGET_DIR="$bench_target" cargo build --quiet --release \
+native_rustflags=${SOUNDKIT_NATIVE_RUSTFLAGS:-${RUSTFLAGS:-}}
+wasm_rustflags=${SOUNDKIT_WASM_RUSTFLAGS:-${RUSTFLAGS:-}}
+RUSTFLAGS="$native_rustflags" CARGO_TARGET_DIR="$bench_target" cargo build --quiet --release \
   --manifest-path "$crate_dir/Cargo.toml" --example flac_packet_bench
-wasm_rustflags=${RUSTFLAGS:-}
 RUSTFLAGS="${wasm_rustflags:+$wasm_rustflags }-C target-feature=+simd128" \
   wasm-pack build "$wasm_crate" --target web --out-dir "$bench_tmp/wasm-pkg" \
     --release -- --no-default-features --features flac
@@ -71,7 +72,8 @@ rustc --version
 cargo --version
 node --version
 wasm-pack --version
-echo "wasm target-feature=+simd128 transfer=$wasm_transfer"
+echo "native rustflags=${native_rustflags:-<default>}"
+echo "wasm rustflags=${wasm_rustflags:+$wasm_rustflags }-C target-feature=+simd128 transfer=$wasm_transfer"
 
 run_case 48000 realtime "$pcm_48"
 run_case 48000 balanced "$pcm_48"
