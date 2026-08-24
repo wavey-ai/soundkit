@@ -643,9 +643,9 @@ impl BitWriter {
         let tail_bits = usize::from(parameter) + 1;
         let symbol_bits = quotient + tail_bits;
         let available = (64 - self.used) as usize;
+        let remainder_mask = (1_u32 << parameter) - 1;
+        let tail = u64::from((1_u32 << parameter) | (folded & remainder_mask));
         if symbol_bits <= available {
-            let remainder_mask = (1_u32 << parameter) - 1;
-            let tail = u64::from((1_u32 << parameter) | (folded & remainder_mask));
             self.word |= tail << (available - symbol_bits);
             self.used += symbol_bits as u32;
             if self.used == 64 {
@@ -653,9 +653,30 @@ impl BitWriter {
             }
             return;
         }
+
+        // A normal Rice symbol crosses at most one word boundary. Finish the
+        // current word and seed the next one directly instead of re-entering
+        // the general zero-run and bit-field writers.
+        let remaining = symbol_bits - available;
+        if remaining <= 64 {
+            if remaining < tail_bits {
+                self.word |= tail >> remaining;
+            }
+            self.flush_word();
+            self.word = if remaining == 64 {
+                tail
+            } else {
+                tail << (64 - remaining)
+            };
+            self.used = remaining as u32;
+            if self.used == 64 {
+                self.flush_word();
+            }
+            return;
+        }
+
         self.write_zeros(quotient);
-        let remainder = folded & ((1_u32 << parameter) - 1);
-        self.write_bits(u64::from((1_u32 << parameter) | remainder), tail_bits);
+        self.write_bits(tail, tail_bits);
     }
 
     #[inline]
