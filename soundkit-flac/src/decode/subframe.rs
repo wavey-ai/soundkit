@@ -304,6 +304,43 @@ fn decode_residual<S: BitSource>(input: &mut S, block_size: u16, buffer: &mut [i
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_residual_with<S: BitSource, F: FnMut(i32) -> i32>(
+    input: &mut S,
+    block_size: u16,
+    buffer: &mut [i32],
+    mut map: F,
+) -> Result<()> {
+    let partition_type = match input.read_leq_u8(2)? {
+        0b00 => RicePartitionType::Rice,
+        0b01 => RicePartitionType::Rice2,
+        _ => return fmt_err("invalid residual, encountered reserved value"),
+    };
+    let order = input.read_leq_u8(4)?;
+    let n_partitions = 1u32 << order;
+    let n_samples_per_partition = block_size >> order;
+    if block_size & (n_partitions - 1) as u16 != 0 {
+        return fmt_err("invalid partition order");
+    }
+    let n_warm_up = block_size - buffer.len() as u16;
+    if n_warm_up > n_samples_per_partition {
+        return fmt_err("invalid residual");
+    }
+
+    let mut start = 0;
+    let mut len = n_samples_per_partition - n_warm_up;
+    for _ in 0..n_partitions {
+        let slice = &mut buffer[start..start + len as usize];
+        match partition_type {
+            RicePartitionType::Rice => decode_rice_partition_with(input, slice, &mut map)?,
+            RicePartitionType::Rice2 => decode_rice2_partition_with(input, slice, &mut map)?,
+        }
+        start += len as usize;
+        len = n_samples_per_partition;
+    }
+    Ok(())
+}
+
 // Performance note: all Rice partitions in real-world FLAC files are Rice
 // partitions, not Rice2 partitions. Therefore it makes sense to inline this
 // function into decode_residual.
@@ -321,6 +358,21 @@ fn decode_rice_partition<S: BitSource>(input: &mut S, buffer: &mut [i32]) -> Res
     // single cache window when possible, which is where nearly all decode
     // time used to go.
     input.decode_rice_partition_into(rice_param, buffer, rice_to_signed)?;
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(always)]
+fn decode_rice_partition_with<S: BitSource, F: FnMut(i32) -> i32>(
+    input: &mut S,
+    buffer: &mut [i32],
+    map: &mut F,
+) -> Result<()> {
+    let rice_param = input.read_leq_u8(4)? as u32;
+    if rice_param == 0b1111 {
+        return decode_unencoded_partition_with(input, buffer, map);
+    }
+    input.decode_rice_partition_into(rice_param, buffer, |value| map(rice_to_signed(value)))?;
     Ok(())
 }
 
@@ -344,6 +396,21 @@ fn decode_rice2_partition<S: BitSource>(input: &mut S, buffer: &mut [i32]) -> Re
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[inline(never)]
+fn decode_rice2_partition_with<S: BitSource, F: FnMut(i32) -> i32>(
+    input: &mut S,
+    buffer: &mut [i32],
+    map: &mut F,
+) -> Result<()> {
+    let rice_param = input.read_leq_u8(5)? as u32;
+    if rice_param == 0b11111 {
+        return decode_unencoded_partition_with(input, buffer, map);
+    }
+    input.decode_rice_partition_into(rice_param, buffer, |value| map(rice_to_signed(value)))?;
+    Ok(())
+}
+
 /// Decode a Rice escape partition, whose residuals are stored directly as
 /// signed two's-complement integers of a shared width.
 fn decode_unencoded_partition<S: BitSource>(input: &mut S, buffer: &mut [i32]) -> Result<()> {
@@ -353,6 +420,25 @@ fn decode_unencoded_partition<S: BitSource>(input: &mut S, buffer: &mut [i32]) -
     } else {
         for sample in buffer.iter_mut() {
             *sample = extend_sign_u32(input.read_leq_u32(raw_bits)?, raw_bits);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_unencoded_partition_with<S: BitSource, F: FnMut(i32) -> i32>(
+    input: &mut S,
+    buffer: &mut [i32],
+    map: &mut F,
+) -> Result<()> {
+    let raw_bits = input.read_leq_u8(5)? as u32;
+    if raw_bits == 0 {
+        for sample in buffer {
+            *sample = map(0);
+        }
+    } else {
+        for sample in buffer {
+            *sample = map(extend_sign_u32(input.read_leq_u32(raw_bits)?, raw_bits));
         }
     }
     Ok(())
@@ -483,6 +569,7 @@ fn decode_verbatim<S: BitSource>(input: &mut S, bps: u32, buffer: &mut [i32]) ->
     Ok(())
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
 fn predict_fixed(order: u32, buffer: &mut [i32]) -> Result<()> {
     // When this is called during decoding, the order as read from the subframe
     // header has already been verified, so it is safe to assume that
@@ -589,12 +676,78 @@ fn decode_fixed<S: BitSource>(
     // There are order * bits per sample unencoded warm-up sample bits.
     (decode_verbatim(input, bps, &mut buffer[..order as usize]))?;
 
-    // Next up is the residual. We decode into the buffer directly, the
-    // predictor contributions will be added in a second pass. The first
-    // `order` samples have been decoded already, so continue after that.
-    (decode_residual(input, buffer.len() as u16, &mut buffer[order as usize..]))?;
+    #[cfg(target_arch = "wasm32")]
+    {
+        // The compact two-pass form is faster in current Wasm engines and
+        // avoids cloning the Rice decoder for all five predictor orders.
+        decode_residual(input, buffer.len() as u16, &mut buffer[order as usize..])?;
+        predict_fixed(order, buffer)?;
+    }
 
-    (predict_fixed(order, buffer))?;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Native code benefits from reconstructing each sample inside the
+        // Rice mapping callback, avoiding a second memory pass over the block.
+        let block_size = buffer.len() as u16;
+        match order {
+            0 => decode_residual_with(input, block_size, buffer, |delta| delta)?,
+            1 => {
+                let mut x1 = buffer[0];
+                decode_residual_with(input, block_size, &mut buffer[1..], |delta| {
+                    let value = x1.wrapping_add(delta);
+                    x1 = value;
+                    value
+                })?;
+            }
+            2 => {
+                let mut x2 = buffer[0];
+                let mut x1 = buffer[1];
+                decode_residual_with(input, block_size, &mut buffer[2..], |delta| {
+                    let prediction = x1.wrapping_mul(2).wrapping_sub(x2);
+                    let value = prediction.wrapping_add(delta);
+                    x2 = x1;
+                    x1 = value;
+                    value
+                })?;
+            }
+            3 => {
+                let mut x3 = buffer[0];
+                let mut x2 = buffer[1];
+                let mut x1 = buffer[2];
+                decode_residual_with(input, block_size, &mut buffer[3..], |delta| {
+                    let prediction = x1
+                        .wrapping_mul(3)
+                        .wrapping_sub(x2.wrapping_mul(3))
+                        .wrapping_add(x3);
+                    let value = prediction.wrapping_add(delta);
+                    x3 = x2;
+                    x2 = x1;
+                    x1 = value;
+                    value
+                })?;
+            }
+            4 => {
+                let mut x4 = buffer[0];
+                let mut x3 = buffer[1];
+                let mut x2 = buffer[2];
+                let mut x1 = buffer[3];
+                decode_residual_with(input, block_size, &mut buffer[4..], |delta| {
+                    let prediction = x1
+                        .wrapping_mul(4)
+                        .wrapping_sub(x2.wrapping_mul(6))
+                        .wrapping_add(x3.wrapping_mul(4))
+                        .wrapping_sub(x4);
+                    let value = prediction.wrapping_add(delta);
+                    x4 = x3;
+                    x3 = x2;
+                    x2 = x1;
+                    x1 = value;
+                    value
+                })?;
+            }
+            _ => unreachable!(),
+        }
+    }
 
     Ok(())
 }
