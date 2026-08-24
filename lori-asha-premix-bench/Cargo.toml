@@ -8,8 +8,9 @@ description = "Benchmark comparing soundkit-opus and libopus-rs on Lori Asha Pre
 
 [dependencies]
 bytes = "1"
+libc = "0.2.158"
 soundkit = { path = "../soundkit", version = "0.12.3" }
 soundkit-decoder = { path = "../soundkit-decoder" }
 soundkit-opus = { path = "../soundkit-opus" }
-libopus_rust = { package = "libopus", git = "https://github.com/wavey-ai/opus-rs", branch = "main" }
+libopus-rs-native = { package = "libopus-rs", path = "../../libopus-rs" }
 opus-sys = { package = "opus-sys", git = "https://github.com/wavey-ai/opus-rs", branch = "main" }

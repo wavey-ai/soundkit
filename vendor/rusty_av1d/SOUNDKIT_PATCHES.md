@@ -8,4 +8,9 @@ SoundKit adds `Picture::plane16()` in `src/rust_api.rs`. Upstream `Picture::plan
 
 SoundKit also fixes `Picture::bit_depth()` and `Picture::stride()`. The first method now returns the 8-bit or 16-bit storage width. The second method now returns samples as documented.
 
+SoundKit restores upstream's `src/arm/asm-offsets.h`, which the crates.io
+package excludes even though the native ARM assembly sources include it. This
+allows native AArch64 builds to use dav1d's assembly fast paths; WASM builds
+continue to use the no-assembly implementation.
+
 Remove this patch after upstream publishes an equivalent repair.

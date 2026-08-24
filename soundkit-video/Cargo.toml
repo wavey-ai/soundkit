@@ -18,9 +18,14 @@ dnx = ["dep:soundkit-dnx"]
 [dependencies]
 rusty_h264-decoder = { path = "../vendor/rusty_h264-decoder", default-features = false, optional = true }
 rusty_h264-common = { version = "0.10.0", default-features = false, optional = true }
-rust_h265 = { git = "https://github.com/roticv/rust_h265.git", rev = "8db4fb4321a801fb1b734a009739317d67034d9c", optional = true }
-vp9dec = { version = "0.1.1", optional = true }
-rusty_av1d = { version = "1.2.0", default-features = false, features = ["bitdepth_8", "bitdepth_16"], optional = true }
+rust_h265 = { git = "https://github.com/wavey-ai/rust_h265.git", branch = "main", optional = true }
+vp9dec = { git = "https://github.com/wavey-ai/vp9dec.git", branch = "main", optional = true }
 oxideav-core = { version = "0.1.31", optional = true }
 oxideav-prores = { version = "0.1.1", optional = true }
 soundkit-dnx = { path = "../soundkit-dnx", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rusty_av1d = { version = "1.2.0", default-features = false, features = ["asm", "asm_arm64_dotprod", "bitdepth_8", "bitdepth_16"], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rusty_av1d = { version = "1.2.0", default-features = false, features = ["bitdepth_8", "bitdepth_16"], optional = true }

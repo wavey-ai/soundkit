@@ -122,28 +122,28 @@ pub(crate) fn crc8_flac(data: &[u8]) -> u8 {
     state
 }
 
-/// Slicing-by-8 tables for the bulk CRC-16 pass.
+/// Slicing-by-16 tables for the bulk CRC-16 pass.
 ///
 /// FLAC's CRC-16 shifts bytes in most-significant-bit first, so within a
-/// block of eight bytes the first data byte carries weight `x^72` and each
+/// block of sixteen bytes the first data byte carries weight `x^136` and each
 /// later position loses one `x^8`, down to `x^16` for the last byte. Column
 /// `CRC16_SLICE[k]` holds entries `b * x^(16 + 8*k) mod P`. The incoming
-/// register carries weight `x^64` across the whole block: its high byte
-/// lands on `x^72` and its low byte on `x^64`, exactly the weights of the
+/// register carries weight `x^128` across the whole block: its high byte
+/// lands on `x^136` and its low byte on `x^128`, exactly the weights of the
 /// first two data positions, which is why those two indices fold the
 /// register bytes in. Because the CRC is linear over GF(2), the CRC of a
-/// block is the XOR of eight entries, replacing the serial per-byte
-/// dependency chain with independent lookups. All eight columns together
-/// occupy 4 KiB, so they stay resident in L1 cache.
-static CRC16_SLICE: std::sync::OnceLock<[[u16; 256]; 8]> = std::sync::OnceLock::new();
+/// block is the XOR of sixteen entries, replacing the serial per-byte
+/// dependency chain with independent lookups. All columns together occupy
+/// 8 KiB, so they stay resident in L1 cache.
+static CRC16_SLICE: std::sync::OnceLock<[[u16; 256]; 16]> = std::sync::OnceLock::new();
 
-fn crc16_slice_tables() -> &'static [[u16; 256]; 8] {
+fn crc16_slice_tables() -> &'static [[u16; 256]; 16] {
     CRC16_SLICE.get_or_init(|| {
-        let mut tables = [[0_u16; 256]; 8];
+        let mut tables = [[0_u16; 256]; 16];
         tables[0] = CRC16_TABLE;
         // Each next column advances the previous column's CRC by one zero
         // byte: append a zero to the sequence the entry encodes.
-        for k in 1..8 {
+        for k in 1..16 {
             for b in 0..256_usize {
                 let prev = tables[k - 1][b];
                 tables[k][b] = (prev << 8) ^ CRC16_TABLE[((prev >> 8) as u8) as usize];
@@ -155,26 +155,35 @@ fn crc16_slice_tables() -> &'static [[u16; 256]; 8] {
 
 /// Computes the FLAC CRC-16 over a byte range in a single pass.
 ///
-/// The hot loop is a slicing-by-8 implementation: it consumes eight bytes
-/// per step through eight independent table lookups, which removes most of
+/// The hot loop is a slicing-by-16 implementation: it consumes sixteen bytes
+/// per step through sixteen independent table lookups, which removes most of
 /// the serial dependency chain that limits the byte-at-a-time form. The
 /// tail falls back to the byte-at-a-time loop.
 pub(crate) fn crc16_flac(data: &[u8]) -> u16 {
     let tables = crc16_slice_tables();
     let mut state = 0_u16;
-    let mut chunks = data.chunks_exact(8);
+    let mut chunks = data.chunks_exact(16);
     for chunk in &mut chunks {
-        let block = u64::from_be_bytes(chunk.try_into().unwrap());
+        let first = u64::from_be_bytes(chunk[..8].try_into().unwrap());
+        let second = u64::from_be_bytes(chunk[8..].try_into().unwrap());
         let hi = (state >> 8) as usize;
         let lo = (state & 0xff) as usize;
-        state = tables[7][hi ^ ((block >> 56) & 0xff) as usize]
-            ^ tables[6][lo ^ ((block >> 48) & 0xff) as usize]
-            ^ tables[5][((block >> 40) & 0xff) as usize]
-            ^ tables[4][((block >> 32) & 0xff) as usize]
-            ^ tables[3][((block >> 24) & 0xff) as usize]
-            ^ tables[2][((block >> 16) & 0xff) as usize]
-            ^ tables[1][((block >> 8) & 0xff) as usize]
-            ^ tables[0][(block & 0xff) as usize];
+        state = tables[15][hi ^ ((first >> 56) & 0xff) as usize]
+            ^ tables[14][lo ^ ((first >> 48) & 0xff) as usize]
+            ^ tables[13][((first >> 40) & 0xff) as usize]
+            ^ tables[12][((first >> 32) & 0xff) as usize]
+            ^ tables[11][((first >> 24) & 0xff) as usize]
+            ^ tables[10][((first >> 16) & 0xff) as usize]
+            ^ tables[9][((first >> 8) & 0xff) as usize]
+            ^ tables[8][(first & 0xff) as usize]
+            ^ tables[7][((second >> 56) & 0xff) as usize]
+            ^ tables[6][((second >> 48) & 0xff) as usize]
+            ^ tables[5][((second >> 40) & 0xff) as usize]
+            ^ tables[4][((second >> 32) & 0xff) as usize]
+            ^ tables[3][((second >> 24) & 0xff) as usize]
+            ^ tables[2][((second >> 16) & 0xff) as usize]
+            ^ tables[1][((second >> 8) & 0xff) as usize]
+            ^ tables[0][(second & 0xff) as usize];
     }
     for &byte in chunks.remainder() {
         state = (state << 8) ^ CRC16_TABLE[((state >> 8) as u8 ^ byte) as usize];
@@ -353,10 +362,10 @@ impl Xorshift {
 fn crc16_flac_bulk_matches_scalar_across_lengths() {
     let mut rng = Xorshift(0x2545_f491_4f6c_dd1d);
     let data: Vec<u8> = (0..4096).map(|_| rng.next() as u8).collect();
-    // Exercise the empty input, every tail length around the 8-byte block,
+    // Exercise the empty input, every tail length around the 16-byte block,
     // and multi-block spans.
     let lengths = [
-        0_usize, 1, 2, 7, 8, 9, 15, 16, 17, 63, 64, 65, 255, 1023, 4095, 4096,
+        0_usize, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 255, 1023, 4095, 4096,
     ];
     for &len in &lengths {
         assert_eq!(

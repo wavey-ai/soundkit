@@ -41,7 +41,7 @@ run_case() {
 
   run_soundkit() {
     "$rust_bench" "$rate" 2 24 "$profile" "$iterations" "$pcm" \
-      "$stem.libflac.bundle" "$stem.soundkit.bundle"
+      "$stem.soundkit.bundle" "$stem.soundkit.bundle"
   }
   run_libflac() {
     "$bench_tmp/libflac_frame_bench" \

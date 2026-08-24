@@ -1,6 +1,8 @@
 use frame_header::{EncodingFlag, Endianness};
 #[cfg(feature = "aac-lc")]
 use js_sys::Float32Array;
+#[cfg(feature = "flac")]
+use js_sys::Int32Array;
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use sha2::{Digest, Sha256};
 use soundkit::audio_content_crypto::{AudioContentCipher, AudioGroupMetadata};
@@ -53,8 +55,8 @@ use soundkit_audio_demux::{
 };
 #[cfg(feature = "flac")]
 use soundkit_flac::{
-    stream::Encoder as FlacStreamEncoder, FlacDecoder, FlacFrameConfig, FlacFrameEncoder,
-    FlacProfile,
+    stream::Encoder as FlacStreamEncoder, FlacDecoder, FlacFrameConfig, FlacFrameDecoder,
+    FlacFrameEncoder, FlacProfile,
 };
 #[cfg(feature = "mp3")]
 use soundkit_mp3::Mp3Decoder;
@@ -438,6 +440,31 @@ pub struct WasmFlacEncoder {
     encoder: FlacStreamEncoder,
     channels: u8,
     bits_per_sample: u32,
+}
+
+/// Persistent raw-FLAC packet encoder for low-latency transports.
+///
+/// Each call consumes exactly one configured PCM block and returns one raw
+/// FLAC frame. The encoder and its packet allocation are reused across calls.
+#[cfg(feature = "flac")]
+#[wasm_bindgen]
+pub struct WasmFlacFrameEncoder {
+    encoder: FlacFrameEncoder,
+    input_pcm: Vec<i32>,
+    packet: Vec<u8>,
+    sample_count: usize,
+}
+
+/// Persistent raw-FLAC packet decoder for low-latency transports.
+///
+/// Each call consumes one raw FLAC frame and returns one interleaved PCM
+/// block. The decoder and its PCM allocation are reused across calls.
+#[cfg(feature = "flac")]
+#[wasm_bindgen]
+pub struct WasmFlacFrameDecoder {
+    decoder: FlacFrameDecoder,
+    input_packet: Vec<u8>,
+    pcm: Vec<i32>,
 }
 
 // Opus encoder backed by soundkit-opus -> libopus-rs (Rust), so both the player
@@ -2456,6 +2483,237 @@ fn validate_wav_encode_chunk(samples: usize, bytes_per_sample: usize) -> Result<
         )));
     }
     Ok(())
+}
+
+#[cfg(feature = "flac")]
+#[wasm_bindgen]
+impl WasmFlacFrameEncoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        sample_rate: u32,
+        channels: u8,
+        bits_per_sample: u32,
+        frame_size: u32,
+        compression_level: u32,
+    ) -> Result<WasmFlacFrameEncoder, JsValue> {
+        let bits_per_sample = u8::try_from(bits_per_sample)
+            .map_err(|_| js_error(format!("FLAC bit depth {bits_per_sample} exceeds u8")))?;
+        let config = FlacFrameConfig::new(
+            sample_rate,
+            u16::from(channels),
+            bits_per_sample,
+            frame_size,
+            flac_profile_for_compression_level(compression_level),
+        )
+        .map_err(|error| js_error(error.to_string()))?;
+        let sample_count = config
+            .sample_count()
+            .map_err(|error| js_error(error.to_string()))?;
+        let packet_capacity = config
+            .raw_pcm_bytes()
+            .map_err(|error| js_error(error.to_string()))?
+            .saturating_mul(2)
+            .saturating_add(64);
+        Ok(Self {
+            encoder: FlacFrameEncoder::new(config).map_err(|error| js_error(error.to_string()))?,
+            input_pcm: vec![0; sample_count],
+            packet: Vec::with_capacity(packet_capacity),
+            sample_count,
+        })
+    }
+
+    /// Encode exactly one interleaved PCM block into one raw FLAC frame.
+    #[wasm_bindgen(js_name = encodeInterleavedI32)]
+    pub fn encode_interleaved_i32(&mut self, interleaved: &[i32]) -> Result<Uint8Array, JsValue> {
+        if interleaved.len() != self.sample_count {
+            return Err(js_error(format!(
+                "FLAC frame input has {} samples, expected {}",
+                interleaved.len(),
+                self.sample_count
+            )));
+        }
+        let written = self
+            .encoder
+            .encode_i32_into(interleaved, &mut self.packet)
+            .map_err(|error| js_error(error.to_string()))?;
+        Ok(Uint8Array::from(&self.packet[..written]))
+    }
+
+    /// Encode one block and return an ephemeral zero-copy view of the packet.
+    ///
+    /// The view must be consumed before another call into WebAssembly that can
+    /// grow memory, and its bytes are overwritten by the next encode call. Use
+    /// `encodeInterleavedI32` when the returned packet must be retained.
+    #[wasm_bindgen(js_name = encodeInterleavedI32View)]
+    pub fn encode_interleaved_i32_view(
+        &mut self,
+        interleaved: &[i32],
+    ) -> Result<Uint8Array, JsValue> {
+        if interleaved.len() != self.sample_count {
+            return Err(js_error(format!(
+                "FLAC frame input has {} samples, expected {}",
+                interleaved.len(),
+                self.sample_count
+            )));
+        }
+        let written = self
+            .encoder
+            .encode_i32_into(interleaved, &mut self.packet)
+            .map_err(|error| js_error(error.to_string()))?;
+        // The method contract makes the Wasm-memory view ephemeral. The packet
+        // allocation is reserved at construction and reused on every call.
+        Ok(unsafe { Uint8Array::view(&self.packet[..written]) })
+    }
+
+    /// Return the reusable PCM input block for the buffer-reusing API.
+    ///
+    /// Fill this view, then call `encodeBufferedView`. WebAssembly memory growth
+    /// invalidates the view, so reacquire it after calling unrelated Wasm APIs
+    /// that can allocate.
+    #[wasm_bindgen(js_name = inputPcmView)]
+    pub fn input_pcm_view(&self) -> Int32Array {
+        // The returned view follows the explicit lifetime contract above.
+        unsafe { Int32Array::view(&self.input_pcm) }
+    }
+
+    /// Encode `inputPcmView` and return an ephemeral zero-copy packet view.
+    #[wasm_bindgen(js_name = encodeBufferedView)]
+    pub fn encode_buffered_view(&mut self) -> Result<Uint8Array, JsValue> {
+        let written = self
+            .encoder
+            .encode_i32_into(&self.input_pcm, &mut self.packet)
+            .map_err(|error| js_error(error.to_string()))?;
+        // Both buffers are reserved at construction and reused across calls.
+        Ok(unsafe { Uint8Array::view(&self.packet[..written]) })
+    }
+
+    #[wasm_bindgen(getter, js_name = sampleCount)]
+    pub fn sample_count(&self) -> usize {
+        self.sample_count
+    }
+
+    pub fn reset(&mut self) {
+        self.packet.clear();
+        self.encoder.reset();
+    }
+}
+
+#[cfg(feature = "flac")]
+#[wasm_bindgen]
+impl WasmFlacFrameDecoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        sample_rate: u32,
+        channels: u8,
+        bits_per_sample: u32,
+        frame_size: u32,
+    ) -> Result<WasmFlacFrameDecoder, JsValue> {
+        let bits_per_sample = u8::try_from(bits_per_sample)
+            .map_err(|_| js_error(format!("FLAC bit depth {bits_per_sample} exceeds u8")))?;
+        let config = FlacFrameConfig::new(
+            sample_rate,
+            u16::from(channels),
+            bits_per_sample,
+            frame_size,
+            FlacProfile::Realtime,
+        )
+        .map_err(|error| js_error(error.to_string()))?;
+        let sample_count = config
+            .sample_count()
+            .map_err(|error| js_error(error.to_string()))?;
+        let packet_capacity = config
+            .raw_pcm_bytes()
+            .map_err(|error| js_error(error.to_string()))?
+            .saturating_mul(2)
+            .saturating_add(64);
+        Ok(Self {
+            decoder: FlacFrameDecoder::new(config).map_err(|error| js_error(error.to_string()))?,
+            input_packet: vec![0; packet_capacity],
+            pcm: vec![0; sample_count],
+        })
+    }
+
+    /// Decode exactly one raw FLAC frame into interleaved PCM.
+    #[wasm_bindgen(js_name = decodeInterleavedI32)]
+    pub fn decode_interleaved_i32(&mut self, packet: &[u8]) -> Result<Int32Array, JsValue> {
+        let written = self
+            .decoder
+            .decode_into(packet, &mut self.pcm)
+            .map_err(|error| js_error(error.to_string()))?;
+        Ok(Int32Array::from(&self.pcm[..written]))
+    }
+
+    /// Decode one packet and return an ephemeral zero-copy PCM view.
+    ///
+    /// The view must be consumed before another call into WebAssembly that can
+    /// grow memory, and its samples are overwritten by the next decode call.
+    /// Use `decodeInterleavedI32` when the returned PCM must be retained.
+    #[wasm_bindgen(js_name = decodeInterleavedI32View)]
+    pub fn decode_interleaved_i32_view(&mut self, packet: &[u8]) -> Result<Int32Array, JsValue> {
+        let written = self
+            .decoder
+            .decode_into(packet, &mut self.pcm)
+            .map_err(|error| js_error(error.to_string()))?;
+        // The method contract makes the Wasm-memory view ephemeral. The PCM
+        // allocation has a fixed size and is reused on every call.
+        Ok(unsafe { Int32Array::view(&self.pcm[..written]) })
+    }
+
+    /// Return the reusable encoded-packet input buffer.
+    ///
+    /// Copy one packet into this view, then call `decodeBuffered` with its byte
+    /// length. Reacquire the view after any unrelated call that can grow
+    /// WebAssembly memory.
+    #[wasm_bindgen(js_name = inputPacketView)]
+    pub fn input_packet_view(&self) -> Uint8Array {
+        // The returned view follows the explicit lifetime contract above.
+        unsafe { Uint8Array::view(&self.input_packet) }
+    }
+
+    /// Decode a packet already copied into `inputPacketView`.
+    #[wasm_bindgen(js_name = decodeBuffered)]
+    pub fn decode_buffered(&mut self, packet_length: usize) -> Result<usize, JsValue> {
+        if packet_length == 0 || packet_length > self.input_packet.len() {
+            return Err(js_error(format!(
+                "FLAC packet length {packet_length} exceeds buffered capacity {}",
+                self.input_packet.len()
+            )));
+        }
+        self.decoder
+            .decode_into(&self.input_packet[..packet_length], &mut self.pcm)
+            .map_err(|error| js_error(error.to_string()))
+    }
+
+    /// Return the persistent decoded PCM output buffer.
+    ///
+    /// Its samples are overwritten by the next decode call. Reacquire the view
+    /// after any unrelated call that can grow WebAssembly memory.
+    #[wasm_bindgen(js_name = decodedPcmView)]
+    pub fn decoded_pcm_view(&self) -> Int32Array {
+        // The returned view follows the explicit lifetime contract above.
+        unsafe { Int32Array::view(&self.pcm) }
+    }
+
+    #[wasm_bindgen(getter, js_name = packetCapacity)]
+    pub fn packet_capacity(&self) -> usize {
+        self.input_packet.len()
+    }
+
+    #[wasm_bindgen(js_name = setVerifyChecksums)]
+    pub fn set_verify_checksums(&mut self, enabled: bool) {
+        self.decoder.set_verify_checksums(enabled);
+    }
+
+    #[wasm_bindgen(getter, js_name = sampleCount)]
+    pub fn sample_count(&self) -> usize {
+        self.pcm.len()
+    }
+
+    pub fn reset(&mut self) -> Result<(), JsValue> {
+        self.decoder
+            .reset()
+            .map_err(|error| js_error(error.to_string()))
+    }
 }
 
 #[cfg(feature = "flac")]

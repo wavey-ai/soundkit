@@ -17,6 +17,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "benchmark_clock.h"
+
 enum {
     CHANNELS = 2,
     BITS_PER_SAMPLE = 24,
@@ -34,12 +36,6 @@ typedef struct {
     size_t count;
     uint64_t total_bytes;
 } Bundle;
-
-static double now_seconds(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
-}
 
 static int compare_double(const void *left, const void *right) {
     const double a = *(const double *)left;
@@ -250,9 +246,9 @@ static int run_once(
     uint64_t sum = 0;
     for (unsigned iteration = 0; iteration < iterations; iteration++) {
         AVPacket *packet = bundle->packets[iteration % bundle->count];
-        const double started = now_seconds();
+        const uint64_t started = benchmark_now_ticks();
         const int status = decode_one(context, packet, frame);
-        timings[iteration] = (now_seconds() - started) * 1e6;
+        timings[iteration] = benchmark_elapsed_us(started, benchmark_now_ticks());
         if (status < 0)
             goto fail;
         sum += (uint32_t)decoded_sample(

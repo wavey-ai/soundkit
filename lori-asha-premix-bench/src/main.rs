@@ -1,7 +1,6 @@
 use bytes::Bytes;
-use libopus_rust::{
-    decoder::Decoder as PureDecoder,
-    encoder::{Application as PureApplication, Encoder as PureEncoder, OPUS_SET_BITRATE_REQUEST},
+use libopus_rs_native::{
+    Application as PureApplication, Decoder as PureDecoder, Encoder as PureEncoder,
 };
 use opus_sys;
 use soundkit::audio_bytes::i16le_to_i16;
@@ -10,13 +9,16 @@ use soundkit_decoder::{DecodeOptions, DecodePipeline};
 use soundkit_opus::{OpusDecoder as SoundkitDecoder, OpusEncoder as SoundkitEncoder};
 use std::collections::{HashSet, VecDeque};
 use std::env;
+use std::ffi::CStr;
 use std::fs;
+use std::hint::black_box;
+use std::io::{self, Write};
 use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const TARGET_SAMPLE_RATE: u32 = 48_000;
-const TARGET_CHANNELS: u8 = 1;
+const TARGET_CHANNELS: u8 = 2;
 const TARGET_BITS: u8 = 16;
 const DEFAULT_FRAME_SIZE: usize = 960;
 const DEFAULT_BITRATE: u32 = 128_000;
@@ -149,11 +151,62 @@ impl BackendAggregate {
 }
 
 #[derive(Debug)]
+enum ProfileTarget {
+    RustEncode,
+    RustDecode,
+    CEncode,
+    CDecode,
+    CompareEncode,
+    CompareDecode,
+}
+
+impl ProfileTarget {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "rust-encode" => Ok(Self::RustEncode),
+            "rust-decode" => Ok(Self::RustDecode),
+            "c-encode" => Ok(Self::CEncode),
+            "c-decode" => Ok(Self::CDecode),
+            "compare-encode" => Ok(Self::CompareEncode),
+            "compare-decode" => Ok(Self::CompareDecode),
+            _ => Err(format!(
+                "invalid profile target '{value}'; expected rust-encode, rust-decode, c-encode, c-decode, compare-encode, or compare-decode"
+            )),
+        }
+    }
+
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::RustEncode => "rust-encode",
+            Self::RustDecode => "rust-decode",
+            Self::CEncode => "c-encode",
+            Self::CDecode => "c-decode",
+            Self::CompareEncode => "compare-encode",
+            Self::CompareDecode => "compare-decode",
+        }
+    }
+
+    const fn is_decode(&self) -> bool {
+        matches!(self, Self::RustDecode | Self::CDecode | Self::CompareDecode)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProfileMeasurement {
+    wall_time: Duration,
+    cpu_time: Duration,
+    checksum: usize,
+}
+
+#[derive(Debug)]
 struct Config {
     roots: Vec<PathBuf>,
     query_terms: Vec<String>,
     bitrate: u32,
     frame_size: usize,
+    profile: Option<ProfileTarget>,
+    profile_iterations: usize,
+    profile_delay_ms: u64,
     show_help: bool,
 }
 
@@ -163,6 +216,9 @@ fn main() -> Result<(), String> {
     if config.show_help {
         return Ok(());
     }
+
+    let c_version = unsafe { CStr::from_ptr(opus_sys::opus_get_version_string()) };
+    println!("libopus C FFI version: {}", c_version.to_string_lossy());
 
     let track_paths = discover_tracks(&config.roots, &config.query_terms)?;
     if track_paths.is_empty() {
@@ -176,6 +232,19 @@ fn main() -> Result<(), String> {
     }
 
     println!("Found {} candidate tracks", track_paths.len());
+
+    if let Some(profile) = &config.profile {
+        let path = &track_paths[0];
+        let track = decode_for_benchmark(path)?;
+        return run_profile(
+            profile,
+            &track,
+            config.frame_size,
+            config.bitrate,
+            config.profile_iterations,
+            config.profile_delay_ms,
+        );
+    }
 
     let mut agg_soundkit = BackendAggregate::default();
     let mut agg_pure = BackendAggregate::default();
@@ -343,13 +412,16 @@ fn parse_args() -> Result<Config, String> {
     let mut bitrate = DEFAULT_BITRATE;
     let mut frame_ms = 20.0f64;
     let mut query = String::from("lori asha premix");
+    let mut profile = None;
+    let mut profile_iterations = 1usize;
+    let mut profile_delay_ms = 0u64;
     let mut show_help = false;
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
-                println!("Usage: lori-asha-premix-bench [--dir <path>] [--bitrate <bps>] [--frame-ms <milliseconds>] [--query <text>]");
+                println!("Usage: lori-asha-premix-bench [--dir <path>] [--bitrate <bps>] [--frame-ms <milliseconds>] [--query <text>] [--profile <target>] [--iterations <count>] [--profile-delay-ms <milliseconds>]");
                 println!("  --dir   Add a directory to scan (repeatable). Defaults to ~/Downloads and ~/Documents.");
                 println!(
                     "  --bitrate    Opus target bitrate in bps. Default {}.",
@@ -362,6 +434,9 @@ fn parse_args() -> Result<Config, String> {
                     "  --query      Case-insensitive match terms for file path. Default: {}",
                     query
                 );
+                println!("  --profile    Isolate rust-encode, rust-decode, c-encode, or c-decode; compare-encode and compare-decode alternate both implementations in one process.");
+                println!("  --iterations Repeat an isolated profile target. Default 1.");
+                println!("  --profile-delay-ms Wait after profile setup so a sampler can attach.");
                 show_help = true;
             }
             "--dir" | "--root" => {
@@ -392,6 +467,28 @@ fn parse_args() -> Result<Config, String> {
                     .ok_or_else(|| format!("missing value for {arg}. usage: --query <text>"))?;
                 query = value;
             }
+            "--profile" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("missing value for {arg}. usage: --profile <target>"))?;
+                profile = Some(ProfileTarget::parse(&value)?);
+            }
+            "--iterations" => {
+                let value = args.next().ok_or_else(|| {
+                    format!("missing value for {arg}. usage: --iterations <count>")
+                })?;
+                profile_iterations = value
+                    .parse::<usize>()
+                    .map_err(|e| format!("invalid iterations '{}': {}", value, e))?;
+            }
+            "--profile-delay-ms" => {
+                let value = args.next().ok_or_else(|| {
+                    format!("missing value for {arg}. usage: --profile-delay-ms <milliseconds>")
+                })?;
+                profile_delay_ms = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("invalid profile delay '{}': {}", value, e))?;
+            }
             _ => {
                 return Err(format!("unknown argument: {arg}"));
             }
@@ -413,6 +510,9 @@ fn parse_args() -> Result<Config, String> {
     if bitrate == 0 {
         return Err("bitrate must be greater than 0".to_string());
     }
+    if profile_iterations == 0 {
+        return Err("iterations must be greater than 0".to_string());
+    }
 
     if roots.is_empty() {
         let home = env::var("HOME").map_err(|_| "HOME not set".to_string())?;
@@ -430,6 +530,9 @@ fn parse_args() -> Result<Config, String> {
         query_terms,
         bitrate,
         frame_size,
+        profile,
+        profile_iterations,
+        profile_delay_ms,
         show_help,
     })
 }
@@ -504,9 +607,11 @@ fn decode_for_benchmark(path: &Path) -> Result<TrackData, String> {
     };
 
     let mut pipeline = DecodePipeline::spawn_with_options(options);
-    pipeline
-        .send(Bytes::from(data))
-        .map_err(|e| format!("decode send failed {}: {}", path.display(), e))?;
+    for chunk in data.chunks(1024 * 1024) {
+        pipeline
+            .send(Bytes::copy_from_slice(chunk))
+            .map_err(|e| format!("decode send failed {}: {}", path.display(), e))?;
+    }
     pipeline
         .send(Bytes::new())
         .map_err(|e| format!("decode eof send failed {}: {}", path.display(), e))?;
@@ -515,22 +620,15 @@ fn decode_for_benchmark(path: &Path) -> Result<TrackData, String> {
     loop {
         match pipeline.recv() {
             Some(Ok(audio_data)) => {
-                let mut frame = i16le_to_i16(audio_data.data());
+                let frame = i16le_to_i16(audio_data.data());
 
-                if audio_data.channel_count() > 1 {
-                    let channels = audio_data.channel_count() as usize;
-                    let mut mono = Vec::with_capacity(frame.len() / channels);
-
-                    for frame_idx in 0..(frame.len() / channels) {
-                        let mut sum = 0i32;
-                        for channel in 0..channels {
-                            sum += frame[frame_idx * channels + channel] as i32;
-                        }
-                        let sample = (sum as f32 / channels as f32).round() as i32;
-                        mono.push(sample.clamp(i16::MIN as i32, i16::MAX as i32) as i16);
-                    }
-
-                    frame = mono;
+                if audio_data.channel_count() != TARGET_CHANNELS {
+                    return Err(format!(
+                        "decode output for {} has {} channels, expected {}",
+                        path.display(),
+                        audio_data.channel_count(),
+                        TARGET_CHANNELS
+                    ));
                 }
 
                 samples.extend_from_slice(&frame);
@@ -545,13 +643,257 @@ fn decode_for_benchmark(path: &Path) -> Result<TrackData, String> {
     }
 
     let sample_rate = TARGET_SAMPLE_RATE as f64;
-    let duration_seconds = samples.len() as f64 / sample_rate;
+    let duration_seconds = samples.len() as f64 / (sample_rate * f64::from(TARGET_CHANNELS));
 
     Ok(TrackData {
         path: path.to_path_buf(),
         samples,
         duration_seconds,
     })
+}
+
+fn run_profile(
+    target: &ProfileTarget,
+    track: &TrackData,
+    frame_size: usize,
+    bitrate: u32,
+    iterations: usize,
+    delay_ms: u64,
+) -> Result<(), String> {
+    let common_packets = if target.is_decode() {
+        Some(encode_with_c_libopus(track, frame_size, bitrate)?.packets)
+    } else {
+        None
+    };
+
+    println!(
+        "profile-ready target={} track={} duration_s={:.3} iterations={} frame_size={} bitrate={}",
+        target.label(),
+        track.path.display(),
+        track.duration_seconds,
+        iterations,
+        frame_size,
+        bitrate
+    );
+    io::stdout()
+        .flush()
+        .map_err(|error| format!("failed to flush profile marker: {error}"))?;
+    if delay_ms > 0 {
+        std::thread::sleep(Duration::from_millis(delay_ms));
+    }
+
+    if matches!(
+        target,
+        ProfileTarget::CompareEncode | ProfileTarget::CompareDecode
+    ) {
+        return run_compare_profile(
+            target,
+            track,
+            frame_size,
+            bitrate,
+            iterations,
+            common_packets.as_deref(),
+        );
+    }
+
+    let mut codec_time = Duration::ZERO;
+    let mut checksum = 0usize;
+    let cpu_start = process_cpu_time()?;
+    let wall_start = Instant::now();
+    for _ in 0..iterations {
+        let (elapsed, work) = match target {
+            ProfileTarget::RustEncode => {
+                let result = encode_with_pure_libopus(track, frame_size, bitrate)?;
+                (
+                    result.encode_time,
+                    result.encoded_bytes ^ result.packets.len(),
+                )
+            }
+            ProfileTarget::RustDecode => {
+                let result = decode_with_pure_libopus(
+                    track,
+                    common_packets
+                        .as_ref()
+                        .expect("decode profiles require common packets"),
+                )?;
+                let edge = result.samples.first().copied().unwrap_or(0) as u16 as usize;
+                (result.decode_time, result.decoded_bytes ^ edge)
+            }
+            ProfileTarget::CEncode => {
+                let result = encode_with_c_libopus(track, frame_size, bitrate)?;
+                (
+                    result.encode_time,
+                    result.encoded_bytes ^ result.packets.len(),
+                )
+            }
+            ProfileTarget::CDecode => {
+                let result = decode_with_c_libopus(
+                    track,
+                    common_packets
+                        .as_ref()
+                        .expect("decode profiles require common packets"),
+                )?;
+                let edge = result.samples.first().copied().unwrap_or(0) as u16 as usize;
+                (result.decode_time, result.decoded_bytes ^ edge)
+            }
+            ProfileTarget::CompareEncode | ProfileTarget::CompareDecode => unreachable!(),
+        };
+        codec_time += elapsed;
+        checksum = checksum.wrapping_add(black_box(work));
+    }
+    let wall_time = wall_start.elapsed();
+    let cpu_time = process_cpu_time()?.saturating_sub(cpu_start);
+    black_box(checksum);
+
+    let audio_seconds = track.duration_seconds * iterations as f64;
+    println!(
+        "profile-result target={} codec_s={:.6} wall_s={:.6} cpu_s={:.6} audio_s={:.3} codec_rtf={:.6} wall_rtf={:.6} cpu_rtf={:.6} checksum={}",
+        target.label(),
+        codec_time.as_secs_f64(),
+        wall_time.as_secs_f64(),
+        cpu_time.as_secs_f64(),
+        audio_seconds,
+        codec_time.as_secs_f64() / audio_seconds,
+        wall_time.as_secs_f64() / audio_seconds,
+        cpu_time.as_secs_f64() / audio_seconds,
+        checksum
+    );
+    Ok(())
+}
+
+fn run_compare_profile(
+    target: &ProfileTarget,
+    track: &TrackData,
+    frame_size: usize,
+    bitrate: u32,
+    iterations: usize,
+    common_packets: Option<&[Vec<u8>]>,
+) -> Result<(), String> {
+    let mut rust = ProfileMeasurement::default();
+    let mut c = ProfileMeasurement::default();
+
+    for iteration in 0..iterations {
+        let rust_first = iteration % 2 == 0;
+        match target {
+            ProfileTarget::CompareEncode => {
+                let mut run_rust = || {
+                    measure_profile_work(
+                        &mut rust,
+                        || encode_with_pure_libopus(track, frame_size, bitrate),
+                        |result| result.encoded_bytes ^ result.packets.len(),
+                    )
+                };
+                let mut run_c = || {
+                    measure_profile_work(
+                        &mut c,
+                        || encode_with_c_libopus(track, frame_size, bitrate),
+                        |result| result.encoded_bytes ^ result.packets.len(),
+                    )
+                };
+                if rust_first {
+                    run_rust()?;
+                    run_c()?;
+                } else {
+                    run_c()?;
+                    run_rust()?;
+                }
+            }
+            ProfileTarget::CompareDecode => {
+                let packets = common_packets.expect("decode profiles require common packets");
+                let mut run_rust = || {
+                    measure_profile_work(
+                        &mut rust,
+                        || decode_with_pure_libopus(track, packets),
+                        |result| {
+                            let edge = result.samples.first().copied().unwrap_or(0) as u16 as usize;
+                            result.decoded_bytes ^ edge
+                        },
+                    )
+                };
+                let mut run_c = || {
+                    measure_profile_work(
+                        &mut c,
+                        || decode_with_c_libopus(track, packets),
+                        |result| {
+                            let edge = result.samples.first().copied().unwrap_or(0) as u16 as usize;
+                            result.decoded_bytes ^ edge
+                        },
+                    )
+                };
+                if rust_first {
+                    run_rust()?;
+                    run_c()?;
+                } else {
+                    run_c()?;
+                    run_rust()?;
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    let audio_seconds = track.duration_seconds * iterations as f64;
+    println!(
+        "compare-result target={} backend=rust wall_s={:.6} cpu_s={:.6} audio_s={:.3} wall_rtf={:.6} cpu_rtf={:.6} checksum={}",
+        target.label(),
+        rust.wall_time.as_secs_f64(),
+        rust.cpu_time.as_secs_f64(),
+        audio_seconds,
+        rust.wall_time.as_secs_f64() / audio_seconds,
+        rust.cpu_time.as_secs_f64() / audio_seconds,
+        rust.checksum
+    );
+    println!(
+        "compare-result target={} backend=c wall_s={:.6} cpu_s={:.6} audio_s={:.3} wall_rtf={:.6} cpu_rtf={:.6} checksum={}",
+        target.label(),
+        c.wall_time.as_secs_f64(),
+        c.cpu_time.as_secs_f64(),
+        audio_seconds,
+        c.wall_time.as_secs_f64() / audio_seconds,
+        c.cpu_time.as_secs_f64() / audio_seconds,
+        c.checksum
+    );
+    println!(
+        "compare-ratio target={} rust_vs_c_wall={:.4} rust_vs_c_cpu={:.4}",
+        target.label(),
+        rust.wall_time.as_secs_f64() / c.wall_time.as_secs_f64(),
+        rust.cpu_time.as_secs_f64() / c.cpu_time.as_secs_f64()
+    );
+    Ok(())
+}
+
+fn measure_profile_work<T>(
+    measurement: &mut ProfileMeasurement,
+    work: impl FnOnce() -> Result<T, String>,
+    checksum: impl FnOnce(&T) -> usize,
+) -> Result<(), String> {
+    let cpu_start = process_cpu_time()?;
+    let wall_start = Instant::now();
+    let result = work()?;
+    measurement.wall_time += wall_start.elapsed();
+    measurement.cpu_time += process_cpu_time()?.saturating_sub(cpu_start);
+    measurement.checksum = measurement
+        .checksum
+        .wrapping_add(black_box(checksum(&result)));
+    black_box(result);
+    Ok(())
+}
+
+fn process_cpu_time() -> Result<Duration, String> {
+    let mut usage = MaybeUninit::<libc::rusage>::zeroed();
+    let result = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if result != 0 {
+        return Err(format!(
+            "failed to read process CPU time: {}",
+            io::Error::last_os_error()
+        ));
+    }
+
+    let usage = unsafe { usage.assume_init() };
+    let seconds = usage.ru_utime.tv_sec as f64
+        + usage.ru_stime.tv_sec as f64
+        + (usage.ru_utime.tv_usec as f64 + usage.ru_stime.tv_usec as f64) / 1_000_000.0;
+    Ok(Duration::from_secs_f64(seconds))
 }
 
 fn run_soundkit_benchmark(
@@ -734,21 +1076,20 @@ fn encode_with_pure_libopus(
     frame_size: usize,
     bitrate: u32,
 ) -> Result<PacketEncodeResult, String> {
-    let mut encoder = PureEncoder::create(
-        TARGET_SAMPLE_RATE as usize,
+    let mut encoder = PureEncoder::new(
+        TARGET_SAMPLE_RATE as i32,
         TARGET_CHANNELS as usize,
-        1,
-        0,
-        &[0u8, 1u8],
-        PureApplication::Audio,
+        PureApplication::RestrictedLowDelay,
     )
     .map_err(|e| format!("libopus-rs encoder init failed: {}", e))?;
     encoder
-        .set_option(OPUS_SET_BITRATE_REQUEST, bitrate)
+        .set_bitrate(bitrate as i32)
         .map_err(|e| format!("libopus-rs set bitrate failed: {}", e))?;
+    encoder
+        .set_vbr(false)
+        .map_err(|e| format!("libopus-rs disable VBR failed: {}", e))?;
 
     let mut packets = Vec::new();
-    let mut scratch_output = vec![0u8; 6_144];
     let mut encode_time = Duration::ZERO;
     let mut encoded_bytes = 0usize;
 
@@ -759,14 +1100,14 @@ fn encode_with_pure_libopus(
         if offset + frame_samples <= track.samples.len() {
             let chunk = &track.samples[offset..offset + frame_samples];
             let start = Instant::now();
-            let packet_len = encoder
-                .encode(chunk, &mut scratch_output)
+            let packet = encoder
+                .encode_i16(chunk, frame_size)
                 .map_err(|e| format!("libopus-rs encode failed: {}", e))?;
             encode_time += start.elapsed();
 
-            if packet_len > 0 {
-                encoded_bytes += packet_len;
-                packets.push(scratch_output[..packet_len].to_vec());
+            if !packet.is_empty() {
+                encoded_bytes += packet.len();
+                packets.push(packet);
             }
         } else {
             let mut padded = vec![0i16; frame_samples];
@@ -774,14 +1115,14 @@ fn encode_with_pure_libopus(
             if !tail.is_empty() {
                 padded[..tail.len()].copy_from_slice(tail);
                 let start = Instant::now();
-                let packet_len = encoder
-                    .encode(&padded[..], &mut scratch_output)
+                let packet = encoder
+                    .encode_i16(&padded, frame_size)
                     .map_err(|e| format!("libopus-rs encode failed: {}", e))?;
                 encode_time += start.elapsed();
 
-                if packet_len > 0 {
-                    encoded_bytes += packet_len;
-                    packets.push(scratch_output[..packet_len].to_vec());
+                if !packet.is_empty() {
+                    encoded_bytes += packet.len();
+                    packets.push(packet);
                 }
             }
         }
@@ -804,27 +1145,28 @@ fn decode_with_pure_libopus(
     _track: &TrackData,
     packets: &[Vec<u8>],
 ) -> Result<PacketDecodeResult, String> {
-    let mut decoder = PureDecoder::create(
-        TARGET_SAMPLE_RATE as usize,
-        TARGET_CHANNELS as usize,
-        1,
-        1,
-        &[0u8, 1u8],
-    )
-    .map_err(|e| format!("libopus-rs decoder init failed: {}", e))?;
+    let mut decoder = PureDecoder::new(TARGET_SAMPLE_RATE as i32, TARGET_CHANNELS as usize)
+        .map_err(|e| format!("libopus-rs decoder init failed: {}", e))?;
 
     let mut decoded = Vec::new();
-    let mut scratch = vec![0i16; 6_144];
+    let mut scratch = Vec::new();
     let mut decode_time = Duration::ZERO;
 
     for packet in packets {
         let start = Instant::now();
         let samples_written = decoder
-            .decode(&packet[..], &mut scratch[..], false)
+            .decode_i16_into(packet, false, &mut scratch)
             .map_err(|e| format!("libopus-rs decode failed: {}", e))?;
         decode_time += start.elapsed();
         if samples_written > 0 {
             let count = samples_written * TARGET_CHANNELS as usize;
+            if scratch.len() != count {
+                return Err(format!(
+                    "libopus-rs decoded {} samples, expected {}",
+                    scratch.len(),
+                    count
+                ));
+            }
             decoded.extend_from_slice(&scratch[..count]);
         }
     }
@@ -851,7 +1193,7 @@ fn encode_with_c_libopus(
         opus_sys::opus_encoder_create(
             TARGET_SAMPLE_RATE as i32,
             TARGET_CHANNELS as i32,
-            opus_sys::OPUS_APPLICATION_AUDIO as i32,
+            opus_sys::OPUS_APPLICATION_RESTRICTED_LOWDELAY as i32,
             err.as_mut_ptr(),
         )
     };
@@ -871,6 +1213,13 @@ fn encode_with_c_libopus(
     if bitrate_result != opus_sys::OPUS_OK as i32 {
         unsafe { opus_sys::opus_encoder_destroy(encoder) };
         return Err(format!("libopus C set bitrate failed: {}", bitrate_result));
+    }
+
+    let vbr_result =
+        unsafe { opus_sys::opus_encoder_ctl(encoder, opus_sys::OPUS_SET_VBR_REQUEST as i32, 0i32) };
+    if vbr_result != opus_sys::OPUS_OK as i32 {
+        unsafe { opus_sys::opus_encoder_destroy(encoder) };
+        return Err(format!("libopus C disable VBR failed: {}", vbr_result));
     }
 
     let result = (|| -> Result<PacketEncodeResult, String> {

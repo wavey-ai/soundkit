@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "benchmark_clock.h"
+
 // libFLAC 1.4 exports this setting but Debian 12's public header predates its
 // declaration.
 extern FLAC__bool FLAC__stream_encoder_set_do_md5(
@@ -33,12 +35,6 @@ typedef struct {
     FLAC__int32 *samples;
     size_t sample_count;
 } Pcm;
-
-static double now_seconds(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
-}
 
 static int compare_double(const void *left, const void *right) {
     const double a = *(const double *)left;
@@ -225,10 +221,10 @@ static int run_once(
     output.bytes = 0;
     for (unsigned iteration = 0; iteration < iterations; iteration++) {
         const size_t frame = iteration % corpus_frames;
-        const double started = now_seconds();
+        const uint64_t started = benchmark_now_ticks();
         const int ok = FLAC__stream_encoder_process_interleaved(
             encoder, &pcm->samples[frame * samples_per_frame], frame_length);
-        timings[iteration] = (now_seconds() - started) * 1e6;
+        timings[iteration] = benchmark_elapsed_us(started, benchmark_now_ticks());
         if (!ok) {
             FLAC__stream_encoder_delete(encoder);
             return 1;

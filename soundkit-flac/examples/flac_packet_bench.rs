@@ -12,8 +12,26 @@ use std::time::Instant;
 
 const WARMUP_CALLS: usize = 1_024;
 const MAX_PACKET_BYTES: usize = 16 * 1024 * 1024;
+const MODE_ENV: &str = "SOUNDKIT_FLAC_BENCH_MODE";
 
 type AnyError = Box<dyn std::error::Error>;
+
+#[derive(Clone, Copy)]
+enum BenchmarkMode {
+    Both,
+    Encode,
+    Decode,
+}
+
+impl BenchmarkMode {
+    fn includes_encode(self) -> bool {
+        matches!(self, Self::Both | Self::Encode)
+    }
+
+    fn includes_decode(self) -> bool {
+        matches!(self, Self::Both | Self::Decode)
+    }
+}
 
 struct Arguments {
     sample_rate: u32,
@@ -24,6 +42,7 @@ struct Arguments {
     pcm_path: PathBuf,
     decode_bundle_path: Option<PathBuf>,
     output_bundle_path: Option<PathBuf>,
+    mode: BenchmarkMode,
 }
 
 fn usage() -> &'static str {
@@ -42,6 +61,14 @@ fn parse_arguments() -> Result<Arguments, AnyError> {
         "realtime" => FlacProfile::Realtime,
         "balanced" => FlacProfile::Balanced,
         _ => return Err(usage().into()),
+    };
+    let mode = match env::var(MODE_ENV).as_deref() {
+        Ok("encode") => BenchmarkMode::Encode,
+        Ok("decode") => BenchmarkMode::Decode,
+        Ok("both") | Err(env::VarError::NotPresent) => BenchmarkMode::Both,
+        Ok(_) | Err(env::VarError::NotUnicode(_)) => {
+            return Err(format!("{MODE_ENV} must be encode, decode, or both").into());
+        }
     };
     let iterations = arguments[4].parse()?;
     if !matches!(sample_rate, 48_000 | 96_000)
@@ -63,6 +90,7 @@ fn parse_arguments() -> Result<Arguments, AnyError> {
             .filter(|path| path.as_str() != "-")
             .map(PathBuf::from),
         output_bundle_path: arguments.get(7).map(PathBuf::from),
+        mode,
     })
 }
 
@@ -200,36 +228,40 @@ fn main() -> Result<(), AnyError> {
         }
     }
 
-    let mut encoder = FlacFrameEncoder::new(config)?;
-    let mut packet = Vec::with_capacity(config.raw_pcm_bytes()? + 64);
-    for iteration in 0..WARMUP_CALLS {
-        let frame = pcm_frames[iteration % pcm_frames.len()];
-        black_box(encoder.encode_i32_into(black_box(frame), &mut packet)?);
-    }
     let mut encode_nanos = Vec::with_capacity(arguments.iterations);
     let mut encoded_bytes = 0usize;
-    for iteration in 0..arguments.iterations {
-        let frame = pcm_frames[iteration % pcm_frames.len()];
-        let started = Instant::now();
-        let written = encoder.encode_i32_into(black_box(frame), &mut packet)?;
-        encode_nanos.push(started.elapsed().as_nanos());
-        encoded_bytes = encoded_bytes.saturating_add(black_box(written));
+    if arguments.mode.includes_encode() {
+        let mut encoder = FlacFrameEncoder::new(config)?;
+        let mut packet = Vec::with_capacity(config.raw_pcm_bytes()? + 64);
+        for iteration in 0..WARMUP_CALLS {
+            let frame = pcm_frames[iteration % pcm_frames.len()];
+            black_box(encoder.encode_i32_into(black_box(frame), &mut packet)?);
+        }
+        for iteration in 0..arguments.iterations {
+            let frame = pcm_frames[iteration % pcm_frames.len()];
+            let started = Instant::now();
+            let written = encoder.encode_i32_into(black_box(frame), &mut packet)?;
+            encode_nanos.push(started.elapsed().as_nanos());
+            encoded_bytes = encoded_bytes.saturating_add(black_box(written));
+        }
     }
 
-    for iteration in 0..WARMUP_CALLS {
-        let packet = &decode_packets[iteration % decode_packets.len()];
-        black_box(decoder.decode_into(black_box(packet), &mut decoded)?);
-    }
     let mut decode_nanos = Vec::with_capacity(arguments.iterations);
     let mut decoded_samples = 0usize;
     let mut decoded_packet_bytes = 0usize;
-    for iteration in 0..arguments.iterations {
-        let packet = &decode_packets[iteration % decode_packets.len()];
-        let started = Instant::now();
-        let written = decoder.decode_into(black_box(packet), &mut decoded)?;
-        decode_nanos.push(started.elapsed().as_nanos());
-        decoded_samples = decoded_samples.saturating_add(black_box(written));
-        decoded_packet_bytes = decoded_packet_bytes.saturating_add(packet.len());
+    if arguments.mode.includes_decode() {
+        for iteration in 0..WARMUP_CALLS {
+            let packet = &decode_packets[iteration % decode_packets.len()];
+            black_box(decoder.decode_into(black_box(packet), &mut decoded)?);
+        }
+        for iteration in 0..arguments.iterations {
+            let packet = &decode_packets[iteration % decode_packets.len()];
+            let started = Instant::now();
+            let written = decoder.decode_into(black_box(packet), &mut decoded)?;
+            decode_nanos.push(started.elapsed().as_nanos());
+            decoded_samples = decoded_samples.saturating_add(black_box(written));
+            decoded_packet_bytes = decoded_packet_bytes.saturating_add(packet.len());
+        }
     }
 
     let raw_bytes_per_frame = config.raw_pcm_bytes()?;
@@ -243,19 +275,23 @@ fn main() -> Result<(), AnyError> {
         pcm_frames.len(),
         pcm_frames.len() as f64 * 5.0,
     );
-    report(
-        "soundkit encode",
-        encode_nanos,
-        arguments.iterations,
-        encoded_bytes,
-        arguments.iterations * raw_bytes_per_frame,
-    );
-    report(
-        "soundkit decode",
-        decode_nanos,
-        arguments.iterations,
-        decoded_packet_bytes,
-        decoded_samples * usize::from(config.bits_per_sample / 8),
-    );
+    if arguments.mode.includes_encode() {
+        report(
+            "soundkit encode",
+            encode_nanos,
+            arguments.iterations,
+            encoded_bytes,
+            arguments.iterations * raw_bytes_per_frame,
+        );
+    }
+    if arguments.mode.includes_decode() {
+        report(
+            "soundkit decode",
+            decode_nanos,
+            arguments.iterations,
+            decoded_packet_bytes,
+            decoded_samples * usize::from(config.bits_per_sample / 8),
+        );
+    }
     Ok(())
 }
