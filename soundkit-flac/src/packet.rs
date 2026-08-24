@@ -291,7 +291,7 @@ fn analyze_channel(
     let order = select_fixed_order(samples, max_order);
     fill_fixed_residual(samples, order, residual);
     let rice = analyze_rice(residual, order);
-    let fixed_bits = 8 + order * usize::from(bits_per_sample) + rice.exact_bits;
+    let fixed_bits = 8 + order * usize::from(bits_per_sample) + rice.estimated_bits;
     if fixed_bits >= verbatim_bits {
         ChannelPlan {
             bits: verbatim_bits,
@@ -390,7 +390,7 @@ fn fill_fixed_residual(signal: &[i32], order: usize, residual: &mut [u32]) {
 struct RicePlan {
     partition_order: u8,
     parameters: [u8; MAX_TARGET_PARTITIONS],
-    exact_bits: usize,
+    estimated_bits: usize,
 }
 
 fn analyze_rice(residual: &[u32], warmup: usize) -> RicePlan {
@@ -445,26 +445,14 @@ fn analyze_rice(residual: &[u32], warmup: usize) -> RicePlan {
         order -= 1;
     }
 
-    let parts = 1usize << best_order;
-    let partition_size = residual.len() >> best_order;
-    let parameter_bits = if best_parameters[..parts].iter().any(|&p| p > 14) {
-        5
-    } else {
-        4
-    };
-    let mut exact_bits = 6 + parts * parameter_bits;
-    for (partition, &parameter) in best_parameters[..parts].iter().enumerate() {
-        let start = (partition * partition_size).max(warmup);
-        let end = (partition + 1) * partition_size;
-        for &folded in &residual[start..end] {
-            exact_bits += (folded >> parameter) as usize + usize::from(parameter) + 1;
-        }
-    }
-
+    // Reuse the cost already computed while selecting the partition plan.
+    // A second exact quotient scan materially increases five-millisecond
+    // latency, while this estimate only affects representation choices that
+    // are already near ties; the emitted Rice stream remains exact/lossless.
     RicePlan {
         partition_order: best_order as u8,
         parameters: best_parameters,
-        exact_bits,
+        estimated_bits: best_cost as usize,
     }
 }
 
