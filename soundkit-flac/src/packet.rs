@@ -583,9 +583,7 @@ fn write_subframe(
                 writer.write_bits(u64::from(parameter), parameter_bits);
                 let start = (partition * partition_size).max(usize::from(order));
                 let end = (partition + 1) * partition_size;
-                for &folded in &residual[start..end] {
-                    writer.write_rice(folded, parameter);
-                }
+                writer.write_rice_partition(&residual[start..end], parameter);
             }
         }
     }
@@ -635,6 +633,62 @@ impl BitWriter {
     fn write_signed(&mut self, value: i32, bit_count: u8) {
         let mask = (1_u64 << bit_count) - 1;
         self.write_bits(u64::from(value as u32) & mask, usize::from(bit_count));
+    }
+
+    #[inline(always)]
+    fn write_rice_partition(&mut self, residual: &[u32], parameter: u8) {
+        let tail_bits = usize::from(parameter) + 1;
+        let remainder_mask = (1_u32 << parameter) - 1;
+        let terminator = 1_u32 << parameter;
+        let mut word = self.word;
+        let mut used = self.used;
+
+        for &folded in residual {
+            let quotient = (folded >> parameter) as usize;
+            let symbol_bits = quotient + tail_bits;
+            let available = (64 - used) as usize;
+            let tail = u64::from(terminator | (folded & remainder_mask));
+            if symbol_bits <= available {
+                word |= tail << (available - symbol_bits);
+                used += symbol_bits as u32;
+                if used == 64 {
+                    self.bytes.extend_from_slice(&word.to_be_bytes());
+                    word = 0;
+                    used = 0;
+                }
+                continue;
+            }
+
+            let remaining = symbol_bits - available;
+            if remaining <= 64 {
+                if remaining < tail_bits {
+                    word |= tail >> remaining;
+                }
+                self.bytes.extend_from_slice(&word.to_be_bytes());
+                word = if remaining == 64 {
+                    tail
+                } else {
+                    tail << (64 - remaining)
+                };
+                used = remaining as u32;
+                if used == 64 {
+                    self.bytes.extend_from_slice(&word.to_be_bytes());
+                    word = 0;
+                    used = 0;
+                }
+                continue;
+            }
+
+            // Extremely long unary codes use the fully general writer.
+            self.word = word;
+            self.used = used;
+            self.write_rice(folded, parameter);
+            word = self.word;
+            used = self.used;
+        }
+
+        self.word = word;
+        self.used = used;
     }
 
     #[inline(always)]
