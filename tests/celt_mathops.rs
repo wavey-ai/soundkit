@@ -1,6 +1,37 @@
 use libopus_rs::celt::mathops::*;
 
 #[test]
+fn floor_to_i32_matches_rust_floor_cast() {
+    let edge_cases = [
+        f32::NEG_INFINITY,
+        i32::MIN as f32,
+        -1234.75,
+        -2.0,
+        -1.999_999_9,
+        -0.5,
+        -0.0,
+        0.0,
+        0.5,
+        1.999_999_9,
+        2.0,
+        1234.75,
+        i32::MAX as f32,
+        f32::INFINITY,
+        f32::NAN,
+    ];
+    for value in edge_cases {
+        assert_eq!(floor_to_i32(value), value.floor() as i32, "value={value}");
+    }
+
+    let mut bits = 0x1234_5678u32;
+    for _ in 0..1_000_000 {
+        bits = bits.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let value = f32::from_bits(bits);
+        assert_eq!(floor_to_i32(value), value.floor() as i32, "bits={bits:#x}");
+    }
+}
+
+#[test]
 fn official_isqrt32_matches_integer_floor_sqrt() {
     let mut i = 1u32;
     while i <= 1_000_000_000 {

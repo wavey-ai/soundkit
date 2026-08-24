@@ -79,6 +79,13 @@ const E_PROB_MODEL: [[[u8; 42]; 2]; 4] = [
 
 const SMALL_ENERGY_ICDF: [u8; 3] = [2, 1, 0];
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CoarseEnergyScratch {
+    old_e_bands_intra: Vec<f32>,
+    error_intra: Vec<f32>,
+    intra_bits: Vec<u8>,
+}
+
 fn loss_distortion(
     e_bands: &[f32],
     old_e_bands: &[f32],
@@ -207,9 +214,53 @@ pub fn quant_coarse_energy(
     nb_available_bytes: i32,
     force_intra: bool,
     delayed_intra: &mut f32,
+    two_pass: bool,
+    loss_rate: i32,
+    lfe: bool,
+) {
+    let mut scratch = CoarseEnergyScratch::default();
+    quant_coarse_energy_with_scratch(
+        mode,
+        start,
+        end,
+        eff_end,
+        e_bands,
+        old_e_bands,
+        budget,
+        error,
+        enc,
+        channels,
+        lm,
+        nb_available_bytes,
+        force_intra,
+        delayed_intra,
+        two_pass,
+        loss_rate,
+        lfe,
+        &mut scratch,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn quant_coarse_energy_with_scratch(
+    mode: &CeltMode,
+    start: usize,
+    end: usize,
+    eff_end: usize,
+    e_bands: &[f32],
+    old_e_bands: &mut [f32],
+    budget: u32,
+    error: &mut [f32],
+    enc: &mut RangeEncoder,
+    channels: usize,
+    lm: usize,
+    nb_available_bytes: i32,
+    force_intra: bool,
+    delayed_intra: &mut f32,
     mut two_pass: bool,
     loss_rate: i32,
     lfe: bool,
+    scratch: &mut CoarseEnergyScratch,
 ) {
     let len = mode.nb_ebands;
     assert!(end <= len);
@@ -241,24 +292,24 @@ pub fn quant_coarse_energy(
         max_decay = 3.0;
     }
 
-    let enc_start_state = enc.clone();
-    let mut old_e_bands_intra = old_e_bands.to_vec();
-    let mut error_intra = error.to_vec();
+    let enc_start_state = enc.snapshot();
     let mut badness1 = 0;
-    let mut enc_intra_state = None;
-    let mut tell_intra = 0i32;
 
     if two_pass || intra {
+        scratch.old_e_bands_intra.resize(old_e_bands.len(), 0.0);
+        scratch.old_e_bands_intra.copy_from_slice(old_e_bands);
+        scratch.error_intra.resize(error.len(), 0.0);
+        scratch.error_intra.copy_from_slice(error);
         badness1 = quant_coarse_energy_impl(
             mode,
             start,
             end,
             e_bands,
-            &mut old_e_bands_intra,
+            &mut scratch.old_e_bands_intra,
             budget,
             tell,
             &E_PROB_MODEL[lm][1],
-            &mut error_intra,
+            &mut scratch.error_intra,
             enc,
             channels,
             lm,
@@ -266,12 +317,18 @@ pub fn quant_coarse_energy(
             max_decay,
             lfe,
         );
-        tell_intra = enc.tell_frac() as i32;
-        enc_intra_state = Some(enc.clone());
     }
 
     if !intra {
-        *enc = enc_start_state;
+        let tell_intra = enc.tell_frac() as i32;
+        let enc_intra_state = enc.snapshot();
+        let start_byte = enc_start_state.offs as usize;
+        let intra_end_byte = enc_intra_state.offs as usize;
+        if two_pass {
+            enc.copy_buffer_range_into(start_byte, intra_end_byte, &mut scratch.intra_bits);
+        }
+
+        enc.restore(enc_start_state);
         let badness2 = quant_coarse_energy_impl(
             mode,
             start,
@@ -295,14 +352,15 @@ pub fn quant_coarse_energy(
                 || (badness1 == badness2 && tell_inter + intra_bias > tell_intra));
 
         if select_intra {
-            *enc = enc_intra_state.expect("two-pass intra state exists");
-            old_e_bands.copy_from_slice(&old_e_bands_intra[..old_e_bands.len()]);
-            error.copy_from_slice(&error_intra[..error.len()]);
+            enc.restore(enc_intra_state);
+            enc.restore_buffer_range(start_byte, &scratch.intra_bits);
+            old_e_bands.copy_from_slice(&scratch.old_e_bands_intra[..old_e_bands.len()]);
+            error.copy_from_slice(&scratch.error_intra[..error.len()]);
             intra = true;
         }
     } else {
-        old_e_bands.copy_from_slice(&old_e_bands_intra[..old_e_bands.len()]);
-        error.copy_from_slice(&error_intra[..error.len()]);
+        old_e_bands.copy_from_slice(&scratch.old_e_bands_intra[..old_e_bands.len()]);
+        error.copy_from_slice(&scratch.error_intra[..error.len()]);
     }
 
     if intra {

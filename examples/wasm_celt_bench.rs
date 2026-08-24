@@ -39,7 +39,7 @@ pub extern "C" fn raw_celt_encode_bench(frames: u32, frame_size: u32, bitrate: u
     let frames = frames.max(1) as usize;
     let frame_size = frame_size.clamp(120, 960) as usize;
     let mut encoder =
-        Encoder::new(SAMPLE_RATE, CHANNELS, Application::RestrictedLowDelay).expect("encoder init");
+        Encoder::new(SAMPLE_RATE, CHANNELS, Application::Audio).expect("encoder init");
     encoder.set_bitrate(bitrate as i32).expect("set bitrate");
     encoder.set_vbr(false).expect("set vbr");
 

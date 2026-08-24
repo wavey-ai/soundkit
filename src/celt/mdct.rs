@@ -178,33 +178,11 @@ pub fn clt_mdct_forward_with_scratch(
         i += 1;
     }
 
-    let scale = st.scale();
-    for i in 0..n4 {
-        let t0 = trig[i];
-        let t1 = trig[n4 + i];
-        let re = f[2 * i];
-        let im = f[2 * i + 1];
-        let yr = re * t0 - im * t1;
-        let yi = im * t0 + re * t1;
-        f2[st.bitrev()[i]] = KissFftCpx::new(yr * scale, yi * scale);
-    }
+    libopus_rs_kernels::mdct_forward_pre_rotate(f, trig, st.checked_bitrev(), st.scale(), f2);
 
     opus_fft_impl(st, f2);
 
-    let mut yp1 = 0usize;
-    let mut yp2 = stride * (n2 - 1);
-    for i in 0..n4 {
-        let t0 = trig[i];
-        let t1 = trig[n4 + i];
-        let yr = f2[i].i * t1 - f2[i].r * t0;
-        let yi = f2[i].r * t1 + f2[i].i * t0;
-        output[yp1] = yr;
-        output[yp2] = yi;
-        yp1 += 2 * stride;
-        if i + 1 < n4 {
-            yp2 -= 2 * stride;
-        }
-    }
+    libopus_rs_kernels::mdct_forward_post_rotate(f2, trig, stride, output);
 }
 
 /// Compute a backward MDCT and perform the weighted overlap-add step.
@@ -247,77 +225,21 @@ pub fn clt_mdct_backward_with_scratch(
     let n2 = n >> 1;
     let n4 = n >> 2;
 
-    assert!(input.len() > stride * (n2 - 1));
-    assert!(output.len() >= (overlap >> 1) + n2);
-    assert!(window.len() >= overlap);
-
     if scratch.f2.len() < n4 {
         scratch.f2.resize(n4, KissFftCpx::default());
     }
     let f2 = &mut scratch.f2[..n4];
-    let mut xp1 = 0usize;
-    let mut xp2 = stride * (n2 - 1);
-    for i in 0..n4 {
-        let rev = st.bitrev()[i];
-        let x1 = input[xp1];
-        let x2 = input[xp2];
-        let yr = x2 * trig[i] + x1 * trig[n4 + i];
-        let yi = x1 * trig[i] - x2 * trig[n4 + i];
-        f2[rev] = KissFftCpx::new(yi, yr);
-        xp1 += 2 * stride;
-        if i + 1 < n4 {
-            xp2 -= 2 * stride;
-        }
-    }
+    libopus_rs_kernels::mdct_backward_pre_rotate(input, trig, st.checked_bitrev(), stride, f2);
 
     opus_fft_impl(st, f2);
 
-    if scratch.buf.len() < n2 {
-        scratch.buf.resize(n2, 0.0);
-    }
-    let buf = &mut scratch.buf[..n2];
-    for i in 0..n4 {
-        buf[2 * i] = f2[i].r;
-        buf[2 * i + 1] = f2[i].i;
-    }
-
-    let mut yp0 = 0usize;
-    let mut yp1 = n2 - 2;
-    for i in 0..((n4 + 1) >> 1) {
-        let re = buf[yp0 + 1];
-        let im = buf[yp0];
-        let t0 = trig[i];
-        let t1 = trig[n4 + i];
-        let yr = re * t0 + im * t1;
-        let yi = re * t1 - im * t0;
-
-        let re2 = buf[yp1 + 1];
-        let im2 = buf[yp1];
-        buf[yp0] = yr;
-        buf[yp1 + 1] = yi;
-
-        let t0 = trig[n4 - i - 1];
-        let t1 = trig[n2 - i - 1];
-        let yr = re2 * t0 + im2 * t1;
-        let yi = re2 * t1 - im2 * t0;
-        buf[yp1] = yr;
-        buf[yp0 + 1] = yi;
-
-        yp0 += 2;
-        yp1 = yp1.saturating_sub(2);
-    }
+    libopus_rs_kernels::mdct_backward_post_rotate(f2, trig);
 
     let base = overlap >> 1;
-    output[base..base + n2].copy_from_slice(&buf);
-
-    for i in 0..overlap / 2 {
-        let lo = i;
-        let hi = overlap - 1 - i;
-        let x1 = output[hi];
-        let x2 = output[lo];
-        let wp1 = window[i];
-        let wp2 = window[overlap - 1 - i];
-        output[lo] = x2 * wp2 - x1 * wp1;
-        output[hi] = x2 * wp1 + x1 * wp2;
+    for (pair, value) in output[base..base + n2].chunks_exact_mut(2).zip(f2) {
+        pair[0] = value.r;
+        pair[1] = value.i;
     }
+
+    libopus_rs_kernels::mdct_backward_mirror(output, window, overlap);
 }

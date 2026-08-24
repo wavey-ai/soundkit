@@ -2,16 +2,17 @@
 //! `celt/celt_encoder.c`, and `celt/celt_decoder.c` control path.
 
 use crate::celt::bands::{
-    anti_collapse, haar1, quant_all_bands_mono_with_scratch, quant_all_bands_stereo_with_scratch,
-    BandCoder, BandScratch, SPREAD_NORMAL,
+    anti_collapse, haar1, quant_all_bands_mono_with_scratch_and_coding,
+    quant_all_bands_stereo_with_scratch_and_coding, BandCoder, BandScratch, SPREAD_NORMAL,
 };
 use crate::celt::entropy::{RangeDecoder, RangeEncoder};
 use crate::celt::mathops::{celt_exp2, ec_ilog};
 use crate::celt::modes::CeltMode;
 use crate::celt::pitch::PrefilterDecision;
 use crate::celt::quant_bands::{
-    amp2_log2, quant_coarse_energy, quant_energy_finalise, quant_fine_energy,
-    unquant_coarse_energy, unquant_energy_finalise, unquant_fine_energy, E_MEANS,
+    amp2_log2, quant_coarse_energy_with_scratch, quant_energy_finalise, quant_fine_energy,
+    unquant_coarse_energy, unquant_energy_finalise, unquant_fine_energy, CoarseEnergyScratch,
+    E_MEANS,
 };
 use crate::celt::rate::{
     clt_compute_allocation_with_scratch, Allocation, AllocationCoder, AllocationInfo,
@@ -791,6 +792,11 @@ pub struct CeltFrameConfig {
     pub signal_bandwidth: usize,
     pub analysis_leak_boost: Option<[u8; 19]>,
     pub vbr_state: Option<CeltVbrConfig>,
+    /// Selects the experimental direct-cubic band syntax.
+    ///
+    /// This syntax is not an Opus packet extension. The encoder and decoder
+    /// must receive the same setting out of band.
+    pub experimental_direct_cubic: bool,
 }
 
 impl CeltFrameConfig {
@@ -822,6 +828,7 @@ impl CeltFrameConfig {
             signal_bandwidth: mode.nb_ebands - 1,
             analysis_leak_boost: None,
             vbr_state: None,
+            experimental_direct_cubic: false,
         })
     }
 }
@@ -918,6 +925,7 @@ pub struct CeltFrameEncodeScratch {
     bands: BandScratch,
     dynalloc: DynallocAnalysisScratch,
     tf_analysis: TfAnalysisScratch,
+    coarse_energy: CoarseEnergyScratch,
 }
 
 fn validate_spectral_args(
@@ -1108,6 +1116,65 @@ pub fn encode_spectral_frame_with_scratch(
     mode: &CeltMode,
     config: &CeltFrameConfig,
     x: &mut [f32],
+    y: Option<&mut [f32]>,
+    band_e: &[f32],
+    old_band_e: &mut [f32],
+    energy_error: &mut [f32],
+    delayed_intra: &mut f32,
+    seed: &mut u32,
+    scratch: &mut CeltFrameEncodeScratch,
+) -> Result<CeltFrameEncodeResult> {
+    encode_spectral_frame_with_scratch_inner(
+        mode,
+        config,
+        x,
+        y,
+        band_e,
+        old_band_e,
+        energy_error,
+        delayed_intra,
+        seed,
+        scratch,
+        Vec::new(),
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_spectral_frame_reusing_buffer(
+    mode: &CeltMode,
+    config: &CeltFrameConfig,
+    x: &mut [f32],
+    y: Option<&mut [f32]>,
+    band_e: &[f32],
+    old_band_e: &mut [f32],
+    energy_error: &mut [f32],
+    delayed_intra: &mut f32,
+    seed: &mut u32,
+    scratch: &mut CeltFrameEncodeScratch,
+    packet_buffer: Vec<u8>,
+) -> Result<CeltFrameEncodeResult> {
+    encode_spectral_frame_with_scratch_inner(
+        mode,
+        config,
+        x,
+        y,
+        band_e,
+        old_band_e,
+        energy_error,
+        delayed_intra,
+        seed,
+        scratch,
+        packet_buffer,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_spectral_frame_with_scratch_inner(
+    mode: &CeltMode,
+    config: &CeltFrameConfig,
+    x: &mut [f32],
     mut y: Option<&mut [f32]>,
     band_e: &[f32],
     old_band_e: &mut [f32],
@@ -1115,6 +1182,8 @@ pub fn encode_spectral_frame_with_scratch(
     delayed_intra: &mut f32,
     seed: &mut u32,
     scratch: &mut CeltFrameEncodeScratch,
+    packet_buffer: Vec<u8>,
+    export_details: bool,
 ) -> Result<CeltFrameEncodeResult> {
     let n = validate_spectral_args(
         mode,
@@ -1135,7 +1204,7 @@ pub fn encode_spectral_frame_with_scratch(
         .vbr_state
         .map_or(config.packet_bytes, |vbr| vbr.effective_bytes);
     let eff_end = config.end.min(mode.eff_ebands);
-    let mut enc = RangeEncoder::with_extra_capacity(config.packet_bytes, 1);
+    let mut enc = RangeEncoder::with_buffer(config.packet_bytes, 1, packet_buffer);
     let silence = false;
     if enc.tell() == 1 && enc.tell() < total_bits {
         enc.encode_bit_logp(silence, 15);
@@ -1194,7 +1263,7 @@ pub fn encode_spectral_frame_with_scratch(
     }
     scratch.error.resize(band_count, 0.0);
     scratch.error[..band_count].fill(0.0);
-    quant_coarse_energy(
+    quant_coarse_energy_with_scratch(
         mode,
         config.start,
         config.end,
@@ -1212,6 +1281,7 @@ pub fn encode_spectral_frame_with_scratch(
         true,
         0,
         false,
+        &mut scratch.coarse_energy,
     );
     scratch.tf_res.resize(mode.nb_ebands, 0);
     scratch.tf_res[..mode.nb_ebands].fill(0);
@@ -1284,9 +1354,9 @@ pub fn encode_spectral_frame_with_scratch(
     let mut bits = total_bits_frac - enc.tell_frac() as i32 - 1;
     let anti_collapse_rsv = anti_collapse_reservation(is_transient, config.lm, bits);
     bits -= anti_collapse_rsv;
-    let allocation = {
+    let allocation_info = {
         let mut allocation_coder = AllocationCoder::Encode(&mut enc);
-        let info = clt_compute_allocation_with_scratch(
+        clt_compute_allocation_with_scratch(
             mode,
             config.start,
             config.end,
@@ -1302,8 +1372,7 @@ pub fn encode_spectral_frame_with_scratch(
             config.last_coded_bands,
             config.signal_bandwidth.min(config.end.saturating_sub(1)),
             &mut scratch.allocation,
-        );
-        scratch.allocation.to_allocation(info)
+        )
     };
 
     quant_fine_energy(
@@ -1312,7 +1381,7 @@ pub fn encode_spectral_frame_with_scratch(
         config.end,
         old_band_e,
         &mut scratch.error,
-        &allocation.ebits,
+        &scratch.allocation.ebits,
         &mut enc,
         config.channels,
     );
@@ -1323,31 +1392,32 @@ pub fn encode_spectral_frame_with_scratch(
     {
         let mut band_coder = BandCoder::Encode(&mut enc);
         if config.channels == 1 {
-            quant_all_bands_mono_with_scratch(
+            quant_all_bands_mono_with_scratch_and_coding(
                 mode,
                 config.start,
                 config.end,
                 x,
                 &mut scratch.collapse_masks,
                 band_e,
-                &allocation.pulses,
+                &scratch.allocation.pulses,
                 short_blocks,
                 spread,
-                allocation.intensity,
+                allocation_info.intensity,
                 &scratch.tf_res,
                 total_bits_frac - anti_collapse_rsv,
-                allocation.balance,
+                allocation_info.balance,
                 &mut band_coder,
                 config.lm,
-                allocation.coded_bands,
+                allocation_info.coded_bands,
                 seed,
                 0,
                 false,
+                config.experimental_direct_cubic,
                 &mut scratch.bands,
             );
         } else {
             let y = y.as_deref_mut().ok_or(Error::BadArg)?;
-            quant_all_bands_stereo_with_scratch(
+            quant_all_bands_stereo_with_scratch_and_coding(
                 mode,
                 config.start,
                 config.end,
@@ -1355,21 +1425,22 @@ pub fn encode_spectral_frame_with_scratch(
                 y,
                 &mut scratch.collapse_masks,
                 band_e,
-                &allocation.pulses,
+                &scratch.allocation.pulses,
                 short_blocks,
                 spread,
-                allocation.dual_stereo,
-                allocation.intensity,
+                allocation_info.dual_stereo,
+                allocation_info.intensity,
                 &scratch.tf_res,
                 total_bits_frac - anti_collapse_rsv,
-                allocation.balance,
+                allocation_info.balance,
                 &mut band_coder,
                 config.lm,
-                allocation.coded_bands,
+                allocation_info.coded_bands,
                 seed,
                 9,
                 config.disable_inv,
                 false,
+                config.experimental_direct_cubic,
                 &mut scratch.bands,
             );
         }
@@ -1384,8 +1455,8 @@ pub fn encode_spectral_frame_with_scratch(
         config.end,
         old_band_e,
         &mut scratch.error,
-        &allocation.ebits,
-        &allocation.fine_priority,
+        &scratch.allocation.ebits,
+        &scratch.allocation.fine_priority,
         total_bits - enc.tell(),
         &mut enc,
         config.channels,
@@ -1413,11 +1484,33 @@ pub fn encode_spectral_frame_with_scratch(
         }
     }
 
+    let allocation = if export_details {
+        scratch.allocation.to_allocation(allocation_info)
+    } else {
+        Allocation {
+            coded_bands: allocation_info.coded_bands,
+            balance: allocation_info.balance,
+            pulses: Vec::new(),
+            ebits: Vec::new(),
+            fine_priority: Vec::new(),
+            intensity: allocation_info.intensity,
+            dual_stereo: allocation_info.dual_stereo,
+        }
+    };
+
     Ok(CeltFrameEncodeResult {
         data: enc.into_range_data(),
         allocation,
-        tf_res: scratch.tf_res.clone(),
-        collapse_masks: scratch.collapse_masks.clone(),
+        tf_res: if export_details {
+            scratch.tf_res.clone()
+        } else {
+            Vec::new()
+        },
+        collapse_masks: if export_details {
+            scratch.collapse_masks.clone()
+        } else {
+            Vec::new()
+        },
         silence,
         prefilter_symbol,
         is_transient,
@@ -1615,7 +1708,7 @@ fn decode_spectral_frame_into_impl(
     {
         let mut band_coder = BandCoder::Decode(&mut dec);
         if config.channels == 1 {
-            quant_all_bands_mono_with_scratch(
+            quant_all_bands_mono_with_scratch_and_coding(
                 mode,
                 config.start,
                 config.end,
@@ -1635,10 +1728,11 @@ fn decode_spectral_frame_into_impl(
                 seed,
                 0,
                 false,
+                config.experimental_direct_cubic,
                 &mut scratch.bands,
             );
         } else {
-            quant_all_bands_stereo_with_scratch(
+            quant_all_bands_stereo_with_scratch_and_coding(
                 mode,
                 config.start,
                 config.end,
@@ -1661,6 +1755,7 @@ fn decode_spectral_frame_into_impl(
                 0,
                 config.disable_inv,
                 false,
+                config.experimental_direct_cubic,
                 &mut scratch.bands,
             );
         }

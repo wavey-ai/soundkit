@@ -1,6 +1,11 @@
 /target/
 .DS_Store
 
+# Local profiler and benchmark output.
+*.cpuprofile.json
+/wasm-browser-*.json
+/crates/*/Cargo.lock
+
 # Local audio comparison fixtures and generated roundtrip artifacts.
 /testdata/
 /roundtrips/

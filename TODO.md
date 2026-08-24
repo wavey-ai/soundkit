@@ -1,15 +1,19 @@
 # TODO
 
-This roadmap targets the best safe Rust CELT implementation. It does not target
-one libopus release or encoder byte identity.
+This roadmap targets the best Rust CELT implementation with a safe public codec
+crate. It does not target one libopus release or encoder byte identity.
 
 Use stable libopus and upstream main as evidence. Preserve packet
 interoperability. Let real-audio quality tests decide between valid encoders.
 
 ## Current 48 kHz Baseline
 
-- Keep `#![forbid(unsafe_code)]` intact.
+- Keep `#![forbid(unsafe_code)]` intact in the public codec crate.
+- Keep audited unsafe kernels in the private kernel crate behind checked safe
+  functions.
 - Support mono and stereo 48 kHz CELT-only fullband raw packets.
+- Focus encoder quality and performance work on 192, 256, and 320 kb/s stereo;
+  retain lower bitrates as regression coverage.
 - Support 2.5, 5, 10, and 20 ms frames.
 - Support CBR, constrained VBR, and exact compressed-frame-byte controls.
 - Decode one CELT frame per packet through reusable i16 and f32 output paths.
@@ -35,7 +39,8 @@ current upstream code correctly rejects.
 ## P0: Establish a Quality Gate
 
 - Build a licensed corpus with music, speech, transients, ambience, and tonal signals.
-- Cover every frame duration and representative low, medium, and high bitrates.
+- Gate the 192, 256, and 320 kb/s stereo transparency candidates first, while
+  retaining representative low and medium rates as regression coverage.
 - Add a reproducible perceptual metric and delay-aligned diagnostic metrics.
 - Add blinded listening tests for changes that affect encoder decisions.
 - Keep malformed-packet, cross-decode, and exact-budget tests as hard gates.

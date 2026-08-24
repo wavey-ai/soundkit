@@ -269,8 +269,40 @@ fn pitch_downsample(
 
 fn pitch_xcorr(x: &[f32], y: &[f32], len: usize, max_pitch: usize, xcorr: &mut Vec<f32>) {
     xcorr.resize(max_pitch, 0.0);
-    for i in 0..max_pitch {
-        xcorr[i] = inner_prod(x, &y[i..], len);
+    debug_assert!(x.len() >= len);
+    debug_assert!(y.len() >= len + max_pitch.saturating_sub(1));
+
+    // Match libopus' optimized xcorr shape: each SIMD lane accumulates one
+    // adjacent lag. Compared with calling `inner_prod` four times this reuses
+    // every x sample, turns the four shifted y reads into one contiguous SIMD
+    // load, and avoids four horizontal reductions.
+    #[cfg(target_arch = "x86_64")]
+    let grouped = max_pitch / 8 * 8;
+    #[cfg(not(target_arch = "x86_64"))]
+    let grouped = max_pitch / 4 * 4;
+
+    #[cfg(target_arch = "x86_64")]
+    let used_native_simd =
+        libopus_rs_kernels::pitch_xcorr_8(x, y, len, grouped, &mut xcorr[..grouped]);
+    #[cfg(target_arch = "aarch64")]
+    let used_native_simd =
+        libopus_rs_kernels::pitch_xcorr_4(x, y, len, grouped, &mut xcorr[..grouped]);
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let used_native_simd = false;
+
+    if !used_native_simd {
+        for lag in (0..grouped).step_by(4) {
+            let mut sums = f32x4::ZERO;
+            let y_windows = y[lag..lag + len + 3].windows(4);
+            for (&x_sample, y_window) in x[..len].iter().zip(y_windows) {
+                let y_lags = f32x4::new([y_window[0], y_window[1], y_window[2], y_window[3]]);
+                sums = y_lags.mul_add(f32x4::splat(x_sample), sums);
+            }
+            xcorr[lag..lag + 4].copy_from_slice(&sums.to_array());
+        }
+    }
+    for lag in grouped..max_pitch {
+        xcorr[lag] = inner_prod(x, &y[lag..], len);
     }
 }
 
@@ -366,6 +398,11 @@ fn compute_pitch_gain(xy: f32, xx: f32, yy: f32) -> f32 {
 }
 
 fn dual_inner_prod(x: &[f32], y01: &[f32], y02: &[f32], n: usize) -> (f32, f32) {
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    if let Some(result) = libopus_rs_kernels::dual_inner_prod_f32(x, y01, y02, n) {
+        return result;
+    }
+
     let mut xy01 = f32x4::ZERO;
     let mut xy02 = f32x4::ZERO;
     let mut i = 0usize;

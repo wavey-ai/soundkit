@@ -36,6 +36,42 @@ export class DecodeResult {
 }
 if (Symbol.dispose) DecodeResult.prototype[Symbol.dispose] = DecodeResult.prototype.free;
 
+export class DecodeResultI24 {
+    static __wrap(ptr) {
+        const obj = Object.create(DecodeResultI24.prototype);
+        obj.__wbg_ptr = ptr;
+        DecodeResultI24Finalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        DecodeResultI24Finalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_decoderesulti24_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get decodedSize() {
+        const ret = wasm.decoderesulti24_decodedSize(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {Int32Array}
+     */
+    get output() {
+        const ret = wasm.decoderesulti24_output(this.__wbg_ptr);
+        var v1 = getArrayI32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+}
+if (Symbol.dispose) DecodeResultI24.prototype[Symbol.dispose] = DecodeResultI24.prototype.free;
+
 export class Decoder {
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
@@ -59,6 +95,32 @@ export class Decoder {
             throw takeFromExternrefTable0(ret[1]);
         }
         return DecodeResult.__wrap(ret[0]);
+    }
+    /**
+     * @param {Uint8Array} packet
+     * @returns {DecodeResultI24}
+     */
+    dec_frame_i24(packet) {
+        const ptr0 = passArray8ToWasm0(packet, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.decoder_dec_frame_i24(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return DecodeResultI24.__wrap(ret[0]);
+    }
+    /**
+     * @param {Uint8Array} packet
+     * @returns {number}
+     */
+    dec_frame_i24_reuse(packet) {
+        const ptr0 = passArray8ToWasm0(packet, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.decoder_dec_frame_i24_reuse(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
     }
     /**
      * @param {Uint8Array} packet
@@ -97,6 +159,20 @@ export class Decoder {
         this.__wbg_ptr = ret[0];
         DecoderFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * @returns {number}
+     */
+    get outputI24Len() {
+        const ret = wasm.decoder_outputI24Len(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get outputI24Ptr() {
+        const ret = wasm.decoder_outputI24Ptr(this.__wbg_ptr);
+        return ret >>> 0;
     }
     /**
      * @returns {number}
@@ -180,6 +256,73 @@ export class Encoder {
         return EncodeResult.__wrap(ret[0]);
     }
     /**
+     * @param {Int32Array} input
+     * @returns {EncodeResult}
+     */
+    enc_frame_i24(input) {
+        const ptr0 = passArray32ToWasm0(input, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.encoder_enc_frame_i24(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return EncodeResult.__wrap(ret[0]);
+    }
+    /**
+     * Encodes signed 24-bit samples from this encoder's staged `i32` input.
+     * @returns {number}
+     */
+    enc_frame_i24_reuse() {
+        const ret = wasm.encoder_enc_frame_i24_reuse(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * Encodes the samples in this encoder's input storage into its output
+     * storage and returns the packet size.
+     *
+     * JavaScript callers fill `inputPtr..inputLen`, then read the packet through
+     * `outputPtr..outputLen`. Views must be refreshed after Wasm memory grows.
+     * @returns {number}
+     */
+    enc_frame_reuse() {
+        const ret = wasm.encoder_enc_frame_reuse(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get inputI24Len() {
+        const ret = wasm.encoder_inputI24Len(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get inputI24Ptr() {
+        const ret = wasm.encoder_inputI24Ptr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get inputLen() {
+        const ret = wasm.encoder_inputLen(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get inputPtr() {
+        const ret = wasm.encoder_inputPtr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * @param {number} channels
      * @param {number} sample_rate
      * @param {number} bitrate
@@ -193,6 +336,20 @@ export class Encoder {
         this.__wbg_ptr = ret[0];
         EncoderFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * @returns {number}
+     */
+    get outputLen() {
+        const ret = wasm.encoder_outputLen(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get outputPtr() {
+        const ret = wasm.encoder_outputPtr(this.__wbg_ptr);
+        return ret >>> 0;
     }
     /**
      * @param {boolean} enabled
@@ -235,6 +392,9 @@ function __wbg_get_imports() {
 const DecodeResultFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_decoderesult_free(ptr, 1));
+const DecodeResultI24Finalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_decoderesulti24_free(ptr, 1));
 const DecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_decoder_free(ptr, 1));
@@ -250,6 +410,11 @@ function getArrayI16FromWasm0(ptr, len) {
     return getInt16ArrayMemory0().subarray(ptr / 2, ptr / 2 + len);
 }
 
+function getArrayI32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getInt32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
@@ -261,6 +426,14 @@ function getInt16ArrayMemory0() {
         cachedInt16ArrayMemory0 = new Int16Array(wasm.memory.buffer);
     }
     return cachedInt16ArrayMemory0;
+}
+
+let cachedInt32ArrayMemory0 = null;
+function getInt32ArrayMemory0() {
+    if (cachedInt32ArrayMemory0 === null || cachedInt32ArrayMemory0.byteLength === 0) {
+        cachedInt32ArrayMemory0 = new Int32Array(wasm.memory.buffer);
+    }
+    return cachedInt32ArrayMemory0;
 }
 
 function getStringFromWasm0(ptr, len) {
@@ -275,6 +448,14 @@ function getUint16ArrayMemory0() {
     return cachedUint16ArrayMemory0;
 }
 
+let cachedUint32ArrayMemory0 = null;
+function getUint32ArrayMemory0() {
+    if (cachedUint32ArrayMemory0 === null || cachedUint32ArrayMemory0.byteLength === 0) {
+        cachedUint32ArrayMemory0 = new Uint32Array(wasm.memory.buffer);
+    }
+    return cachedUint32ArrayMemory0;
+}
+
 let cachedUint8ArrayMemory0 = null;
 function getUint8ArrayMemory0() {
     if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.byteLength === 0) {
@@ -286,6 +467,13 @@ function getUint8ArrayMemory0() {
 function passArray16ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 2, 2) >>> 0;
     getUint16ArrayMemory0().set(arg, ptr / 2);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArray32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getUint32ArrayMemory0().set(arg, ptr / 4);
     WASM_VECTOR_LEN = arg.length;
     return ptr;
 }
@@ -325,7 +513,9 @@ function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
     wasmModule = module;
     cachedInt16ArrayMemory0 = null;
+    cachedInt32ArrayMemory0 = null;
     cachedUint16ArrayMemory0 = null;
+    cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

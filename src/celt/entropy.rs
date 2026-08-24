@@ -49,14 +49,34 @@ pub struct RangeEncoder {
     error: i32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RangeEncoderSnapshot {
+    end_offs: u32,
+    end_window: u32,
+    nend_bits: i32,
+    nbits_total: i32,
+    pub(crate) offs: u32,
+    rng: u32,
+    val: u32,
+    ext: u32,
+    rem: i32,
+    error: i32,
+}
+
 impl RangeEncoder {
     pub fn new(size: usize) -> Self {
         Self::with_extra_capacity(size, 0)
     }
 
     pub(crate) fn with_extra_capacity(size: usize, extra_capacity: usize) -> Self {
-        let mut buf = Vec::with_capacity(size.saturating_add(extra_capacity));
+        Self::with_buffer(size, extra_capacity, Vec::new())
+    }
+
+    pub(crate) fn with_buffer(size: usize, extra_capacity: usize, mut buf: Vec<u8>) -> Self {
+        let required_capacity = size.saturating_add(extra_capacity);
+        buf.reserve(required_capacity.saturating_sub(buf.len()));
         buf.resize(size, 0);
+        buf.fill(0);
         Self {
             buf,
             storage: size as u32,
@@ -96,6 +116,59 @@ impl RangeEncoder {
 
     pub(crate) fn final_range(&self) -> u32 {
         self.rng
+    }
+
+    pub(crate) fn snapshot(&self) -> RangeEncoderSnapshot {
+        RangeEncoderSnapshot {
+            end_offs: self.end_offs,
+            end_window: self.end_window,
+            nend_bits: self.nend_bits,
+            nbits_total: self.nbits_total,
+            offs: self.offs,
+            rng: self.rng,
+            val: self.val,
+            ext: self.ext,
+            rem: self.rem,
+            error: self.error,
+        }
+    }
+
+    pub(crate) fn restore(&mut self, snapshot: RangeEncoderSnapshot) {
+        self.end_offs = snapshot.end_offs;
+        self.end_window = snapshot.end_window;
+        self.nend_bits = snapshot.nend_bits;
+        self.nbits_total = snapshot.nbits_total;
+        self.offs = snapshot.offs;
+        self.rng = snapshot.rng;
+        self.val = snapshot.val;
+        self.ext = snapshot.ext;
+        self.rem = snapshot.rem;
+        self.error = snapshot.error;
+    }
+
+    pub(crate) fn copy_buffer_tail_into(&self, start: usize, saved: &mut Vec<u8>) {
+        let end = self.storage as usize;
+        debug_assert!(start <= end);
+        saved.clear();
+        saved.extend_from_slice(&self.buf[start..end]);
+    }
+
+    pub(crate) fn restore_buffer_tail(&mut self, start: usize, saved: &[u8]) {
+        let end = self.storage as usize;
+        debug_assert_eq!(saved.len(), end.saturating_sub(start));
+        self.buf[start..end].copy_from_slice(saved);
+    }
+
+    pub(crate) fn copy_buffer_range_into(&self, start: usize, end: usize, saved: &mut Vec<u8>) {
+        debug_assert!(start <= end && end <= self.storage as usize);
+        saved.clear();
+        saved.extend_from_slice(&self.buf[start..end]);
+    }
+
+    pub(crate) fn restore_buffer_range(&mut self, start: usize, saved: &[u8]) {
+        let end = start + saved.len();
+        debug_assert!(end <= self.storage as usize);
+        self.buf[start..end].copy_from_slice(saved);
     }
 
     pub fn storage_bytes(&self) -> usize {
@@ -565,4 +638,45 @@ fn tell_frac(nbits_total: i32, rng: u32) -> u32 {
     b += usize::from(r > CORRECTION[b]);
     l = (l << 3) + b as i32;
     nbits - l as u32
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::RangeEncoder;
+
+    fn encode_candidate(encoder: &mut RangeEncoder, offset: u32) {
+        for i in 0..48 {
+            let value = (i + offset) % 7;
+            encoder.encode(value, value + 1, 7);
+        }
+    }
+
+    #[test]
+    fn scalar_snapshot_and_saved_tail_restore_an_encoded_candidate() {
+        let mut encoder = RangeEncoder::with_extra_capacity(64, 1);
+        for i in 0..24 {
+            encoder.encode_bit_logp(i % 3 == 0, 2);
+        }
+
+        let mut expected = encoder.clone();
+        encode_candidate(&mut expected, 1);
+        expected.finish();
+        let expected_range = expected.final_range();
+        let expected_data = expected.into_range_data();
+
+        let start = encoder.snapshot();
+        encode_candidate(&mut encoder, 1);
+        let selected = encoder.snapshot();
+        let mut selected_bytes = Vec::new();
+        encoder.copy_buffer_tail_into(start.offs as usize, &mut selected_bytes);
+
+        encoder.restore(start);
+        encode_candidate(&mut encoder, 5);
+        encoder.restore(selected);
+        encoder.restore_buffer_tail(start.offs as usize, &selected_bytes);
+        encoder.finish();
+
+        assert_eq!(encoder.final_range(), expected_range);
+        assert_eq!(encoder.into_range_data(), expected_data);
+    }
 }

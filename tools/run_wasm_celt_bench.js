@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-const fs = require("fs");
-const { performance } = require("perf_hooks");
+import fs from "node:fs";
+import { performance } from "node:perf_hooks";
 
 const [, , scalarPath, simdPath] = process.argv;
 if (!scalarPath || !simdPath) {
@@ -41,7 +41,7 @@ function timeBench(bench, frameSize, bitrate, seconds, repeats) {
 (async () => {
   const repeats = Number(process.env.REPEATS || 9);
   const seconds = Number(process.env.AUDIO_SECONDS || 2);
-  const bitrate = Number(process.env.BITRATE || 128_000);
+  const bitrate = Number(process.env.BITRATE || 192_000);
   const scalar = await loadBench(scalarPath);
   const simd = await loadBench(simdPath);
 

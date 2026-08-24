@@ -1,8 +1,8 @@
 {
   "name": "libopus-rs",
   "type": "module",
-  "description": "Pure Rust port of libopus 1.5.2",
-  "version": "0.0.1",
+  "description": "Pure Rust implementation of the Opus audio codec",
+  "version": "0.0.2",
   "license": "BSD-3-Clause",
   "repository": {
     "type": "git",

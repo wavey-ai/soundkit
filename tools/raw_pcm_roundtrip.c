@@ -123,7 +123,7 @@ int main(int argc, char **argv) {
 
     int error = OPUS_OK;
     OpusEncoder *encoder = opus_encoder_create(
-        SAMPLE_RATE, CHANNELS, OPUS_APPLICATION_RESTRICTED_LOWDELAY, &error);
+        SAMPLE_RATE, CHANNELS, OPUS_APPLICATION_AUDIO, &error);
     check_opus(error, "opus_encoder_create");
     OpusDecoder *decoder = opus_decoder_create(SAMPLE_RATE, CHANNELS, &error);
     check_opus(error, "opus_decoder_create");

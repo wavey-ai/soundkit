@@ -3,7 +3,7 @@ use crate::celt::bands::{
     compute_band_energies, hysteresis_decision, normalise_bands, spreading_decision, SPREAD_NORMAL,
 };
 use crate::celt::codec::{
-    encode_spectral_frame_with_scratch, CeltFrameConfig, CeltFrameEncodeScratch, CeltVbrConfig,
+    encode_spectral_frame_reusing_buffer, CeltFrameConfig, CeltFrameEncodeScratch, CeltVbrConfig,
 };
 use crate::celt::mathops::{celt_log2, celt_sqrt};
 use crate::celt::mdct::{clt_mdct_forward_with_scratch, MdctScratch};
@@ -16,6 +16,7 @@ use crate::celt::quant_bands::{amp2_log2, E_MEANS};
 use crate::constants::{valid_channels, valid_sample_rate, PCM_I24_MAX, PCM_I24_MIN};
 use crate::packet;
 use crate::{Error, Result};
+use wide::{i32x8, CmpGt, CmpLt};
 
 pub const CELT_FRAME_SIZES_48K: [usize; 4] = [120, 240, 480, 960];
 pub const CELT_MIN_BITRATE: i32 = 500;
@@ -33,6 +34,7 @@ const INTENSITY_HYSTERESIS: [f32; 21] = [
 ];
 const CELT_SIG_SCALE: f32 = 32_768.0;
 const BITRES: i32 = 3;
+const I24_TO_F32_SCALE: f32 = 1.0 / 8_388_608.0;
 const TRANSIENT_INV_TABLE: [u8; 128] = [
     255, 255, 156, 110, 86, 70, 59, 51, 45, 40, 37, 33, 31, 28, 26, 25, 23, 22, 21, 20, 19, 18, 17,
     16, 16, 15, 15, 14, 13, 13, 12, 12, 12, 12, 11, 11, 11, 10, 10, 10, 9, 9, 9, 9, 9, 9, 8, 8, 8,
@@ -40,6 +42,45 @@ const TRANSIENT_INV_TABLE: [u8; 128] = [
     5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3,
     3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2,
 ];
+
+#[inline]
+fn convert_i24_to_f32(input: &[i32], output: &mut [f32]) -> bool {
+    if output.len() < input.len() {
+        return false;
+    }
+
+    let minimum = i32x8::splat(PCM_I24_MIN);
+    let maximum = i32x8::splat(PCM_I24_MAX);
+    let scale = wide::f32x8::splat(I24_TO_F32_SCALE);
+    let vectorized = input.len() & !7;
+    let mut offset = 0usize;
+    while offset < vectorized {
+        let samples = i32x8::new([
+            input[offset],
+            input[offset + 1],
+            input[offset + 2],
+            input[offset + 3],
+            input[offset + 4],
+            input[offset + 5],
+            input[offset + 6],
+            input[offset + 7],
+        ]);
+        if samples.cmp_lt(minimum).any() || samples.cmp_gt(maximum).any() {
+            return false;
+        }
+        output[offset..offset + 8].copy_from_slice(&(samples.round_float() * scale).to_array());
+        offset += 8;
+    }
+    while offset < input.len() {
+        let sample = input[offset];
+        if !(PCM_I24_MIN..=PCM_I24_MAX).contains(&sample) {
+            return false;
+        }
+        output[offset] = sample as f32 * I24_TO_F32_SCALE;
+        offset += 1;
+    }
+    true
+}
 
 #[derive(Clone, Copy, Debug)]
 struct TransientAnalysis {
@@ -89,7 +130,8 @@ pub struct Encoder {
     sample_rate: i32,
     channels: usize,
     application: Application,
-    mode: CeltMode,
+    experimental_direct_cubic: bool,
+    mode: &'static CeltMode,
     bitrate: i32,
     old_band_e: Vec<f32>,
     energy_error: Vec<f32>,
@@ -134,12 +176,13 @@ impl Encoder {
         if !valid_sample_rate(sample_rate) || !valid_channels(channels as i32) {
             return Err(Error::BadArg);
         }
-        let mode = CeltMode::standard_48k();
+        let mode = CeltMode::standard_48k_shared();
         let bitrate = if channels == 1 { 64_000 } else { 96_000 };
         Ok(Self {
             sample_rate,
             channels,
             application,
+            experimental_direct_cubic: false,
             bitrate,
             old_band_e: vec![0.0; channels * mode.nb_ebands],
             energy_error: vec![0.0; channels * mode.nb_ebands],
@@ -199,6 +242,19 @@ impl Encoder {
 
     pub const fn vbr(&self) -> bool {
         self.vbr
+    }
+
+    /// Reports whether this encoder uses the experimental direct-cubic packet syntax.
+    pub const fn experimental_direct_cubic(&self) -> bool {
+        self.experimental_direct_cubic
+    }
+
+    /// Selects the experimental direct-cubic packet syntax.
+    ///
+    /// Set the same value on the decoder before it decodes these packets. This
+    /// mode is not compatible with standard Opus decoders.
+    pub fn set_experimental_direct_cubic(&mut self, enabled: bool) {
+        self.experimental_direct_cubic = enabled;
     }
 
     pub fn set_bitrate(&mut self, bitrate: i32) -> Result<()> {
@@ -732,13 +788,15 @@ impl Encoder {
         }
     }
 
-    fn encode_filtered_f32_with_frame_bytes(
+    fn encode_filtered_f32_with_frame_bytes_into(
         &mut self,
         pcm: &mut [f32],
         frame_size: usize,
         frame_bytes: usize,
         allow_vbr_shrink: bool,
-    ) -> Result<Vec<u8>> {
+        packet: &mut Vec<u8>,
+    ) -> Result<usize> {
+        let packet_buffer = std::mem::take(packet);
         let mut scratch = std::mem::take(&mut self.frame_scratch);
         let result = self.encode_filtered_f32_with_frame_bytes_inner(
             pcm,
@@ -746,9 +804,16 @@ impl Encoder {
             frame_bytes,
             allow_vbr_shrink,
             &mut scratch,
+            packet_buffer,
         );
         self.frame_scratch = scratch;
-        result
+        match result {
+            Ok(encoded) => {
+                *packet = encoded;
+                Ok(packet.len())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn encode_filtered_f32_with_frame_bytes_inner(
@@ -758,11 +823,13 @@ impl Encoder {
         frame_bytes: usize,
         allow_vbr_shrink: bool,
         scratch: &mut EncoderFrameScratch,
+        packet_buffer: Vec<u8>,
     ) -> Result<Vec<u8>> {
         let lm = self.frame_lm(frame_size)?;
         Self::validate_frame_bytes(frame_bytes)?;
         let stream_channels = self.choose_stream_channels(frame_size);
         let mut config = CeltFrameConfig::new(&self.mode, lm, stream_channels, frame_bytes)?;
+        config.experimental_direct_cubic = self.experimental_direct_cubic;
         config.spread = SPREAD_NORMAL;
         config.last_coded_bands = self.last_coded_bands;
         config.vbr = self.vbr;
@@ -798,8 +865,13 @@ impl Encoder {
         scratch.inputs.resize_with(self.channels, Vec::new);
         for c in 0..self.channels {
             let input = &mut scratch.inputs[c];
-            input.resize(2 * n, 0.0);
-            input[..2 * n].fill(0.0);
+            // Only [0, n + overlap) is ever written below; the remaining tail
+            // must stay zero. Skip the per-frame fill when the buffer already
+            // has the right length and its tail was never dirtied.
+            if input.len() != 2 * n {
+                input.resize(2 * n, 0.0);
+                input[..2 * n].fill(0.0);
+            }
             input[..overlap].copy_from_slice(&self.overlap_mem[c]);
             for i in 0..n {
                 let sample = pcm[i * self.channels + c] * CELT_SIG_SCALE;
@@ -874,8 +946,8 @@ impl Encoder {
             self.overlap_mem[c].copy_from_slice(&scratch.inputs[c][n..n + overlap]);
         }
 
+        // compute_mdcts fully rewrites freq[0..channels * n]; no pre-fill needed.
         scratch.freq.resize(self.channels * n, 0.0);
-        scratch.freq[..self.channels * n].fill(0.0);
         let short_blocks = if config.is_transient { m } else { 0 };
         Self::compute_mdcts(
             &self.mode,
@@ -1120,7 +1192,7 @@ impl Encoder {
         }
 
         let encoded = if stream_channels == 1 {
-            encode_spectral_frame_with_scratch(
+            encode_spectral_frame_reusing_buffer(
                 &self.mode,
                 &config,
                 &mut scratch.norm,
@@ -1131,10 +1203,11 @@ impl Encoder {
                 &mut self.delayed_intra,
                 &mut self.seed,
                 &mut self.spectral_scratch,
+                packet_buffer,
             )?
         } else {
             let (left, right) = scratch.norm.split_at_mut(n);
-            encode_spectral_frame_with_scratch(
+            encode_spectral_frame_reusing_buffer(
                 &self.mode,
                 &config,
                 left,
@@ -1145,6 +1218,7 @@ impl Encoder {
                 &mut self.delayed_intra,
                 &mut self.seed,
                 &mut self.spectral_scratch,
+                packet_buffer,
             )?
         };
         if stream_channels == 2 {
@@ -1203,6 +1277,18 @@ impl Encoder {
     }
 
     pub fn encode_i16(&mut self, pcm: &[i16], frame_size: usize) -> Result<Vec<u8>> {
+        let mut packet = Vec::new();
+        self.encode_i16_into(pcm, frame_size, &mut packet)?;
+        Ok(packet)
+    }
+
+    /// Encodes 16-bit PCM into a reusable packet buffer.
+    pub fn encode_i16_into(
+        &mut self,
+        pcm: &[i16],
+        frame_size: usize,
+        packet: &mut Vec<u8>,
+    ) -> Result<usize> {
         let required = frame_size * self.channels;
         if pcm.len() < required {
             return Err(Error::BadArg);
@@ -1212,7 +1298,7 @@ impl Encoder {
         for (dst, src) in pcm_f32.iter_mut().zip(pcm.iter().take(required)) {
             *dst = *src as f32 / 32768.0;
         }
-        let result = self.encode_f32(&pcm_f32, frame_size);
+        let result = self.encode_f32_into(&pcm_f32, frame_size, packet);
         self.pcm_f32_scratch = pcm_f32;
         result
     }
@@ -1223,6 +1309,19 @@ impl Encoder {
         frame_size: usize,
         frame_bytes: usize,
     ) -> Result<Vec<u8>> {
+        let mut packet = Vec::new();
+        self.encode_i16_with_frame_bytes_into(pcm, frame_size, frame_bytes, &mut packet)?;
+        Ok(packet)
+    }
+
+    /// Encodes 16-bit PCM to an exact byte budget into a reusable packet buffer.
+    pub fn encode_i16_with_frame_bytes_into(
+        &mut self,
+        pcm: &[i16],
+        frame_size: usize,
+        frame_bytes: usize,
+        packet: &mut Vec<u8>,
+    ) -> Result<usize> {
         let required = frame_size * self.channels;
         if pcm.len() < required {
             return Err(Error::BadArg);
@@ -1232,7 +1331,8 @@ impl Encoder {
         for (dst, src) in pcm_f32.iter_mut().zip(pcm.iter().take(required)) {
             *dst = *src as f32 / 32768.0;
         }
-        let result = self.encode_f32_with_frame_bytes(&pcm_f32, frame_size, frame_bytes);
+        let result =
+            self.encode_f32_with_frame_bytes_into(&pcm_f32, frame_size, frame_bytes, packet);
         self.pcm_f32_scratch = pcm_f32;
         result
     }
@@ -1241,21 +1341,32 @@ impl Encoder {
     ///
     /// Every sample must be in `PCM_I24_MIN..=PCM_I24_MAX`.
     pub fn encode_i24(&mut self, pcm: &[i32], frame_size: usize) -> Result<Vec<u8>> {
+        let mut packet = Vec::new();
+        self.encode_i24_into(pcm, frame_size, &mut packet)?;
+        Ok(packet)
+    }
+
+    /// Encodes signed 24-bit PCM into a reusable packet buffer.
+    ///
+    /// Samples are stored sign-extended in `i32` and must be in
+    /// `PCM_I24_MIN..=PCM_I24_MAX`.
+    pub fn encode_i24_into(
+        &mut self,
+        pcm: &[i32],
+        frame_size: usize,
+        packet: &mut Vec<u8>,
+    ) -> Result<usize> {
         let required = frame_size * self.channels;
-        if pcm.len() < required
-            || pcm
-                .iter()
-                .take(required)
-                .any(|&sample| !(PCM_I24_MIN..=PCM_I24_MAX).contains(&sample))
-        {
+        if pcm.len() < required {
             return Err(Error::BadArg);
         }
         let mut pcm_f32 = std::mem::take(&mut self.pcm_f32_scratch);
         pcm_f32.resize(required, 0.0);
-        for (dst, src) in pcm_f32.iter_mut().zip(pcm.iter().take(required)) {
-            *dst = *src as f32 / 8_388_608.0;
+        if !convert_i24_to_f32(&pcm[..required], &mut pcm_f32) {
+            self.pcm_f32_scratch = pcm_f32;
+            return Err(Error::BadArg);
         }
-        let result = self.encode_f32(&pcm_f32, frame_size);
+        let result = self.encode_f32_into(&pcm_f32, frame_size, packet);
         self.pcm_f32_scratch = pcm_f32;
         result
     }
@@ -1270,26 +1381,52 @@ impl Encoder {
         frame_size: usize,
         frame_bytes: usize,
     ) -> Result<Vec<u8>> {
+        let mut packet = Vec::new();
+        self.encode_i24_with_frame_bytes_into(pcm, frame_size, frame_bytes, &mut packet)?;
+        Ok(packet)
+    }
+
+    /// Encodes signed 24-bit PCM to an exact byte budget into a reusable packet
+    /// buffer.
+    ///
+    /// Samples are stored sign-extended in `i32` and must be in
+    /// `PCM_I24_MIN..=PCM_I24_MAX`.
+    pub fn encode_i24_with_frame_bytes_into(
+        &mut self,
+        pcm: &[i32],
+        frame_size: usize,
+        frame_bytes: usize,
+        packet: &mut Vec<u8>,
+    ) -> Result<usize> {
         let required = frame_size * self.channels;
-        if pcm.len() < required
-            || pcm
-                .iter()
-                .take(required)
-                .any(|&sample| !(PCM_I24_MIN..=PCM_I24_MAX).contains(&sample))
-        {
+        if pcm.len() < required {
             return Err(Error::BadArg);
         }
         let mut pcm_f32 = std::mem::take(&mut self.pcm_f32_scratch);
         pcm_f32.resize(required, 0.0);
-        for (dst, src) in pcm_f32.iter_mut().zip(pcm.iter().take(required)) {
-            *dst = *src as f32 / 8_388_608.0;
+        if !convert_i24_to_f32(&pcm[..required], &mut pcm_f32) {
+            self.pcm_f32_scratch = pcm_f32;
+            return Err(Error::BadArg);
         }
-        let result = self.encode_f32_with_frame_bytes(&pcm_f32, frame_size, frame_bytes);
+        let result =
+            self.encode_f32_with_frame_bytes_into(&pcm_f32, frame_size, frame_bytes, packet);
         self.pcm_f32_scratch = pcm_f32;
         result
     }
 
     pub fn encode_f32(&mut self, pcm: &[f32], frame_size: usize) -> Result<Vec<u8>> {
+        let mut packet = Vec::new();
+        self.encode_f32_into(pcm, frame_size, &mut packet)?;
+        Ok(packet)
+    }
+
+    /// Encodes floating-point PCM into a reusable packet buffer.
+    pub fn encode_f32_into(
+        &mut self,
+        pcm: &[f32],
+        frame_size: usize,
+        packet: &mut Vec<u8>,
+    ) -> Result<usize> {
         if self.sample_rate != 48_000 {
             return Err(Error::Unimplemented);
         }
@@ -1304,8 +1441,13 @@ impl Encoder {
         } else {
             self.frame_bytes_for_bitrate(frame_size)
         };
-        let result =
-            self.encode_filtered_f32_with_frame_bytes(&mut filtered, frame_size, frame_bytes, true);
+        let result = self.encode_filtered_f32_with_frame_bytes_into(
+            &mut filtered,
+            frame_size,
+            frame_bytes,
+            true,
+            packet,
+        );
         self.filtered_scratch = filtered;
         result
     }
@@ -1316,6 +1458,20 @@ impl Encoder {
         frame_size: usize,
         frame_bytes: usize,
     ) -> Result<Vec<u8>> {
+        let mut packet = Vec::new();
+        self.encode_f32_with_frame_bytes_into(pcm, frame_size, frame_bytes, &mut packet)?;
+        Ok(packet)
+    }
+
+    /// Encodes floating-point PCM to an exact byte budget into a reusable packet
+    /// buffer.
+    pub fn encode_f32_with_frame_bytes_into(
+        &mut self,
+        pcm: &[f32],
+        frame_size: usize,
+        frame_bytes: usize,
+        packet: &mut Vec<u8>,
+    ) -> Result<usize> {
         if self.sample_rate != 48_000 {
             return Err(Error::Unimplemented);
         }
@@ -1325,11 +1481,12 @@ impl Encoder {
         self.analysis_info = self.analysis.run(pcm, frame_size, self.channels);
         let mut filtered = std::mem::take(&mut self.filtered_scratch);
         self.dc_reject_frame_into(pcm, frame_size, &mut filtered);
-        let result = self.encode_filtered_f32_with_frame_bytes(
+        let result = self.encode_filtered_f32_with_frame_bytes_into(
             &mut filtered,
             frame_size,
             frame_bytes,
             false,
+            packet,
         );
         self.filtered_scratch = filtered;
         result

@@ -11,14 +11,16 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const DEFAULT_CASES = ["c", "rust-cbr", "rust-vbr"];
 const SUPPORTED_CASES = [...DEFAULT_CASES, "rust-cbr-reuse", "rust-vbr-reuse"];
-const DEFAULT_BITRATES = [48_000, 128_000, 196_000];
+const DEFAULT_BITRATES = [192_000, 256_000, 320_000];
 
 function usage() {
   console.error(`usage: node tools/run_browser_wasm_compare.mjs [options]
 
 Options:
   --seconds <n>        synthetic 48 kHz stereo fixture length (default: 10)
-  --bitrates <csv>     bitrates in bps (default: 48000,128000,196000)
+  --frame-size <n>     samples per channel: 120,240,480,960 (default: 960)
+  --pcm-bits <n>       PCM input/output depth: 16 or 24 (default: 16; Rust only for 24)
+  --bitrates <csv>     bitrates in bps (default: 192000,256000,320000)
   --cases <csv>        c,rust-cbr,rust-vbr,rust-cbr-reuse,rust-vbr-reuse (default: c,rust-cbr,rust-vbr)
   --repeats <n>        fresh Chrome runs per case; median is reported (default: 1)
   --timeout-ms <n>     timeout per browser run (default: 90000)
@@ -28,6 +30,8 @@ Options:
   --json <path>        also write raw result JSON
   --profile-rust-decode <path>
                       write a Chrome CPU profile for one Rust decode case
+  --profile-rust-encode <path>
+                      write a Chrome CPU profile for one Rust encode case
   --keep-open          keep the HTTP server running after the benchmark
   -h, --help           show this help
 `);
@@ -36,6 +40,8 @@ Options:
 function parseArgs(argv) {
   const options = {
     seconds: Number(process.env.BENCH_SECONDS || 10),
+    frameSize: Number(process.env.FRAME_SIZE || 960),
+    pcmBits: Number(process.env.PCM_BITS || 16),
     bitrates: DEFAULT_BITRATES,
     cases: DEFAULT_CASES,
     repeats: Number(process.env.REPEATS || 1),
@@ -45,6 +51,7 @@ function parseArgs(argv) {
     libopusjs: resolve(ROOT, "../libopusjs/release"),
     json: null,
     profileRustDecode: null,
+    profileRustEncode: null,
     keepOpen: false,
   };
 
@@ -66,6 +73,12 @@ function parseArgs(argv) {
         break;
       case "--seconds":
         options.seconds = Number(next());
+        break;
+      case "--frame-size":
+        options.frameSize = Number(next());
+        break;
+      case "--pcm-bits":
+        options.pcmBits = Number(next());
         break;
       case "--bitrates":
         options.bitrates = parseCsvNumbers(next(), arg);
@@ -94,6 +107,9 @@ function parseArgs(argv) {
       case "--profile-rust-decode":
         options.profileRustDecode = next();
         break;
+      case "--profile-rust-encode":
+        options.profileRustEncode = next();
+        break;
       case "--keep-open":
         options.keepOpen = true;
         break;
@@ -105,6 +121,12 @@ function parseArgs(argv) {
   if (!Number.isFinite(options.seconds) || options.seconds <= 0) {
     throw new Error("--seconds must be a positive number");
   }
+  if (![120, 240, 480, 960].includes(options.frameSize)) {
+    throw new Error("--frame-size must be 120, 240, 480, or 960");
+  }
+  if (![16, 24].includes(options.pcmBits)) {
+    throw new Error("--pcm-bits must be 16 or 24");
+  }
   if (!Number.isInteger(options.repeats) || options.repeats <= 0) {
     throw new Error("--repeats must be a positive integer");
   }
@@ -115,6 +137,9 @@ function parseArgs(argv) {
     if (!SUPPORTED_CASES.includes(name)) {
       throw new Error(`unknown case "${name}"; expected one of ${SUPPORTED_CASES.join(",")}`);
     }
+  }
+  if (options.pcmBits === 24 && options.cases.includes("c")) {
+    throw new Error("the libopusjs C wrapper does not expose signed-24 PCM; omit the c case");
   }
 
   return options;
@@ -137,7 +162,7 @@ function requireFile(path, label) {
   }
 }
 
-function makePage({ caseName, bitrate, seconds, cacheBust, profileDecode }) {
+function makePage({ caseName, bitrate, seconds, frameSize, pcmBits, cacheBust, profileMode }) {
   return `<!doctype html>
 <meta charset="utf-8">
 <title>libopus-rs browser wasm benchmark</title>
@@ -145,13 +170,14 @@ function makePage({ caseName, bitrate, seconds, cacheBust, profileDecode }) {
 <script type="module">
 const SAMPLE_RATE = 48000;
 const CHANNELS = 2;
-const FRAME_SIZE = 960;
+const FRAME_SIZE = ${frameSize};
 const FRAME_SAMPLES = FRAME_SIZE * CHANNELS;
+const PCM_BITS = ${pcmBits};
 const CASE_NAME = ${JSON.stringify(caseName)};
 const BITRATE = ${bitrate};
 const SECONDS = ${seconds};
 const CACHE_BUST = ${JSON.stringify(cacheBust)};
-const PROFILE_DECODE = ${profileDecode ? "true" : "false"};
+const PROFILE_MODE = ${JSON.stringify(profileMode)};
 
 function emit(kind, payload) {
   console.log("__BENCH_" + kind + "__" + JSON.stringify(payload));
@@ -161,9 +187,29 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function startProfile() {
+  globalThis.__BENCH_PROFILE_READY__ = false;
+  emit("PROFILE_START", { case: CASE_NAME, bitrate: BITRATE, mode: PROFILE_MODE });
+  while (!globalThis.__BENCH_PROFILE_READY__) {
+    await wait(1);
+  }
+}
+
+async function stopProfile() {
+  globalThis.__BENCH_PROFILE_STOPPED__ = false;
+  emit("PROFILE_END", { case: CASE_NAME, bitrate: BITRATE, mode: PROFILE_MODE });
+  while (!globalThis.__BENCH_PROFILE_STOPPED__) {
+    await wait(1);
+  }
+}
+
 function makePcm() {
   const frames = Math.floor((SAMPLE_RATE * SECONDS) / FRAME_SIZE);
-  const pcm = new Int16Array(frames * FRAME_SAMPLES);
+  const pcm = PCM_BITS === 24
+    ? new Int32Array(frames * FRAME_SAMPLES)
+    : new Int16Array(frames * FRAME_SAMPLES);
+  const scale = PCM_BITS === 24 ? 8388607 : 32767;
+  const minimum = PCM_BITS === 24 ? -8388608 : -32768;
 
   for (let frame = 0; frame < frames; frame += 1) {
     for (let i = 0; i < FRAME_SIZE; i += 1) {
@@ -180,8 +226,8 @@ function makePcm() {
           0.22 * Math.sin(2 * Math.PI * 554.37 * t) +
           0.1 * Math.sin(2 * Math.PI * 1490 * t));
       const base = frame * FRAME_SAMPLES + i * CHANNELS;
-      pcm[base] = Math.max(-32768, Math.min(32767, Math.round(left * 32767)));
-      pcm[base + 1] = Math.max(-32768, Math.min(32767, Math.round(right * 32767)));
+      pcm[base] = Math.max(minimum, Math.min(scale, Math.round(left * scale)));
+      pcm[base + 1] = Math.max(minimum, Math.min(scale, Math.round(right * scale)));
     }
   }
 
@@ -275,36 +321,67 @@ async function benchRust(module, wasm, fixture, vbr, reuseOutput, loadMs) {
   const encoder = new module.Encoder(CHANNELS, SAMPLE_RATE, BITRATE, FRAME_SIZE);
   encoder.set_vbr(vbr);
   const packets = [];
+  let reusableInput = null;
+  if (PROFILE_MODE === "encode") {
+    await startProfile();
+  }
   let started = performance.now();
   for (let frame = 0; frame < fixture.frames; frame += 1) {
     const input = fixture.pcm.subarray(frame * FRAME_SAMPLES, (frame + 1) * FRAME_SAMPLES);
-    const result = encoder.enc_frame(input);
-    if (!result.ok) {
-      throw new Error("libopus-rs encode failed at frame " + frame);
+    if (reuseOutput) {
+      if (reusableInput === null || reusableInput.buffer !== wasm.memory.buffer) {
+        reusableInput = PCM_BITS === 24
+          ? new Int32Array(wasm.memory.buffer, encoder.inputI24Ptr, encoder.inputI24Len)
+          : new Int16Array(wasm.memory.buffer, encoder.inputPtr, encoder.inputLen);
+      }
+      reusableInput.set(input);
+      const encodedSize = PCM_BITS === 24
+        ? encoder.enc_frame_i24_reuse()
+        : encoder.enc_frame_reuse();
+      if (encodedSize <= 0 || encodedSize !== encoder.outputLen) {
+        throw new Error("libopus-rs reuse encode failed at frame " + frame + ": " + encodedSize);
+      }
+      const output = new Uint8Array(wasm.memory.buffer, encoder.outputPtr, encodedSize);
+      packets.push(output.slice());
+    } else {
+      const result = PCM_BITS === 24
+        ? encoder.enc_frame_i24(input)
+        : encoder.enc_frame(input);
+      if (!result.ok) {
+        throw new Error("libopus-rs encode failed at frame " + frame);
+      }
+      packets.push(result.encodedData);
+      result.free();
     }
-    packets.push(result.encodedData);
-    result.free();
   }
   const encodeMs = performance.now() - started;
+  if (PROFILE_MODE === "encode") {
+    await stopProfile();
+  }
   encoder.destroy();
 
   const decoder = new module.Decoder(CHANNELS, SAMPLE_RATE, FRAME_SIZE);
   let checksum = 0;
-  if (PROFILE_DECODE) {
-    emit("PROFILE_START", { case: CASE_NAME, bitrate: BITRATE });
-    await wait(5);
+  if (PROFILE_MODE === "decode") {
+    await startProfile();
   }
   started = performance.now();
   for (let frame = 0; frame < packets.length; frame += 1) {
     if (reuseOutput) {
-      const decodedSize = decoder.dec_frame_reuse(packets[frame]);
+      const decodedSize = PCM_BITS === 24
+        ? decoder.dec_frame_i24_reuse(packets[frame])
+        : decoder.dec_frame_reuse(packets[frame]);
       if (decodedSize !== FRAME_SIZE) {
         throw new Error("libopus-rs reuse decode failed at frame " + frame + ": " + decodedSize);
       }
-      const output = new Int16Array(wasm.memory.buffer, decoder.outputPtr, decoder.outputLen);
+      const output = PCM_BITS === 24
+        ? new Int32Array(wasm.memory.buffer, decoder.outputI24Ptr, decoder.outputI24Len)
+        : new Int16Array(wasm.memory.buffer, decoder.outputPtr, decoder.outputLen);
       checksum = (checksum + (output[0] | 0) + (output[output.length - 1] | 0)) | 0;
     } else {
-      const result = decoder.dec_frame(packets[frame]);
+      const result = PCM_BITS === 24
+        ? decoder.dec_frame_i24(packets[frame])
+        : decoder.dec_frame(packets[frame]);
       if (result.decodedSize !== FRAME_SIZE) {
         throw new Error("libopus-rs decode failed at frame " + frame + ": " + result.decodedSize);
       }
@@ -314,13 +391,13 @@ async function benchRust(module, wasm, fixture, vbr, reuseOutput, loadMs) {
     }
   }
   const decodeMs = performance.now() - started;
-  if (PROFILE_DECODE) {
-    emit("PROFILE_END", { case: CASE_NAME, bitrate: BITRATE });
-    await wait(5);
+  if (PROFILE_MODE === "decode") {
+    await stopProfile();
   }
   decoder.destroy();
   return finish(
-    "Rust libopus-rs " + (vbr ? "VBR" : "CBR") + (reuseOutput ? " reuse" : ""),
+    "Rust libopus-rs " + (vbr ? "VBR" : "CBR") +
+      (PCM_BITS === 24 ? " i24" : "") + (reuseOutput ? " reuse" : ""),
     fixture,
     packets,
     encodeMs,
@@ -373,10 +450,12 @@ function createAssetServer(paths) {
       const caseName = url.searchParams.get("case");
       const bitrate = Number(url.searchParams.get("bitrate"));
       const seconds = Number(url.searchParams.get("seconds"));
+      const frameSize = Number(url.searchParams.get("frameSize"));
+      const pcmBits = Number(url.searchParams.get("pcmBits"));
       const cacheBust = url.searchParams.get("v") || String(Date.now());
-      const profileDecode = url.searchParams.get("profile") === "1";
+      const profileMode = url.searchParams.get("profile") || null;
       response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      response.end(makePage({ caseName, bitrate, seconds, cacheBust, profileDecode }));
+      response.end(makePage({ caseName, bitrate, seconds, frameSize, pcmBits, cacheBust, profileMode }));
       return;
     }
 
@@ -470,7 +549,10 @@ async function stopChrome(chrome) {
 }
 
 async function runBrowserCase({ port, options, caseName, bitrate, repeat }) {
-  const shouldProfile = Boolean(options.profileRustDecode && caseName.startsWith("rust"));
+  const profileMode = options.profileRustEncode ? "encode" :
+    options.profileRustDecode ? "decode" : null;
+  const profilePath = options.profileRustEncode || options.profileRustDecode;
+  const shouldProfile = Boolean(profileMode && caseName.startsWith("rust"));
   const debugPort = 9_200 + Math.floor(Math.random() * 700);
   const userDataDir = resolve(tmpdir(), `libopus-browser-bench-${process.pid}-${Date.now()}-${repeat}`);
   const chrome = spawn(
@@ -498,7 +580,7 @@ async function runBrowserCase({ port, options, caseName, bitrate, repeat }) {
   try {
     const wsUrl = await waitForDebuggerUrl(debugPort, () => chromeStderr);
     const devtools = await connectDevtools(wsUrl);
-    let decodeProfile = null;
+    let cpuProfile = null;
     let profileStop = Promise.resolve();
     const done = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -529,13 +611,19 @@ async function runBrowserCase({ port, options, caseName, bitrate, repeat }) {
             clearTimeout(timer);
             reject(new Error(text.slice("__BENCH_ERROR__".length)));
           } else if (text.startsWith("__BENCH_PROFILE_START__") && shouldProfile) {
-            profileStop = devtools.send("Profiler.start");
+            profileStop = devtools.send("Profiler.start")
+              .then(() => devtools.send("Runtime.evaluate", {
+                expression: "globalThis.__BENCH_PROFILE_READY__ = true",
+              }));
           } else if (text.startsWith("__BENCH_PROFILE_END__") && shouldProfile) {
             profileStop = profileStop
               .then(() => devtools.send("Profiler.stop"))
               .then((result) => {
-                decodeProfile = result.profile;
-              });
+                cpuProfile = result.profile;
+              })
+              .then(() => devtools.send("Runtime.evaluate", {
+                expression: "globalThis.__BENCH_PROFILE_STOPPED__ = true",
+              }));
           }
         } else if (message.method === "Runtime.exceptionThrown") {
           clearTimeout(timer);
@@ -554,16 +642,18 @@ async function runBrowserCase({ port, options, caseName, bitrate, repeat }) {
       `?case=${encodeURIComponent(caseName)}` +
       `&bitrate=${bitrate}` +
       `&seconds=${options.seconds}` +
+      `&frameSize=${options.frameSize}` +
+      `&pcmBits=${options.pcmBits}` +
       `&v=${Date.now()}-${repeat}` +
-      (shouldProfile ? "&profile=1" : "");
+      (shouldProfile ? `&profile=${profileMode}` : "");
     await devtools.send("Page.navigate", { url });
     const result = await done;
     if (shouldProfile) {
       await profileStop;
-      if (decodeProfile) {
+      if (cpuProfile) {
         writeFileSync(
-          options.profileRustDecode,
-          `${JSON.stringify({ case: caseName, bitrate, profile: decodeProfile }, null, 2)}\n`,
+          profilePath,
+          `${JSON.stringify({ case: caseName, bitrate, mode: profileMode, profile: cpuProfile }, null, 2)}\n`,
         );
       }
     }
@@ -606,6 +696,8 @@ function printMarkdown(rows, options, paths) {
   console.log("");
   console.log(
     `Browser-loaded wasm comparison: ${options.seconds}s synthetic 48 kHz stereo fixture, ` +
+      `${options.frameSize * 1000 / 48_000} ms frames, ` +
+      `signed-${options.pcmBits} PCM, ` +
       `${options.repeats} fresh Chrome run${options.repeats === 1 ? "" : "s"} per case.`,
   );
   console.log(`Chrome: ${options.chrome}`);
@@ -701,13 +793,16 @@ async function main() {
       fixture: {
         sampleRate: 48_000,
         channels: 2,
-        frameSize: 960,
+        frameSize: options.frameSize,
+        pcmBits: options.pcmBits,
         seconds: options.seconds,
       },
       options: {
         bitrates: options.bitrates,
         cases: options.cases,
         repeats: options.repeats,
+        frameSize: options.frameSize,
+        pcmBits: options.pcmBits,
         chrome: options.chrome,
       },
       artifacts: {

@@ -17,6 +17,7 @@ default = []
 wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
+libopus-rs-kernels = { path = "crates/libopus-rs-kernels" }
 wasm-bindgen = { version = "0.2", optional = true }
 wide = "0.7"
 

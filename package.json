@@ -2,7 +2,7 @@
   "name": "@wavey-ai/libopus-rs",
   "version": "0.0.1",
   "type": "module",
-  "description": "Pure Rust port of libopus 1.5.2 for WebAssembly",
+  "description": "Pure Rust Opus implementation focused on 48 kHz CELT for WebAssembly",
   "license": "BSD-3-Clause",
   "repository": {
     "type": "git",
@@ -16,7 +16,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "wasm-pack build --target web --release --features wasm && rm -f pkg/.gitignore",
+    "build": "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='-C target-feature=+simd128' wasm-pack build --target web --release --features wasm && rm -f pkg/.gitignore",
     "bench:browser-wasm": "node tools/run_browser_wasm_compare.mjs",
     "prepare": "npm run build"
   },

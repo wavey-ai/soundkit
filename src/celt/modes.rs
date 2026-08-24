@@ -1,6 +1,8 @@
 //! CELT mode construction and pulse cache, ported from official
 //! `celt/modes.c` and `celt/rate.c`.
 
+use std::sync::OnceLock;
+
 use crate::celt::cwrs::{get_pulses, get_required_bits, log2_frac, CELT_MAX_PULSES, MAX_PSEUDO};
 use crate::celt::mdct::MdctLookup;
 use crate::{Error, Result};
@@ -273,6 +275,16 @@ impl CeltMode {
     pub fn standard_48k() -> Self {
         Self::new(48_000, 960).expect("48 kHz CELT mode is valid")
     }
+
+    /// Process-wide shared 48 kHz mode.
+    ///
+    /// Building a `CeltMode` computes FFT twiddles, MDCT trig tables and the
+    /// pulse cache, so instances that only use standard parameters share one
+    /// immutable copy instead of rebuilding it per `Encoder`/`Decoder`.
+    pub fn standard_48k_shared() -> &'static Self {
+        static STANDARD_48K: OnceLock<CeltMode> = OnceLock::new();
+        STANDARD_48K.get_or_init(|| Self::new(48_000, 960).expect("48 kHz CELT mode is valid"))
+    }
 }
 
 pub fn compute_window(overlap: usize) -> Vec<f32> {
@@ -523,22 +535,8 @@ pub fn bits2pulses(mode: &CeltMode, band: usize, lm: usize, bits: i32) -> usize 
 pub fn bits2pulses_signed(mode: &CeltMode, band: usize, lm: isize, bits: i32) -> usize {
     let lm = (lm + 1) as usize;
     let cache = &mode.cache.bits[mode.cache.index[lm * mode.nb_ebands + band] as usize..];
-    let mut lo = 0usize;
-    let mut hi = cache[0] as usize;
-    let bits = bits - 1;
-    for _ in 0..6 {
-        let mid = (lo + hi + 1) >> 1;
-        if cache[mid] as i32 >= bits {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
-    }
-    if bits - if lo == 0 { -1 } else { cache[lo] as i32 } <= cache[hi] as i32 - bits {
-        lo
-    } else {
-        hi
-    }
+    libopus_rs_kernels::pulse_cache_bits_to_pulses(cache, bits)
+        .expect("CELT pulse cache must contain its declared index range")
 }
 
 pub fn pulses2bits(mode: &CeltMode, band: usize, lm: usize, pulses: usize) -> i32 {

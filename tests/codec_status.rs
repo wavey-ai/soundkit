@@ -130,6 +130,41 @@ fn encode_and_decode_48k_celt_only_smoke_path() {
 }
 
 #[test]
+fn experimental_direct_cubic_round_trips_5ms_stereo() {
+    let frame_size = 240;
+    let mut standard = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut cubic = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    standard.set_bitrate(512_000).unwrap();
+    cubic.set_bitrate(512_000).unwrap();
+    standard.set_vbr(false).unwrap();
+    cubic.set_vbr(false).unwrap();
+    assert!(!standard.experimental_direct_cubic());
+    assert!(!cubic.experimental_direct_cubic());
+    cubic.set_experimental_direct_cubic(true);
+    assert!(cubic.experimental_direct_cubic());
+
+    let mut decoder = Decoder::new(48_000, 2).unwrap();
+    assert!(!decoder.experimental_direct_cubic());
+    decoder.set_experimental_direct_cubic(true);
+    assert!(decoder.experimental_direct_cubic());
+
+    let mut packets_differ = false;
+    for frame in 0..24 {
+        let pcm = raw_celt_bench_frame(frame_size, frame);
+        let standard_packet = standard.encode_f32(&pcm, frame_size).unwrap();
+        let cubic_packet = cubic.encode_f32(&pcm, frame_size).unwrap();
+        assert_eq!(cubic_packet.len(), standard_packet.len());
+        packets_differ |= cubic_packet != standard_packet;
+
+        let decoded = decoder.decode_f32(&cubic_packet, false).unwrap();
+        assert_eq!(decoded.len(), pcm.len());
+        assert!(decoded.iter().all(|sample| sample.is_finite()));
+        assert!(decoded.iter().any(|sample| sample.abs() > 1e-5));
+    }
+    assert!(packets_differ);
+}
+
+#[test]
 fn celt_encoder_carries_final_range_rng_between_frames() {
     let mut encoder = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
     encoder.set_bitrate(128_000).unwrap();
@@ -241,6 +276,36 @@ fn encode_i24_matches_equivalent_f32_input() {
         encoder.encode_i24_with_frame_bytes(&invalid, 960, 320),
         Err(Error::BadArg)
     );
+}
+
+#[test]
+fn encode_i24_into_reuses_packet_storage_and_matches_allocating_api() {
+    let frame_size = 240;
+    let pcm_i24 = (0..frame_size)
+        .flat_map(|i| {
+            let t = i as f32;
+            [
+                (0.72 * (0.037 * t).sin() * PCM_I24_MAX as f32).round() as i32,
+                (0.64 * (0.041 * t + 0.4).sin() * PCM_I24_MAX as f32).round() as i32,
+            ]
+        })
+        .collect::<Vec<_>>();
+    let mut allocating = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    let mut reusing = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    allocating.set_bitrate(96_000).unwrap();
+    reusing.set_bitrate(96_000).unwrap();
+
+    let mut packet = Vec::with_capacity(64);
+    let allocation = packet.as_ptr();
+    for _ in 0..8 {
+        let expected = allocating.encode_i24(&pcm_i24, frame_size).unwrap();
+        let encoded_size = reusing
+            .encode_i24_into(&pcm_i24, frame_size, &mut packet)
+            .unwrap();
+        assert_eq!(encoded_size, expected.len());
+        assert_eq!(packet, expected);
+        assert_eq!(packet.as_ptr(), allocation);
+    }
 }
 
 #[test]

@@ -1,21 +1,11 @@
 //! Floating-point CELT KISS-FFT path, ported from the official Opus
 //! `celt/kiss_fft.c` CUSTOM_MODES/non-FIXED_POINT implementation.
 
+pub use libopus_rs_kernels::Complex32 as KissFftCpx;
+use libopus_rs_kernels::InRangeIndices;
+
 const MAX_FACTORS: usize = 8;
 const PI: f64 = core::f64::consts::PI;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct KissFftCpx {
-    pub r: f32,
-    pub i: f32,
-}
-
-impl KissFftCpx {
-    #[inline]
-    pub const fn new(r: f32, i: f32) -> Self {
-        Self { r, i }
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct KissFftState {
@@ -23,8 +13,10 @@ pub struct KissFftState {
     scale: f32,
     shift: i32,
     factors: [i16; 2 * MAX_FACTORS],
-    bitrev: Vec<usize>,
+    bitrev: InRangeIndices,
     twiddles: Vec<KissFftCpx>,
+    #[cfg(target_arch = "aarch64")]
+    radix5_twiddles: Vec<KissFftCpx>,
 }
 
 impl KissFftState {
@@ -55,6 +47,9 @@ impl KissFftState {
 
         let mut bitrev = vec![0usize; nfft];
         compute_bitrev_table(0, &mut bitrev, 0, 1, 1, &factors);
+        let bitrev = InRangeIndices::new(bitrev, nfft)?;
+        #[cfg(target_arch = "aarch64")]
+        let radix5_twiddles = pack_first_radix5_twiddles(&factors, shift, &twiddles);
 
         Some(Self {
             nfft,
@@ -63,6 +58,8 @@ impl KissFftState {
             factors,
             bitrev,
             twiddles,
+            #[cfg(target_arch = "aarch64")]
+            radix5_twiddles,
         })
     }
 
@@ -75,8 +72,35 @@ impl KissFftState {
     }
 
     pub(crate) fn bitrev(&self) -> &[usize] {
+        self.bitrev.as_slice()
+    }
+
+    pub(crate) fn checked_bitrev(&self) -> &InRangeIndices {
         &self.bitrev
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn pack_first_radix5_twiddles(
+    factors: &[i16; 2 * MAX_FACTORS],
+    shift: i32,
+    twiddles: &[KissFftCpx],
+) -> Vec<KissFftCpx> {
+    if factors[0] != 5 {
+        return Vec::new();
+    }
+    let m = factors[1] as usize;
+    if m == 0 || m % 4 != 0 {
+        return Vec::new();
+    }
+    let stride = 1usize << shift.max(0) as usize;
+    let mut packed = Vec::with_capacity(4 * m);
+    for factor in 1..=4 {
+        for u in 0..m {
+            packed.push(twiddles[factor * u * stride]);
+        }
+    }
+    packed
 }
 
 #[inline]
@@ -285,6 +309,7 @@ fn kf_bfly3(
 ) {
     let m2 = 2 * m;
     let epi3 = st.twiddles[fstride * m];
+
     for i in 0..n {
         let base = i * mm;
         for k in 0..m {
@@ -319,6 +344,11 @@ fn kf_bfly5(
 ) {
     let ya = st.twiddles[fstride * m];
     let yb = st.twiddles[fstride * 2 * m];
+
+    #[cfg(target_arch = "aarch64")]
+    if n == 1 && libopus_rs_kernels::fft_radix5_neon(fout, &st.radix5_twiddles, ya, yb, m) {
+        return;
+    }
 
     for i in 0..n {
         let base = i * mm;
@@ -412,7 +442,7 @@ pub fn opus_fft(st: &KissFftState, fin: &[KissFftCpx], fout: &mut [KissFftCpx]) 
     assert!(fout.len() >= st.nfft);
     for i in 0..st.nfft {
         let x = fin[i];
-        fout[st.bitrev[i]] = KissFftCpx::new(x.r * st.scale, x.i * st.scale);
+        fout[st.bitrev()[i]] = KissFftCpx::new(x.r * st.scale, x.i * st.scale);
     }
     opus_fft_impl(st, fout);
 }
@@ -421,7 +451,7 @@ pub fn opus_ifft(st: &KissFftState, fin: &[KissFftCpx], fout: &mut [KissFftCpx])
     assert!(fin.len() >= st.nfft);
     assert!(fout.len() >= st.nfft);
     for i in 0..st.nfft {
-        fout[st.bitrev[i]] = fin[i];
+        fout[st.bitrev()[i]] = fin[i];
     }
     for item in fout.iter_mut().take(st.nfft) {
         item.i = -item.i;

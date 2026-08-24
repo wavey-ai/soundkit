@@ -1,11 +1,12 @@
 use crate::celt::codec::{
     decode_spectral_frame_into_with_anti_collapse, CeltFrameConfig, CeltFrameDecodeScratch,
 };
+use crate::celt::mathops::float_to_i16;
 use crate::celt::modes::CeltMode;
 use crate::celt::pitch::{comb_filter_in_place, COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD};
 use crate::celt::synthesis::{
-    celt_synthesis_with_overlap_into, deemphasis_interleaved_i16_into,
-    deemphasis_interleaved_i24_into, deemphasis_interleaved_into, SynthesisScratch,
+    celt_synthesis_with_overlap_into, deemphasis_interleaved_i24_into, deemphasis_interleaved_into,
+    SynthesisScratch,
 };
 use crate::constants::{valid_channels, valid_sample_rate, Bandwidth};
 use crate::packet;
@@ -15,7 +16,8 @@ use crate::{Error, Result};
 pub struct Decoder {
     sample_rate: i32,
     channels: usize,
-    mode: CeltMode,
+    experimental_direct_cubic: bool,
+    mode: &'static CeltMode,
     old_band_e: Vec<f32>,
     old_log_e: Vec<f32>,
     old_log_e2: Vec<f32>,
@@ -26,6 +28,7 @@ pub struct Decoder {
     decode_scratch: CeltFrameDecodeScratch,
     synthesis_channels: Vec<Vec<f32>>,
     synthesis_scratch: SynthesisScratch,
+    pcm_f32_scratch: Vec<f32>,
     postfilter_period: usize,
     postfilter_period_old: usize,
     postfilter_gain: f32,
@@ -40,10 +43,11 @@ impl Decoder {
         if !valid_sample_rate(sample_rate) || !valid_channels(channels as i32) {
             return Err(Error::BadArg);
         }
-        let mode = CeltMode::standard_48k();
+        let mode = CeltMode::standard_48k_shared();
         Ok(Self {
             sample_rate,
             channels,
+            experimental_direct_cubic: false,
             old_band_e: vec![0.0; channels * mode.nb_ebands],
             old_log_e: vec![-28.0; channels * mode.nb_ebands],
             old_log_e2: vec![-28.0; channels * mode.nb_ebands],
@@ -54,6 +58,7 @@ impl Decoder {
             decode_scratch: CeltFrameDecodeScratch::default(),
             synthesis_channels: vec![Vec::new(); channels],
             synthesis_scratch: SynthesisScratch::default(),
+            pcm_f32_scratch: Vec::new(),
             postfilter_period: 0,
             postfilter_period_old: 0,
             postfilter_gain: 0.0,
@@ -71,6 +76,19 @@ impl Decoder {
 
     pub const fn channels(&self) -> usize {
         self.channels
+    }
+
+    /// Reports whether this decoder accepts the experimental direct-cubic packet syntax.
+    pub const fn experimental_direct_cubic(&self) -> bool {
+        self.experimental_direct_cubic
+    }
+
+    /// Selects the experimental direct-cubic packet syntax.
+    ///
+    /// Set the same value on the encoder before it creates these packets. This
+    /// mode is not compatible with standard Opus packets.
+    pub fn set_experimental_direct_cubic(&mut self, enabled: bool) {
+        self.experimental_direct_cubic = enabled;
     }
 
     pub fn validate_packet(&self, packet: &[u8]) -> Result<usize> {
@@ -91,12 +109,16 @@ impl Decoder {
         pcm: &mut Vec<i16>,
     ) -> Result<usize> {
         let channels = self.decode_channels(packet, decode_fec)?;
-        deemphasis_interleaved_i16_into(
+        deemphasis_interleaved_into(
             &self.mode,
             &self.synthesis_channels[..channels],
             &mut self.preemph_mem,
-            pcm,
+            &mut self.pcm_f32_scratch,
         )?;
+        pcm.resize(self.pcm_f32_scratch.len(), 0);
+        for (output, &sample) in pcm.iter_mut().zip(&self.pcm_f32_scratch) {
+            *output = float_to_i16(sample);
+        }
         Ok(pcm.len() / channels)
     }
 
@@ -184,7 +206,8 @@ impl Decoder {
             }
         }
 
-        let config = CeltFrameConfig::new(&self.mode, lm, stream_channels, frame.len())?;
+        let mut config = CeltFrameConfig::new(&self.mode, lm, stream_channels, frame.len())?;
+        config.experimental_direct_cubic = self.experimental_direct_cubic;
         let decoded = decode_spectral_frame_into_with_anti_collapse(
             &self.mode,
             &config,

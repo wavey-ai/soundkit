@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let total_samples = input.len();
     let frame_samples = frame_size * CHANNELS;
-    let mut encoder = Encoder::new(SAMPLE_RATE, CHANNELS, Application::RestrictedLowDelay)?;
+    let mut encoder = Encoder::new(SAMPLE_RATE, CHANNELS, Application::Audio)?;
     encoder.set_bitrate(bitrate)?;
     encoder.set_vbr(vbr)?;
     let mut decoder = Decoder::new(SAMPLE_RATE, CHANNELS)?;

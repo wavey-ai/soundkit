@@ -2,9 +2,26 @@
 
 Pure Rust implementation of Opus, with a current focus on 48 kHz CELT.
 
+Current encoder quality and performance work targets 48 kHz stereo at 192,
+256, and 320 kb/s. These are transparency candidates, not a transparency
+claim; lower bitrates remain in the regression matrix, and controlled listening
+tests remain the gate for perceptual changes.
+
 This crate does not wrap libopus or expose a C API. Stable releases and
 upstream main provide behavioral evidence. Encoder packets do not need to be
 byte-identical when quality and interoperability agree.
+
+## Native Performance
+
+On an isolated x86 GCP host, native Rust encoded `1.19-2.36%` faster and
+decoded `1.50-4.64%` faster than trunk libopus across all 12 tested cells.
+
+Tests used 5 ms, 48 kHz stereo audio at maximum complexity. They covered
+16-bit and 24-bit PCM, CBR, constrained VBR, and 192-320 kb/s.
+
+All packet sizes and checksums matched the preceding Rust checkpoint. See the
+[complete native performance report](performance-results/2026-08-24-native-48k/README.md)
+for the matrix, test method, quality gate, and profiler evidence.
 
 ## Current Support
 
@@ -86,12 +103,18 @@ cargo test
 cargo build --release
 ```
 
-The crate is built with `#![forbid(unsafe_code)]`. It does not expose a C API.
+The public codec crate is built with `#![forbid(unsafe_code)]`. Audited SIMD
+and MDCT kernels live in the private `libopus-rs-kernels` path dependency behind
+checked safe functions. The project does not expose a C API.
 
 The 24-bit methods use the range `-8_388_608..=8_388_607` in `i32`. Conversion
 to the internal `f32` path preserves every 24-bit input value exactly. Opus is
 still lossy; this avoids an extra 16-bit PCM boundary but does not make the
 compressed stream lossless.
+
+Streaming callers can reuse compressed-packet storage with `encode_i16_into`,
+`encode_i24_into`, or `encode_f32_into`. The matching `decode_*_into` APIs also
+avoid a packet allocation on every short frame.
 
 ## WAV Round Trip
 
@@ -100,8 +123,8 @@ implemented CELT-only packet path:
 
 ```sh
 cargo run --release --example wav_celt -- roundtrip input.wav output.lors decoded.wav
-cargo run --release --example wav_celt -- roundtrip --frame-size 240 --bitrate 128000 input.wav output.lors decoded.wav
-cargo run --release --example wav_celt -- roundtrip --frame-size 240 --bitrate 128000 --vbr input.wav output.lors decoded.wav
+cargo run --release --example wav_celt -- roundtrip --frame-size 240 --bitrate 192000 input.wav output.lors decoded.wav
+cargo run --release --example wav_celt -- roundtrip --frame-size 240 --bitrate 192000 --vbr input.wav output.lors decoded.wav
 cargo run --release --example wav_celt -- roundtrip --frame-size 960 --frame-bytes 120 input.wav output.lors decoded.wav
 ```
 
@@ -121,8 +144,9 @@ decoded WAV plus the upstream `opus_demo` packet stream and decoded WAV.
 ## Raw CELT benchmark
 
 The raw benchmark compares this crate against libopus through direct in-process
-encode/decode calls with no file I/O in the measured loops. The input is a
-deterministic in-memory 48 kHz stereo fixture.
+encode/decode calls with no file I/O in the measured loops. Its default matrix
+uses a deterministic in-memory 48 kHz stereo fixture at 192, 256, and 320 kb/s;
+lower rates remain available through an explicit `--bitrate`.
 
 ```sh
 tools/run_raw_celt_bench.sh --repeats 21 --seconds 4 --mode both
@@ -131,9 +155,52 @@ tools/run_raw_celt_bench.sh --repeats 21 --seconds 4 --mode both
 Filter a trace to one row or select the pure-tone fixture:
 
 ```sh
-tools/run_raw_celt_bench.sh --seconds 1 --repeats 1 --frame-size 240 --bitrate 48000
-tools/run_raw_celt_bench.sh --seconds 1 --repeats 1 --frame-size 240 --bitrate 128000 --fixture tone
+tools/run_raw_celt_bench.sh --seconds 1 --repeats 1 --frame-size 240 --bitrate 192000
+tools/run_raw_celt_bench.sh --seconds 1 --repeats 1 --frame-size 240 --bitrate 256000 --fixture tone
 ```
+
+Use `--pcm-bits 16` or `--pcm-bits 24` to benchmark the corresponding integer
+encoder and decoder APIs. A real signed-24 source is stored as sign-extended
+little-endian `i32` samples. The 16-bit case derives the same source at its
+16-bit precision before either implementation sees it:
+
+```sh
+tools/run_raw_celt_bench.sh --seconds 10 --repeats 21 --frame-size 240 \
+  --bitrate 192000 --input-s32le input-48k-stereo-s24.s32le --pcm-bits 16
+tools/run_raw_celt_bench.sh --seconds 10 --repeats 21 --frame-size 240 \
+  --bitrate 192000 --input-s32le input-48k-stereo-s24.s32le --pcm-bits 24
+```
+
+Add `--skip-quality` to repeated timing runs to skip alignment and SNR
+calculation. Packet sizes and checksums remain active. Run at least one pass
+without this option as the quality gate.
+
+Use the SoundKit FLAC corpus for the full 48 kHz quality and performance gate.
+The runner builds each implementation once. It warms each cell and alternates
+Rust with the specified trunk libopus build:
+
+```sh
+OPUS_DIR=/path/to/opus-trunk \
+  tools/run_soundkit_flac_corpus.py --cpu 2 --json corpus-results.json
+```
+
+By default, the runner tests four 100-second sources. It tests 16-bit and
+24-bit PCM at 192, 256, and 320 kb/s. Each test uses 5 ms frames, CBR, and
+constrained VBR. Set `--seconds 10 --rounds 1 --repeats 3` for a quick check.
+Use `--quality-only` for a full-length quality pass without timing rounds. Use
+`--skip-quality` for a timing-only pass. The corpus is local test data and is
+not part of this repository.
+
+Add `--direct-cubic` to test the experimental high-depth shape coder on the
+Rust path. The C reference continues to use standard Opus. Both Rust endpoints
+must enable this mode. Its packets are not compatible with standard Opus
+decoders.
+
+The mode retains PVQ below its measured high-depth crossover. Therefore, 5 ms
+CBR packets at 192, 256, and 320 kb/s remain byte-identical to the default Rust
+path. Constrained-VBR packets can differ. The SoundKit 400-second FLAC corpus
+showed no aligned-SNR regression at 384 or 512 kb/s. This result is a
+regression gate, not a transparency claim.
 
 For local speed runs, benchmark the Rust side with host-native codegen:
 
@@ -142,11 +209,15 @@ RUST_BENCH_RUSTFLAGS='-C target-cpu=native -C target-feature=+avx2' tools/run_ra
 ```
 
 Set `OPUS_DIR=path/to/built-libopus` to compare against a built upstream source
-tree. Otherwise the script uses `pkg-config opus`. The C reference is configured
-for restricted-lowdelay/fullband mode with CBR or constrained VBR. Reported
-speed columns are normalized as realtime speedup:
+tree. Otherwise the script uses `pkg-config opus`. Both encoders use
+audio/fullband mode and maximum encoder complexity by default, with CBR or
+constrained VBR. Reported speed columns are normalized as realtime speedup:
 `RTFx = (seconds * 1000) / elapsed_ms`, where 1.0x is realtime, and larger is
-faster.
+faster. Record the libopus build configuration with performance results. Use
+`--application restricted-lowdelay` to
+isolate low-delay application behavior on both implementations. Architecture
+intrinsics and `--enable-float-approx` materially affect the C
+baseline.
 
 Positive deltas mean Rust took longer than C. Negative deltas mean Rust
 was faster. Byte counts are raw Opus packet bytes, not wrapper/container bytes.
@@ -155,6 +226,10 @@ Packet ranges show per-frame compressed packet byte sizes. The SNR and lag
 columns are aligned decode-quality checks against the deterministic fixture.
 The script also builds `raw_celt_decode_dump_c` in the benchmark directory for
 same-packet C decode checks against `--dump-packets` output.
+
+See the [2026-08-24 native x86 checkpoint](performance-results/2026-08-24-native-48k/README.md)
+for the complete timing matrix, isolated A/B tests, profiler findings, and
+full-length quality checks.
 
 Run `tools/run_raw_celt_bench.sh` to generate a local table. For a minimal
 check, use:
@@ -176,11 +251,10 @@ Use `AUDIO_SECONDS`, `REPEATS`, `BITRATE`, or `SIMD_RUSTFLAGS` to adjust the
 run. `tools/build_wasm_simd.sh --example wasm_celt_bench` builds only the
 `simd128` artifact.
 
-Local measurements do not justify enabling wasm SIMD by default. The
-`simd128` build produced matching checksums. It was usually slower than the
-scalar WASM build in Node on Apple Silicon. The 5 ms frame case had the clearest
-regression. Treat the scalar WASM build as the baseline. Use this
-benchmark to validate targeted SIMD work.
+The `simd128` build produces matching checksums. It is approximately 7.5%
+faster than scalar WASM for the current Apple Silicon 5 ms encode checkpoint.
+Thus, the npm release build enables `simd128`. The benchmark still builds both
+variants for revalidation on other runtimes.
 
 ## Full-track wasm comparison
 
@@ -189,21 +263,35 @@ Emscripten build, run:
 
 ```sh
 npm run bench:browser-wasm -- --seconds 10 --repeats 3 \
+  --frame-size 240 \
   --cases c,rust-cbr,rust-vbr,rust-cbr-reuse,rust-vbr-reuse
 ```
 
 The benchmark serves the local `pkg/libopus_rs_bg.wasm` output and
 `../libopusjs/release/libopus.wasm` through localhost. It starts a new headless
 Chrome for each codec and bitrate case. It measures the public browser
-JavaScript API for 20 ms stereo CELT frames. The default bitrate set is 48, 128, and
-196 kb/s. Use `--json /tmp/wasm-browser-bench.json` to keep the raw samples.
+JavaScript API for 2.5, 5, 10, or 20 ms stereo CELT frames. The default bitrate
+set is 192, 256, and 320 kb/s. Use `--json /tmp/wasm-browser-bench.json` to keep
+the raw samples.
 The fixture is deterministic synthetic 48 kHz stereo audio for repeatable runs
 under lower system load.
 
 The Rust cases also support `rust-cbr-reuse` and `rust-vbr-reuse`. These cases
-decode into the WASM decoder's output buffer. They expose `outputPtr` and
-`outputLen` so JavaScript callers do not have to clone the result. To capture a Chrome CPU
-profile around a Rust decode loop, run a single Rust case with
+stage encoder input and reuse encoder/decoder output storage. The 16-bit path
+exposes `inputPtr`, `inputLen`, `outputPtr`, and `outputLen`; the signed-24 path
+uses the corresponding `inputI24*` and `outputI24*` properties. Conventional
+signed-24 calls are also available as `enc_frame_i24` and `dec_frame_i24`.
+
+Run the Rust signed-24 browser path with:
+
+```sh
+npm run bench:browser-wasm -- --seconds 10 --frame-size 240 --pcm-bits 24 \
+  --bitrates 192000,256000,320000 --cases rust-cbr-reuse,rust-vbr-reuse
+```
+
+The sibling `libopusjs` wrapper does not expose libopus 1.6's signed-24 entry
+points, so the browser tool rejects the C case with `--pcm-bits 24`. To capture
+a Chrome CPU profile around a Rust decode loop, run a single Rust case with
 `--profile-rust-decode /tmp/rust-decode.cpuprofile.json`.
 
 A full-track browser API comparison used the *Westside* premix source.

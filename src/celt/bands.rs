@@ -1,15 +1,20 @@
 //! CELT band helper routines, ported from official `celt/bands.c`.
 
+use wide::f32x4;
+
 use crate::celt::cwrs::get_pulses;
 use crate::celt::cwrs::CwrsDecodeCache;
-use crate::celt::entropy::{RangeDecoder, RangeEncoder};
+use crate::celt::entropy::{RangeDecoder, RangeEncoder, RangeEncoderSnapshot};
 use crate::celt::mathops::{
-    bitexact_cos, bitexact_log2tan, celt_exp2, celt_exp2_db, celt_rsqrt_norm, celt_sqrt,
-    fast_atan2f, frac_mul16, isqrt32,
+    bitexact_cos, bitexact_log2tan, celt_cos_norm, celt_exp2, celt_exp2_db, celt_rsqrt_norm,
+    celt_sqrt, fast_atan2f, frac_mul16,
 };
 use crate::celt::modes::{bits2pulses_signed, pulses2bits_signed, CeltMode};
 use crate::celt::quant_bands::E_MEANS;
-use crate::celt::vq::{alg_quant_with_scratch, alg_unquant_with_scratch, renormalise_vector};
+use crate::celt::vq::{
+    alg_quant_with_scratch, alg_unquant_with_scratch, cubic_quant_with_scratch,
+    cubic_unquant_with_scratch, renormalise_vector,
+};
 
 pub const SPREAD_NONE: i32 = 0;
 pub const SPREAD_LIGHT: i32 = 1;
@@ -17,24 +22,58 @@ pub const SPREAD_NORMAL: i32 = 2;
 pub const SPREAD_AGGRESSIVE: i32 = 3;
 
 const BITRES: i32 = 3;
+// The SoundKit corpus shows a cubic/PVQ quality crossover near this depth.
+// The packet-rate gate keeps short high-energy allocations from crossing early.
+const DIRECT_CUBIC_MIN_DEPTH: i32 = 7;
+const DIRECT_CUBIC_MIN_BYTES_PER_2P5MS: usize = 119;
 const QTHETA_OFFSET: i32 = 4;
 const QTHETA_OFFSET_TWOPHASE: i32 = 16;
+const MAX_THETA_QN: usize = 256;
+const MAX_THETA_HALF: usize = MAX_THETA_QN / 2;
+const MAX_THETA_RESIDUAL: usize =
+    (MAX_THETA_HALF + 1) * (MAX_THETA_HALF + 1) - MAX_THETA_HALF * (MAX_THETA_HALF + 1) / 2 - 1;
 const ORDERY_TABLE: [usize; 30] = [
     1, 0, 3, 0, 2, 1, 7, 0, 4, 3, 6, 1, 5, 2, 15, 0, 8, 7, 12, 3, 11, 4, 14, 1, 9, 6, 13, 2, 10, 5,
 ];
+
+const fn build_theta_root_ceil() -> [u8; MAX_THETA_RESIDUAL + 1] {
+    let mut roots = [0u8; MAX_THETA_RESIDUAL + 1];
+    let mut root = 1usize;
+    let mut next_triangle = 1usize;
+    let mut residual = 0usize;
+    while residual <= MAX_THETA_RESIDUAL {
+        if residual == next_triangle {
+            root += 1;
+            next_triangle += root;
+        }
+        roots[residual] = root as u8;
+        residual += 1;
+    }
+    roots
+}
+
+/// `ceil(floor(sqrt(8*r + 1)) / 2)` for every standard-mode theta residual.
+const THETA_ROOT_CEIL: [u8; MAX_THETA_RESIDUAL + 1] = build_theta_root_ceil();
 
 #[derive(Clone, Debug, Default)]
 pub struct BandScratch {
     norm: Vec<f32>,
     norm2: Vec<f32>,
     lowband_tmp: Vec<f32>,
+    hadamard_tmp: Vec<f32>,
     lowband_out: Vec<f32>,
     lowband_out2: Vec<f32>,
     pulse_y: Vec<i32>,
     pulse_u: Vec<u32>,
     pulse_cache: CwrsDecodeCache,
     pvq_y: Vec<f32>,
-    pvq_signx: Vec<bool>,
+    pvq_signx: Vec<u8>,
+    rdo_x_save: Vec<f32>,
+    rdo_y_save: Vec<f32>,
+    rdo_x_down: Vec<f32>,
+    rdo_y_down: Vec<f32>,
+    rdo_lowband_down: Vec<f32>,
+    rdo_bytes: Vec<u8>,
 }
 
 pub fn hysteresis_decision(
@@ -380,8 +419,38 @@ pub fn deinterleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: 
     let n = n0 * stride;
     assert!(x.len() >= n);
     let mut tmp = vec![0.0f32; n];
+    deinterleave_hadamard_with_scratch(x, n0, stride, hadamard, &mut tmp);
+}
 
-    if hadamard {
+pub fn deinterleave_hadamard_with_scratch(
+    x: &mut [f32],
+    n0: usize,
+    stride: usize,
+    hadamard: bool,
+    tmp: &mut Vec<f32>,
+) {
+    assert!(stride > 0);
+    let n = n0 * stride;
+    assert!(x.len() >= n);
+    if tmp.len() < n {
+        tmp.resize(n, 0.0);
+    }
+
+    if stride == 2 {
+        let (first, second) = tmp[..n].split_at_mut(n0);
+        for (source, (dst0, dst1)) in x[..n]
+            .chunks_exact(2)
+            .zip(first.iter_mut().zip(second.iter_mut()))
+        {
+            if hadamard {
+                *dst0 = source[1];
+                *dst1 = source[0];
+            } else {
+                *dst0 = source[0];
+                *dst1 = source[1];
+            }
+        }
+    } else if hadamard {
         let ordery = &ORDERY_TABLE[stride - 2..];
         for i in 0..stride {
             for j in 0..n0 {
@@ -395,7 +464,7 @@ pub fn deinterleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: 
             }
         }
     }
-    x[..n].copy_from_slice(&tmp);
+    x[..n].copy_from_slice(&tmp[..n]);
 }
 
 pub fn interleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: bool) {
@@ -403,8 +472,38 @@ pub fn interleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: bo
     let n = n0 * stride;
     assert!(x.len() >= n);
     let mut tmp = vec![0.0f32; n];
+    interleave_hadamard_with_scratch(x, n0, stride, hadamard, &mut tmp);
+}
 
-    if hadamard {
+pub fn interleave_hadamard_with_scratch(
+    x: &mut [f32],
+    n0: usize,
+    stride: usize,
+    hadamard: bool,
+    tmp: &mut Vec<f32>,
+) {
+    assert!(stride > 0);
+    let n = n0 * stride;
+    assert!(x.len() >= n);
+    if tmp.len() < n {
+        tmp.resize(n, 0.0);
+    }
+
+    if stride == 2 {
+        let (first, second) = x[..n].split_at(n0);
+        for (destination, (&src0, &src1)) in tmp[..n]
+            .chunks_exact_mut(2)
+            .zip(first.iter().zip(second.iter()))
+        {
+            if hadamard {
+                destination[0] = src1;
+                destination[1] = src0;
+            } else {
+                destination[0] = src0;
+                destination[1] = src1;
+            }
+        }
+    } else if hadamard {
         let ordery = &ORDERY_TABLE[stride - 2..];
         for i in 0..stride {
             for j in 0..n0 {
@@ -418,13 +517,43 @@ pub fn interleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: bo
             }
         }
     }
-    x[..n].copy_from_slice(&tmp);
+    x[..n].copy_from_slice(&tmp[..n]);
 }
 
 pub fn haar1(x: &mut [f32], n0: usize, stride: usize) {
     assert!(x.len() >= n0 * stride);
     let n0 = n0 >> 1;
     let c = 0.707_106_77f32;
+    if stride == 1 {
+        // Adjacent pairs: process four per lane group with identical
+        // per-element multiply/add order as the scalar loop.
+        let cv = f32x4::splat(c);
+        let mut j = 0;
+        while j + 4 <= n0 {
+            let evens = f32x4::new([x[2 * j], x[2 * j + 2], x[2 * j + 4], x[2 * j + 6]]);
+            let odds = f32x4::new([x[2 * j + 1], x[2 * j + 3], x[2 * j + 5], x[2 * j + 7]]);
+            let t1 = evens * cv;
+            let t2 = odds * cv;
+            let lo = t1 + t2;
+            let hi = t1 - t2;
+            let lo_arr = lo.to_array();
+            let hi_arr = hi.to_array();
+            for t in 0..4 {
+                x[2 * j + 2 * t] = lo_arr[t];
+                x[2 * j + 2 * t + 1] = hi_arr[t];
+            }
+            j += 4;
+        }
+        for jj in j..n0 {
+            let a = 2 * jj;
+            let b = a + 1;
+            let tmp1 = c * x[a];
+            let tmp2 = c * x[b];
+            x[a] = tmp1 + tmp2;
+            x[b] = tmp1 - tmp2;
+        }
+        return;
+    }
     for i in 0..stride {
         for j in 0..n0 {
             let a = stride * 2 * j + i;
@@ -521,26 +650,6 @@ impl BandCoder<'_, '_> {
         }
     }
 
-    fn encode_or_decode_uint(&mut self, value: usize, ft: u32) -> usize {
-        match self {
-            Self::Encode(enc) => {
-                enc.encode_uint(value as u32, ft);
-                value
-            }
-            Self::Decode(dec) => dec.decode_uint(ft) as usize,
-        }
-    }
-
-    fn encode_or_decode_bit(&mut self, value: bool, logp: u32) -> bool {
-        match self {
-            Self::Encode(enc) => {
-                enc.encode_bit_logp(value, logp);
-                value
-            }
-            Self::Decode(dec) => dec.decode_bit_logp(logp),
-        }
-    }
-
     fn encode_or_decode_bits(&mut self, value: u32, bits: u32) -> u32 {
         match self {
             Self::Encode(enc) => {
@@ -551,22 +660,24 @@ impl BandCoder<'_, '_> {
         }
     }
 
-    fn encode_or_decode_range(&mut self, value: usize, fl: u32, fh: u32, ft: u32) -> usize {
+    fn encode_or_decode_uint(&mut self, value: u32, ft: u32) -> u32 {
         match self {
             Self::Encode(enc) => {
-                enc.encode(fl, fh, ft);
+                enc.encode_uint(value, ft);
                 value
             }
-            Self::Decode(dec) => {
-                let fm = dec.decode(ft);
-                let mut decoded = value;
-                debug_assert!(fm >= fl && fm < fh);
-                if !(fm >= fl && fm < fh) {
-                    decoded = fl as usize;
-                }
-                dec.update(fl, fh, ft);
-                decoded
-            }
+            Self::Decode(dec) => dec.decode_uint(ft),
+        }
+    }
+
+    fn storage_bits_frac(&self) -> i32 {
+        (self.storage_bytes() as i32) << (BITRES + 3)
+    }
+
+    fn storage_bytes(&self) -> usize {
+        match self {
+            Self::Encode(enc) => enc.storage_bytes(),
+            Self::Decode(dec) => dec.storage_bytes(),
         }
     }
 
@@ -583,7 +694,7 @@ impl BandCoder<'_, '_> {
         pulse_u: &mut Vec<u32>,
         pulse_cache: &mut CwrsDecodeCache,
         pvq_y: &mut Vec<f32>,
-        pvq_signx: &mut Vec<bool>,
+        pvq_signx: &mut Vec<u8>,
     ) -> u32 {
         match self {
             Self::Encode(enc) => alg_quant_with_scratch(
@@ -604,22 +715,138 @@ impl BandCoder<'_, '_> {
         }
     }
 
-    fn clone_encoder(&mut self) -> Option<RangeEncoder> {
+    #[allow(clippy::too_many_arguments)]
+    fn cubic_quant_or_unquant(
+        &mut self,
+        x: &mut [f32],
+        n: usize,
+        resolution: u32,
+        blocks: usize,
+        gain: f32,
+        resynth: bool,
+        cubic_y: &mut Vec<i32>,
+    ) -> u32 {
         match self {
-            Self::Encode(enc) => Some((**enc).clone()),
+            Self::Encode(enc) => {
+                cubic_quant_with_scratch(x, n, resolution, blocks, enc, gain, resynth, cubic_y)
+            }
+            Self::Decode(dec) => {
+                cubic_unquant_with_scratch(x, n, resolution, blocks, dec, gain, cubic_y)
+            }
+        }
+    }
+
+    fn snapshot_encoder(&self) -> Option<RangeEncoderSnapshot> {
+        match self {
+            Self::Encode(enc) => Some(enc.snapshot()),
             Self::Decode(_) => None,
         }
     }
 
-    fn restore_encoder(&mut self, saved: RangeEncoder) {
+    fn restore_encoder(&mut self, saved: RangeEncoderSnapshot) {
         match self {
-            Self::Encode(enc) => **enc = saved,
+            Self::Encode(enc) => enc.restore(saved),
+            Self::Decode(_) => unreachable!("theta RDO only runs while encoding"),
+        }
+    }
+
+    fn copy_encoder_buffer_tail_into(&self, start: usize, saved: &mut Vec<u8>) {
+        match self {
+            Self::Encode(enc) => enc.copy_buffer_tail_into(start, saved),
+            Self::Decode(_) => unreachable!("theta RDO only runs while encoding"),
+        }
+    }
+
+    fn restore_encoder_buffer_tail(&mut self, start: usize, saved: &[u8]) {
+        match self {
+            Self::Encode(enc) => enc.restore_buffer_tail(start, saved),
             Self::Decode(_) => unreachable!("theta RDO only runs while encoding"),
         }
     }
 }
 
-#[derive(Clone, Debug)]
+trait ThetaCoder {
+    const ENCODE: bool;
+
+    fn theta_tell_frac(&self) -> i32;
+    fn theta_uint(&mut self, value: usize, ft: u32) -> usize;
+    fn theta_bit(&mut self, value: bool, logp: u32) -> bool;
+    fn theta_encode(&mut self, fl: u32, fh: u32, ft: u32);
+    fn theta_decode(&mut self, ft: u32) -> u32;
+    fn theta_update(&mut self, fl: u32, fh: u32, ft: u32);
+}
+
+impl ThetaCoder for RangeEncoder {
+    const ENCODE: bool = true;
+
+    #[inline]
+    fn theta_tell_frac(&self) -> i32 {
+        self.tell_frac() as i32
+    }
+
+    #[inline]
+    fn theta_uint(&mut self, value: usize, ft: u32) -> usize {
+        self.encode_uint(value as u32, ft);
+        value
+    }
+
+    #[inline]
+    fn theta_bit(&mut self, value: bool, logp: u32) -> bool {
+        self.encode_bit_logp(value, logp);
+        value
+    }
+
+    #[inline]
+    fn theta_encode(&mut self, fl: u32, fh: u32, ft: u32) {
+        self.encode(fl, fh, ft);
+    }
+
+    #[inline]
+    fn theta_decode(&mut self, _ft: u32) -> u32 {
+        unreachable!("decode-only theta operation while encoding")
+    }
+
+    #[inline]
+    fn theta_update(&mut self, _fl: u32, _fh: u32, _ft: u32) {
+        unreachable!("decode-only theta operation while encoding")
+    }
+}
+
+impl ThetaCoder for RangeDecoder<'_> {
+    const ENCODE: bool = false;
+
+    #[inline]
+    fn theta_tell_frac(&self) -> i32 {
+        self.tell_frac() as i32
+    }
+
+    #[inline]
+    fn theta_uint(&mut self, _value: usize, ft: u32) -> usize {
+        self.decode_uint(ft) as usize
+    }
+
+    #[inline]
+    fn theta_bit(&mut self, _value: bool, logp: u32) -> bool {
+        self.decode_bit_logp(logp)
+    }
+
+    #[inline]
+    fn theta_encode(&mut self, _fl: u32, _fh: u32, _ft: u32) {
+        unreachable!("encode-only theta operation while decoding")
+    }
+
+    #[inline]
+    fn theta_decode(&mut self, ft: u32) -> u32 {
+        self.decode(ft)
+    }
+
+    #[inline]
+    fn theta_update(&mut self, fl: u32, fh: u32, ft: u32) {
+        self.update(fl, fh, ft);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 struct BandContext<'a> {
     mode: &'a CeltMode,
     band_e: &'a [f32],
@@ -633,6 +860,7 @@ struct BandContext<'a> {
     avoid_split_noise: bool,
     disable_inv: bool,
     theta_round: i32,
+    direct_cubic: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -665,10 +893,50 @@ fn quant_band_n1(
     1
 }
 
+#[inline(always)]
+fn decode_triangular_theta(qn: i32, fm: u32) -> i32 {
+    debug_assert!((2..=MAX_THETA_QN as i32).contains(&qn));
+    let half = qn >> 1;
+    let ft = (half + 1) * (half + 1);
+    let lower_ft = half * (half + 1) >> 1;
+    if fm < lower_ft as u32 {
+        i32::from(THETA_ROOT_CEIL[fm as usize]) - 1
+    } else {
+        let residual = ft as u32 - fm - 1;
+        debug_assert!(residual as usize <= MAX_THETA_RESIDUAL);
+        qn + 1 - i32::from(THETA_ROOT_CEIL[residual as usize])
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compute_theta(
     ctx: &mut BandContext<'_>,
     coder: &mut BandCoder<'_, '_>,
+    x: &mut [f32],
+    y: &mut [f32],
+    n: usize,
+    b: &mut i32,
+    blocks: usize,
+    blocks0: usize,
+    lm: isize,
+    stereo: bool,
+    fill: &mut u32,
+) -> SplitContext {
+    match coder {
+        BandCoder::Encode(encoder) => {
+            compute_theta_impl(ctx, *encoder, x, y, n, b, blocks, blocks0, lm, stereo, fill)
+        }
+        BandCoder::Decode(decoder) => {
+            compute_theta_impl(ctx, *decoder, x, y, n, b, blocks, blocks0, lm, stereo, fill)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn compute_theta_impl<C: ThetaCoder + ?Sized>(
+    ctx: &mut BandContext<'_>,
+    coder: &mut C,
     x: &mut [f32],
     y: &mut [f32],
     n: usize,
@@ -691,16 +959,17 @@ fn compute_theta(
         qn = 1;
     }
 
+    let encode = C::ENCODE;
     let mut inv = false;
-    let mut itheta = if coder.is_encode() {
+    let mut itheta = if encode {
         stereo_itheta(x, y, stereo, n)
     } else {
         0
     };
-    let tell = coder.tell_frac();
+    let tell = coder.theta_tell_frac();
 
     if qn != 1 {
-        if coder.is_encode() {
+        if encode {
             if !stereo || ctx.theta_round == 0 {
                 itheta = (itheta * qn + 8192) >> 14;
                 if !stereo && ctx.avoid_split_noise && itheta > 0 && itheta < qn {
@@ -732,44 +1001,41 @@ fn compute_theta(
             let p0 = 3i32;
             let x0 = qn / 2;
             let ft = p0 * (x0 + 1) + x0;
-            match coder {
-                BandCoder::Encode(enc) => {
-                    let fl = if itheta <= x0 {
-                        p0 * itheta
-                    } else {
-                        (itheta - 1 - x0) + (x0 + 1) * p0
-                    };
-                    let fh = if itheta <= x0 {
-                        p0 * (itheta + 1)
-                    } else {
-                        (itheta - x0) + (x0 + 1) * p0
-                    };
-                    enc.encode(fl as u32, fh as u32, ft as u32);
-                }
-                BandCoder::Decode(dec) => {
-                    let fs = dec.decode(ft as u32) as i32;
-                    let xq = if fs < (x0 + 1) * p0 {
-                        fs / p0
-                    } else {
-                        x0 + 1 + (fs - (x0 + 1) * p0)
-                    };
-                    let fl = if xq <= x0 {
-                        p0 * xq
-                    } else {
-                        (xq - 1 - x0) + (x0 + 1) * p0
-                    };
-                    let fh = if xq <= x0 {
-                        p0 * (xq + 1)
-                    } else {
-                        (xq - x0) + (x0 + 1) * p0
-                    };
-                    dec.update(fl as u32, fh as u32, ft as u32);
-                    itheta = xq;
-                }
+            if encode {
+                let fl = if itheta <= x0 {
+                    p0 * itheta
+                } else {
+                    (itheta - 1 - x0) + (x0 + 1) * p0
+                };
+                let fh = if itheta <= x0 {
+                    p0 * (itheta + 1)
+                } else {
+                    (itheta - x0) + (x0 + 1) * p0
+                };
+                coder.theta_encode(fl as u32, fh as u32, ft as u32);
+            } else {
+                let fs = coder.theta_decode(ft as u32) as i32;
+                let xq = if fs < (x0 + 1) * p0 {
+                    fs / p0
+                } else {
+                    x0 + 1 + (fs - (x0 + 1) * p0)
+                };
+                let fl = if xq <= x0 {
+                    p0 * xq
+                } else {
+                    (xq - 1 - x0) + (x0 + 1) * p0
+                };
+                let fh = if xq <= x0 {
+                    p0 * (xq + 1)
+                } else {
+                    (xq - x0) + (x0 + 1) * p0
+                };
+                coder.theta_update(fl as u32, fh as u32, ft as u32);
+                itheta = xq;
             }
         } else if blocks0 > 1 || stereo {
-            itheta = coder.encode_or_decode_uint(itheta as usize, (qn + 1) as u32) as i32;
-        } else if coder.is_encode() {
+            itheta = coder.theta_uint(itheta as usize, (qn + 1) as u32) as i32;
+        } else if encode {
             let half = qn >> 1;
             let fs = if itheta <= half {
                 itheta + 1
@@ -782,37 +1048,27 @@ fn compute_theta(
                 ((half + 1) * (half + 1)) - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1)
             };
             let ft = (half + 1) * (half + 1);
-            itheta = coder.encode_or_decode_range(
-                itheta as usize,
-                fl as u32,
-                (fl + fs) as u32,
-                ft as u32,
-            ) as i32;
+            coder.theta_encode(fl as u32, (fl + fs) as u32, ft as u32);
         } else {
             let half = qn >> 1;
             let ft = (half + 1) * (half + 1);
-            let (fl, fs);
-            let fm = match coder {
-                BandCoder::Decode(dec) => dec.decode(ft as u32),
-                BandCoder::Encode(_) => unreachable!("encode handled above"),
-            };
-            if fm < ((half * (half + 1)) >> 1) as u32 {
-                itheta = ((isqrt32(8 * fm + 1) - 1) >> 1) as i32;
-                fs = itheta + 1;
-                fl = itheta * (itheta + 1) >> 1;
+            let fm = coder.theta_decode(ft as u32);
+            itheta = decode_triangular_theta(qn, fm);
+            let fs = if itheta <= half {
+                itheta + 1
             } else {
-                itheta = (2 * (qn + 1) - isqrt32(8 * (ft as u32 - fm - 1) + 1) as i32) >> 1;
-                fs = qn + 1 - itheta;
-                fl = ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1);
-            }
-            match coder {
-                BandCoder::Decode(dec) => dec.update(fl as u32, (fl + fs) as u32, ft as u32),
-                BandCoder::Encode(_) => unreachable!("encode handled above"),
-            }
+                qn + 1 - itheta
+            };
+            let fl = if itheta <= half {
+                itheta * (itheta + 1) >> 1
+            } else {
+                ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1)
+            };
+            coder.theta_update(fl as u32, (fl + fs) as u32, ft as u32);
         }
 
         itheta = itheta * 16384 / qn;
-        if coder.is_encode() && stereo {
+        if encode && stereo {
             if itheta == 0 {
                 intensity_stereo(ctx.mode, x, y, ctx.band_e, ctx.band, n);
             } else {
@@ -820,7 +1076,7 @@ fn compute_theta(
             }
         }
     } else if stereo {
-        if coder.is_encode() {
+        if encode {
             inv = itheta > 8192 && !ctx.disable_inv;
             if inv {
                 for value in y.iter_mut().take(n) {
@@ -830,7 +1086,7 @@ fn compute_theta(
             intensity_stereo(ctx.mode, x, y, ctx.band_e, ctx.band, n);
         }
         if *b > 2 << BITRES && ctx.remaining_bits > 2 << BITRES {
-            inv = coder.encode_or_decode_bit(inv, 2);
+            inv = coder.theta_bit(inv, 2);
         } else {
             inv = false;
         }
@@ -840,7 +1096,7 @@ fn compute_theta(
         itheta = 0;
     }
 
-    let qalloc = coder.tell_frac() - tell;
+    let qalloc = coder.theta_tell_frac() - tell;
     *b -= qalloc;
 
     let (imid, iside, delta);
@@ -876,11 +1132,27 @@ fn compute_channel_weights(ex: f32, ey: f32) -> (f32, f32) {
 }
 
 fn inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
-    x.iter()
-        .zip(y.iter())
-        .take(n)
-        .map(|(left, right)| left * right)
-        .sum()
+    // Four independent partial sums instead of one serial chain; lane order
+    // keeps element order so results only differ from the serial fold by
+    // normal float reassociation inside the RDO distance heuristics.
+    let mut acc0 = 0.0f32;
+    let mut acc1 = 0.0f32;
+    let mut acc2 = 0.0f32;
+    let mut acc3 = 0.0f32;
+    let chunks = n / 4 * 4;
+    let xv = &x[..chunks];
+    let yv = &y[..chunks];
+    for i in (0..chunks).step_by(4) {
+        acc0 += xv[i] * yv[i];
+        acc1 += xv[i + 1] * yv[i + 1];
+        acc2 += xv[i + 2] * yv[i + 2];
+        acc3 += xv[i + 3] * yv[i + 3];
+    }
+    let mut sum = (acc0 + acc2) + (acc1 + acc3);
+    for i in chunks..n {
+        sum += x[i] * y[i];
+    }
+    sum
 }
 
 fn shift_right_i32(value: i32, shift: isize) -> i32 {
@@ -907,7 +1179,7 @@ fn quant_partition(
     pulse_u: &mut Vec<u32>,
     pulse_cache: &mut CwrsDecodeCache,
     pvq_y: &mut Vec<f32>,
-    pvq_signx: &mut Vec<bool>,
+    pvq_signx: &mut Vec<u8>,
 ) -> u32 {
     let mode = ctx.mode;
     let cache_offset = mode.cache.index[(lm + 1) as usize * mode.nb_ebands + ctx.band] as usize;
@@ -1093,6 +1365,80 @@ fn quant_partition(
     }
 }
 
+/// Codes a high-depth band with the direct cubic codebook from Opus QEXT.
+///
+/// This uses the main range coder instead of a QEXT enhancement stream. Both
+/// endpoints must therefore select the experimental direct-cubic packet mode.
+#[allow(clippy::too_many_arguments)]
+fn cubic_quant_partition(
+    ctx: &mut BandContext<'_>,
+    coder: &mut BandCoder<'_, '_>,
+    x: &mut [f32],
+    n: usize,
+    b: i32,
+    blocks: usize,
+    lm: isize,
+    gain: f32,
+    cubic_y: &mut Vec<i32>,
+) -> u32 {
+    debug_assert!(lm >= 0);
+    debug_assert!(n > 1);
+
+    ctx.remaining_bits = coder.storage_bits_frac() - coder.tell_frac();
+    let mut b = b.min(ctx.remaining_bits);
+    if lm == 0 || n <= 2 || b <= ((2 * n as i32) << BITRES) {
+        b = (b + (((n as i32 - 1) << BITRES) / 2)).min(ctx.remaining_bits);
+        let resolution =
+            (((b - (1 << BITRES) - ctx.mode.log_n[ctx.band] as i32 - ((lm as i32) << BITRES) - 1)
+                / (n as i32 - 1))
+                >> BITRES)
+                .clamp(0, 14) as u32;
+        let mask =
+            coder.cubic_quant_or_unquant(x, n, resolution, blocks, gain, ctx.resynth, cubic_y);
+        ctx.remaining_bits = coder.storage_bits_frac() - coder.tell_frac();
+        return mask;
+    }
+
+    let n0 = n;
+    let n = n >> 1;
+    let lm = lm - 1;
+    let blocks = (blocks + 1) >> 1;
+    let theta_resolution = 16.min((b >> BITRES) / (n0 as i32 - 1) + 1);
+    debug_assert!(theta_resolution > 0);
+
+    let mut theta_q30 = if coder.is_encode() {
+        stereo_itheta(&x[..n], &x[n..n0], false, n) << 16
+    } else {
+        0
+    };
+    let qtheta = if coder.is_encode() {
+        ((theta_q30 + (1 << (29 - theta_resolution))) >> (30 - theta_resolution)) as u32
+    } else {
+        0
+    };
+    let qtheta = coder.encode_or_decode_uint(qtheta, (1u32 << theta_resolution) + 1);
+    theta_q30 = (qtheta as i32) << (30 - theta_resolution);
+    b -= theta_resolution << BITRES;
+
+    let delta = ((n0 as i32 - 1) * 23 * ((theta_q30 >> 16) - 8192)) >> (17 - BITRES);
+    let theta = theta_q30 as f32 * (1.0 / 1_073_741_824.0);
+    let gain0 = celt_cos_norm(theta);
+    let gain1 = celt_cos_norm(1.0 - theta);
+    let (b0, b1) = if theta_q30 == 0 {
+        (b, 0)
+    } else if theta_q30 == 1 << 30 {
+        (0, b)
+    } else {
+        let b0 = ((b - delta) / 2).max(0).min(b);
+        (b0, b - b0)
+    };
+
+    let (x0, x1) = x.split_at_mut(n);
+    let mut mask = cubic_quant_partition(ctx, coder, x0, n, b0, blocks, lm, gain * gain0, cubic_y);
+    mask |= cubic_quant_partition(ctx, coder, x1, n, b1, blocks, lm, gain * gain1, cubic_y);
+    mask
+}
+
 #[allow(clippy::too_many_arguments)]
 fn quant_band_mono(
     ctx: &mut BandContext<'_>,
@@ -1105,11 +1451,12 @@ fn quant_band_mono(
     lm: isize,
     lowband_out: Option<&mut [f32]>,
     lowband_tmp: &mut Vec<f32>,
+    hadamard_tmp: &mut Vec<f32>,
     pulse_y: &mut Vec<i32>,
     pulse_u: &mut Vec<u32>,
     pulse_cache: &mut CwrsDecodeCache,
     pvq_y: &mut Vec<f32>,
-    pvq_signx: &mut Vec<bool>,
+    pvq_signx: &mut Vec<u8>,
     gain: f32,
     fill: u32,
 ) -> u32 {
@@ -1169,7 +1516,13 @@ fn quant_band_mono(
     let n_b0 = n_b;
     if blocks0 > 1 {
         if coder.is_encode() {
-            deinterleave_hadamard(x, n_b >> recombine, blocks0 << recombine, long_blocks);
+            deinterleave_hadamard_with_scratch(
+                x,
+                n_b >> recombine,
+                blocks0 << recombine,
+                long_blocks,
+                hadamard_tmp,
+            );
         }
         if let Some(low) = lowband {
             if !lowband_copied {
@@ -1177,11 +1530,12 @@ fn quant_band_mono(
                 lowband_tmp[..n].copy_from_slice(&low[..n]);
                 lowband_copied = true;
             }
-            deinterleave_hadamard(
+            deinterleave_hadamard_with_scratch(
                 &mut lowband_tmp[..n],
                 n_b >> recombine,
                 blocks0 << recombine,
                 long_blocks,
+                hadamard_tmp,
             );
         }
     }
@@ -1191,27 +1545,44 @@ fn quant_band_mono(
     } else {
         lowband
     };
-    let mut cm = quant_partition(
-        ctx,
-        coder,
-        x,
-        n,
-        b,
-        blocks,
-        lowband,
-        lm,
-        gain,
-        fill,
-        pulse_y,
-        pulse_u,
-        pulse_cache,
-        pvq_y,
-        pvq_signx,
-    );
+    let use_direct_cubic = ctx.direct_cubic
+        && lm >= 0
+        && coder.storage_bytes() >= DIRECT_CUBIC_MIN_BYTES_PER_2P5MS << lm as usize
+        && b > ((DIRECT_CUBIC_MIN_DEPTH * n as i32) << BITRES)
+            + ctx.mode.log_n[ctx.band] as i32
+            + 8
+            + 8 * lm as i32;
+    let mut cm = if use_direct_cubic {
+        cubic_quant_partition(ctx, coder, x, n, b, blocks, lm, gain, pulse_y)
+    } else {
+        quant_partition(
+            ctx,
+            coder,
+            x,
+            n,
+            b,
+            blocks,
+            lowband,
+            lm,
+            gain,
+            fill,
+            pulse_y,
+            pulse_u,
+            pulse_cache,
+            pvq_y,
+            pvq_signx,
+        )
+    };
 
     if ctx.resynth {
         if blocks0 > 1 {
-            interleave_hadamard(x, n_b >> recombine, blocks0 << recombine, long_blocks);
+            interleave_hadamard_with_scratch(
+                x,
+                n_b >> recombine,
+                blocks0 << recombine,
+                long_blocks,
+                hadamard_tmp,
+            );
         }
 
         n_b = n_b0;
@@ -1294,11 +1665,12 @@ fn quant_band_stereo(
     lm: isize,
     lowband_out: Option<&mut [f32]>,
     lowband_tmp: &mut Vec<f32>,
+    hadamard_tmp: &mut Vec<f32>,
     pulse_y: &mut Vec<i32>,
     pulse_u: &mut Vec<u32>,
     pulse_cache: &mut CwrsDecodeCache,
     pvq_y: &mut Vec<f32>,
-    pvq_signx: &mut Vec<bool>,
+    pvq_signx: &mut Vec<u8>,
     fill: u32,
 ) -> u32 {
     if n == 1 {
@@ -1349,6 +1721,7 @@ fn quant_band_stereo(
                 lm,
                 lowband_out,
                 lowband_tmp,
+                hadamard_tmp,
                 pulse_y,
                 pulse_u,
                 pulse_cache,
@@ -1376,6 +1749,7 @@ fn quant_band_stereo(
                 lm,
                 lowband_out,
                 lowband_tmp,
+                hadamard_tmp,
                 pulse_y,
                 pulse_u,
                 pulse_cache,
@@ -1419,6 +1793,7 @@ fn quant_band_stereo(
                 lm,
                 lowband_out,
                 lowband_tmp,
+                hadamard_tmp,
                 pulse_y,
                 pulse_u,
                 pulse_cache,
@@ -1442,6 +1817,7 @@ fn quant_band_stereo(
                 lm,
                 None,
                 lowband_tmp,
+                hadamard_tmp,
                 pulse_y,
                 pulse_u,
                 pulse_cache,
@@ -1463,6 +1839,7 @@ fn quant_band_stereo(
                 lm,
                 None,
                 lowband_tmp,
+                hadamard_tmp,
                 pulse_y,
                 pulse_u,
                 pulse_cache,
@@ -1486,6 +1863,7 @@ fn quant_band_stereo(
                 lm,
                 lowband_out,
                 lowband_tmp,
+                hadamard_tmp,
                 pulse_y,
                 pulse_u,
                 pulse_cache,
@@ -1585,6 +1963,54 @@ pub fn quant_all_bands_mono_with_scratch(
     _intensity: usize,
     tf_res: &[i32],
     total_bits: i32,
+    balance: i32,
+    coder: &mut BandCoder<'_, '_>,
+    lm: usize,
+    coded_bands: usize,
+    seed: &mut u32,
+    _complexity: i32,
+    encode_resynth: bool,
+    scratch: &mut BandScratch,
+) {
+    quant_all_bands_mono_with_scratch_and_coding(
+        mode,
+        start,
+        end,
+        x,
+        collapse_masks,
+        band_e,
+        pulses,
+        short_blocks,
+        spread,
+        _intensity,
+        tf_res,
+        total_bits,
+        balance,
+        coder,
+        lm,
+        coded_bands,
+        seed,
+        _complexity,
+        encode_resynth,
+        false,
+        scratch,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn quant_all_bands_mono_with_scratch_and_coding(
+    mode: &CeltMode,
+    start: usize,
+    end: usize,
+    x: &mut [f32],
+    collapse_masks: &mut [u8],
+    band_e: &[f32],
+    pulses: &[i32],
+    short_blocks: bool,
+    spread: i32,
+    _intensity: usize,
+    tf_res: &[i32],
+    total_bits: i32,
     mut balance: i32,
     coder: &mut BandCoder<'_, '_>,
     lm: usize,
@@ -1592,6 +2018,7 @@ pub fn quant_all_bands_mono_with_scratch(
     seed: &mut u32,
     _complexity: i32,
     encode_resynth: bool,
+    direct_cubic: bool,
     scratch: &mut BandScratch,
 ) {
     assert!(start < end);
@@ -1630,6 +2057,7 @@ pub fn quant_all_bands_mono_with_scratch(
         avoid_split_noise: blocks > 1,
         disable_inv: false,
         theta_round: 0,
+        direct_cubic,
     };
 
     for i in start..end {
@@ -1718,6 +2146,7 @@ pub fn quant_all_bands_mono_with_scratch(
             lm as isize,
             lowband_out,
             &mut scratch.lowband_tmp,
+            &mut scratch.hadamard_tmp,
             &mut scratch.pulse_y,
             &mut scratch.pulse_u,
             &mut scratch.pulse_cache,
@@ -1807,6 +2236,60 @@ pub fn quant_all_bands_stereo_with_scratch(
     pulses: &[i32],
     short_blocks: bool,
     spread: i32,
+    dual_stereo: bool,
+    intensity: usize,
+    tf_res: &[i32],
+    total_bits: i32,
+    balance: i32,
+    coder: &mut BandCoder<'_, '_>,
+    lm: usize,
+    coded_bands: usize,
+    seed: &mut u32,
+    complexity: i32,
+    disable_inv: bool,
+    encode_resynth: bool,
+    scratch: &mut BandScratch,
+) {
+    quant_all_bands_stereo_with_scratch_and_coding(
+        mode,
+        start,
+        end,
+        x,
+        y,
+        collapse_masks,
+        band_e,
+        pulses,
+        short_blocks,
+        spread,
+        dual_stereo,
+        intensity,
+        tf_res,
+        total_bits,
+        balance,
+        coder,
+        lm,
+        coded_bands,
+        seed,
+        complexity,
+        disable_inv,
+        encode_resynth,
+        false,
+        scratch,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn quant_all_bands_stereo_with_scratch_and_coding(
+    mode: &CeltMode,
+    start: usize,
+    end: usize,
+    x: &mut [f32],
+    y: &mut [f32],
+    collapse_masks: &mut [u8],
+    band_e: &[f32],
+    pulses: &[i32],
+    short_blocks: bool,
+    spread: i32,
     mut dual_stereo: bool,
     intensity: usize,
     tf_res: &[i32],
@@ -1819,6 +2302,7 @@ pub fn quant_all_bands_stereo_with_scratch(
     complexity: i32,
     disable_inv: bool,
     encode_resynth: bool,
+    direct_cubic: bool,
     scratch: &mut BandScratch,
 ) {
     assert!(start < end);
@@ -1861,6 +2345,7 @@ pub fn quant_all_bands_stereo_with_scratch(
         avoid_split_noise: blocks > 1,
         disable_inv,
         theta_round: 0,
+        direct_cubic,
     };
 
     for i in start..end {
@@ -1954,8 +2439,6 @@ pub fn quant_all_bands_stereo_with_scratch(
         if write_lowband_out2 {
             scratch.lowband_out2.resize(n, 0.0);
         }
-        let mut selected_lowband_out = None;
-
         if dual_stereo {
             let lowband_out = if write_lowband_out {
                 Some(&mut scratch.lowband_out[..n])
@@ -1973,6 +2456,7 @@ pub fn quant_all_bands_stereo_with_scratch(
                 lm as isize,
                 lowband_out,
                 &mut scratch.lowband_tmp,
+                &mut scratch.hadamard_tmp,
                 &mut scratch.pulse_y,
                 &mut scratch.pulse_u,
                 &mut scratch.pulse_cache,
@@ -1997,6 +2481,7 @@ pub fn quant_all_bands_stereo_with_scratch(
                 lm as isize,
                 lowband_out2,
                 &mut scratch.lowband_tmp,
+                &mut scratch.hadamard_tmp,
                 &mut scratch.pulse_y,
                 &mut scratch.pulse_u,
                 &mut scratch.pulse_cache,
@@ -2009,36 +2494,34 @@ pub fn quant_all_bands_stereo_with_scratch(
             let cm = x_cm | y_cm;
             if theta_rdo && i < intensity {
                 let enc_save = coder
-                    .clone_encoder()
+                    .snapshot_encoder()
                     .expect("theta RDO only runs while encoding");
-                let ctx_save = ctx.clone();
-                let x_save = x[band_start..band_end].to_vec();
-                let y_save = y[band_start..band_end].to_vec();
+                let ctx_save = ctx;
+                scratch.rdo_x_save.resize(n, 0.0);
+                scratch.rdo_y_save.resize(n, 0.0);
+                scratch.rdo_x_save[..n].copy_from_slice(&x[band_start..band_end]);
+                scratch.rdo_y_save[..n].copy_from_slice(&y[band_start..band_end]);
                 let (w0, w1) = compute_channel_weights(band_e[i], band_e[i + mode.nb_ebands]);
 
-                let mut enc_down = enc_save.clone();
-                let mut coder_down = BandCoder::Encode(&mut enc_down);
-                let mut ctx_down = ctx_save.clone();
-                ctx_down.theta_round = -1;
-                let mut x_down = x_save.clone();
-                let mut y_down = y_save.clone();
-                let mut lowband_down = if !last && resynth {
-                    Some(vec![0.0f32; n])
+                ctx.theta_round = -1;
+                let lowband_out = if write_lowband_out {
+                    Some(&mut scratch.lowband_out[..n])
                 } else {
                     None
                 };
                 let x_cm_down = quant_band_stereo(
-                    &mut ctx_down,
-                    &mut coder_down,
-                    &mut x_down,
-                    &mut y_down,
+                    &mut ctx,
+                    coder,
+                    &mut x[band_start..band_end],
+                    &mut y[band_start..band_end],
                     n,
                     b,
                     blocks,
                     lowband,
                     lm as isize,
-                    lowband_down.as_deref_mut(),
+                    lowband_out,
                     &mut scratch.lowband_tmp,
+                    &mut scratch.hadamard_tmp,
                     &mut scratch.pulse_y,
                     &mut scratch.pulse_u,
                     &mut scratch.pulse_cache,
@@ -2046,32 +2529,48 @@ pub fn quant_all_bands_stereo_with_scratch(
                     &mut scratch.pvq_signx,
                     cm,
                 );
-                let dist_down =
-                    w0 * inner_prod(&x_save, &x_down, n) + w1 * inner_prod(&y_save, &y_down, n);
+                let dist_down = w0
+                    * inner_prod(&scratch.rdo_x_save[..n], &x[band_start..band_end], n)
+                    + w1 * inner_prod(&scratch.rdo_y_save[..n], &y[band_start..band_end], n);
+                let enc_down = coder
+                    .snapshot_encoder()
+                    .expect("theta RDO only runs while encoding");
+                let ctx_down = ctx;
+                scratch.rdo_x_down.resize(n, 0.0);
+                scratch.rdo_y_down.resize(n, 0.0);
+                scratch.rdo_x_down[..n].copy_from_slice(&x[band_start..band_end]);
+                scratch.rdo_y_down[..n].copy_from_slice(&y[band_start..band_end]);
+                if write_lowband_out {
+                    scratch.rdo_lowband_down.resize(n, 0.0);
+                    scratch.rdo_lowband_down[..n].copy_from_slice(&scratch.lowband_out[..n]);
+                }
+                let buffer_start = enc_save.offs as usize;
+                coder.copy_encoder_buffer_tail_into(buffer_start, &mut scratch.rdo_bytes);
 
-                let mut enc_up = enc_save;
-                let mut coder_up = BandCoder::Encode(&mut enc_up);
-                let mut ctx_up = ctx_save;
-                ctx_up.theta_round = 1;
-                let mut x_up = x_save.clone();
-                let mut y_up = y_save.clone();
-                let mut lowband_up = if !last && resynth {
-                    Some(vec![0.0f32; n])
+                coder.restore_encoder(enc_save);
+                ctx = ctx_save;
+                x[band_start..band_end].copy_from_slice(&scratch.rdo_x_save[..n]);
+                y[band_start..band_end].copy_from_slice(&scratch.rdo_y_save[..n]);
+
+                ctx.theta_round = 1;
+                let lowband_out = if write_lowband_out {
+                    Some(&mut scratch.lowband_out[..n])
                 } else {
                     None
                 };
                 let x_cm_up = quant_band_stereo(
-                    &mut ctx_up,
-                    &mut coder_up,
-                    &mut x_up,
-                    &mut y_up,
+                    &mut ctx,
+                    coder,
+                    &mut x[band_start..band_end],
+                    &mut y[band_start..band_end],
                     n,
                     b,
                     blocks,
                     lowband,
                     lm as isize,
-                    lowband_up.as_deref_mut(),
+                    lowband_out,
                     &mut scratch.lowband_tmp,
+                    &mut scratch.hadamard_tmp,
                     &mut scratch.pulse_y,
                     &mut scratch.pulse_u,
                     &mut scratch.pulse_cache,
@@ -2079,22 +2578,21 @@ pub fn quant_all_bands_stereo_with_scratch(
                     &mut scratch.pvq_signx,
                     cm,
                 );
-                let dist_up =
-                    w0 * inner_prod(&x_save, &x_up, n) + w1 * inner_prod(&y_save, &y_up, n);
+                let dist_up = w0
+                    * inner_prod(&scratch.rdo_x_save[..n], &x[band_start..band_end], n)
+                    + w1 * inner_prod(&scratch.rdo_y_save[..n], &y[band_start..band_end], n);
 
                 if dist_down >= dist_up {
                     coder.restore_encoder(enc_down);
+                    coder.restore_encoder_buffer_tail(buffer_start, &scratch.rdo_bytes);
                     ctx = ctx_down;
-                    x[band_start..band_end].copy_from_slice(&x_down);
-                    y[band_start..band_end].copy_from_slice(&y_down);
-                    selected_lowband_out = lowband_down;
+                    x[band_start..band_end].copy_from_slice(&scratch.rdo_x_down[..n]);
+                    y[band_start..band_end].copy_from_slice(&scratch.rdo_y_down[..n]);
+                    if write_lowband_out {
+                        scratch.lowband_out[..n].copy_from_slice(&scratch.rdo_lowband_down[..n]);
+                    }
                     x_cm = x_cm_down;
                 } else {
-                    coder.restore_encoder(enc_up);
-                    ctx = ctx_up;
-                    x[band_start..band_end].copy_from_slice(&x_up);
-                    y[band_start..band_end].copy_from_slice(&y_up);
-                    selected_lowband_out = lowband_up;
                     x_cm = x_cm_up;
                 }
             } else {
@@ -2116,6 +2614,7 @@ pub fn quant_all_bands_stereo_with_scratch(
                     lm as isize,
                     lowband_out,
                     &mut scratch.lowband_tmp,
+                    &mut scratch.hadamard_tmp,
                     &mut scratch.pulse_y,
                     &mut scratch.pulse_u,
                     &mut scratch.pulse_cache,
@@ -2127,12 +2626,7 @@ pub fn quant_all_bands_stereo_with_scratch(
             y_cm = x_cm;
         }
 
-        if let Some(out) = selected_lowband_out.as_deref() {
-            let norm_pos = band_start - norm_offset;
-            if norm_pos + n <= norm.len() {
-                norm[norm_pos..norm_pos + n].copy_from_slice(&out);
-            }
-        } else if write_lowband_out {
+        if write_lowband_out {
             let norm_pos = band_start - norm_offset;
             if norm_pos + n <= norm.len() {
                 norm[norm_pos..norm_pos + n].copy_from_slice(&scratch.lowband_out[..n]);
@@ -2157,7 +2651,29 @@ pub fn quant_all_bands_stereo_with_scratch(
 
 #[cfg(test)]
 mod tests {
-    use super::copy_active_stereo_band;
+    use super::{copy_active_stereo_band, decode_triangular_theta, MAX_THETA_QN};
+    use crate::celt::mathops::isqrt32;
+
+    #[test]
+    fn theta_inverse_table_matches_integer_sqrt_for_every_symbol() {
+        for qn in (2..=MAX_THETA_QN as i32).step_by(2) {
+            let half = qn >> 1;
+            let ft = (half + 1) * (half + 1);
+            let lower_ft = half * (half + 1) >> 1;
+            for fm in 0..ft as u32 {
+                let expected = if fm < lower_ft as u32 {
+                    ((isqrt32(8 * fm + 1) - 1) >> 1) as i32
+                } else {
+                    (2 * (qn + 1) - isqrt32(8 * (ft as u32 - fm - 1) + 1) as i32) >> 1
+                };
+                assert_eq!(
+                    decode_triangular_theta(qn, fm),
+                    expected,
+                    "qn={qn}, fm={fm}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn silent_stereo_band_uses_the_active_channel_for_mid_side() {

@@ -2,12 +2,21 @@
 //! `celt/celt_decoder.c` floating-point path.
 
 use crate::celt::bands::denormalise_bands;
-use crate::celt::mathops::{float_to_i16, float_to_i24};
+use crate::celt::mathops::{float_to_i16, floor_to_i32};
 use crate::celt::mdct::{clt_mdct_backward_with_scratch, MdctScratch};
 use crate::celt::modes::CeltMode;
 use crate::{Error, Result};
 
 const CELT_SIG_SCALE: f32 = 32_768.0;
+
+#[inline]
+fn celt_signal_to_i24(x: f32) -> i32 {
+    // Equivalent to float_to_i24(x / CELT_SIG_SCALE). Both scale factors are
+    // exact powers of two, but spelling the combined factor avoids a second
+    // multiply in the per-sample decode loop.
+    let x = (x * 256.0).clamp(-8_388_608.0, 8_388_607.0);
+    floor_to_i32(x + 0.5)
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct SynthesisScratch {
@@ -203,6 +212,29 @@ pub fn deemphasis_interleaved_into(
     let c_count = channels.len();
     let coef0 = mode.preemph[0];
     pcm.resize(n * c_count, 0.0);
+
+    if c_count == 2 {
+        // The two IIR chains are independent. Advancing them together exposes
+        // enough instruction-level parallelism to hide much of the recurrence
+        // latency and writes the interleaved output sequentially.
+        let mut mem0 = preemph_mem[0];
+        let mut mem1 = preemph_mem[1];
+        for (output, (&sample0, &sample1)) in pcm
+            .chunks_exact_mut(2)
+            .zip(channels[0].iter().zip(&channels[1]))
+        {
+            let tmp0 = sample0 + 1e-30f32 + mem0;
+            let tmp1 = sample1 + 1e-30f32 + mem1;
+            mem0 = coef0 * tmp0;
+            mem1 = coef0 * tmp1;
+            output[0] = tmp0 / CELT_SIG_SCALE;
+            output[1] = tmp1 / CELT_SIG_SCALE;
+        }
+        preemph_mem[0] = mem0;
+        preemph_mem[1] = mem1;
+        return Ok(());
+    }
+
     for c in 0..c_count {
         let mut mem = preemph_mem[c];
         for j in 0..n {
@@ -282,12 +314,41 @@ pub fn deemphasis_interleaved_i24_into(
     let coef0 = mode.preemph[0];
     pcm.resize(n * c_count, 0);
 
+    if c_count == 2 {
+        if libopus_rs_kernels::deemphasis_stereo_i24(
+            &channels[0],
+            &channels[1],
+            coef0,
+            preemph_mem,
+            pcm,
+        ) {
+            return Ok(());
+        }
+
+        let mut mem0 = preemph_mem[0];
+        let mut mem1 = preemph_mem[1];
+        for (output, (&sample0, &sample1)) in pcm
+            .chunks_exact_mut(2)
+            .zip(channels[0].iter().zip(&channels[1]))
+        {
+            let tmp0 = sample0 + 1e-30f32 + mem0;
+            let tmp1 = sample1 + 1e-30f32 + mem1;
+            mem0 = coef0 * tmp0;
+            mem1 = coef0 * tmp1;
+            output[0] = celt_signal_to_i24(tmp0);
+            output[1] = celt_signal_to_i24(tmp1);
+        }
+        preemph_mem[0] = mem0;
+        preemph_mem[1] = mem1;
+        return Ok(());
+    }
+
     for c in 0..c_count {
         let mut mem = preemph_mem[c];
         for j in 0..n {
             let tmp = channels[c][j] + 1e-30f32 + mem;
             mem = coef0 * tmp;
-            pcm[j * c_count + c] = float_to_i24(tmp / CELT_SIG_SCALE);
+            pcm[j * c_count + c] = celt_signal_to_i24(tmp);
         }
         preemph_mem[c] = mem;
     }
@@ -296,8 +357,8 @@ pub fn deemphasis_interleaved_i24_into(
 
 #[cfg(test)]
 mod tests {
-    use super::{deemphasis_interleaved_i16_into, CELT_SIG_SCALE};
-    use crate::celt::mathops::float_to_i16;
+    use super::{celt_signal_to_i24, deemphasis_interleaved_i16_into, CELT_SIG_SCALE};
+    use crate::celt::mathops::{float_to_i16, float_to_i24};
     use crate::celt::modes::CeltMode;
 
     #[test]
@@ -331,5 +392,17 @@ mod tests {
 
         assert_eq!(actual_pcm, expected_pcm);
         assert_eq!(actual_mem, expected_mem);
+    }
+
+    #[test]
+    fn combined_i24_scale_matches_composed_conversion() {
+        for index in -20_000..=20_000 {
+            let signal = index as f32 * 521.125;
+            assert_eq!(
+                celt_signal_to_i24(signal),
+                float_to_i24(signal / CELT_SIG_SCALE),
+                "signal={signal}"
+            );
+        }
     }
 }

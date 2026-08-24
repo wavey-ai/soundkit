@@ -77,7 +77,7 @@ for mode in cbr vbr; do
       960) frame_ms="20" ;;
       *) exit 1 ;;
     esac
-    for bitrate in 48000 96000 128000; do
+    for bitrate in 192000 256000 320000; do
       case_dir="$OUT_DIR/${mode}_${frame_ms}ms_$((bitrate / 1000))k"
       mkdir -p "$case_dir"
 

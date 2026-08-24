@@ -1,5 +1,6 @@
-use libopus_rs::{Application, Decoder, Encoder, CELT_FRAME_SIZES_48K};
+use libopus_rs::{Application, Decoder, Encoder, CELT_FRAME_SIZES_48K, CELT_MAX_FRAME_BYTES};
 use std::env;
+use std::fs;
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -8,6 +9,7 @@ const CHANNELS: usize = 2;
 const BITRATES: [i32; 9] = [
     48_000, 96_000, 128_000, 160_000, 192_000, 256_000, 320_000, 384_000, 512_000,
 ];
+const TARGET_BITRATES: [i32; 3] = [192_000, 256_000, 320_000];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BenchMode {
@@ -21,6 +23,38 @@ enum BenchFixture {
     Tone,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PcmFormat {
+    F32,
+    I16,
+    I24,
+}
+
+#[derive(Clone, Copy)]
+enum PcmInput<'a> {
+    F32(&'a [f32]),
+    I16(&'a [i16]),
+    I24(&'a [i32]),
+}
+
+impl PcmInput<'_> {
+    const fn len(self) -> usize {
+        match self {
+            Self::F32(pcm) => pcm.len(),
+            Self::I16(pcm) => pcm.len(),
+            Self::I24(pcm) => pcm.len(),
+        }
+    }
+
+    const fn format(self) -> PcmFormat {
+        match self {
+            Self::F32(_) => PcmFormat::F32,
+            Self::I16(_) => PcmFormat::I16,
+            Self::I24(_) => PcmFormat::I24,
+        }
+    }
+}
+
 impl BenchMode {
     const fn label(self) -> &'static str {
         match self {
@@ -30,7 +64,7 @@ impl BenchMode {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Options {
     repeats: usize,
     seconds: usize,
@@ -39,19 +73,21 @@ struct Options {
     frame_size: Option<usize>,
     bitrate: Option<i32>,
     fixture: BenchFixture,
+    input_s32le: Option<String>,
+    pcm_bits: Option<u8>,
+    skip_quality: bool,
+    quality_lag: Option<isize>,
+    application: Application,
+    direct_cubic: bool,
 }
 
 struct EncodeResult {
     packets: Vec<Vec<u8>>,
-    bytes: usize,
-    checksum: u64,
-    min_packet: usize,
-    max_packet: usize,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: raw_celt_bench [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--frame-size n] [--bitrate n] [--fixture mixed|tone] [--dump-packets n]"
+        "usage: raw_celt_bench [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--application audio|restricted-lowdelay] [--direct-cubic] [--frame-size n] [--bitrate n] [--fixture mixed|tone] [--input-s32le path] [--pcm-bits 16|24] [--quality-lag frames] [--skip-quality] [--dump-packets n]"
     );
     std::process::exit(2);
 }
@@ -65,6 +101,12 @@ fn parse_options() -> Options {
         frame_size: None,
         bitrate: None,
         fixture: BenchFixture::Mixed,
+        input_s32le: None,
+        pcm_bits: None,
+        skip_quality: false,
+        quality_lag: None,
+        application: Application::Audio,
+        direct_cubic: false,
     };
     let args = env::args().collect::<Vec<_>>();
     let mut i = 1usize;
@@ -93,6 +135,15 @@ fn parse_options() -> Options {
                     _ => usage(),
                 };
             }
+            "--application" => {
+                i += 1;
+                options.application = match args.get(i).map(String::as_str) {
+                    Some("audio") => Application::Audio,
+                    Some("restricted-lowdelay") => Application::RestrictedLowDelay,
+                    _ => usage(),
+                };
+            }
+            "--direct-cubic" => options.direct_cubic = true,
             "--dump-packets" => {
                 i += 1;
                 options.dump_packets = Some(
@@ -131,6 +182,27 @@ fn parse_options() -> Options {
                     _ => usage(),
                 };
             }
+            "--input-s32le" => {
+                i += 1;
+                options.input_s32le = Some(args.get(i).cloned().unwrap_or_else(|| usage()));
+            }
+            "--pcm-bits" => {
+                i += 1;
+                options.pcm_bits = match args.get(i).map(String::as_str) {
+                    Some("16") => Some(16),
+                    Some("24") => Some(24),
+                    _ => usage(),
+                };
+            }
+            "--quality-lag" => {
+                i += 1;
+                options.quality_lag = Some(
+                    args.get(i)
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or_else(|| usage()),
+                );
+            }
+            "--skip-quality" => options.skip_quality = true,
             _ => usage(),
         }
         i += 1;
@@ -147,6 +219,14 @@ fn modes(options: &Options) -> &'static [BenchMode] {
         Some(BenchMode::Vbr) => &[BenchMode::Vbr],
         None => &[BenchMode::Cbr, BenchMode::Vbr],
     }
+}
+
+fn bitrate_enabled(options: &Options, bitrate: i32) -> bool {
+    options
+        .bitrate
+        .map_or(TARGET_BITRATES.contains(&bitrate), |selected| {
+            selected == bitrate
+        })
 }
 
 fn generate_mixed_fixture(seconds: usize) -> Vec<f32> {
@@ -192,6 +272,69 @@ fn generate_fixture(seconds: usize, fixture: BenchFixture) -> Vec<f32> {
     }
 }
 
+fn load_i24_s32le(
+    path: &str,
+    seconds: usize,
+) -> Result<(Vec<f32>, Vec<i32>), Box<dyn std::error::Error>> {
+    let bytes = fs::read(path)?;
+    let sample_count = SAMPLE_RATE
+        .checked_mul(seconds)
+        .and_then(|frames| frames.checked_mul(CHANNELS))
+        .ok_or("requested input duration is too large")?;
+    let byte_count = sample_count
+        .checked_mul(std::mem::size_of::<i32>())
+        .ok_or("requested input duration is too large")?;
+    if bytes.len() < byte_count {
+        return Err(format!(
+            "{path} contains {} bytes, but {seconds} seconds of stereo 48 kHz S32LE needs {byte_count}",
+            bytes.len()
+        )
+        .into());
+    }
+
+    let mut pcm_i24 = Vec::with_capacity(sample_count);
+    let mut pcm_f32 = Vec::with_capacity(sample_count);
+    for bytes in bytes[..byte_count].chunks_exact(4) {
+        let sample = i32::from_le_bytes(bytes.try_into().expect("four-byte sample"));
+        if !(-8_388_608..=8_388_607).contains(&sample) {
+            return Err(format!("{path} contains a sample outside signed 24-bit range").into());
+        }
+        pcm_i24.push(sample);
+        pcm_f32.push(sample as f32 / 8_388_608.0);
+    }
+    Ok((pcm_f32, pcm_i24))
+}
+
+fn quantize_fixture_i16(pcm: &mut [f32]) -> Vec<i16> {
+    let quantized = pcm
+        .iter()
+        .map(|&sample| {
+            (sample * 32_768.0)
+                .round()
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+        })
+        .collect::<Vec<_>>();
+    for (reference, &sample) in pcm.iter_mut().zip(&quantized) {
+        *reference = sample as f32 / 32_768.0;
+    }
+    quantized
+}
+
+fn quantize_fixture_i24(pcm: &mut [f32]) -> Vec<i32> {
+    let quantized = pcm
+        .iter()
+        .map(|&sample| {
+            (sample * 8_388_608.0)
+                .round()
+                .clamp(-8_388_608.0, 8_388_607.0) as i32
+        })
+        .collect::<Vec<_>>();
+    for (reference, &sample) in pcm.iter_mut().zip(&quantized) {
+        *reference = sample as f32 / 8_388_608.0;
+    }
+    quantized
+}
+
 fn centered_u16(value: u32) -> f32 {
     ((value & 0xffff) as i32 - 32_768) as f32 * (1.0 / 32_768.0)
 }
@@ -229,16 +372,46 @@ struct DecodeQuality {
 fn decode_packets(
     packets: &[Vec<u8>],
     frame_size: usize,
+    format: PcmFormat,
+    direct_cubic: bool,
 ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let mut decoder = Decoder::new(SAMPLE_RATE as i32, CHANNELS)?;
+    decoder.set_experimental_direct_cubic(direct_cubic);
     let mut decoded = Vec::with_capacity(packets.len() * frame_size * CHANNELS);
-    let mut frame = Vec::new();
-    for packet in packets {
-        let decoded_frames = decoder.decode_f32_into(black_box(packet), false, &mut frame)?;
-        if decoded_frames != frame_size || frame.len() != frame_size * CHANNELS {
-            return Err("unexpected decoded frame size".into());
+    match format {
+        PcmFormat::I16 => {
+            let mut frame = Vec::new();
+            for packet in packets {
+                let decoded_frames =
+                    decoder.decode_i16_into(black_box(packet), false, &mut frame)?;
+                if decoded_frames != frame_size || frame.len() != frame_size * CHANNELS {
+                    return Err("unexpected decoded frame size".into());
+                }
+                decoded.extend(frame.iter().map(|&sample| sample as f32 / 32_768.0));
+            }
         }
-        decoded.extend_from_slice(&frame);
+        PcmFormat::I24 => {
+            let mut frame = Vec::new();
+            for packet in packets {
+                let decoded_frames =
+                    decoder.decode_i24_into(black_box(packet), false, &mut frame)?;
+                if decoded_frames != frame_size || frame.len() != frame_size * CHANNELS {
+                    return Err("unexpected decoded frame size".into());
+                }
+                decoded.extend(frame.iter().map(|&sample| sample as f32 / 8_388_608.0));
+            }
+        }
+        PcmFormat::F32 => {
+            let mut frame = Vec::new();
+            for packet in packets {
+                let decoded_frames =
+                    decoder.decode_f32_into(black_box(packet), false, &mut frame)?;
+                if decoded_frames != frame_size || frame.len() != frame_size * CHANNELS {
+                    return Err("unexpected decoded frame size".into());
+                }
+                decoded.extend_from_slice(&frame);
+            }
+        }
     }
     Ok(decoded)
 }
@@ -253,49 +426,79 @@ fn aligned_quality(reference: &[f32], decoded: &[f32]) -> DecodeQuality {
     };
 
     for lag in -(max_lag as isize)..=(max_lag as isize) {
-        let (reference_start, decoded_start) = if lag >= 0 {
-            (lag as usize, 0)
-        } else {
-            (0, (-lag) as usize)
-        };
-        let mut signal = 0.0f64;
-        let mut error = 0.0f64;
-        for frame in 0..compare_frames {
-            let ref_base = (reference_start + frame) * CHANNELS;
-            let dec_base = (decoded_start + frame) * CHANNELS;
-            for channel in 0..CHANNELS {
-                let expected = f64::from(reference[ref_base + channel]);
-                let actual = f64::from(decoded[dec_base + channel]);
-                let diff = expected - actual;
-                signal += expected * expected;
-                error += diff * diff;
-            }
-        }
-        let snr_db = if error <= f64::EPSILON {
-            f64::INFINITY
-        } else if signal <= f64::EPSILON {
-            f64::NEG_INFINITY
-        } else {
-            10.0 * (signal / error).log10()
-        };
-        if snr_db > best.snr_db {
-            best = DecodeQuality {
-                lag_frames: lag,
-                snr_db,
-            };
+        let candidate = quality_at_lag(reference, decoded, lag, compare_frames);
+        if candidate.snr_db > best.snr_db {
+            best = candidate;
         }
     }
 
     best
 }
 
+fn quality_at_lag(
+    reference: &[f32],
+    decoded: &[f32],
+    lag: isize,
+    requested_frames: usize,
+) -> DecodeQuality {
+    let total_frames = (reference.len().min(decoded.len())) / CHANNELS;
+    let (reference_start, decoded_start) = if lag >= 0 {
+        (lag as usize, 0)
+    } else {
+        (0, (-lag) as usize)
+    };
+    let compare_frames = requested_frames.min(
+        total_frames
+            .saturating_sub(reference_start)
+            .min(total_frames.saturating_sub(decoded_start)),
+    );
+    let mut signal = 0.0f64;
+    let mut error = 0.0f64;
+    for frame in 0..compare_frames {
+        let ref_base = (reference_start + frame) * CHANNELS;
+        let dec_base = (decoded_start + frame) * CHANNELS;
+        for channel in 0..CHANNELS {
+            let expected = f64::from(reference[ref_base + channel]);
+            let actual = f64::from(decoded[dec_base + channel]);
+            let diff = expected - actual;
+            signal += expected * expected;
+            error += diff * diff;
+        }
+    }
+    let snr_db = if error <= f64::EPSILON {
+        f64::INFINITY
+    } else if signal <= f64::EPSILON {
+        f64::NEG_INFINITY
+    } else {
+        10.0 * (signal / error).log10()
+    };
+    DecodeQuality {
+        lag_frames: lag,
+        snr_db,
+    }
+}
+
 fn encode_with_encoder(
     encoder: &mut Encoder,
-    pcm: &[f32],
+    pcm: PcmInput<'_>,
     frame_size: usize,
 ) -> Result<EncodeResult, Box<dyn std::error::Error>> {
     let frames = pcm.len() / (frame_size * CHANNELS);
     let mut packets = Vec::with_capacity(frames);
+    packets.resize_with(frames, Vec::new);
+    encode_with_encoder_into(encoder, pcm, frame_size, &mut packets)?;
+    Ok(EncodeResult { packets })
+}
+
+fn encode_with_encoder_into(
+    encoder: &mut Encoder,
+    pcm: PcmInput<'_>,
+    frame_size: usize,
+    packets: &mut Vec<Vec<u8>>,
+) -> Result<(usize, usize, usize, u64), Box<dyn std::error::Error>> {
+    let frames = pcm.len() / (frame_size * CHANNELS);
+    packets.resize_with(frames, Vec::new);
+    packets.truncate(frames);
     let mut bytes = 0usize;
     let mut checksum = 0u64;
     let mut min_packet = usize::MAX;
@@ -303,44 +506,49 @@ fn encode_with_encoder(
     for frame in 0..frames {
         let start = frame * frame_size * CHANNELS;
         let end = start + frame_size * CHANNELS;
-        let packet = encoder.encode_f32(black_box(&pcm[start..end]), frame_size)?;
+        let packet = &mut packets[frame];
+        match pcm {
+            PcmInput::F32(pcm) => {
+                encoder.encode_f32_into(black_box(&pcm[start..end]), frame_size, packet)?;
+            }
+            PcmInput::I16(pcm) => {
+                encoder.encode_i16_into(black_box(&pcm[start..end]), frame_size, packet)?;
+            }
+            PcmInput::I24(pcm) => {
+                encoder.encode_i24_into(black_box(&pcm[start..end]), frame_size, packet)?;
+            }
+        }
         bytes += packet.len();
         min_packet = min_packet.min(packet.len());
         max_packet = max_packet.max(packet.len());
-        checksum = checksum.wrapping_add(packet_checksum(&packet));
-        packets.push(packet);
+        checksum = checksum.wrapping_add(packet_checksum(packet));
     }
     black_box(checksum);
-    Ok(EncodeResult {
-        packets,
-        bytes,
-        checksum,
-        min_packet,
-        max_packet,
-    })
+    Ok((bytes, min_packet, max_packet, checksum))
 }
 
 fn encode_packets(
-    pcm: &[f32],
+    pcm: PcmInput<'_>,
     frame_size: usize,
     bitrate: i32,
     mode: BenchMode,
+    application: Application,
+    direct_cubic: bool,
 ) -> Result<EncodeResult, Box<dyn std::error::Error>> {
-    let mut encoder = Encoder::new(
-        SAMPLE_RATE as i32,
-        CHANNELS,
-        Application::RestrictedLowDelay,
-    )?;
+    let mut encoder = Encoder::new(SAMPLE_RATE as i32, CHANNELS, application)?;
+    encoder.set_experimental_direct_cubic(direct_cubic);
     encoder.set_bitrate(bitrate)?;
     encoder.set_vbr(mode == BenchMode::Vbr)?;
     encode_with_encoder(&mut encoder, pcm, frame_size)
 }
 
 fn time_encode(
-    pcm: &[f32],
+    pcm: PcmInput<'_>,
     frame_size: usize,
     bitrate: i32,
     mode: BenchMode,
+    application: Application,
+    direct_cubic: bool,
     repeats: usize,
 ) -> Result<(f64, usize, usize, usize, u64), Box<dyn std::error::Error>> {
     let mut times = Vec::with_capacity(repeats);
@@ -348,23 +556,25 @@ fn time_encode(
     let mut last_min_packet = 0usize;
     let mut last_max_packet = 0usize;
     let mut last_checksum = 0u64;
+    let frames = pcm.len() / (frame_size * CHANNELS);
+    let mut packets = (0..frames)
+        .map(|_| Vec::with_capacity(CELT_MAX_FRAME_BYTES + 1))
+        .collect::<Vec<_>>();
     for _ in 0..repeats {
-        let mut encoder = Encoder::new(
-            SAMPLE_RATE as i32,
-            CHANNELS,
-            Application::RestrictedLowDelay,
-        )?;
+        let mut encoder = Encoder::new(SAMPLE_RATE as i32, CHANNELS, application)?;
+        encoder.set_experimental_direct_cubic(direct_cubic);
         encoder.set_bitrate(bitrate)?;
         encoder.set_vbr(mode == BenchMode::Vbr)?;
         let start = Instant::now();
-        let encoded = encode_with_encoder(&mut encoder, pcm, frame_size)?;
+        let (bytes, min_packet, max_packet, checksum) =
+            encode_with_encoder_into(&mut encoder, pcm, frame_size, &mut packets)?;
         let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-        black_box(&encoded.packets);
+        black_box(&packets);
         times.push(elapsed);
-        last_bytes = encoded.bytes;
-        last_min_packet = encoded.min_packet;
-        last_max_packet = encoded.max_packet;
-        last_checksum = encoded.checksum;
+        last_bytes = bytes;
+        last_min_packet = min_packet;
+        last_max_packet = max_packet;
+        last_checksum = checksum;
     }
     Ok((
         median(&mut times),
@@ -379,25 +589,68 @@ fn time_decode(
     packets: &[Vec<u8>],
     frame_size: usize,
     repeats: usize,
-) -> Result<(f64, f32), Box<dyn std::error::Error>> {
+    format: PcmFormat,
+    direct_cubic: bool,
+) -> Result<(f64, u64), Box<dyn std::error::Error>> {
     let mut times = Vec::with_capacity(repeats);
-    let mut last_checksum = 0.0f32;
+    let mut last_checksum = 0u64;
     for _ in 0..repeats {
         let mut decoder = Decoder::new(SAMPLE_RATE as i32, CHANNELS)?;
-        let mut decoded = Vec::new();
+        decoder.set_experimental_direct_cubic(direct_cubic);
+        let mut decoded_i16 = Vec::with_capacity(frame_size * CHANNELS);
+        let mut decoded_i24 = Vec::with_capacity(frame_size * CHANNELS);
+        let mut decoded_f32 = Vec::with_capacity(frame_size * CHANNELS);
         let start = Instant::now();
-        let mut checksum = 0.0f32;
-        for packet in packets {
-            let decoded_frames = decoder.decode_f32_into(black_box(packet), false, &mut decoded)?;
-            if decoded_frames != frame_size || decoded.len() != frame_size * CHANNELS {
-                return Err("unexpected decoded frame size".into());
+        last_checksum = match format {
+            PcmFormat::I16 => {
+                let mut checksum = 0i64;
+                for packet in packets {
+                    let decoded_frames =
+                        decoder.decode_i16_into(black_box(packet), false, &mut decoded_i16)?;
+                    if decoded_frames != frame_size || decoded_i16.len() != frame_size * CHANNELS {
+                        return Err("unexpected decoded frame size".into());
+                    }
+                    let first = decoded_i16.first().copied().unwrap_or(0) as i64;
+                    let middle =
+                        decoded_i16.get(decoded_i16.len() / 2).copied().unwrap_or(0) as i64;
+                    let last = decoded_i16.last().copied().unwrap_or(0) as i64;
+                    checksum = checksum.wrapping_add(first + middle + last);
+                }
+                black_box(checksum);
+                checksum as u64
             }
-            checksum += decoded_checksum(&decoded);
-        }
-        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
-        black_box(checksum);
-        times.push(elapsed);
-        last_checksum = checksum;
+            PcmFormat::I24 => {
+                let mut checksum = 0i64;
+                for packet in packets {
+                    let decoded_frames =
+                        decoder.decode_i24_into(black_box(packet), false, &mut decoded_i24)?;
+                    if decoded_frames != frame_size || decoded_i24.len() != frame_size * CHANNELS {
+                        return Err("unexpected decoded frame size".into());
+                    }
+                    let first = decoded_i24.first().copied().unwrap_or(0) as i64;
+                    let middle =
+                        decoded_i24.get(decoded_i24.len() / 2).copied().unwrap_or(0) as i64;
+                    let last = decoded_i24.last().copied().unwrap_or(0) as i64;
+                    checksum = checksum.wrapping_add(first + middle + last);
+                }
+                black_box(checksum);
+                checksum as u64
+            }
+            PcmFormat::F32 => {
+                let mut checksum = 0.0f32;
+                for packet in packets {
+                    let decoded_frames =
+                        decoder.decode_f32_into(black_box(packet), false, &mut decoded_f32)?;
+                    if decoded_frames != frame_size || decoded_f32.len() != frame_size * CHANNELS {
+                        return Err("unexpected decoded frame size".into());
+                    }
+                    checksum += decoded_checksum(&decoded_f32);
+                }
+                black_box(checksum);
+                u64::from(checksum.to_bits())
+            }
+        };
+        times.push(start.elapsed().as_secs_f64() * 1000.0);
     }
     Ok((median(&mut times), last_checksum))
 }
@@ -410,7 +663,7 @@ fn print_packet_hex(packet: &[u8]) {
 }
 
 fn dump_packets(
-    pcm: &[f32],
+    pcm: PcmInput<'_>,
     options: &Options,
     limit: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -423,12 +676,17 @@ fn dump_packets(
                 }
             }
             for &bitrate in &BITRATES {
-                if let Some(selected) = options.bitrate {
-                    if selected != bitrate {
-                        continue;
-                    }
+                if !bitrate_enabled(options, bitrate) {
+                    continue;
                 }
-                let encoded = encode_packets(pcm, frame_size, bitrate, mode)?;
+                let encoded = encode_packets(
+                    pcm,
+                    frame_size,
+                    bitrate,
+                    mode,
+                    options.application,
+                    options.direct_cubic,
+                )?;
                 for (frame, packet) in encoded.packets.iter().take(limit).enumerate() {
                     print!(
                         "rust\t{}\t{}\t{:.1}\t{}\t{}\t{}\t",
@@ -449,9 +707,43 @@ fn dump_packets(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = parse_options();
-    let pcm = generate_fixture(options.seconds, options.fixture);
+    let (pcm, pcm_i16, pcm_i24) = if let Some(path) = options.input_s32le.as_deref() {
+        let (mut pcm, source_i24) = load_i24_s32le(path, options.seconds)?;
+        if options.pcm_bits.unwrap_or(24) == 16 {
+            let pcm_i16 = source_i24
+                .iter()
+                .map(|&sample| (sample >> 8) as i16)
+                .collect::<Vec<_>>();
+            for (reference, &sample) in pcm.iter_mut().zip(&pcm_i16) {
+                *reference = sample as f32 / 32_768.0;
+            }
+            (pcm, Some(pcm_i16), None)
+        } else {
+            (pcm, None, Some(source_i24))
+        }
+    } else {
+        let mut pcm = generate_fixture(options.seconds, options.fixture);
+        match options.pcm_bits {
+            Some(16) => {
+                let pcm_i16 = quantize_fixture_i16(&mut pcm);
+                (pcm, Some(pcm_i16), None)
+            }
+            Some(24) => {
+                let pcm_i24 = quantize_fixture_i24(&mut pcm);
+                (pcm, None, Some(pcm_i24))
+            }
+            _ => (pcm, None, None),
+        }
+    };
+    let input = if let Some(pcm_i16) = pcm_i16.as_deref() {
+        PcmInput::I16(pcm_i16)
+    } else if let Some(pcm_i24) = pcm_i24.as_deref() {
+        PcmInput::I24(pcm_i24)
+    } else {
+        PcmInput::F32(&pcm)
+    };
     if let Some(limit) = options.dump_packets {
-        return dump_packets(&pcm, &options, limit);
+        return dump_packets(input, &options, limit);
     }
 
     println!("impl\tmode\tframe_size\tframe_ms\tbitrate\tencode_ms\tdecode_ms\tbytes\tmin_packet\tmax_packet\tchecksum\tquality_lag\tquality_snr_db");
@@ -463,19 +755,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             for &bitrate in &BITRATES {
-                if let Some(selected) = options.bitrate {
-                    if selected != bitrate {
-                        continue;
-                    }
+                if !bitrate_enabled(&options, bitrate) {
+                    continue;
                 }
-                let (encode_ms, bytes, min_packet, max_packet, encode_checksum) =
-                    time_encode(&pcm, frame_size, bitrate, mode, options.repeats)?;
-                let encoded = encode_packets(&pcm, frame_size, bitrate, mode)?;
-                let decoded = decode_packets(&encoded.packets, frame_size)?;
-                let quality = aligned_quality(&pcm, &decoded);
-                let (decode_ms, decode_checksum) =
-                    time_decode(&encoded.packets, frame_size, options.repeats)?;
-                let checksum = encode_checksum ^ u64::from(decode_checksum.to_bits());
+                let (encode_ms, bytes, min_packet, max_packet, encode_checksum) = time_encode(
+                    input,
+                    frame_size,
+                    bitrate,
+                    mode,
+                    options.application,
+                    options.direct_cubic,
+                    options.repeats,
+                )?;
+                let encoded = encode_packets(
+                    input,
+                    frame_size,
+                    bitrate,
+                    mode,
+                    options.application,
+                    options.direct_cubic,
+                )?;
+                let quality = if options.skip_quality {
+                    DecodeQuality {
+                        lag_frames: 0,
+                        snr_db: f64::NAN,
+                    }
+                } else {
+                    let decoded = decode_packets(
+                        &encoded.packets,
+                        frame_size,
+                        input.format(),
+                        options.direct_cubic,
+                    )?;
+                    if let Some(lag) = options.quality_lag {
+                        let total_frames = pcm.len().min(decoded.len()) / CHANNELS;
+                        let trim = (SAMPLE_RATE / 50).min(total_frames.saturating_sub(16));
+                        quality_at_lag(&pcm, &decoded, lag, total_frames.saturating_sub(trim))
+                    } else {
+                        aligned_quality(&pcm, &decoded)
+                    }
+                };
+                let (decode_ms, decode_checksum) = time_decode(
+                    &encoded.packets,
+                    frame_size,
+                    options.repeats,
+                    input.format(),
+                    options.direct_cubic,
+                )?;
+                let checksum = encode_checksum ^ decode_checksum;
                 println!(
                     "rust\t{}\t{}\t{:.1}\t{}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{:.2}",
                     mode.label(),

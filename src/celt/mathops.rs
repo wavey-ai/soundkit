@@ -123,6 +123,26 @@ pub fn celt_log2_db(x: f32) -> f32 {
     celt_log2(x)
 }
 
+/// Converts the floor of an `f32` to `i32` without a libm call.
+///
+/// Rust float-to-integer casts truncate toward zero and saturate. Subtracting
+/// one for negative fractional inputs makes the result match
+/// `x.floor() as i32`, including saturation and non-finite inputs.
+#[inline]
+pub fn floor_to_i32(x: f32) -> i32 {
+    let truncated = x as i32;
+    truncated.saturating_sub(i32::from((truncated as f32) > x))
+}
+
+/// Fast floor conversion for finite values strictly inside the `i32` range.
+#[inline]
+pub(crate) fn floor_bounded_to_i32(x: f32) -> i32 {
+    debug_assert!(x.is_finite());
+    debug_assert!(x > i32::MIN as f32 && x < i32::MAX as f32);
+    let truncated = x as i32;
+    truncated - i32::from((truncated as f32) > x)
+}
+
 pub fn bitexact_cos(x: i16) -> i16 {
     let tmp = (4096 + (x as i32) * (x as i32)) >> 13;
     debug_assert!(tmp <= 32767);
@@ -145,7 +165,7 @@ pub fn bitexact_log2tan(isin: i32, icos: i32) -> i32 {
 
 pub fn float_to_i16(x: f32) -> i16 {
     let x = (x * 32768.0).clamp(-32768.0, 32767.0);
-    (x + 0.5).floor() as i16
+    floor_bounded_to_i32(x + 0.5) as i16
 }
 
 pub fn float_to_i24(x: f32) -> i32 {

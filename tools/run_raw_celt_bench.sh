@@ -10,6 +10,11 @@ MODE="${MODE:-both}"
 FRAME_SIZE="${FRAME_SIZE:-}"
 BITRATE="${BITRATE:-}"
 FIXTURE="${FIXTURE:-mixed}"
+INPUT_S32LE="${INPUT_S32LE:-}"
+PCM_BITS="${PCM_BITS:-}"
+APPLICATION="${APPLICATION:-audio}"
+DIRECT_CUBIC="${DIRECT_CUBIC:-0}"
+SKIP_QUALITY="${SKIP_QUALITY:-0}"
 C_BENCH_CFLAGS="${C_BENCH_CFLAGS--O3 -DNDEBUG}"
 RUST_BENCH_RUSTFLAGS="${RUST_BENCH_RUSTFLAGS--C target-cpu=native}"
 BUILD_RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }${RUST_BENCH_RUSTFLAGS}"
@@ -28,6 +33,18 @@ while [[ $# -gt 0 ]]; do
       MODE="$2"
       shift 2
       ;;
+    --application)
+      APPLICATION="$2"
+      shift 2
+      ;;
+    --direct-cubic)
+      DIRECT_CUBIC=1
+      shift
+      ;;
+    --skip-quality)
+      SKIP_QUALITY=1
+      shift
+      ;;
     --frame-size)
       FRAME_SIZE="$2"
       shift 2
@@ -40,8 +57,16 @@ while [[ $# -gt 0 ]]; do
       FIXTURE="$2"
       shift 2
       ;;
+    --input-s32le)
+      INPUT_S32LE="$2"
+      shift 2
+      ;;
+    --pcm-bits)
+      PCM_BITS="$2"
+      shift 2
+      ;;
     *)
-      echo "usage: tools/run_raw_celt_bench.sh [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--frame-size n] [--bitrate n] [--fixture mixed|tone]" >&2
+      echo "usage: tools/run_raw_celt_bench.sh [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--application audio|restricted-lowdelay] [--direct-cubic] [--frame-size n] [--bitrate n] [--fixture mixed|tone] [--input-s32le path] [--pcm-bits 16|24] [--skip-quality]" >&2
       exit 2
       ;;
   esac
@@ -55,6 +80,30 @@ case "$MODE" in
     ;;
 esac
 
+case "$APPLICATION" in
+  audio | restricted-lowdelay) ;;
+  *)
+    echo "--application must be audio or restricted-lowdelay" >&2
+    exit 2
+    ;;
+esac
+
+case "$DIRECT_CUBIC" in
+  0 | 1) ;;
+  *)
+    echo "DIRECT_CUBIC must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+
+case "$SKIP_QUALITY" in
+  0 | 1) ;;
+  *)
+    echo "SKIP_QUALITY must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+
 case "$FIXTURE" in
   mixed | tone) ;;
   *)
@@ -62,6 +111,18 @@ case "$FIXTURE" in
     exit 2
     ;;
 esac
+
+case "$PCM_BITS" in
+  "" | 16 | 24) ;;
+  *)
+    echo "--pcm-bits must be 16 or 24" >&2
+    exit 2
+    ;;
+esac
+
+if [[ -n "$INPUT_S32LE" && -z "$PCM_BITS" ]]; then
+  PCM_BITS=24
+fi
 
 mkdir -p "$BENCH_DIR"
 
@@ -97,18 +158,41 @@ fi
 
 RUSTFLAGS="$BUILD_RUSTFLAGS" cargo build --release --target-dir "$TARGET_DIR" --example raw_celt_bench >/dev/null
 
-echo "Raw in-memory CELT benchmark: generated 48 kHz stereo fixture, no file I/O in measured loops." >&2
-echo "Repeats: $REPEATS, seconds: $AUDIO_SECONDS, mode: $MODE, fixture: $FIXTURE" >&2
+if [[ -n "$INPUT_S32LE" ]]; then
+  if [[ "$PCM_BITS" == 16 ]]; then
+    echo "Raw in-memory CELT benchmark: 48 kHz stereo signed-16 PCM derived from an S32LE signed-24 source, no file I/O in measured loops." >&2
+  else
+    echo "Raw in-memory CELT benchmark: 48 kHz stereo signed-24 S32LE input, no file I/O in measured loops." >&2
+  fi
+  echo "Repeats: $REPEATS, seconds: $AUDIO_SECONDS, mode: $MODE, application: $APPLICATION, direct cubic: $DIRECT_CUBIC, input: $INPUT_S32LE" >&2
+else
+  echo "Raw in-memory CELT benchmark: generated 48 kHz stereo fixture, no file I/O in measured loops." >&2
+  echo "Repeats: $REPEATS, seconds: $AUDIO_SECONDS, mode: $MODE, application: $APPLICATION, direct cubic: $DIRECT_CUBIC, fixture: $FIXTURE" >&2
+fi
 
-bench_args=(--repeats "$REPEATS" --seconds "$AUDIO_SECONDS" --mode "$MODE" --fixture "$FIXTURE")
+bench_args=(--repeats "$REPEATS" --seconds "$AUDIO_SECONDS" --mode "$MODE" --application "$APPLICATION" --fixture "$FIXTURE")
+if [[ -n "$INPUT_S32LE" ]]; then
+  bench_args+=(--input-s32le "$INPUT_S32LE")
+fi
+if [[ -n "$PCM_BITS" ]]; then
+  bench_args+=(--pcm-bits "$PCM_BITS")
+fi
 if [[ -n "$FRAME_SIZE" ]]; then
   bench_args+=(--frame-size "$FRAME_SIZE")
 fi
 if [[ -n "$BITRATE" ]]; then
   bench_args+=(--bitrate "$BITRATE")
 fi
+if [[ "$SKIP_QUALITY" == 1 ]]; then
+  bench_args+=(--skip-quality)
+fi
 
-rust_out="$("$rust_bin" "${bench_args[@]}")"
+rust_bench_args=("${bench_args[@]}")
+if [[ "$DIRECT_CUBIC" == 1 ]]; then
+  rust_bench_args+=(--direct-cubic)
+fi
+
+rust_out="$("$rust_bin" "${rust_bench_args[@]}")"
 c_out="$("$c_bin" "${bench_args[@]}")"
 
 rt_factor=$((AUDIO_SECONDS * 1000))

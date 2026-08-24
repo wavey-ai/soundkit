@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--excerpts-per-track", type=int, default=5)
     parser.add_argument("--excerpt-seconds", type=float, default=8.0)
     parser.add_argument("--edge-margin-seconds", type=float, default=5.0)
-    parser.add_argument("--bitrates", default="96000,128000,192000")
+    parser.add_argument("--bitrates", default="192000,256000,320000")
     parser.add_argument("--frame-sizes", default="240,960")
     parser.add_argument("--modes", default="cbr,vbr")
     parser.add_argument("--headroom-db", type=float, default=0.1)
