@@ -310,36 +310,33 @@ fn analyze_channel(
 }
 
 fn select_fixed_order(signal: &[i32], max_order: usize) -> usize {
+    debug_assert_eq!(max_order, MAX_FIXED_ORDER);
     let mut totals = [0_u64; MAX_FIXED_ORDER + 1];
-    for index in max_order..signal.len() {
-        let x = signal[index];
-        totals[0] += u64::from(x.unsigned_abs());
-        if max_order >= 1 {
-            totals[1] += u64::from(x.wrapping_sub(signal[index - 1]).unsigned_abs());
-        }
-        if max_order >= 2 {
-            let error = x
-                .wrapping_sub(signal[index - 1].wrapping_mul(2))
-                .wrapping_add(signal[index - 2]);
-            totals[2] += u64::from(error.unsigned_abs());
-        }
-        if max_order >= 3 {
-            let error = x
-                .wrapping_sub(signal[index - 1].wrapping_mul(3))
-                .wrapping_add(signal[index - 2].wrapping_mul(3))
-                .wrapping_sub(signal[index - 3]);
-            totals[3] += u64::from(error.unsigned_abs());
-        }
-        if max_order >= 4 {
-            let error = x
-                .wrapping_sub(signal[index - 1].wrapping_mul(4))
-                .wrapping_add(signal[index - 2].wrapping_mul(6))
-                .wrapping_sub(signal[index - 3].wrapping_mul(4))
-                .wrapping_add(signal[index - 4]);
-            totals[4] += u64::from(error.unsigned_abs());
-        }
+    let mut previous_first = signal[3].wrapping_sub(signal[2]);
+    let mut previous_second = previous_first.wrapping_sub(signal[2].wrapping_sub(signal[1]));
+    let mut previous_third = previous_second.wrapping_sub(
+        signal[2]
+            .wrapping_sub(signal[1])
+            .wrapping_sub(signal[1].wrapping_sub(signal[0])),
+    );
+    for index in MAX_FIXED_ORDER..signal.len() {
+        let sample = signal[index];
+        let first = sample.wrapping_sub(signal[index - 1]);
+        let second = first.wrapping_sub(previous_first);
+        let third = second.wrapping_sub(previous_second);
+        let fourth = third.wrapping_sub(previous_third);
+
+        totals[0] += u64::from(sample.unsigned_abs());
+        totals[1] += u64::from(first.unsigned_abs());
+        totals[2] += u64::from(second.unsigned_abs());
+        totals[3] += u64::from(third.unsigned_abs());
+        totals[4] += u64::from(fourth.unsigned_abs());
+
+        previous_first = first;
+        previous_second = second;
+        previous_third = third;
     }
-    totals[..=max_order]
+    totals
         .iter()
         .enumerate()
         .min_by_key(|(order, total)| (**total, *order))
