@@ -1369,10 +1369,10 @@ impl BitSource for BitReader<'_> {
                 // does not, so it retains the stateful loop below.
                 let mut cache = self.cache;
                 let mut bits_left = self.bits_left;
-                loop {
+                for slot in &mut buffer[i..] {
                     let zeros = cache.leading_zeros();
                     let symbol_bits = zeros + 1 + param_bits;
-                    if symbol_bits >= bits_left || i == buffer.len() {
+                    if symbol_bits >= bits_left {
                         break;
                     }
                     let shifted = cache << (zeros + 1);
@@ -1383,7 +1383,7 @@ impl BitSource for BitReader<'_> {
                     };
                     cache = shifted << param_bits;
                     bits_left -= symbol_bits;
-                    buffer[i] = map(((zeros as u32) << param_bits) | r);
+                    *slot = map(((zeros as u32) << param_bits) | r);
                     i += 1;
                 }
 
