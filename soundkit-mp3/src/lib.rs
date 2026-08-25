@@ -2,7 +2,6 @@
 use mp3lame_encoder::{
     max_required_buffer_size, Bitrate, Builder, FlushNoGap, InterleavedPcm, MonoPcm,
 };
-use nanomp3::{Decoder as NanoDecoder, FrameInfo, MAX_SAMPLES_PER_FRAME};
 use soundkit::audio_packet::Decoder;
 #[cfg(feature = "encode")]
 use soundkit::audio_packet::Encoder;
@@ -11,6 +10,61 @@ use std::mem::MaybeUninit;
 #[cfg(feature = "encode")]
 use std::slice;
 use std::vec::Vec;
+
+mod decoder;
+
+const MAX_SAMPLES_PER_FRAME: usize = 1152 * 2;
+
+struct Mp3FrameDecoder(decoder::Layer3Decoder);
+
+#[derive(Debug, Clone, Copy)]
+struct FrameInfo {
+    samples_produced: usize,
+    channels: Channels,
+    sample_rate: u32,
+    bitrate: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Channels {
+    Mono = 1,
+    Stereo,
+}
+
+impl Channels {
+    const fn num(self) -> u8 {
+        self as u8
+    }
+}
+
+impl Mp3FrameDecoder {
+    const fn new() -> Self {
+        Self(decoder::Layer3Decoder::new())
+    }
+
+    fn decode(&mut self, mp3: &[u8], pcm: &mut [f32]) -> (usize, Option<FrameInfo>) {
+        assert!(pcm.len() >= MAX_SAMPLES_PER_FRAME, "PCM buffer too small");
+        let mut info = decoder::CoreFrameInfo::default();
+        let samples = decoder::decode_frame(&mut self.0, mp3, pcm, &mut info);
+        if samples == 0 {
+            return (0, None);
+        }
+        let channels = match info.channels {
+            1 => Channels::Mono,
+            2 => Channels::Stereo,
+            _ => return (0, None),
+        };
+        (
+            info.frame_bytes,
+            Some(FrameInfo {
+                samples_produced: samples,
+                channels,
+                sample_rate: info.sample_rate,
+                bitrate: info.bitrate_kbps,
+            }),
+        )
+    }
+}
 
 #[cfg(feature = "encode")]
 pub struct Mp3Encoder {
@@ -145,8 +199,9 @@ impl Encoder for Mp3Encoder {
 }
 
 pub struct Mp3Decoder {
-    inner: NanoDecoder,
+    inner: Mp3FrameDecoder,
     buffer: Vec<u8>,
+    buffer_start: usize,
     pcm: [f32; MAX_SAMPLES_PER_FRAME],
     sample_rate: Option<u32>,
     channels: Option<u8>,
@@ -157,8 +212,9 @@ const MAX_MP3_STREAM_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 impl Mp3Decoder {
     pub fn new() -> Self {
         Self {
-            inner: NanoDecoder::new(),
+            inner: Mp3FrameDecoder::new(),
             buffer: Vec::with_capacity(16 * 1024),
+            buffer_start: 0,
             pcm: [0.0; MAX_SAMPLES_PER_FRAME],
             sample_rate: None,
             channels: None,
@@ -175,12 +231,13 @@ impl Mp3Decoder {
 
     /// Get current buffer length (for debugging)
     pub fn buffer_len(&self) -> usize {
-        self.buffer.len()
+        self.buffer.len() - self.buffer_start
     }
 
     pub fn reset(&mut self) {
-        self.inner = NanoDecoder::new();
+        self.inner = Mp3FrameDecoder::new();
         self.buffer.clear();
+        self.buffer_start = 0;
         self.sample_rate = None;
         self.channels = None;
     }
@@ -215,13 +272,32 @@ impl Mp3Decoder {
     }
 
     fn append_input(&mut self, input: &[u8]) -> Result<(), String> {
-        if self.buffer.len().saturating_add(input.len()) > MAX_MP3_STREAM_BUFFER_BYTES {
+        self.compact_buffer();
+        if self.buffer_len().saturating_add(input.len()) > MAX_MP3_STREAM_BUFFER_BYTES {
             return Err(format!(
                 "MP3 stream exceeds the {MAX_MP3_STREAM_BUFFER_BYTES} byte buffer budget"
             ));
         }
         self.buffer.extend_from_slice(input);
         Ok(())
+    }
+
+    #[inline]
+    fn compact_buffer(&mut self) {
+        if self.buffer_start == self.buffer.len() {
+            self.buffer.clear();
+            self.buffer_start = 0;
+        } else if self.buffer_start >= 16 * 1024 && self.buffer_start >= self.buffer.len() / 2 {
+            self.buffer.copy_within(self.buffer_start.., 0);
+            self.buffer.truncate(self.buffer.len() - self.buffer_start);
+            self.buffer_start = 0;
+        }
+    }
+
+    #[inline]
+    fn advance_buffer(&mut self, consumed: usize) {
+        debug_assert!(consumed <= self.buffer_len());
+        self.buffer_start += consumed;
     }
 
     fn write_frame_i16(&self, info: &FrameInfo, output: &mut [i16]) -> Result<usize, String> {
@@ -280,11 +356,13 @@ impl Decoder for Mp3Decoder {
         self.append_input(input)?;
 
         let mut written = 0;
-        while !self.buffer.is_empty() {
-            let (consumed, frame) = self.inner.decode(&self.buffer, &mut self.pcm);
+        while self.buffer_start < self.buffer.len() {
+            let (consumed, frame) = self
+                .inner
+                .decode(&self.buffer[self.buffer_start..], &mut self.pcm);
 
             if consumed > 0 {
-                self.buffer.drain(..consumed);
+                self.advance_buffer(consumed);
             }
 
             let Some(info) = frame else {
@@ -301,6 +379,8 @@ impl Decoder for Mp3Decoder {
             }
         }
 
+        self.compact_buffer();
+
         Ok(written)
     }
 
@@ -308,11 +388,13 @@ impl Decoder for Mp3Decoder {
         self.append_input(input)?;
 
         let mut written = 0;
-        while !self.buffer.is_empty() {
-            let (consumed, frame) = self.inner.decode(&self.buffer, &mut self.pcm);
+        while self.buffer_start < self.buffer.len() {
+            let (consumed, frame) = self
+                .inner
+                .decode(&self.buffer[self.buffer_start..], &mut self.pcm);
 
             if consumed > 0 {
-                self.buffer.drain(..consumed);
+                self.advance_buffer(consumed);
             }
 
             let Some(info) = frame else {
@@ -329,6 +411,8 @@ impl Decoder for Mp3Decoder {
             }
         }
 
+        self.compact_buffer();
+
         Ok(written)
     }
 
@@ -336,11 +420,13 @@ impl Decoder for Mp3Decoder {
         self.append_input(input)?;
 
         let mut written = 0;
-        while !self.buffer.is_empty() {
-            let (consumed, frame) = self.inner.decode(&self.buffer, &mut self.pcm);
+        while self.buffer_start < self.buffer.len() {
+            let (consumed, frame) = self
+                .inner
+                .decode(&self.buffer[self.buffer_start..], &mut self.pcm);
 
             if consumed > 0 {
-                self.buffer.drain(..consumed);
+                self.advance_buffer(consumed);
             }
 
             let Some(info) = frame else {
@@ -368,6 +454,8 @@ impl Decoder for Mp3Decoder {
                 break;
             }
         }
+
+        self.compact_buffer();
 
         Ok(written)
     }
@@ -400,8 +488,10 @@ mod tests {
     use super::*;
     #[cfg(feature = "encode")]
     use mp3lame_encoder::max_required_buffer_size;
+    #[cfg(feature = "encode")]
     use soundkit::audio_bytes::s16le_to_i16;
     use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
+    #[cfg(feature = "encode")]
     use soundkit::wav::WavStreamProcessor;
     use std::fs;
     use std::path::PathBuf;
@@ -426,6 +516,7 @@ mod tests {
             .join(file)
     }
 
+    #[cfg(feature = "encode")]
     fn golden_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")

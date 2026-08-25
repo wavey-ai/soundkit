@@ -12,7 +12,7 @@ resampling, authored codec implementations, and browser-safe streaming.
 | PCM utilities | `soundkit::audio_bytes`, `soundkit::raw_pcm` | Sample-width conversion, endian conversion, interleave/deinterleave, headerless PCM streams. |
 | WAV / RF64 | `soundkit::wav` | Incremental PCM parser and bounded `WavStreamEncoder`; `generate_wav_buffer` remains a convenience wrapper. |
 | Resampling | `soundkit::downsample_audio` | `rubato` sinc resampling. |
-| Codecs | `soundkit-*` codec crates | Small wrappers around native Rust decoders where available, with C FFI only where useful or required. |
+| Codecs | `soundkit-*` codec crates | SoundKit-authored codec cores first, with explicit native fallbacks only for profiles not yet owned. |
 | Decode pipeline | `soundkit-decoder` | Ring-buffered worker thread, `access-unit` autodetection, explicit telephony paths, optional output conversion. |
 | Media demux | `soundkit-audio-demux`, `soundkit-webm` | Rust-owned MOV, MP4, fragmented MP4, WebM, Matroska, MPEG-TS, and MXF parsing. |
 | Video decode | `soundkit-video`, `soundkit-dnx` | Pure-Rust H.264, HEVC, VP9, AV1, ProRes, DNxHD, and DNxHR decoding. |
@@ -73,7 +73,7 @@ the container layout can require enough metadata/media to be buffered first.
 | --- | --- | --- | --- | --- |
 | Raw PCM (`linear16`, `linear32`, `s16le`, `f32le`, `L16`) | `soundkit::raw_pcm` | Explicit | Yes | Caller supplies sample rate, channels, sample format. |
 | WAV / RIFF PCM | `soundkit::wav` | Auto | Yes | Emits complete PCM frame runs after the `data` chunk starts. |
-| MP3 | `soundkit-mp3` / `nanomp3` | Auto | Yes | Pure Rust decode; native decoder output is `f32`. |
+| MP3 | `soundkit-mp3` | Auto | Yes | SoundKit-owned Layer III decoder; bounded Rust core with runtime AVX2/SSE2 synthesis on x86-64. |
 | AAC ADTS | `soundkit-aac` / owned AAC-LC + FDK fallback | Auto | Yes | Supported mono/stereo AAC-LC uses SoundKit's owned decoder by default; unsupported profiles and tools route to FDK on native builds. |
 | AAC-LC in M4A/MP4/MOV or Matroska | `soundkit-aac` + owned Rust demuxers | Streaming or seekable index | Limited | Browser AAC-LC uses the production owned decoder. Native builds retain FDK fallback for HE-AAC/SBR/PS and unsupported profiles. |
 | MP2 in MPEG-TS | `soundkit-decoder` / Rust TS demux + Wavey Symphonia fork | Complete-file | EOF | Pure Rust; collected TS fixture measures 50.36 dB against FFmpeg. |
@@ -96,12 +96,13 @@ the container layout can require enough metadata/media to be buffered first.
 
 ## Pure Rust Decode Boundary
 
-For native builds, SoundKit can mix Rust wrappers and C-backed codec libraries.
-For WASM, Cloudflare Workers, and other Rust-only targets, the codec decode
-boundary is narrower:
+Native builds may retain explicit C-backed fallbacks for codec profiles the
+authored cores do not yet support. For Rust-only targets, the decode boundary
+is narrower:
 
 | Format / area | Current decode path | Pure Rust decode? | Notes |
 | --- | --- | --- | --- |
+| MP3 | `soundkit-mp3` owned decoder | Yes | No decoder package or FFI boundary. On the 60-file multi-album music corpus, SoundKit used 2.17% less time/sample than optimized minimp3 C and measured 145.567 dB differential SNR. |
 | AAC ADTS | `soundkit-aac` / owned AAC-LC + optional FDK fallback | Yes for supported AAC-LC | The production API selects the owned decoder for mono/stereo AAC-LC; native FDK handles unsupported AAC. |
 | AAC-LC raw access units | `soundkit-aac` + `soundkit-wasm` | Controlled production profile | `soundkit-aac-lc` is the internal owned engine behind the production facade. Pure Rust decoding supports 1,024-sample mono/stereo AAC-LC. Other profiles return explicit fallback errors. See [`AAC_LC_PRODUCTION_STATUS.md`](AAC_LC_PRODUCTION_STATUS.md). |
 | AAC in MP4/MOV/Matroska | `soundkit-aac` facade + owned demuxers | AAC-LC only in Rust-only builds | AAC-LC uses the owned access-unit decoder. HE-AAC/SBR/PS requires native FDK or a platform fallback. |
@@ -114,9 +115,9 @@ boundary is narrower:
 | DNxHD and DNxHR | `soundkit-dnx` | Yes | Rust supports progressive DNxHD and current DNxHR delivery profiles. |
 
 Everything else in the decode matrix is currently on a pure-Rust decode path.
-MP3 decode uses `nanomp3`. MP3 encode is the part that pulls in LAME.
-Rubber Band is also a native dependency, but it is a time-stretch/resampling
-tool rather than a codec decoder.
+MP3 encoding, unlike decoding, still pulls in LAME when the `encode` feature is
+enabled. Rubber Band is also a native dependency, but it is a
+time-stretch/resampling tool rather than a codec decoder.
 
 ## Native Media Pipeline
 
