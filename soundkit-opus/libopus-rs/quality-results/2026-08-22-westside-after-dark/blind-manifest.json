@@ -1,0 +1,62 @@
+[
+  {
+    "case": 1,
+    "track": "after-dark",
+    "excerpt": 5,
+    "configuration": "vbr_20ms_128k"
+  },
+  {
+    "case": 2,
+    "track": "westside",
+    "excerpt": 4,
+    "configuration": "vbr_20ms_128k"
+  },
+  {
+    "case": 3,
+    "track": "westside",
+    "excerpt": 1,
+    "configuration": "vbr_20ms_128k"
+  },
+  {
+    "case": 4,
+    "track": "after-dark",
+    "excerpt": 4,
+    "configuration": "vbr_20ms_128k"
+  },
+  {
+    "case": 5,
+    "track": "after-dark",
+    "excerpt": 3,
+    "configuration": "vbr_20ms_128k"
+  },
+  {
+    "case": 6,
+    "track": "westside",
+    "excerpt": 5,
+    "configuration": "vbr_5ms_96k"
+  },
+  {
+    "case": 7,
+    "track": "after-dark",
+    "excerpt": 2,
+    "configuration": "vbr_20ms_128k"
+  },
+  {
+    "case": 8,
+    "track": "after-dark",
+    "excerpt": 1,
+    "configuration": "vbr_20ms_128k"
+  },
+  {
+    "case": 9,
+    "track": "westside",
+    "excerpt": 1,
+    "configuration": "vbr_5ms_96k"
+  },
+  {
+    "case": 10,
+    "track": "westside",
+    "excerpt": 1,
+    "configuration": "cbr_5ms_96k"
+  }
+]

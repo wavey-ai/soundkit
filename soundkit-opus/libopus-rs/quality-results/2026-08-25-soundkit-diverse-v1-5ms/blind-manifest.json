@@ -1,0 +1,122 @@
+[
+  {
+    "case": 1,
+    "track": "nocturnal-animals",
+    "excerpt": 2,
+    "configuration": "i24_cbr_5ms_192k"
+  },
+  {
+    "case": 2,
+    "track": "nocturnal-animals",
+    "excerpt": 2,
+    "configuration": "i24_vbr_5ms_192k"
+  },
+  {
+    "case": 3,
+    "track": "nocturnal-animals",
+    "excerpt": 5,
+    "configuration": "i16_cbr_5ms_192k"
+  },
+  {
+    "case": 4,
+    "track": "nocturnal-animals",
+    "excerpt": 3,
+    "configuration": "i24_cbr_5ms_256k"
+  },
+  {
+    "case": 5,
+    "track": "nocturnal-animals",
+    "excerpt": 3,
+    "configuration": "i16_cbr_5ms_256k"
+  },
+  {
+    "case": 6,
+    "track": "nocturnal-animals",
+    "excerpt": 3,
+    "configuration": "i16_vbr_5ms_192k"
+  },
+  {
+    "case": 7,
+    "track": "nocturnal-animals",
+    "excerpt": 3,
+    "configuration": "i24_vbr_5ms_192k"
+  },
+  {
+    "case": 8,
+    "track": "bill-evans-secret-sessions",
+    "excerpt": 4,
+    "configuration": "i16_vbr_5ms_192k"
+  },
+  {
+    "case": 9,
+    "track": "bill-evans-secret-sessions",
+    "excerpt": 4,
+    "configuration": "i16_cbr_5ms_192k"
+  },
+  {
+    "case": 10,
+    "track": "nocturnal-animals",
+    "excerpt": 2,
+    "configuration": "i16_vbr_5ms_192k"
+  },
+  {
+    "case": 11,
+    "track": "nocturnal-animals",
+    "excerpt": 2,
+    "configuration": "i24_vbr_5ms_256k"
+  },
+  {
+    "case": 12,
+    "track": "nocturnal-animals",
+    "excerpt": 4,
+    "configuration": "i24_cbr_5ms_192k"
+  },
+  {
+    "case": 13,
+    "track": "nocturnal-animals",
+    "excerpt": 1,
+    "configuration": "i16_vbr_5ms_192k"
+  },
+  {
+    "case": 14,
+    "track": "nocturnal-animals",
+    "excerpt": 2,
+    "configuration": "i24_cbr_5ms_256k"
+  },
+  {
+    "case": 15,
+    "track": "nocturnal-animals",
+    "excerpt": 3,
+    "configuration": "i16_vbr_5ms_256k"
+  },
+  {
+    "case": 16,
+    "track": "bill-evans-secret-sessions",
+    "excerpt": 4,
+    "configuration": "i24_cbr_5ms_256k"
+  },
+  {
+    "case": 17,
+    "track": "nocturnal-animals",
+    "excerpt": 2,
+    "configuration": "i16_vbr_5ms_256k"
+  },
+  {
+    "case": 18,
+    "track": "bill-evans-secret-sessions",
+    "excerpt": 4,
+    "configuration": "i24_vbr_5ms_192k"
+  },
+  {
+    "case": 19,
+    "track": "nocturnal-animals",
+    "excerpt": 4,
+    "configuration": "i24_vbr_5ms_256k"
+  },
+  {
+    "case": 20,
+    "track": "nocturnal-animals",
+    "excerpt": 1,
+    "configuration": "i24_vbr_5ms_192k"
+  }
+]

@@ -1,0 +1,26 @@
+[package]
+name = "libopus-rs"
+version = "0.0.2"
+edition = "2021"
+license = "BSD-3-Clause"
+description = "Pure Rust implementation of the Opus audio codec"
+repository = "https://github.com/wavey-ai/libopus-rs"
+readme = "README.md"
+keywords = ["opus", "codec", "audio", "libopus"]
+categories = ["multimedia::audio"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen"]
+
+[dependencies]
+libopus-rs-kernels = { path = "crates/libopus-rs-kernels" }
+wasm-bindgen = { version = "0.2", optional = true }
+wide = "0.7"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"

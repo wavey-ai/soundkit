@@ -1,0 +1,102 @@
+[
+  {
+    "case": 1,
+    "track": "after-dark",
+    "excerpt": 5,
+    "configuration": "vbr_20ms_128k",
+    "A": "c",
+    "B": "rust",
+    "rust_mos_lqo": 4.64870582,
+    "c_mos_lqo": 4.67546283
+  },
+  {
+    "case": 2,
+    "track": "westside",
+    "excerpt": 4,
+    "configuration": "vbr_20ms_128k",
+    "A": "c",
+    "B": "rust",
+    "rust_mos_lqo": 4.66705609,
+    "c_mos_lqo": 4.69240169
+  },
+  {
+    "case": 3,
+    "track": "westside",
+    "excerpt": 1,
+    "configuration": "vbr_20ms_128k",
+    "A": "c",
+    "B": "rust",
+    "rust_mos_lqo": 4.26886692,
+    "c_mos_lqo": 4.28971904
+  },
+  {
+    "case": 4,
+    "track": "after-dark",
+    "excerpt": 4,
+    "configuration": "vbr_20ms_128k",
+    "A": "c",
+    "B": "rust",
+    "rust_mos_lqo": 4.65046366,
+    "c_mos_lqo": 4.66301196
+  },
+  {
+    "case": 5,
+    "track": "after-dark",
+    "excerpt": 3,
+    "configuration": "vbr_20ms_128k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.67031411,
+    "c_mos_lqo": 4.68263847
+  },
+  {
+    "case": 6,
+    "track": "westside",
+    "excerpt": 5,
+    "configuration": "vbr_5ms_96k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.55718061,
+    "c_mos_lqo": 4.54511166
+  },
+  {
+    "case": 7,
+    "track": "after-dark",
+    "excerpt": 2,
+    "configuration": "vbr_20ms_128k",
+    "A": "c",
+    "B": "rust",
+    "rust_mos_lqo": 4.67675859,
+    "c_mos_lqo": 4.68867195
+  },
+  {
+    "case": 8,
+    "track": "after-dark",
+    "excerpt": 1,
+    "configuration": "vbr_20ms_128k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.61201052,
+    "c_mos_lqo": 4.62363774
+  },
+  {
+    "case": 9,
+    "track": "westside",
+    "excerpt": 1,
+    "configuration": "vbr_5ms_96k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 3.41922811,
+    "c_mos_lqo": 3.430403
+  },
+  {
+    "case": 10,
+    "track": "westside",
+    "excerpt": 1,
+    "configuration": "cbr_5ms_96k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 3.42600963,
+    "c_mos_lqo": 3.435886
+  }
+]
