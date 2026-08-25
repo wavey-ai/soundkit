@@ -82,7 +82,7 @@ the container layout can require enough metadata/media to be buffered first.
 | Ogg Opus | `soundkit-ogg-opus` / Ogg parser + Rust Opus decoder | Auto | Yes | Ogg pages parsed incrementally. |
 | WebM Opus | `soundkit-webm` / EBML parser + Rust Opus decoder | Auto | Yes | Known and unknown-size clusters emit bounded blocks before cluster EOF. |
 | Ogg Speex | `soundkit-speex` / `oxideav-speex` | Explicit | Yes | Pure Rust codec core and streaming Ogg packet parser. |
-| Ogg Vorbis | `soundkit-vorbis` / `lewton` | Auto or explicit | Yes | Pure Rust decode and streaming Ogg packet parser. |
+| Ogg Vorbis | `soundkit-vorbis` owned core | Auto or explicit | Yes | In-tree Rust decoder and streaming Ogg packet parser. |
 | ALAC in M4A/MP4 | `soundkit-alac` / `alac` | Seekable MP4 index | Yes | Rust reads `moov`, then decodes one ranged ALAC packet at a time. |
 | ALAC in CAF | `soundkit-alac` / `alac` | Seekable CAF index | Yes | Rust scans bounded metadata, skips `data`, then decodes one ranged packet at a time. |
 | AIFF / AIFF-C | `soundkit-aiff` | Auto or explicit | Yes | Incremental Rust FORM parser supports integer PCM, float PCM, A-law, u-law, and IMA4. |
@@ -100,6 +100,9 @@ Native builds may retain explicit C-backed fallbacks for codec profiles the
 authored cores do not yet support. For Rust-only targets, the decode boundary
 is narrower:
 
+The current consolidation work is decoder-only for import formats. New encoder
+work targets only SoundKit Opus and FLAC.
+
 | Format / area | Current decode path | Pure Rust decode? | Notes |
 | --- | --- | --- | --- |
 | MP3 | `soundkit-mp3` owned decoder | Yes | No decoder package or FFI boundary. On the 60-file multi-album music corpus, SoundKit used 2.17% less time/sample than optimized minimp3 C and measured 145.567 dB differential SNR. |
@@ -109,8 +112,9 @@ is narrower:
 | AMR-NB | OpenCORE AMR-NB | No | Requires the native `opencore-amrnb` library via `pkg-config`. |
 | G.729 | `g729-sys` | No | Uses a native codec binding. |
 | GSM 06.10 / WAV-49 | `gsm-sys` / `libgsm` | No | Uses the native libgsm codec. |
-| Opus / Ogg Opus / WebM Opus | `soundkit-opus` Rust backends | Partial | The in-tree codec handles 48 kHz CELT. The general decoder handles SILK, hybrid, and mode transitions. FEC is incomplete. |
+| Opus / Ogg Opus / WebM Opus | `soundkit-opus` Rust core | Partial | The in-tree decoder handles 48 kHz CELT. It rejects SILK, hybrid, FEC, and mode transitions. |
 | FLAC | `wavey-flac` | Yes | SoundKit uses the standalone Wavey-owned pure-Rust codec for both encoding and decoding. |
+| Vorbis | `soundkit-vorbis` owned decoder | Yes | No external codec package or FFI boundary. SoundKit beat libvorbis C by 8.65% in elapsed time per sample. |
 | H.264, HEVC, VP9, AV1, ProRes | `soundkit-video` | Yes | Rust produces bounded planar frames on native and WASM targets. |
 | DNxHD and DNxHR | `soundkit-dnx` | Yes | Rust supports progressive DNxHD and current DNxHR delivery profiles. |
 
@@ -181,7 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Opus | `soundkit-opus` | Yes | Pure Rust 48 kHz CELT packet encoder with 16-bit and 24-bit APIs. |
 | AMR-NB | OpenCORE AMR-NB | Yes | 160-sample speech frames. |
 | G.711 / G.722 / G.726 / G.729 / GSM | Codec crates | Yes | Frame or sample streaming, depending on codec. |
-| Vorbis / Speex / ALAC / AIFF / AC-3 / WebM | Decode-only today | No | Add only when fixture generation and licensing are clear. |
+| Vorbis / Speex / ALAC / AIFF / AC-3 / WebM | Decode-only | No | No encoder work is planned. New encoding work targets SoundKit Opus and FLAC. |
 
 ## Test Fixture Rule
 
@@ -198,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Dependency family | Distribution note |
 | --- | --- |
-| Pure Rust codec crates (`lewton`, `alac`, `aifc`, `oxideav-*`) | Mostly permissive; keep crate license notices in packaged distributions. |
+| Pure Rust codec crates (`alac`, `aifc`, `oxideav-*`) | Mostly permissive; keep crate license notices in packaged distributions. |
 | `mp4parse` on the ALAC M4A path | MPL-2.0 dependency. |
 | `libFLAC`, `mp3lame`, `fdk-aac`, OpenCORE AMR-NB, `libgsm`, Rubber Band | C/C++ library dependencies; ship notices and review binary distribution requirements. |
 | `libgsm` | Preserve the upstream notice in source and binary distributions. |

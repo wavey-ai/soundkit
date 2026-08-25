@@ -2,12 +2,11 @@
 name = "soundkit-vorbis"
 version = "0.12.3"
 edition = "2021"
-license = "MIT"
-description = "Streaming Ogg Vorbis decoder for soundkit using pure Rust Lewton."
+license = "MIT OR Apache-2.0"
+description = "Streaming Ogg Vorbis decoder with an in-tree Rust codec core."
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
 frame-header = "0.2.1"
-lewton = { git = "https://github.com/wavey-ai/lewton.git", branch = "main" }
 memchr = "2"
 soundkit = { path = "../soundkit" }

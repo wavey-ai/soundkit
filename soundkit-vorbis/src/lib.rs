@@ -1,9 +1,11 @@
 use frame_header::{EncodingFlag, Endianness};
-use lewton::audio::{read_audio_packet_generic, PreviousWindowRight};
-use lewton::header::{
+mod decoder;
+
+use decoder::audio::{read_audio_packet_generic, PreviousWindowRight};
+use decoder::header::{
     read_header_comment, read_header_ident, read_header_setup, IdentHeader, SetupHeader,
 };
-use lewton::samples::{InterleavedSamples, Samples};
+use decoder::samples::{InterleavedPcm16, InterleavedSamples, Samples};
 use soundkit::audio_types::AudioData;
 use soundkit::ogg::{OggPacket as SharedOggPacket, OggPacketParser as SharedOggPacketParser};
 #[cfg(test)]
@@ -132,8 +134,8 @@ impl Default for VorbisPacketDecoder {
 /// Streaming Ogg Vorbis decoder.
 ///
 /// Vorbis is carried in Ogg for normal `.ogg` files. This decoder parses Ogg
-/// pages incrementally, decodes Vorbis packets with the pure Rust `lewton`
-/// decoder, and returns interleaved signed 16-bit PCM.
+/// pages incrementally, decodes Vorbis packets with SoundKit's in-tree Rust
+/// core, and returns interleaved signed 16-bit PCM.
 pub struct VorbisDecoder {
     parser: SharedOggPacketParser,
     state: VorbisDecodeState,
@@ -165,35 +167,31 @@ impl VorbisDecoder {
     /// complete packets have produced audio.
     pub fn add(&mut self, data: &[u8]) -> Result<Option<AudioData>, String> {
         let packets = self.parser.add(data)?;
-        let mut samples = Vec::new();
+        let mut pcm_bytes = Vec::new();
 
         for packet in packets {
-            self.process_packet(packet, &mut samples)?;
+            self.process_packet(packet, &mut pcm_bytes)?;
         }
 
-        self.audio_data_from_samples(samples)
+        self.audio_data_from_pcm(pcm_bytes)
     }
 
     pub fn finish(&mut self) -> Result<Option<AudioData>, String> {
         let packets = self.parser.finish()?;
-        let mut samples = Vec::new();
+        let mut pcm_bytes = Vec::new();
         for packet in packets {
-            self.process_packet(packet, &mut samples)?;
+            self.process_packet(packet, &mut pcm_bytes)?;
         }
-        self.audio_data_from_samples(samples)
+        self.audio_data_from_pcm(pcm_bytes)
     }
 
-    fn audio_data_from_samples(&self, samples: Vec<i16>) -> Result<Option<AudioData>, String> {
-        if samples.is_empty() {
+    fn audio_data_from_pcm(&self, pcm_bytes: Vec<u8>) -> Result<Option<AudioData>, String> {
+        if pcm_bytes.is_empty() {
             return Ok(None);
         }
         let info = self
             .info
             .ok_or_else(|| "Vorbis stream info unavailable after decode".to_string())?;
-        let mut pcm_bytes = Vec::with_capacity(samples.len() * 2);
-        for sample in samples {
-            pcm_bytes.extend_from_slice(&sample.to_le_bytes());
-        }
         Ok(Some(AudioData::new(
             16,
             info.channels,
@@ -207,7 +205,7 @@ impl VorbisDecoder {
     fn process_packet(
         &mut self,
         packet: SharedOggPacket,
-        samples: &mut Vec<i16>,
+        pcm_bytes: &mut Vec<u8>,
     ) -> Result<(), String> {
         let state = std::mem::replace(&mut self.state, VorbisDecodeState::HeaderIdent);
         match state {
@@ -253,7 +251,7 @@ impl VorbisDecoder {
                 mut cur_absgp,
             } => {
                 self.ensure_serial(packet.serial)?;
-                let mut decoded: InterleavedSamples<i16> =
+                let mut decoded: InterleavedPcm16 =
                     read_audio_packet_generic(&ident, &setup, &packet.data, &mut pwr)
                         .map_err(|error| format!("{error:?}"))?;
 
@@ -271,7 +269,7 @@ impl VorbisDecoder {
                     *absgp += decoded.num_samples() as u64;
                 }
 
-                samples.extend(decoded.samples);
+                pcm_bytes.extend(decoded.bytes);
                 self.state = VorbisDecodeState::Audio {
                     ident,
                     setup,
@@ -393,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_vorbis_fixture_and_write_golden_wav() {
+    fn decoded_vorbis_fixture_matches_golden_wav() {
         let fixture = fs::read(testdata_path(
             "vorbis/A_Tusk_is_used_to_make_costly_gifts.ogg",
         ))
@@ -427,9 +425,11 @@ mod tests {
             8_000,
         )
         .unwrap();
-        let output_path = golden_path("vorbis/A_Tusk_is_used_to_make_costly_gifts.decoded.wav");
-        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
-        fs::write(output_path, wav).unwrap();
+        let golden = fs::read(golden_path(
+            "vorbis/A_Tusk_is_used_to_make_costly_gifts.decoded.wav",
+        ))
+        .unwrap();
+        assert_eq!(wav, golden);
     }
 
     #[test]

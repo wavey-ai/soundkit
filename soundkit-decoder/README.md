@@ -19,23 +19,23 @@ containers and exposes explicit spawn paths for headerless telephony codecs.
 | --- | --- | --- | --- | --- |
 | Raw PCM (`linear16`, `linear32`, `s16le`, `f32le`, `L16`) | `spawn_raw_pcm(format)` | Explicit | Yes | `soundkit::raw_pcm` |
 | WAV / RIFF PCM | `spawn()` | Auto | Yes | `WavStreamProcessor` |
-| MP3 | `spawn()` | Auto | Yes | `soundkit-mp3` / `nanomp3` |
+| MP3 | `spawn()` | Auto | Yes | `soundkit-mp3` owned decoder |
 | AAC ADTS | `spawn()` | Auto | Yes | `soundkit-aac` / `fdk-aac` |
 | AAC-LC/HE-AAC in M4A/MP4/MOV or Matroska | `decode_audio_file()` | Auto | EOF/Limited | owned Rust demux + Wavey Symphonia fork |
 | MP2 in MPEG-TS | `decode_audio_file()` | Auto | EOF | owned Rust TS demux + Wavey Symphonia fork |
 | PCM in AVI; DVD LPCM in MPEG-PS/VOB | `decode_audio_file()` | Auto | EOF | owned Rust demux/PCM conversion |
 | FLAC | `spawn()` | Auto | Yes | `soundkit-flac` / `wavey-flac` |
-| Raw Opus stream | `spawn()` | Auto | Yes | `soundkit-opus` / `libopus` |
-| Ogg Opus | `spawn()` | Auto | Yes | `soundkit-ogg-opus` + `libopus` |
-| WebM Opus / Vorbis | `spawn()` | Auto | Yes | `soundkit-webm` + `libopus` / `lewton` |
+| Raw Opus stream | `spawn()` | Auto | Yes | `soundkit-opus` owned decoder |
+| Ogg Opus | `spawn()` | Auto | Yes | `soundkit-ogg-opus` + `soundkit-opus` |
+| WebM Opus / Vorbis | `spawn()` | Auto | Yes | `soundkit-webm` + owned Opus/Vorbis decoders |
 | Ogg Speex | `spawn_speex()` | Explicit | Yes | `soundkit-speex` / `oxideav-speex` |
-| Ogg Vorbis | `spawn()` or `spawn_vorbis()` | Auto or explicit | Yes | `soundkit-vorbis` / `lewton` |
+| Ogg Vorbis | `spawn()` or `spawn_vorbis()` | Auto or explicit | Yes | `soundkit-vorbis` owned decoder |
 | ALAC in M4A/MP4 or CAF | `spawn()` or `spawn_alac()` | Auto or explicit | EOF | `soundkit-alac` / `alac` |
 | AIFF / AIFF-C | `spawn()` or `spawn_aiff()` | Auto or explicit | EOF | `soundkit-aiff` / `aifc` |
 | Raw AC-3 syncframes | `spawn()` or `spawn_ac3()` | Auto or explicit | Yes | `soundkit-ac3` / `oxideav-ac3` |
 | AMR-NB | `spawn_amr_nb()` | Explicit | Yes | `soundkit-amr` / OpenCORE AMR-NB |
 | G.711 u-law / A-law | `spawn_g711(law, rate, channels)` | Explicit | Yes | `soundkit-g711` |
-| G.722 | `spawn_g722()` | Explicit | Yes | `soundkit-g722` / `ezk-g722` |
+| G.722 | `spawn_g722()` | Explicit | Yes | `soundkit-g722` owned codec |
 | G.726 16/24/32/40 | `spawn_g726_with_rate(rate, packing)` | Explicit | Yes | `soundkit-g726` |
 | G.729 | `spawn_g729()` | Explicit | Yes | `soundkit-g729` / `g729-sys` |
 | GSM 06.10 / WAV-49 | `spawn_gsm(variant)` | Explicit | Yes | `soundkit-gsm` / `libgsm` |
@@ -117,13 +117,14 @@ container and audio codec, which covers the common YouTube audio itag families:
 | --- | --- | --- |
 | MP4 AAC-LC | `140`, `141` | owned Rust MP4 demux + Wavey pure-Rust AAC fork through `decode_audio_file` |
 | MP4 HE-AAC | `139`, `256`, `258`, `599` | same owned path with SBR/PS; the collected itag-139 fixture measures 68.59 dB against FFmpeg |
-| WebM Opus | `249`, `250`, `251`, `600`, `774` | WebM demux + `libopus` |
-| WebM Vorbis | `171`, `172` | WebM demux + pure-Rust `lewton` |
+| WebM Opus | `249`, `250`, `251`, `600`, `774` | WebM demux + `soundkit-opus` |
+| WebM Vorbis | `171`, `172` | WebM demux + `soundkit-vorbis` owned decoder |
 
 ## Current Gaps
 
 | Format | Gap |
 | --- | --- |
+| Opus SILK, hybrid, FEC, and mode transitions | `soundkit-opus` currently decodes 48 kHz CELT packets. Other modes return explicit unsupported errors. |
 | Streaming ALAC and AIFF/AIFF-C | Seek-based readers make the streaming wrappers EOF-buffered; complete ALAC in M4A/CAF is packet-decoded by `decode_audio_file`. |
 | AAC in M4A/MP4 | MP4 sample tables make live chunking layout-dependent; use ADTS for live AAC. |
 | MP4 AC-3 / E-AC-3 YouTube surround itags | Raw AC-3 syncframes decode, but MP4-contained AC-3/E-AC-3 is not wired yet. |
