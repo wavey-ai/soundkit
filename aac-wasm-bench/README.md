@@ -102,19 +102,24 @@ with `-O3`, LTO, and `-msimd128`.
 
 ## Native C checkpoint
 
-Before returning to Wasm, the same SoundKit core was measured against direct
-native libavcodec calls on the performance host. Eleven alternating rounds were
-used for each fixture.
+The final checkpoint measures the public `soundkit-aac` production API against
+an equivalent direct native libavcodec C harness. Eleven alternating rounds of
+three complete decodes were used for each music fixture; medians below are
+normalized to one decode.
 
 | Fixture | SoundKit | FFmpeg C | SoundKit faster |
 | --- | ---: | ---: | ---: |
-| WESTSIDE, 48 kHz stereo | **267.797 ms** | 284.068 ms | **5.73%** |
-| A Tusk, 16 kHz | **232.939 ms** | 238.676 ms | **2.40%** |
-| Stereo music, 44.1 kHz | **229.435 ms** | 245.110 ms | **6.40%** |
+| WESTSIDE full mix, 48 kHz stereo | **277.171 ms** | 292.586 ms | **5.27%** |
+| Bill Evans — Secret Sessions | **145.231 ms** | 149.858 ms | **3.09%** |
+| The Blue Nile — Hats | **144.233 ms** | 146.771 ms | **1.73%** |
+| Lori Asha | **141.392 ms** | 147.184 ms | **3.94%** |
+| Nocturnal Animals | **133.659 ms** | 140.784 ms | **5.06%** |
 
-On WESTSIDE, those medians correspond to approximately 730.6x realtime for
-SoundKit and 688.7x for FFmpeg. FDK-AAC measured approximately 1,452 ms, or
-134.7x realtime, on that fixture.
+This corpus contains music only. The C harness performs the same production
+work: fresh decoder construction, ADTS parsing, complete decode, optimized
+planar-`f32` to interleaved-`i16` conversion, and full output consumption. See
+[`../soundkit-aac/BENCHMARK_NATIVE_2026-08-25.md`](../soundkit-aac/BENCHMARK_NATIVE_2026-08-25.md)
+for the complete methodology, checksums, hashes, and release matrix.
 
 ## Correctness and quality gates
 
@@ -131,7 +136,7 @@ RUSTFLAGS='-C target-feature=+simd128' \
 
 Results:
 
-- 120 AAC-LC unit tests passed.
+- 121 AAC-LC unit tests passed.
 - The malformed-frame integration test passed without panics.
 - The steady-state fixture test passed with zero allocations.
 - Six benchmark/conformance tests passed, including both FDK comparisons.

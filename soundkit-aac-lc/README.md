@@ -2,6 +2,9 @@
 
 SoundKit-owned AAC-LC decoder core.
 
+The production ADTS/M4A wrapper, automatic native FDK fallback, and current
+five-track FFmpeg C comparison live in [`soundkit-aac`](../soundkit-aac/README.md).
+
 This crate contains a pure Rust, WebAssembly-oriented AAC-LC decoder. It accepts
 raw AAC access units from the SoundKit packet stream and returns PCM.
 
@@ -160,9 +163,10 @@ cargo build -p soundkit --target wasm32-unknown-unknown --release --no-default-f
 
 ## Production Status
 
-The decoder is a production candidate for the controlled stereo AAC-LC profile.
-Native and WASM tests cover 44.1 and 48 kHz music. MP4 tests use bounded range
-reads and a reusable PCM output buffer.
+The decoder is the default production backend for supported AAC-LC streams in
+`soundkit-aac`. Native music tests cover 44.1 and 48 kHz, and the streaming
+regression suite also covers 16 kHz. MP4 tests use bounded range reads and a
+reusable PCM output buffer.
 
 The default WASM bundle is 3,234,574 bytes. It is 1,221,718 bytes with gzip.
 This size includes all default SoundKit codecs and video decoders.

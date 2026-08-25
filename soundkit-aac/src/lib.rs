@@ -1,6 +1,4 @@
 #[cfg(feature = "fdk")]
-use fdk_aac::dec::{Decoder as AacLibDecoder, DecoderError, Transport as DecoderTransport};
-#[cfg(feature = "fdk")]
 use fdk_aac::enc::EncodeInfo as AacEncodeInfo;
 #[cfg(feature = "fdk")]
 use fdk_aac::enc::{
@@ -8,18 +6,21 @@ use fdk_aac::enc::{
     Transport as EncoderTransport,
 };
 #[cfg(feature = "fdk")]
-use soundkit::audio_packet::{Decoder, Encoder};
+use soundkit::audio_packet::Encoder;
 #[cfg(feature = "fdk")]
 use std::cell::RefCell;
 #[cfg(feature = "fdk")]
 use std::rc::Rc;
 #[cfg(feature = "fdk")]
-use tracing::{debug, error, trace};
+use tracing::error;
 
-#[cfg(feature = "fdk")]
 const MAX_INPUT_CHUNK_BYTES: usize = 4 * 1024 * 1024;
-#[cfg(feature = "fdk")]
 const MAX_AAC_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
+
+#[cfg(any(feature = "owned-lc", feature = "fdk"))]
+mod decoder;
+#[cfg(any(feature = "owned-lc", feature = "fdk"))]
+pub use decoder::{AacDecoder, AacDecoderBackend};
 
 #[cfg(feature = "fdk")]
 pub struct AacEncoder {
@@ -104,174 +105,6 @@ impl Drop for AacEncoder {
     }
 }
 
-#[cfg(feature = "fdk")]
-pub struct AacDecoder {
-    decoder: AacLibDecoder,
-    input_buffer: Vec<u8>,
-    sample_rate: Option<u32>,
-    channels: Option<u8>,
-}
-
-#[cfg(feature = "fdk")]
-impl AacDecoder {
-    pub fn new() -> Self {
-        let decoder = AacLibDecoder::new(DecoderTransport::Adts);
-
-        AacDecoder {
-            decoder,
-            input_buffer: Vec::new(),
-            sample_rate: None,
-            channels: None,
-        }
-    }
-
-    pub fn init(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-
-    pub fn sample_rate(&self) -> Option<u32> {
-        self.sample_rate
-    }
-
-    pub fn channels(&self) -> Option<u8> {
-        self.channels
-    }
-}
-
-#[cfg(feature = "fdk")]
-impl Default for AacDecoder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(feature = "fdk")]
-impl Decoder for AacDecoder {
-    fn decode_i16(
-        &mut self,
-        input: &[u8],
-        output: &mut [i16],
-        _fec: bool,
-    ) -> Result<usize, String> {
-        if input.len() > MAX_INPUT_CHUNK_BYTES {
-            return Err(format!(
-                "AAC input chunk exceeds the {MAX_INPUT_CHUNK_BYTES} byte streaming budget"
-            ));
-        }
-        if !input.is_empty() {
-            if self.input_buffer.len().saturating_add(input.len()) > MAX_AAC_BUFFERED_BYTES {
-                return Err(format!(
-                    "AAC decoder buffer exceeds the {MAX_AAC_BUFFERED_BYTES} byte streaming budget"
-                ));
-            }
-            self.input_buffer.extend_from_slice(input);
-        }
-
-        let mut written = 0usize;
-        let mut total_consumed = 0usize;
-
-        loop {
-            let consumed = if self.input_buffer.is_empty() {
-                0
-            } else {
-                match self.decoder.fill(&self.input_buffer) {
-                    Ok(bytes) => bytes,
-                    Err(err) => return Err(format!("Error filling decoder: {}", err)),
-                }
-            };
-
-            if consumed > 0 {
-                total_consumed += consumed;
-                self.input_buffer.drain(..consumed);
-            }
-
-            let remaining = output.len().saturating_sub(written);
-            if remaining == 0 {
-                break;
-            }
-
-            match self.decoder.decode_frame(&mut output[written..]) {
-                Ok(()) => {
-                    let info = self.decoder.stream_info();
-                    let frame_samples = info.numChannels as usize * info.frameSize as usize;
-
-                    if frame_samples == 0 {
-                        break;
-                    }
-
-                    if remaining < frame_samples {
-                        return Err(format!(
-                            "Output buffer too small for decoded frame (needed {}, had {})",
-                            frame_samples, remaining
-                        ));
-                    }
-
-                    let first_frame = self.sample_rate.is_none() || self.channels.is_none();
-                    self.sample_rate.get_or_insert(info.sampleRate as u32);
-                    self.channels.get_or_insert(info.numChannels as u8);
-                    written += frame_samples;
-
-                    if first_frame {
-                        debug!(
-                            sample_rate_hz = info.sampleRate,
-                            channels = info.numChannels,
-                            frame_samples,
-                            bytes_consumed = total_consumed,
-                            "decoded AAC frame"
-                        );
-                    } else {
-                        trace!(
-                            sample_rate_hz = info.sampleRate,
-                            channels = info.numChannels,
-                            frame_samples,
-                            bytes_consumed = total_consumed,
-                            "decoded AAC frame"
-                        );
-                    }
-                }
-                Err(err) => {
-                    if err == DecoderError::NOT_ENOUGH_BITS {
-                        // need more data
-                        break;
-                    }
-
-                    return Err(format!("Decoding error: {}", err));
-                }
-            }
-        }
-
-        Ok(written)
-    }
-
-    fn decode_i32(
-        &mut self,
-        _input: &[u8],
-        _output: &mut [i32],
-        _fec: bool,
-    ) -> Result<usize, String> {
-        Err("Not implemented.".to_string())
-    }
-
-    fn decode_f32(&mut self, input: &[u8], output: &mut [f32], fec: bool) -> Result<usize, String> {
-        // Decode to i16 then convert to f32
-        let mut i16_buf = vec![0i16; output.len()];
-        let samples = self.decode_i16(input, &mut i16_buf, fec)?;
-
-        for i in 0..samples {
-            output[i] = (i16_buf[i] as f32) / 32768.0;
-        }
-
-        Ok(samples)
-    }
-}
-
-#[cfg(feature = "fdk")]
-impl Drop for AacDecoder {
-    fn drop(&mut self) {
-        // The decoder will automatically handle cleanup in its Drop implementation
-    }
-}
-
 #[cfg(feature = "mp4-demux")]
 mod mp4_demux {
     use soundkit_audio_demux::{AudioCodec, AudioDemuxEvent, AudioTrackDemuxer};
@@ -283,6 +116,7 @@ mod mp4_demux {
         pub channels: u8,
         pub track_id: u32,
         pub sample_count: u32,
+        pub audio_specific_config: Vec<u8>,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -389,6 +223,7 @@ mod mp4_demux {
                             channels,
                             track_id,
                             sample_count: config.sample_count.unwrap_or_default(),
+                            audio_specific_config: config.codec_private,
                         }));
                     }
                     AudioDemuxEvent::Packet(packet) => {
@@ -418,7 +253,9 @@ mod mp4_demux {
 
 #[cfg(feature = "mp4-decoder")]
 mod mp4_decoder {
-    use super::{AacDecoder, AacMp4DemuxEvent, AacMp4Demuxer, MAX_AAC_BUFFERED_BYTES};
+    use super::{
+        AacDecoder, AacDecoderBackend, AacMp4DemuxEvent, AacMp4Demuxer, MAX_AAC_BUFFERED_BYTES,
+    };
     use soundkit::audio_packet::Decoder;
     use std::collections::VecDeque;
 
@@ -464,6 +301,10 @@ mod mp4_decoder {
             self.channels.or_else(|| self.decoder.channels())
         }
 
+        pub fn backend(&self) -> AacDecoderBackend {
+            self.decoder.backend()
+        }
+
         pub fn finish_i16(&mut self, output: &mut [i16]) -> Result<usize, String> {
             if !self.demux_finished {
                 let events = self.demuxer.finish()?;
@@ -479,6 +320,8 @@ mod mp4_decoder {
                     AacMp4DemuxEvent::Config(config) => {
                         self.sample_rate = Some(config.sample_rate);
                         self.channels = Some(config.channels);
+                        self.decoder
+                            .set_audio_specific_config(&config.audio_specific_config)?;
                     }
                     AacMp4DemuxEvent::Frame(frame) => {
                         let next_bytes = self.pending_bytes.saturating_add(frame.adts.len());
@@ -561,13 +404,15 @@ pub use mp4_demux::{AacMp4Config, AacMp4DemuxEvent, AacMp4Demuxer, AacMp4Frame};
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "fdk")]
+    #[cfg(any(feature = "fdk", feature = "owned-lc"))]
     use super::*;
     #[cfg(feature = "fdk")]
     use access_unit::aac::is_aac;
     #[cfg(feature = "fdk")]
     use soundkit::audio_bytes::s16le_to_i16;
-    #[cfg(feature = "fdk")]
+    #[cfg(any(feature = "fdk", feature = "owned-lc", feature = "mp4-decoder"))]
+    use soundkit::audio_packet::Decoder;
+    #[cfg(all(feature = "fdk", feature = "mp4-decoder"))]
     use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
     #[cfg(feature = "fdk")]
     use soundkit::wav::WavStreamProcessor;
@@ -581,7 +426,7 @@ mod tests {
     use std::path::PathBuf;
     #[cfg(feature = "fdk")]
     use std::time::Instant;
-    #[cfg(any(feature = "fdk", feature = "mp4-decoder"))]
+    #[cfg(feature = "fdk")]
     use tracing::trace;
 
     #[cfg(any(feature = "fdk", feature = "mp4-decoder"))]
@@ -592,7 +437,7 @@ mod tests {
             .join(file)
     }
 
-    #[cfg(feature = "fdk")]
+    #[cfg(any(feature = "fdk", feature = "owned-lc"))]
     fn golden_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -600,14 +445,7 @@ mod tests {
             .join(file)
     }
 
-    #[cfg(feature = "fdk")]
-    fn outputs_path(file: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("outputs")
-            .join(file)
-    }
-
-    #[cfg(any(feature = "fdk", feature = "mp4-decoder"))]
+    #[cfg(any(feature = "fdk", feature = "owned-lc", feature = "mp4-decoder"))]
     fn init_tracing() {
         use std::sync::Once;
         static INIT: Once = Once::new();
@@ -620,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "mp4-decoder")]
+    #[cfg(all(feature = "mp4-decoder", feature = "fdk"))]
     fn test_aac_decode_waveform() {
         use crate::AacDecoderMp4;
 
@@ -664,7 +502,56 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "fdk")]
+    #[cfg(feature = "mp4-decoder")]
+    fn test_mp4_aac_lc_uses_owned_decoder() {
+        use crate::AacDecoderMp4;
+
+        let input_path = golden_path("aac/stereo-music-44100-192k.m4a");
+        let m4a_bytes = fs::read(&input_path).unwrap();
+        assert!(!m4a_bytes.is_empty(), "fixture m4a missing or empty");
+
+        let mut decoder = AacDecoderMp4::new();
+        decoder.init().expect("Decoder initialization failed");
+        let mut decoded = Vec::new();
+        let mut scratch = vec![0i16; 16_384];
+
+        for chunk in m4a_bytes.chunks(997) {
+            let written = decoder
+                .decode_i16(chunk, &mut scratch, false)
+                .expect("decode AAC-LC M4A chunk");
+            decoded.extend_from_slice(&scratch[..written]);
+            loop {
+                let written = decoder
+                    .decode_i16(&[], &mut scratch, false)
+                    .expect("drain AAC-LC M4A packets");
+                if written == 0 {
+                    break;
+                }
+                decoded.extend_from_slice(&scratch[..written]);
+            }
+        }
+        loop {
+            let written = decoder
+                .finish_i16(&mut scratch)
+                .expect("finish AAC-LC M4A decode");
+            if written == 0 {
+                break;
+            }
+            decoded.extend_from_slice(&scratch[..written]);
+        }
+
+        assert_eq!(decoder.backend(), AacDecoderBackend::SoundKitAacLc);
+        assert_eq!(decoder.sample_rate(), Some(44_100));
+        assert_eq!(decoder.channels(), Some(2));
+        assert!(!decoded.is_empty(), "decoder produced no PCM samples");
+        assert!(
+            decoded.iter().any(|sample| *sample != 0),
+            "decoded PCM should contain non-zero samples"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "owned-lc")]
     fn test_aac_decoder_streaming_decode() {
         // use the real fixture AAC, not one we just encoded
         let input_path = golden_path("aac/A_Tusk_is_used_to_make_costly_gifts_encoded.aac");
@@ -673,34 +560,42 @@ mod tests {
 
         init_tracing();
 
-        let mut decoder = AacDecoder::new();
-        decoder.init().expect("Decoder initialization failed");
+        fn decode_with_chunks(aac_bytes: &[u8], chunk_size: usize) -> (AacDecoder, Vec<i16>) {
+            let mut decoder = AacDecoder::new();
+            decoder.init().expect("Decoder initialization failed");
+            let mut decoded = Vec::new();
+            let mut scratch = vec![0i16; 4096];
 
-        let mut decoded = Vec::new();
-        let mut scratch = vec![0i16; 4096];
-
-        for chunk in aac_bytes.chunks(2048) {
-            let written = decoder.decode_i16(chunk, &mut scratch, false).unwrap();
-            decoded.extend_from_slice(&scratch[..written]);
-        }
-
-        // final drain if anything buffered
-        loop {
-            let written = decoder.decode_i16(&[], &mut scratch, false).unwrap();
-            if written == 0 {
-                break;
+            for chunk in aac_bytes.chunks(chunk_size) {
+                let written = decoder.decode_i16(chunk, &mut scratch, false).unwrap();
+                decoded.extend_from_slice(&scratch[..written]);
+                loop {
+                    let written = decoder.decode_i16(&[], &mut scratch, false).unwrap();
+                    if written == 0 {
+                        break;
+                    }
+                    decoded.extend_from_slice(&scratch[..written]);
+                }
             }
-            decoded.extend_from_slice(&scratch[..written]);
+            (decoder, decoded)
         }
+
+        let (decoder, decoded) = decode_with_chunks(&aac_bytes, 2048);
 
         assert!(!decoded.is_empty(), "decoder produced no PCM samples");
         assert_eq!(decoder.sample_rate(), Some(16_000), "fixture sample rate");
         assert_eq!(decoder.channels(), Some(2), "fixture channel count");
+        assert_eq!(decoder.backend(), AacDecoderBackend::SoundKitAacLc);
+        assert_eq!(decoded.len(), 94_208);
 
-        let output_path = outputs_path("A_Tusk_is_used_to_make_costly_gifts.s16le");
-        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
-        let pcm_bytes: Vec<u8> = decoded.iter().flat_map(|s| s.to_le_bytes()).collect();
-        fs::write(&output_path, pcm_bytes).unwrap();
+        for chunk_size in [1, 17, aac_bytes.len()] {
+            let (chunked_decoder, chunked) = decode_with_chunks(&aac_bytes, chunk_size);
+            assert_eq!(chunked_decoder.backend(), AacDecoderBackend::SoundKitAacLc);
+            assert_eq!(
+                chunked, decoded,
+                "PCM changed with {chunk_size}-byte chunks"
+            );
+        }
     }
 
     #[cfg(feature = "fdk")]
@@ -816,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "mp4-decoder")]
+    #[cfg(all(feature = "mp4-decoder", feature = "fdk"))]
     fn test_mp4_he_aac_itag_139_decoder() {
         use crate::AacDecoderMp4;
         use mp4::{AudioObjectType, ChannelConfig, MediaType, Mp4Reader};
@@ -868,6 +763,7 @@ mod tests {
         assert!(!decoded.is_empty(), "decoder produced no PCM samples");
         assert_eq!(decoder.sample_rate(), Some(22_050));
         assert_eq!(decoder.channels(), Some(2));
+        assert_eq!(decoder.backend(), AacDecoderBackend::FdkAac);
         assert!(
             decoded.iter().any(|sample| *sample != 0),
             "decoded PCM should contain non-zero samples"

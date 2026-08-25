@@ -223,6 +223,15 @@ impl AudioSpecificConfig {
         let (frame_length, depends_on_core_coder, extension_flag) =
             read_ga_specific_config(reader, object_type)?;
 
+        if !sbr_present {
+            read_sync_extension(
+                reader,
+                &mut sbr_present,
+                &mut ps_present,
+                &mut extension_sampling_frequency,
+            )?;
+        }
+
         Ok(Self {
             object_type,
             sampling_frequency,
@@ -267,6 +276,38 @@ impl AudioSpecificConfig {
     pub const fn channels(&self) -> Option<usize> {
         self.channel_config.channels()
     }
+}
+
+fn read_sync_extension(
+    reader: &mut BitReader<'_>,
+    sbr_present: &mut bool,
+    ps_present: &mut bool,
+    extension_sampling_frequency: &mut Option<SamplingFrequency>,
+) -> Result<()> {
+    const SYNC_EXTENSION_TYPE: u16 = 0x02b7;
+    const PS_SYNC_EXTENSION_TYPE: u16 = 0x0548;
+
+    if reader.remaining_bits() < 16 || reader.peek_u32(11)? != u32::from(SYNC_EXTENSION_TYPE) {
+        return Ok(());
+    }
+
+    reader.skip_bits(11)?;
+    let extension_object_type = read_audio_object_type(reader)?;
+    if extension_object_type != AudioObjectType::Sbr {
+        return Ok(());
+    }
+
+    *sbr_present = reader.read_bool()?;
+    if *sbr_present {
+        *extension_sampling_frequency = Some(read_sampling_frequency(reader)?);
+    }
+
+    if reader.remaining_bits() >= 12 && reader.peek_u32(11)? == u32::from(PS_SYNC_EXTENSION_TYPE) {
+        reader.skip_bits(11)?;
+        *ps_present = reader.read_bool()?;
+    }
+
+    Ok(())
 }
 
 fn read_audio_object_type(reader: &mut BitReader<'_>) -> Result<AudioObjectType> {
@@ -381,6 +422,24 @@ mod tests {
 
         assert_eq!(config.object_type, AudioObjectType::AacLc);
         assert!(config.sbr_present);
+        assert_eq!(
+            config.validate_aac_lc_packet_path().unwrap_err(),
+            AacLcError::UnsupportedFeature("SBR/HE-AAC")
+        );
+    }
+
+    #[test]
+    fn detects_implicit_he_aac_sync_extension() {
+        let config = AudioSpecificConfig::parse(&[0x15, 0x10, 0x56, 0xe5, 0xb8]).unwrap();
+
+        assert_eq!(config.object_type, AudioObjectType::AacLc);
+        assert_eq!(config.sample_rate(), 11_025);
+        assert_eq!(config.channel_config, ChannelConfig::Stereo);
+        assert!(config.sbr_present);
+        assert_eq!(
+            config.extension_sampling_frequency,
+            Some(SamplingFrequency::from_index(7).unwrap())
+        );
         assert_eq!(
             config.validate_aac_lc_packet_path().unwrap_err(),
             AacLcError::UnsupportedFeature("SBR/HE-AAC")
