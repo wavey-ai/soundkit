@@ -141,12 +141,22 @@ def git_revision(directory: Path) -> str:
 
 def source_fingerprint(repo_root: Path) -> str:
     digest = hashlib.sha256()
-    paths = [repo_root / "Cargo.toml", repo_root / "Cargo.lock"]
+    paths = [repo_root / "Cargo.toml"]
+    local_lock = repo_root / "Cargo.lock"
+    if local_lock.is_file():
+        paths.append(local_lock)
+    else:
+        # `soundkit-opus` is a SoundKit workspace member. Cargo resolves its
+        # release profile and dependency versions from the workspace files.
+        for workspace_file in ("Cargo.toml", "Cargo.lock"):
+            path = repo_root.parent / workspace_file
+            if path.is_file():
+                paths.append(path)
     paths.extend(sorted((repo_root / "src").rglob("*.rs")))
     paths.extend(sorted((repo_root / "crates").rglob("*.rs")))
     paths.append(repo_root / "examples/raw_celt_bench.rs")
     for path in paths:
-        relative = path.relative_to(repo_root)
+        relative = os.path.relpath(path, repo_root)
         digest.update(str(relative).encode())
         digest.update(b"\0")
         digest.update(path.read_bytes())
