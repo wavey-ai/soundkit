@@ -9,7 +9,7 @@ repository = "https://github.com/wavey-ai/soundkit"
 [dependencies]
 frame-header = "0.2.1"
 soundkit = { version = "0.12.3", path = "../soundkit" }
-soundkit-opus = { version = "0.12.3", path = "../soundkit-opus", optional = true }
+soundkit-opus = { version = "0.13.0", path = "../soundkit-opus", optional = true }
 soundkit-video = { version = "0.12.3", path = "../soundkit-video", default-features = false }
 soundkit-vorbis = { version = "0.12.3", path = "../soundkit-vorbis", optional = true }
 tracing = "0.1.40"

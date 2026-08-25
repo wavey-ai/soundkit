@@ -1,19 +1,33 @@
 [package]
 name = "soundkit-opus"
-version = "0.12.3"
+version = "0.13.0"
 edition = "2021"
-license = "MIT"
-description = "Opus Encoder traits"
+license = "MIT AND BSD-3-Clause"
+description = "Pure Rust Opus codec with SoundKit packet and streaming adapters"
 repository = "https://github.com/wavey-ai/soundkit"
 readme = "README.md"
+keywords = ["opus", "codec", "audio", "streaming", "wasm"]
+categories = ["multimedia::audio", "wasm"]
+exclude = [
+  "performance-results/**",
+  "quality-results/**",
+  "pkg/**",
+  "tools/**",
+  "package.json",
+]
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
 # Full SILK, hybrid, and CELT coverage for general Opus containers.
 ropus = "0.12.18"
-soundkit = { path = "../soundkit" }
+soundkit = { version = "0.12.3", path = "../soundkit" }
 frame-header = "0.2.2"
 tracing = "0.1.40"
-libopus-rs = { path = "libopus-rs" }
+wasm-bindgen = { version = "0.2", optional = true }
+wide = "0.7"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

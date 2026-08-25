@@ -1,1 +1,19 @@
-/target
+/target/
+.DS_Store
+
+# Local profiler and benchmark output.
+*.cpuprofile.json
+/wasm-browser-*.json
+
+# Local audio comparison fixtures and generated roundtrip artifacts.
+/testdata/
+/roundtrips/
+*.wav
+*.mp3
+*.flac
+*.aif
+*.aiff
+*.pcm
+*.s16le
+*.lors
+*.bit

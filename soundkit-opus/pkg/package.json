@@ -1,0 +1,28 @@
+{
+  "name": "soundkit-opus",
+  "type": "module",
+  "description": "Pure Rust Opus codec with SoundKit packet and streaming adapters",
+  "version": "0.13.0",
+  "license": "MIT AND BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wavey-ai/soundkit"
+  },
+  "files": [
+    "soundkit_opus_bg.wasm",
+    "soundkit_opus.js",
+    "soundkit_opus.d.ts"
+  ],
+  "main": "soundkit_opus.js",
+  "types": "soundkit_opus.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ],
+  "keywords": [
+    "opus",
+    "codec",
+    "audio",
+    "streaming",
+    "wasm"
+  ]
+}

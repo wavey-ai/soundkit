@@ -1,9 +1,0 @@
-[package]
-name = "libopus-rs-kernels"
-version = "0.0.0"
-edition = "2021"
-license = "BSD-3-Clause"
-publish = false
-
-[lib]
-path = "src/lib.rs"

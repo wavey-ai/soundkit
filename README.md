@@ -177,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | MP3 | `mp3lame` | Yes | Feature-gated encoder path. |
 | AAC ADTS | `fdk-aac` | Yes | ADTS output. |
 | FLAC | `wavey-flac` | Yes | The default encoder and decoder come from the standalone Wavey-owned codec. |
-| Opus | `soundkit-opus` / in-tree `libopus-rs` | Yes | Pure Rust 48 kHz CELT packet encoder with 16-bit and 24-bit APIs. |
+| Opus | `soundkit-opus` | Yes | Pure Rust 48 kHz CELT packet encoder with 16-bit and 24-bit APIs. |
 | AMR-NB | OpenCORE AMR-NB | Yes | 160-sample speech frames. |
 | G.711 / G.722 / G.726 / G.729 / GSM | Codec crates | Yes | Frame or sample streaming, depending on codec. |
 | Vorbis / Speex / ALAC / AIFF / AC-3 / WebM | Decode-only today | No | Add only when fixture generation and licensing are clear. |

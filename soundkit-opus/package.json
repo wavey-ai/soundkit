@@ -1,0 +1,31 @@
+{
+  "name": "@wavey-ai/soundkit-opus",
+  "version": "0.13.0",
+  "type": "module",
+  "description": "Pure Rust Opus implementation focused on 48 kHz CELT for WebAssembly",
+  "license": "MIT AND BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wavey-ai/soundkit.git",
+    "directory": "soundkit-opus"
+  },
+  "main": "./pkg/soundkit_opus.js",
+  "types": "./pkg/soundkit_opus.d.ts",
+  "files": [
+    "pkg",
+    "LICENSE-MIT",
+    "LICENSE-BSD-3-CLAUSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='-C target-feature=+simd128' wasm-pack build --target web --release --features wasm && rm -f pkg/.gitignore",
+    "bench:browser-wasm": "node tools/run_browser_wasm_compare.mjs",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "opus",
+    "codec",
+    "audio",
+    "wasm"
+  ]
+}

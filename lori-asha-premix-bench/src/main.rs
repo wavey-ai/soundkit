@@ -1,11 +1,11 @@
 use bytes::Bytes;
-use libopus_rs_native::{
-    Application as PureApplication, Decoder as PureDecoder, Encoder as PureEncoder,
-};
 use opus_sys;
 use soundkit::audio_bytes::i16le_to_i16;
 use soundkit::audio_packet::{Decoder as SoundkitDecoderTrait, Encoder as SoundkitEncoderTrait};
 use soundkit_decoder::{DecodeOptions, DecodePipeline};
+use soundkit_opus::{
+    Application as PureApplication, Decoder as PureDecoder, Encoder as PureEncoder,
+};
 use soundkit_opus::{OpusDecoder as SoundkitDecoder, OpusEncoder as SoundkitEncoder};
 use std::collections::{HashSet, VecDeque};
 use std::env;
@@ -399,7 +399,7 @@ fn main() -> Result<(), String> {
     println!("\nAggregate");
     println!("Soundkit-opus:");
     print_aggregate(&agg_soundkit);
-    println!("libopus-rs:");
+    println!("soundkit-opus:");
     print_aggregate(&agg_pure);
     println!("libopus C:");
     print_aggregate(&agg_c);
@@ -1081,13 +1081,13 @@ fn encode_with_pure_libopus(
         TARGET_CHANNELS as usize,
         PureApplication::Audio,
     )
-    .map_err(|e| format!("libopus-rs encoder init failed: {}", e))?;
+    .map_err(|e| format!("soundkit-opus encoder init failed: {}", e))?;
     encoder
         .set_bitrate(bitrate as i32)
-        .map_err(|e| format!("libopus-rs set bitrate failed: {}", e))?;
+        .map_err(|e| format!("soundkit-opus set bitrate failed: {}", e))?;
     encoder
         .set_vbr(false)
-        .map_err(|e| format!("libopus-rs disable VBR failed: {}", e))?;
+        .map_err(|e| format!("soundkit-opus disable VBR failed: {}", e))?;
 
     let mut packets = Vec::new();
     let mut encode_time = Duration::ZERO;
@@ -1102,7 +1102,7 @@ fn encode_with_pure_libopus(
             let start = Instant::now();
             let packet = encoder
                 .encode_i16(chunk, frame_size)
-                .map_err(|e| format!("libopus-rs encode failed: {}", e))?;
+                .map_err(|e| format!("soundkit-opus encode failed: {}", e))?;
             encode_time += start.elapsed();
 
             if !packet.is_empty() {
@@ -1117,7 +1117,7 @@ fn encode_with_pure_libopus(
                 let start = Instant::now();
                 let packet = encoder
                     .encode_i16(&padded, frame_size)
-                    .map_err(|e| format!("libopus-rs encode failed: {}", e))?;
+                    .map_err(|e| format!("soundkit-opus encode failed: {}", e))?;
                 encode_time += start.elapsed();
 
                 if !packet.is_empty() {
@@ -1131,7 +1131,7 @@ fn encode_with_pure_libopus(
     }
 
     if packets.is_empty() {
-        return Err("libopus-rs produced no packets".to_string());
+        return Err("soundkit-opus produced no packets".to_string());
     }
 
     Ok(PacketEncodeResult {
@@ -1146,7 +1146,7 @@ fn decode_with_pure_libopus(
     packets: &[Vec<u8>],
 ) -> Result<PacketDecodeResult, String> {
     let mut decoder = PureDecoder::new(TARGET_SAMPLE_RATE as i32, TARGET_CHANNELS as usize)
-        .map_err(|e| format!("libopus-rs decoder init failed: {}", e))?;
+        .map_err(|e| format!("soundkit-opus decoder init failed: {}", e))?;
 
     let mut decoded = Vec::new();
     let mut scratch = Vec::new();
@@ -1156,13 +1156,13 @@ fn decode_with_pure_libopus(
         let start = Instant::now();
         let samples_written = decoder
             .decode_i16_into(packet, false, &mut scratch)
-            .map_err(|e| format!("libopus-rs decode failed: {}", e))?;
+            .map_err(|e| format!("soundkit-opus decode failed: {}", e))?;
         decode_time += start.elapsed();
         if samples_written > 0 {
             let count = samples_written * TARGET_CHANNELS as usize;
             if scratch.len() != count {
                 return Err(format!(
-                    "libopus-rs decoded {} samples, expected {}",
+                    "soundkit-opus decoded {} samples, expected {}",
                     scratch.len(),
                     count
                 ));
@@ -1172,7 +1172,7 @@ fn decode_with_pure_libopus(
     }
 
     if decoded.is_empty() {
-        return Err("libopus-rs produced no decoded samples".to_string());
+        return Err("soundkit-opus produced no decoded samples".to_string());
     }
 
     let decoded_bytes = decoded.len() * std::mem::size_of::<i16>();

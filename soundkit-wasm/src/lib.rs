@@ -467,9 +467,8 @@ pub struct WasmFlacFrameDecoder {
     pcm: Vec<i32>,
 }
 
-// Opus encoder backed by soundkit-opus -> libopus-rs (Rust), so both the player
-// and the press /cut editor encode Opus through soundkit rather than a separate
-// libopus wasm bundle or any C dependency.
+// The pure Rust soundkit-opus codec backs this encoder. The player and editor
+// use SoundKit instead of a separate libopus WASM bundle or a C dependency.
 #[cfg(feature = "opus")]
 #[wasm_bindgen]
 pub struct WasmOpusEncoder {

@@ -204,7 +204,7 @@ Implementation:
 
 - Change decoder construction to return `Result`.
 - Remove the constructor `expect` call.
-- Validate supported decode rates before calling `libopus-rs`.
+- Validate supported decode rates before calling `soundkit-opus`.
 - Validate mono and stereo channel counts for the single-stream decoder.
 - Return a precise unsupported-mapping error for multistream input.
 - Update every native and WASM caller through compiler-guided changes.
