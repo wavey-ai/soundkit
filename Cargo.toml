@@ -36,6 +36,10 @@ exclude = ["vendor/rusty_av1d", "vendor/rusty_h264-decoder"]
 [patch.crates-io]
 rusty_av1d = { path = "vendor/rusty_av1d" }
 
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
 # LLVM 21+ currently SIGBUSes while optimizing vp9dec's deeply nested scalar
 # loops at level 3 on AArch64 and wasm32. Level 2 preserves optimization and
 # produces stable native and browser builds until that compiler defect is fixed.

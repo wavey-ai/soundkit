@@ -1,94 +1,23 @@
-# Opus Benchmark Comparison (SoundKit vs libopus-rs vs C)
+# Opus benchmark results
 
-## Date
-Run on 2026-05-29.
+The current Opus results use the in-tree [`libopus-rs`](soundkit-opus/libopus-rs) codec.
 
-## Command
-`cargo run -p lori-asha-premix-bench`
+## Native performance
 
-## C binding support check
-- `soundkit-opus/Cargo.toml` depends on `libopus` and sets
-  `crate-type = ["cdylib", "rlib"]`, so the C-compatible crate path is already part of the existing SoundKit setup.
-- `soundkit-opus/src/lib.rs` includes opus encoder/decoder tests under `#[cfg(test)]`, including decode/streaming and encode/decode roundtrip fixtures.
+Rust encoded 1.19-2.36% faster than trunk libopus on the isolated x86 test host.
 
-## Results (full 22-track run)
+Rust decoded 1.50-4.64% faster than trunk libopus on the same host.
 
-### Aggregate
+The matrix used 48 kHz stereo audio with 5 ms frames. It covered 16-bit and 24-bit PCM at 192-320 kb/s.
 
-Soundkit-opus:
-- Tracks: 22
-- Encode RTF: `0.004x` (18.064s total)
-- Decode RTF: `0.002x` (6.919s total)
-- Encoded output: `68259789` bytes (`126.99` kbps)
-- Decoded output: `412846080` bytes (`768.04` kbps)
-- Avg SNR(dB): `-4.01`
-- Avg RMSE: `7695.212`
-- Avg MAE: `5625.791`
-- Max abs err: `61896.000`
-- Avg length delta samples: `523.32`
+Read the [complete native report](soundkit-opus/libopus-rs/performance-results/2026-08-24-native-48k/README.md).
 
-libopus-rs:
-- Tracks: 22
-- Encode RTF: `0.004x` (18.442s total)
-- Decode RTF: `0.002x` (6.972s total)
-- Encoded output: `68259789` bytes (`126.99` kbps)
-- Decoded output: `412846080` bytes (`768.04` kbps)
-- Avg SNR(dB): `-4.01`
-- Avg RMSE: `7695.212`
-- Avg MAE: `5625.791`
-- Max abs err: `61896.000`
-- Avg length delta samples: `523.32`
+## Perceptual quality
 
-libopus C (FFI via `opus-sys` in benchmark):
-- Tracks: 22
-- Encode RTF: `0.004x` (18.154s total)
-- Decode RTF: `0.001x` (5.973s total)
-- Encoded output: `68259789` bytes (`126.99` kbps)
-- Decoded output: `412846080` bytes (`768.04` kbps)
-- Avg SNR(dB): `-4.01`
-- Avg RMSE: `7695.212`
-- Avg MAE: `5625.791`
-- Max abs err: `61896.000`
-- Avg length delta samples: `523.32`
+The four-source ViSQOL Audio test scored Rust at 4.5731 MOS-LQO. Trunk libopus scored 4.5724.
 
-## Results (query: 1979_MIX)
+The paired Rust-minus-C result was +0.0006. Its conservative 95% confidence interval was -0.0012 to +0.0024.
 
-Soundkit-opus:
-- Tracks: 3
-- Encode RTF: `0.005x` (3.566s total)
-- Decode RTF: `0.002x` (1.349s total)
-- Encoded output: `10765104` bytes (`125.49` kbps)
-- Decoded output: `65886720` bytes (`768.02` kbps)
-- Avg SNR(dB): `-3.83`
-- Avg RMSE: `26.903`
-- Avg MAE: `18.235`
-- Max abs err: `231.000`
-- Avg length delta samples: `278.67`
+Read the [complete quality report](soundkit-opus/libopus-rs/quality-results/2026-08-25-soundkit-diverse-v1-5ms/README.md).
 
-libopus-rs:
-- Tracks: 3
-- Encode RTF: `0.005x` (3.540s total)
-- Decode RTF: `0.002x` (1.337s total)
-- Encoded output: `10765104` bytes (`125.49` kbps)
-- Decoded output: `65886720` bytes (`768.02` kbps)
-- Avg SNR(dB): `-3.83`
-- Avg RMSE: `26.903`
-- Avg MAE: `18.235`
-- Max abs err: `231.000`
-- Avg length delta samples: `278.67`
-
-libopus C (FFI):
-- Tracks: 3
-- Encode RTF: `0.005x` (3.506s total)
-- Decode RTF: `0.002x` (1.136s total)
-- Encoded output: `10765104` bytes (`125.49` kbps)
-- Decoded output: `65886720` bytes (`768.02` kbps)
-- Avg SNR(dB): `-3.83`
-- Avg RMSE: `26.903`
-- Avg MAE: `18.235`
-- Max abs err: `231.000`
-- Avg length delta samples: `278.67`
-
-## Summary
-- The C backend (`libopus-sys` path used in benchmark) is materially in-band with SoundKit output quality and bitrate for all tested tracks.
-- decode-side throughput is marginally better in the C path than both Rust wrapper paths in this run.
+These results show parity with the tested libopus trunk revision. They do not prove transparency or replace controlled listening tests.

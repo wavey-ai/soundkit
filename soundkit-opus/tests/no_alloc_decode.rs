@@ -122,4 +122,51 @@ fn steady_state_soundkit_opus_reuses_caller_storage() {
         0,
         "steady-state Opus encode allocated"
     );
+
+    let pcm_i24 = pcm
+        .iter()
+        .map(|&sample| i32::from(sample) << 8)
+        .collect::<Vec<_>>();
+    let mut encoder_i24 = OpusEncoder::new(SAMPLE_RATE, 24, CHANNELS, FRAME_SIZE, 128_000);
+    encoder_i24.init().unwrap();
+    let packet_len_i24 = encoder_i24.encode_i32(&pcm_i24, &mut packet).unwrap();
+    encoder_i24.encode_i32(&pcm_i24, &mut packet).unwrap();
+
+    ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+    COUNT_ALLOCATIONS.store(true, Ordering::Relaxed);
+    for _ in 0..100 {
+        assert!(encoder_i24.encode_i32(&pcm_i24, &mut packet).unwrap() > 0);
+    }
+    COUNT_ALLOCATIONS.store(false, Ordering::Relaxed);
+
+    assert_eq!(
+        ALLOCATION_COUNT.load(Ordering::Relaxed),
+        0,
+        "steady-state 24-bit Opus encode allocated"
+    );
+
+    let mut decoder_i24 =
+        OpusDecoder::new_celt_only(SAMPLE_RATE as usize, CHANNELS as usize).unwrap();
+    let mut output_i24 = vec![0i32; 5_760 * CHANNELS as usize];
+    decoder_i24
+        .decode_i32(&packet[..packet_len_i24], &mut output_i24, false)
+        .unwrap();
+
+    ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+    COUNT_ALLOCATIONS.store(true, Ordering::Relaxed);
+    for _ in 0..100 {
+        assert_eq!(
+            decoder_i24
+                .decode_i32(&packet[..packet_len_i24], &mut output_i24, false)
+                .unwrap(),
+            FRAME_SIZE as usize,
+        );
+    }
+    COUNT_ALLOCATIONS.store(false, Ordering::Relaxed);
+
+    assert_eq!(
+        ALLOCATION_COUNT.load(Ordering::Relaxed),
+        0,
+        "steady-state 24-bit Opus decode allocated"
+    );
 }

@@ -1,5 +1,7 @@
 # libopus-rs
 
+This crate now lives in the [SoundKit repository](https://github.com/wavey-ai/soundkit/tree/main/soundkit-opus/libopus-rs).
+
 Pure Rust implementation of Opus, with a current focus on 48 kHz CELT.
 
 Current encoder quality and performance work targets 48 kHz stereo at 192,

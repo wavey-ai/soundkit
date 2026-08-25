@@ -78,9 +78,9 @@ the container layout can require enough metadata/media to be buffered first.
 | AAC-LC/HE-AAC in M4A/MP4/MOV or Matroska | `soundkit-decoder` / Rust demux + Wavey Symphonia fork | Complete-file/seekable index | Limited | Pure Rust LC/SBR/PS decode; regular, fragmented, CMAF, DASH, and Matroska fixtures are FFmpeg-differential tested. |
 | MP2 in MPEG-TS | `soundkit-decoder` / Rust TS demux + Wavey Symphonia fork | Complete-file | EOF | Pure Rust; collected TS fixture measures 50.36 dB against FFmpeg. |
 | FLAC | `soundkit-flac` / `wavey-flac` | Auto | Yes | Unified pure-Rust encode/decode retains metadata state and only the current incomplete compressed frame. |
-| Raw Opus stream | `soundkit-opus` / `libopus` | Auto | Yes | Soundkit `OpusHead` plus length-prefixed packets. |
-| Ogg Opus | `soundkit-ogg-opus` / Ogg parser + `libopus` | Auto | Yes | Ogg pages parsed incrementally. |
-| WebM Opus | `soundkit-webm` / EBML parser + `libopus` | Auto | Yes | Known and unknown-size clusters emit bounded blocks before cluster EOF. |
+| Raw Opus stream | `soundkit-opus` / Rust Opus codecs | Auto | Yes | SoundKit `OpusHead` plus length-prefixed packets. |
+| Ogg Opus | `soundkit-ogg-opus` / Ogg parser + Rust Opus decoder | Auto | Yes | Ogg pages parsed incrementally. |
+| WebM Opus | `soundkit-webm` / EBML parser + Rust Opus decoder | Auto | Yes | Known and unknown-size clusters emit bounded blocks before cluster EOF. |
 | Ogg Speex | `soundkit-speex` / `oxideav-speex` | Explicit | Yes | Pure Rust codec core and streaming Ogg packet parser. |
 | Ogg Vorbis | `soundkit-vorbis` / `lewton` | Auto or explicit | Yes | Pure Rust decode and streaming Ogg packet parser. |
 | ALAC in M4A/MP4 | `soundkit-alac` / `alac` | Seekable MP4 index | Yes | Rust reads `moov`, then decodes one ranged ALAC packet at a time. |
@@ -108,7 +108,7 @@ boundary is narrower:
 | AMR-NB | OpenCORE AMR-NB | No | Requires the native `opencore-amrnb` library via `pkg-config`. |
 | G.729 | `g729-sys` | No | Uses a native codec binding. |
 | GSM 06.10 / WAV-49 | `gsm-sys` / `libgsm` | No | Uses the native libgsm codec. |
-| Opus / Ogg Opus / WebM Opus | `soundkit-opus` pure Rust backend | Partial | Supported for the current packet path, but FEC is not implemented and the backend is not full libopus parity yet. |
+| Opus / Ogg Opus / WebM Opus | `soundkit-opus` Rust backends | Partial | The in-tree codec handles 48 kHz CELT. The general decoder handles SILK, hybrid, and mode transitions. FEC is incomplete. |
 | FLAC | `wavey-flac` | Yes | SoundKit uses the standalone Wavey-owned pure-Rust codec for both encoding and decoding. |
 | H.264, HEVC, VP9, AV1, ProRes | `soundkit-video` | Yes | Rust produces bounded planar frames on native and WASM targets. |
 | DNxHD and DNxHR | `soundkit-dnx` | Yes | Rust supports progressive DNxHD and current DNxHR delivery profiles. |
@@ -177,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | MP3 | `mp3lame` | Yes | Feature-gated encoder path. |
 | AAC ADTS | `fdk-aac` | Yes | ADTS output. |
 | FLAC | `wavey-flac` | Yes | The default encoder and decoder come from the standalone Wavey-owned codec. |
-| Opus | `libopus` | Yes | Packet encoder. |
+| Opus | `soundkit-opus` / in-tree `libopus-rs` | Yes | Pure Rust 48 kHz CELT packet encoder with 16-bit and 24-bit APIs. |
 | AMR-NB | OpenCORE AMR-NB | Yes | 160-sample speech frames. |
 | G.711 / G.722 / G.726 / G.729 / GSM | Codec crates | Yes | Frame or sample streaming, depending on codec. |
 | Vorbis / Speex / ALAC / AIFF / AC-3 / WebM | Decode-only today | No | Add only when fixture generation and licensing are clear. |
@@ -199,7 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | --- | --- |
 | Pure Rust codec crates (`lewton`, `alac`, `aifc`, `oxideav-*`, `ezk-g722`) | Mostly permissive; keep crate license notices in packaged distributions. |
 | `mp4parse` on the ALAC M4A path | MPL-2.0 dependency. |
-| `libopus`, `libFLAC`, `mp3lame`, `fdk-aac`, OpenCORE AMR-NB, `libgsm`, Rubber Band | C/C++ library dependencies; ship notices and review binary distribution requirements. |
+| `libFLAC`, `mp3lame`, `fdk-aac`, OpenCORE AMR-NB, `libgsm`, Rubber Band | C/C++ library dependencies; ship notices and review binary distribution requirements. |
 | `libgsm` | Preserve the upstream notice in source and binary distributions. |
 
 ## Pending Formats

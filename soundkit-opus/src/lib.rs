@@ -1,6 +1,6 @@
 use frame_header::{EncodingFlag, Endianness};
-use opus_rs_full::{
-    Application, OpusDecoder as FixedWorkspaceOpusDecoder, OpusEncoder as FixedWorkspaceOpusEncoder,
+use libopus_rs::{
+    Application, Decoder as CeltOpusDecoder, Encoder as CeltOpusEncoder, CELT_MAX_FRAME_BYTES,
 };
 use ropus::{Channels, DecodeMode, Decoder as FullOpusDecoder};
 use soundkit::audio_packet::{Decoder, Encoder};
@@ -8,13 +8,13 @@ use soundkit::audio_types::AudioData;
 use tracing::{debug, trace};
 
 pub struct OpusEncoder {
-    encoder: FixedWorkspaceOpusEncoder,
+    encoder: CeltOpusEncoder,
     sample_rate: u32,
     channels: u32,
-    _bits_per_sample: u32,
+    bits_per_sample: u32,
     frame_size: u32,
     bitrate: u32,
-    f32_input: Vec<f32>,
+    packet: Vec<u8>,
 }
 
 impl Encoder for OpusEncoder {
@@ -32,10 +32,10 @@ impl Encoder for OpusEncoder {
             encoder,
             sample_rate,
             channels,
-            _bits_per_sample: bits_per_sample,
+            bits_per_sample,
             frame_size,
             bitrate,
-            f32_input: vec![0.0; frame_size as usize * channels as usize],
+            packet: Vec::with_capacity(CELT_MAX_FRAME_BYTES + 1),
         }
     }
 
@@ -53,21 +53,60 @@ impl Encoder for OpusEncoder {
             ));
         }
 
-        for (destination, &sample) in self.f32_input.iter_mut().zip(&input[..required]) {
-            *destination = sample as f32 / 32_768.0;
+        let encoded_len = self
+            .encoder
+            .encode_i16_into(
+                &input[..required],
+                self.frame_size as usize,
+                &mut self.packet,
+            )
+            .map_err(|error| error.to_string())?;
+        if encoded_len > output.len() {
+            return Err(format!(
+                "opus encode output too large: {encoded_len} > {}",
+                output.len()
+            ));
         }
-        self.encoder
-            .encode(&self.f32_input, self.frame_size as usize, output)
-            .map_err(str::to_string)
+        output[..encoded_len].copy_from_slice(&self.packet[..encoded_len]);
+        Ok(encoded_len)
     }
 
-    fn encode_i32(&mut self, _input: &[i32], _output: &mut [u8]) -> Result<usize, String> {
-        Err("Not implemented.".to_string())
+    fn encode_i32(&mut self, input: &[i32], output: &mut [u8]) -> Result<usize, String> {
+        if self.bits_per_sample != 24 {
+            return Err(format!(
+                "signed i32 Opus input requires a 24-bit encoder; configured for {} bits",
+                self.bits_per_sample
+            ));
+        }
+        let required = self.frame_size as usize * self.channels as usize;
+        if input.len() < required {
+            return Err(format!(
+                "opus input too small: {} < {required}",
+                input.len()
+            ));
+        }
+
+        let encoded_len = self
+            .encoder
+            .encode_i24_into(
+                &input[..required],
+                self.frame_size as usize,
+                &mut self.packet,
+            )
+            .map_err(|error| error.to_string())?;
+        if encoded_len > output.len() {
+            return Err(format!(
+                "opus encode output too large: {encoded_len} > {}",
+                output.len()
+            ));
+        }
+        output[..encoded_len].copy_from_slice(&self.packet[..encoded_len]);
+        Ok(encoded_len)
     }
 
     fn reset(&mut self) -> Result<(), String> {
         self.encoder = create_pure_encoder(self.sample_rate, self.channels, self.bitrate)?;
-        self.f32_input.fill(0.0);
+        self.packet.clear();
         Ok(())
     }
 }
@@ -76,15 +115,14 @@ fn create_pure_encoder(
     sample_rate: u32,
     channels: u32,
     bitrate: u32,
-) -> Result<FixedWorkspaceOpusEncoder, String> {
-    let mut encoder = FixedWorkspaceOpusEncoder::new(
-        sample_rate as i32,
-        channels as usize,
-        Application::RestrictedLowDelay,
-    )
-    .map_err(str::to_string)?;
-    encoder.bitrate_bps = bitrate as i32;
-    encoder.use_cbr = true;
+) -> Result<CeltOpusEncoder, String> {
+    let mut encoder =
+        CeltOpusEncoder::new(sample_rate as i32, channels as usize, Application::Audio)
+            .map_err(|error| error.to_string())?;
+    encoder
+        .set_bitrate(bitrate as i32)
+        .map_err(|error| error.to_string())?;
+    encoder.set_vbr(false).map_err(|error| error.to_string())?;
     Ok(encoder)
 }
 
@@ -163,10 +201,12 @@ fn opus_packet_samples_per_channel(packet: &[u8], sample_rate: u32) -> Option<us
 }
 
 enum OpusDecoderBackend {
-    /// SoundKit's restricted-low-delay encoder always emits 48 kHz CELT.
+    /// SoundKit's 5 ms audio encoder always emits 48 kHz CELT.
     /// This decoder retains all codec and output workspaces after warm-up.
     Celt {
-        decoder: FixedWorkspaceOpusDecoder,
+        decoder: CeltOpusDecoder,
+        i16_output: Vec<i16>,
+        i24_output: Vec<i32>,
         f32_output: Vec<f32>,
     },
     /// General containers can switch between SILK, hybrid, and CELT. Keep one
@@ -214,12 +254,14 @@ impl OpusDecoder {
         if sample_rate != 48_000 {
             return Err("the allocation-light CELT decoder requires 48 kHz Opus".to_string());
         }
-        let decoder = FixedWorkspaceOpusDecoder::new(sample_rate as i32, channels)
+        let decoder = CeltOpusDecoder::new(sample_rate as i32, channels)
             .map_err(|error| format!("failed to create CELT Opus decoder: {error}"))?;
 
         Ok(Self {
             backend: OpusDecoderBackend::Celt {
                 decoder,
+                i16_output: vec![0; MAX_OPUS_FRAME_SAMPLES * channels],
+                i24_output: vec![0; MAX_OPUS_FRAME_SAMPLES * channels],
                 f32_output: vec![0.0; MAX_OPUS_FRAME_SAMPLES * channels],
             },
             sample_rate: sample_rate as u32,
@@ -238,11 +280,14 @@ impl OpusDecoder {
         match &mut self.backend {
             OpusDecoderBackend::Celt {
                 decoder,
+                i16_output,
+                i24_output,
                 f32_output,
             } => {
-                *decoder =
-                    FixedWorkspaceOpusDecoder::new(self.sample_rate as i32, self.channels as usize)
-                        .map_err(|error| format!("failed to reset CELT Opus decoder: {error}"))?;
+                *decoder = CeltOpusDecoder::new(self.sample_rate as i32, self.channels as usize)
+                    .map_err(|error| format!("failed to reset CELT Opus decoder: {error}"))?;
+                i16_output.fill(0);
+                i24_output.fill(0);
                 f32_output.fill(0.0);
             }
             OpusDecoderBackend::Full(decoder) => {
@@ -324,7 +369,8 @@ impl Decoder for OpusDecoder {
         let decoded_samples_per_channel = match &mut self.backend {
             OpusDecoderBackend::Celt {
                 decoder,
-                f32_output,
+                i16_output,
+                ..
             } => {
                 if fec {
                     return Err(
@@ -339,20 +385,16 @@ impl Decoder for OpusDecoder {
                 )?;
                 let expected_frames = opus_packet_samples_per_channel(input, self.sample_rate)
                     .ok_or_else(|| "invalid Opus packet duration".to_string())?;
-                let sample_count = expected_frames * self.channels as usize;
                 let frames = decoder
-                    .decode(input, expected_frames, &mut f32_output[..sample_count])
-                    .map_err(str::to_string)?;
-                let decoded_count = frames * self.channels as usize;
-                for (destination, &sample) in output[..decoded_count]
-                    .iter_mut()
-                    .zip(&f32_output[..decoded_count])
-                {
-                    *destination = (sample * 32_768.0)
-                        .round()
-                        .clamp(i16::MIN as f32, i16::MAX as f32)
-                        as i16;
+                    .decode_i16_into(input, false, i16_output)
+                    .map_err(|error| error.to_string())?;
+                if frames != expected_frames {
+                    return Err(format!(
+                        "CELT decoder returned {frames} frames; expected {expected_frames}"
+                    ));
                 }
+                let decoded_count = frames * self.channels as usize;
+                output[..decoded_count].copy_from_slice(&i16_output[..decoded_count]);
                 frames
             }
             OpusDecoderBackend::Full(decoder) => {
@@ -389,18 +431,46 @@ impl Decoder for OpusDecoder {
 
         Ok(decoded_samples_per_channel)
     }
-    fn decode_i32(
-        &mut self,
-        _input: &[u8],
-        _output: &mut [i32],
-        _fec: bool,
-    ) -> Result<usize, String> {
-        Err("not implemented.".to_string())
+    fn decode_i32(&mut self, input: &[u8], output: &mut [i32], fec: bool) -> Result<usize, String> {
+        let OpusDecoderBackend::Celt {
+            decoder,
+            i24_output,
+            ..
+        } = &mut self.backend
+        else {
+            return Err("24-bit Opus output requires the 48 kHz CELT decoder".to_string());
+        };
+        if fec {
+            return Err("Opus FEC decode is not implemented by the CELT backend".to_string());
+        }
+        validate_celt_output(
+            input,
+            output.len(),
+            self.sample_rate,
+            self.channels as usize,
+        )?;
+        let expected_frames = opus_packet_samples_per_channel(input, self.sample_rate)
+            .ok_or_else(|| "invalid Opus packet duration".to_string())?;
+        let frames = decoder
+            .decode_i24_into(input, false, i24_output)
+            .map_err(|error| error.to_string())?;
+        if frames != expected_frames {
+            return Err(format!(
+                "CELT decoder returned {frames} frames; expected {expected_frames}"
+            ));
+        }
+        let decoded_count = frames * self.channels as usize;
+        output[..decoded_count].copy_from_slice(&i24_output[..decoded_count]);
+        Ok(frames)
     }
 
     fn decode_f32(&mut self, input: &[u8], output: &mut [f32], fec: bool) -> Result<usize, String> {
         match &mut self.backend {
-            OpusDecoderBackend::Celt { decoder, .. } => {
+            OpusDecoderBackend::Celt {
+                decoder,
+                f32_output,
+                ..
+            } => {
                 if fec {
                     return Err(
                         "Opus FEC decode is not implemented by the CELT backend".to_string()
@@ -414,9 +484,17 @@ impl Decoder for OpusDecoder {
                 )?;
                 let expected_frames = opus_packet_samples_per_channel(input, self.sample_rate)
                     .ok_or_else(|| "invalid Opus packet duration".to_string())?;
-                decoder
-                    .decode(input, expected_frames, output)
-                    .map_err(str::to_string)
+                let frames = decoder
+                    .decode_f32_into(input, false, f32_output)
+                    .map_err(|error| error.to_string())?;
+                if frames != expected_frames {
+                    return Err(format!(
+                        "CELT decoder returned {frames} frames; expected {expected_frames}"
+                    ));
+                }
+                let decoded_count = frames * self.channels as usize;
+                output[..decoded_count].copy_from_slice(&f32_output[..decoded_count]);
+                Ok(frames)
             }
             OpusDecoderBackend::Full(decoder) => {
                 let decode_mode = if fec {

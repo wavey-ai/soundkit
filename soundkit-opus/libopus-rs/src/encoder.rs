@@ -101,8 +101,11 @@ struct SpreadAnalysisScratch {
 struct EncoderFrameScratch {
     inputs: Vec<Vec<f32>>,
     freq: Vec<f32>,
+    long_freq: Vec<f32>,
     band_e: Vec<f32>,
+    band_e2: Vec<f32>,
     band_log_e: Vec<f32>,
+    long_band_log_e: Vec<f32>,
     norm: Vec<f32>,
     transient_old: Vec<f32>,
     spread: SpreadAnalysisScratch,
@@ -993,34 +996,38 @@ impl Encoder {
         } else {
             0.0
         };
+        scratch.long_freq.resize(self.channels * n, 0.0);
+        scratch.band_e2.resize(band_count, 0.0);
+        scratch.long_band_log_e.resize(band_count, 0.0);
         let mut band_log_e2 = None;
         if config.is_transient {
-            let mut long_freq = vec![0.0f32; self.channels * n];
+            scratch.long_freq[..self.channels * n].fill(0.0);
             Self::compute_mdcts(
                 &self.mode,
                 &scratch.inputs,
-                &mut long_freq,
+                &mut scratch.long_freq,
                 self.channels,
                 stream_channels,
                 lm,
                 0,
                 &mut self.mdct_scratch,
             );
-            let mut band_e2 = vec![0.0f32; stream_channels * self.mode.nb_ebands];
+            scratch.band_e2[..stream_channels * self.mode.nb_ebands].fill(0.0);
             compute_band_energies(
                 &self.mode,
-                &long_freq,
-                &mut band_e2,
+                &scratch.long_freq,
+                &mut scratch.band_e2,
                 eff_end,
                 stream_channels,
                 lm,
             );
-            let mut long_band_log_e = vec![0.0f32; stream_channels * self.mode.nb_ebands];
+            let mut long_band_log_e = std::mem::take(&mut scratch.long_band_log_e);
+            long_band_log_e[..stream_channels * self.mode.nb_ebands].fill(0.0);
             amp2_log2(
                 &self.mode,
                 eff_end,
                 config.end,
-                &band_e2,
+                &scratch.band_e2,
                 &mut long_band_log_e,
                 stream_channels,
             );
@@ -1043,7 +1050,8 @@ impl Encoder {
         {
             config.is_transient = true;
             config.tf_estimate = 0.2;
-            let mut long_band_log_e = scratch.band_log_e.clone();
+            let mut long_band_log_e = std::mem::take(&mut scratch.long_band_log_e);
+            long_band_log_e[..band_count].copy_from_slice(&scratch.band_log_e[..band_count]);
             for c in 0..stream_channels {
                 for i in 0..config.end {
                     long_band_log_e[i + c * self.mode.nb_ebands] += 0.5 * lm as f32;
@@ -1204,7 +1212,7 @@ impl Encoder {
                 &mut self.seed,
                 &mut self.spectral_scratch,
                 packet_buffer,
-            )?
+            )
         } else {
             let (left, right) = scratch.norm.split_at_mut(n);
             encode_spectral_frame_reusing_buffer(
@@ -1219,8 +1227,12 @@ impl Encoder {
                 &mut self.seed,
                 &mut self.spectral_scratch,
                 packet_buffer,
-            )?
+            )
         };
+        if let Some(long_band_log_e) = config.band_log_e2.take() {
+            scratch.long_band_log_e = long_band_log_e;
+        }
+        let encoded = encoded?;
         if stream_channels == 2 {
             self.intensity = encoded.allocation.intensity;
         }

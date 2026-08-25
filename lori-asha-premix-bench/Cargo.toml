@@ -12,5 +12,5 @@ libc = "0.2.158"
 soundkit = { path = "../soundkit", version = "0.12.3" }
 soundkit-decoder = { path = "../soundkit-decoder" }
 soundkit-opus = { path = "../soundkit-opus" }
-libopus-rs-native = { package = "libopus-rs", path = "../../libopus-rs" }
+libopus-rs-native = { package = "libopus-rs", path = "../soundkit-opus/libopus-rs" }
 opus-sys = { package = "opus-sys", git = "https://github.com/wavey-ai/opus-rs", branch = "main" }

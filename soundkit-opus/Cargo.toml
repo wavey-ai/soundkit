@@ -13,7 +13,7 @@ ropus = "0.12.18"
 soundkit = { path = "../soundkit" }
 frame-header = "0.2.2"
 tracing = "0.1.40"
-opus-rs-full = { package = "opus-rs", version = "=0.1.31" }
+libopus-rs = { path = "libopus-rs" }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

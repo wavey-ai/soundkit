@@ -1079,7 +1079,7 @@ fn encode_with_pure_libopus(
     let mut encoder = PureEncoder::new(
         TARGET_SAMPLE_RATE as i32,
         TARGET_CHANNELS as usize,
-        PureApplication::RestrictedLowDelay,
+        PureApplication::Audio,
     )
     .map_err(|e| format!("libopus-rs encoder init failed: {}", e))?;
     encoder

@@ -6,7 +6,8 @@
   "license": "BSD-3-Clause",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wavey-ai/libopus-rs.git"
+    "url": "git+https://github.com/wavey-ai/soundkit.git",
+    "directory": "soundkit-opus/libopus-rs"
   },
   "main": "./pkg/libopus_rs.js",
   "types": "./pkg/libopus_rs.d.ts",
