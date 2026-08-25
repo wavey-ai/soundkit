@@ -7,15 +7,16 @@ native FFmpeg C reference on every track in the five-fixture music corpus.
 
 | Music fixture | Audio duration | SoundKit | FFmpeg C | SoundKit faster | SoundKit realtime | FFmpeg realtime |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| WESTSIDE full mix | 195.648 s | **277.171 ms** | 292.586 ms | **5.27%** | 705.9x | 668.7x |
-| Bill Evans — Secret Sessions | 100.032 s | **145.231 ms** | 149.858 ms | **3.09%** | 688.8x | 667.5x |
-| The Blue Nile — Hats | 100.032 s | **144.233 ms** | 146.771 ms | **1.73%** | 693.5x | 681.6x |
-| Lori Asha | 100.032 s | **141.392 ms** | 147.184 ms | **3.94%** | 707.5x | 679.6x |
-| Nocturnal Animals | 100.032 s | **133.659 ms** | 140.784 ms | **5.06%** | 748.4x | 710.5x |
+| WESTSIDE full mix | 195.648 s | **94.896 ms** | 99.764 ms | **4.88%** | 2061.7x | 1961.1x |
+| Bill Evans — Secret Sessions | 100.032 s | **49.684 ms** | 51.293 ms | **3.14%** | 2013.4x | 1950.2x |
+| The Blue Nile — Hats | 100.032 s | **49.619 ms** | 50.461 ms | **1.67%** | 2016.0x | 1982.3x |
+| Lori Asha | 100.032 s | **48.827 ms** | 49.885 ms | **2.12%** | 2048.7x | 2005.3x |
+| Nocturnal Animals | 100.032 s | **45.821 ms** | 47.955 ms | **4.45%** | 2183.1x | 2086.0x |
 
-Times are medians for one complete decode, normalized from batches of three.
-The corpus contains music only. The short A Tusk speech fixture remains a unit
-test for streaming behavior and was not used as performance evidence.
+Times are medians for one complete decode, calculated by dividing each median
+three-decode batch by three. The corpus contains music only. The short A Tusk
+speech fixture remains a unit test for streaming behavior and was not used as
+performance evidence.
 
 ## Host and toolchain
 
@@ -38,7 +39,7 @@ The measurement includes the production work an application has to perform:
 
 1. Construct and initialize a fresh decoder for each iteration.
 2. Parse the complete ADTS stream.
-3. Decode every AAC access unit.
+3. Decode every AAC access unit and finish the stream at EOF.
 4. Convert planar floating-point decoder output to interleaved signed 16-bit
    PCM.
 5. Consume the complete PCM output so the compiler cannot discard work.
@@ -77,7 +78,7 @@ Measured executable identity:
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `bench_adts_decode` | `ffda1301590781f6d017b490a3b366f3830c8de85749a7e9f3a3e695d11f679d` |
+| `bench_adts_decode` | `28af56ed382afb81240ca949815ee4c6bc23495ec993c229f3a2b729df974766` |
 | `ffmpeg-aac-production-bench` | `e75fad6de2950c2f53cb71835644452af8569b258be653c61854aeaaaa00c99e` |
 
 ## Correctness gates
@@ -98,16 +99,15 @@ instead of an invalid architecture-independent PCM hash.
 
 ## Release test matrix
 
-All commands ran in release mode on the benchmark host after the final
-optimization:
+The final consolidation build passed this release-mode feature matrix:
 
 | Command | Result |
 | --- | ---: |
-| `cargo test -p soundkit-aac --release --all-features` | 12 passed |
-| `cargo test -p soundkit-aac --release --no-default-features --features owned-lc` | 5 passed |
+| `cargo test -p soundkit-aac --release --all-features` | 13 passed |
+| `cargo test -p soundkit-aac --release --no-default-features --features owned-lc` | 6 passed |
 | `cargo test -p soundkit-aac --release --no-default-features --features fdk` | 3 passed |
-| `cargo test -p soundkit-aac --release --no-default-features --features mp4-decoder` | 8 passed |
-| `cargo test -p soundkit-aac --release --no-default-features --features mp4-fdk-fallback` | 12 passed |
+| `cargo test -p soundkit-aac --release --no-default-features --features mp4-decoder` | 9 passed |
+| `cargo test -p soundkit-aac --release --no-default-features --features mp4-fdk-fallback` | 13 passed |
 | `cargo test -p soundkit-aac-lc --release` | 121 unit + 2 integration passed |
 | `cargo test -p aac-wasm-bench --release --no-default-features --features fdk,soundkit-lc -- --nocapture` | 6 passed |
 

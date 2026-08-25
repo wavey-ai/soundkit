@@ -25,8 +25,10 @@ an explicit error instead of falling back. Use `AacDecoder::new_fdk()` to force
 FDK-AAC. `AacDecoder::backend()` reports the selected backend.
 
 The ADTS decoder accepts arbitrary input chunk boundaries, including a sync
-word split across calls. Call `decode_i16(&[], ...)` to drain buffered frames.
-Input and pending compressed data are bounded to 4 MiB.
+word split across calls. Call `decode_i16(&[], ...)` between chunks to drain
+available frames, then `finish_i16(...)` at EOF. Finishing rejects a truncated
+last frame and prevents subsequent input. Input and pending compressed data are
+bounded to 4 MiB.
 
 ```rust
 use soundkit::audio_packet::Decoder;
@@ -41,7 +43,7 @@ let written = decoder.decode_i16(adts_chunk, &mut pcm, false)?;
 consume_interleaved_pcm(&pcm[..written]);
 
 loop {
-    let written = decoder.decode_i16(&[], &mut pcm, false)?;
+    let written = decoder.finish_i16(&mut pcm)?;
     if written == 0 {
         break;
     }
@@ -57,12 +59,17 @@ With `mp4-decoder`, `AacDecoderMp4` applies the track's complete
 explicit HE-AAC configurations route to FDK-AAC rather than being decoded as
 their lower-rate AAC-LC core.
 
+For container-indexed raw AAC-LC access units, construct
+`AacLcAccessUnitDecoder` from the track `AudioSpecificConfig`. This exported
+facade keeps callers on `soundkit-aac`; the lower-level `soundkit-aac-lc` crate
+is an internal codec engine.
+
 ## Features
 
 | Feature | Function |
 | --- | --- |
 | `default` | Enables `owned-lc` and `fdk`. |
-| `owned-lc` | SoundKit-owned AAC-LC backend for ADTS decoding. |
+| `owned-lc` | SoundKit-owned AAC-LC backend for ADTS and raw access-unit decoding. |
 | `fdk` | Native FDK-AAC fallback, forced decoding, and AAC-LC ADTS encoding. |
 | `mp4-demux` | Streaming AAC packet/config extraction from M4A/MP4. |
 | `mp4-decoder` | MP4 demux plus the owned AAC-LC decoder. |
@@ -75,18 +82,19 @@ all five music fixtures in the native corpus:
 
 | Music fixture | Audio | SoundKit | FFmpeg C | SoundKit faster |
 | --- | ---: | ---: | ---: | ---: |
-| WESTSIDE full mix | 195.648 s | **277.171 ms** | 292.586 ms | **5.27%** |
-| Bill Evans — Secret Sessions | 100.032 s | **145.231 ms** | 149.858 ms | **3.09%** |
-| The Blue Nile — Hats | 100.032 s | **144.233 ms** | 146.771 ms | **1.73%** |
-| Lori Asha | 100.032 s | **141.392 ms** | 147.184 ms | **3.94%** |
-| Nocturnal Animals | 100.032 s | **133.659 ms** | 140.784 ms | **5.06%** |
+| WESTSIDE full mix | 195.648 s | **94.896 ms** | 99.764 ms | **4.88%** |
+| Bill Evans — Secret Sessions | 100.032 s | **49.684 ms** | 51.293 ms | **3.14%** |
+| The Blue Nile — Hats | 100.032 s | **49.619 ms** | 50.461 ms | **1.67%** |
+| Lori Asha | 100.032 s | **48.827 ms** | 49.885 ms | **2.12%** |
+| Nocturnal Animals | 100.032 s | **45.821 ms** | 47.955 ms | **4.45%** |
 
-These are median times for one complete decode, normalized from three-decode
-batches over 11 alternating rounds on an Intel Emerald Rapids CPU. Both paths
-construct a decoder, parse the same ADTS input, decode every frame, convert to
-interleaved signed 16-bit PCM, and consume the full output inside the timed
-region. Every process performs an untimed full-file warm-up first. No speech
-fixture is included in this performance result.
+These are median times for one complete decode: the median three-decode batch
+from 11 alternating rounds divided by three. The test ran on an Intel Emerald
+Rapids CPU. Both paths construct a decoder, parse the same ADTS input, decode
+and finish every frame, convert to interleaved signed 16-bit PCM, and consume
+the full output inside the timed region. Every process performs an untimed
+full-file warm-up first. No speech fixture is included in this performance
+result.
 
 See [BENCHMARK_NATIVE_2026-08-25.md](BENCHMARK_NATIVE_2026-08-25.md) for the
 host, commands, checksums, artifact hashes, methodology, and complete release

@@ -109,11 +109,11 @@ normalized to one decode.
 
 | Fixture | SoundKit | FFmpeg C | SoundKit faster |
 | --- | ---: | ---: | ---: |
-| WESTSIDE full mix, 48 kHz stereo | **277.171 ms** | 292.586 ms | **5.27%** |
-| Bill Evans — Secret Sessions | **145.231 ms** | 149.858 ms | **3.09%** |
-| The Blue Nile — Hats | **144.233 ms** | 146.771 ms | **1.73%** |
-| Lori Asha | **141.392 ms** | 147.184 ms | **3.94%** |
-| Nocturnal Animals | **133.659 ms** | 140.784 ms | **5.06%** |
+| WESTSIDE full mix, 48 kHz stereo | **94.896 ms** | 99.764 ms | **4.88%** |
+| Bill Evans — Secret Sessions | **49.684 ms** | 51.293 ms | **3.14%** |
+| The Blue Nile — Hats | **49.619 ms** | 50.461 ms | **1.67%** |
+| Lori Asha | **48.827 ms** | 49.885 ms | **2.12%** |
+| Nocturnal Animals | **45.821 ms** | 47.955 ms | **4.45%** |
 
 This corpus contains music only. The C harness performs the same production
 work: fresh decoder construction, ADTS parsing, complete decode, optimized

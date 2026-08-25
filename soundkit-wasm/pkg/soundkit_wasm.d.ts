@@ -165,6 +165,91 @@ export class WasmFlacEncoder {
 }
 
 /**
+ * Persistent raw-FLAC packet decoder for low-latency transports.
+ *
+ * Each call consumes one raw FLAC frame and returns one interleaved PCM
+ * block. The decoder and its PCM allocation are reused across calls.
+ */
+export class WasmFlacFrameDecoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Decode a packet already copied into `inputPacketView`.
+     */
+    decodeBuffered(packet_length: number): number;
+    /**
+     * Decode exactly one raw FLAC frame into interleaved PCM.
+     */
+    decodeInterleavedI32(packet: Uint8Array): Int32Array;
+    /**
+     * Decode one packet and return an ephemeral zero-copy PCM view.
+     *
+     * The view must be consumed before another call into WebAssembly that can
+     * grow memory, and its samples are overwritten by the next decode call.
+     * Use `decodeInterleavedI32` when the returned PCM must be retained.
+     */
+    decodeInterleavedI32View(packet: Uint8Array): Int32Array;
+    /**
+     * Return the persistent decoded PCM output buffer.
+     *
+     * Its samples are overwritten by the next decode call. Reacquire the view
+     * after any unrelated call that can grow WebAssembly memory.
+     */
+    decodedPcmView(): Int32Array;
+    /**
+     * Return the reusable encoded-packet input buffer.
+     *
+     * Copy one packet into this view, then call `decodeBuffered` with its byte
+     * length. Reacquire the view after any unrelated call that can grow
+     * WebAssembly memory.
+     */
+    inputPacketView(): Uint8Array;
+    constructor(sample_rate: number, channels: number, bits_per_sample: number, frame_size: number);
+    reset(): void;
+    setVerifyChecksums(enabled: boolean): void;
+    readonly packetCapacity: number;
+    readonly sampleCount: number;
+}
+
+/**
+ * Persistent raw-FLAC packet encoder for low-latency transports.
+ *
+ * Each call consumes exactly one configured PCM block and returns one raw
+ * FLAC frame. The encoder and its packet allocation are reused across calls.
+ */
+export class WasmFlacFrameEncoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Encode `inputPcmView` and return an ephemeral zero-copy packet view.
+     */
+    encodeBufferedView(): Uint8Array;
+    /**
+     * Encode exactly one interleaved PCM block into one raw FLAC frame.
+     */
+    encodeInterleavedI32(interleaved: Int32Array): Uint8Array;
+    /**
+     * Encode one block and return an ephemeral zero-copy view of the packet.
+     *
+     * The view must be consumed before another call into WebAssembly that can
+     * grow memory, and its bytes are overwritten by the next encode call. Use
+     * `encodeInterleavedI32` when the returned packet must be retained.
+     */
+    encodeInterleavedI32View(interleaved: Int32Array): Uint8Array;
+    /**
+     * Return the reusable PCM input block for the buffer-reusing API.
+     *
+     * Fill this view, then call `encodeBufferedView`. WebAssembly memory growth
+     * invalidates the view, so reacquire it after calling unrelated Wasm APIs
+     * that can allocate.
+     */
+    inputPcmView(): Int32Array;
+    constructor(sample_rate: number, channels: number, bits_per_sample: number, frame_size: number, compression_level: number);
+    reset(): void;
+    readonly sampleCount: number;
+}
+
+/**
  * Streaming Rust fragmented-MP4/CMAF audio-and-video demuxer.
  */
 export class WasmMp4MediaDemuxer {
@@ -490,6 +575,8 @@ export interface InitOutput {
     readonly __wbg_wasmcafaudioindex_free: (a: number, b: number) => void;
     readonly __wbg_wasmcanonicalpcmdecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmflacencoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmflacframedecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmflacframeencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediademuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediaindex_free: (a: number, b: number) => void;
     readonly __wbg_wasmmusicdecoder_free: (a: number, b: number) => void;
@@ -564,6 +651,23 @@ export interface InitOutput {
     readonly wasmflacencoder_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly wasmflacencoder_reset: (a: number) => [number, number];
     readonly wasmflacencoder_streamHeader: (a: number) => any;
+    readonly wasmflacframedecoder_decodeBuffered: (a: number, b: number) => [number, number, number];
+    readonly wasmflacframedecoder_decodeInterleavedI32: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmflacframedecoder_decodeInterleavedI32View: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmflacframedecoder_decodedPcmView: (a: number) => any;
+    readonly wasmflacframedecoder_inputPacketView: (a: number) => any;
+    readonly wasmflacframedecoder_new: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmflacframedecoder_packetCapacity: (a: number) => number;
+    readonly wasmflacframedecoder_reset: (a: number) => [number, number];
+    readonly wasmflacframedecoder_sampleCount: (a: number) => number;
+    readonly wasmflacframedecoder_setVerifyChecksums: (a: number, b: number) => void;
+    readonly wasmflacframeencoder_encodeBufferedView: (a: number) => [number, number, number];
+    readonly wasmflacframeencoder_encodeInterleavedI32: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmflacframeencoder_encodeInterleavedI32View: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmflacframeencoder_inputPcmView: (a: number) => any;
+    readonly wasmflacframeencoder_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly wasmflacframeencoder_reset: (a: number) => void;
+    readonly wasmflacframeencoder_sampleCount: (a: number) => number;
     readonly wasmmp4mediademuxer_flush: (a: number) => [number, number, number];
     readonly wasmmp4mediademuxer_new: () => number;
     readonly wasmmp4mediademuxer_pcmTrim: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
@@ -649,7 +753,6 @@ export interface InitOutput {
     readonly wasmmusicdecoder_newAuto: () => number;
     readonly wasmcanonicalpcmdecoder_newAuto: () => number;
     readonly wasmsoundkitframedecoder_newUnencrypted: () => number;
-    readonly dav1d_set_cpu_flags_mask: (a: number) => void;
     readonly dav1d_apply_grain: (a: number, b: number, c: number) => number;
     readonly dav1d_close: (a: number) => void;
     readonly dav1d_data_create: (a: number, b: number) => number;
@@ -669,6 +772,7 @@ export interface InitOutput {
     readonly dav1d_send_data: (a: number, b: number) => number;
     readonly dav1d_version: () => number;
     readonly dav1d_version_api: () => number;
+    readonly dav1d_set_cpu_flags_mask: (a: number) => void;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;

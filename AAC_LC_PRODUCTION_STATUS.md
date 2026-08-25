@@ -5,6 +5,11 @@ production API for ADTS and M4A/MP4. Supported MPEG-4 AAC-LC mono/stereo streams
 use the owned backend; native builds automatically route unsupported AAC to
 FDK-AAC. Each owned access unit contains 1,024 samples per channel.
 
+`soundkit-wasm` now enters exclusively through `soundkit-aac` for ADTS, M4A/MP4,
+and indexed raw access units. Its former direct `soundkit-aac-lc` dependency and
+duplicate ADTS/MP4 adapters have been removed; `aac-lc` remains only as a Cargo
+feature compatibility alias.
+
 ## Accepted Evidence
 
 - The decoder processes all 9,171 access units in the full 195.648-second

@@ -2,7 +2,7 @@
 
 use aac_wasm_bench::{decode_soundkit_lc_fixture_pcm_for, AacFixture};
 use js_sys::Float32Array;
-use soundkit_aac_lc::AacLcDecoder;
+use soundkit_aac::AacLcAccessUnitDecoder;
 use soundkit_wasm::WasmAacLcDecoder;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_test::{console_log, wasm_bindgen_test};
@@ -93,7 +93,8 @@ fn quality_aac_lc_matches_native_fdk_checked_output() {
 
 fn bench_core_decode(frames: &[AdtsFrame<'_>], asc: &[u8]) -> WasmBenchResult {
     let first = frames.first().expect("fixture has frames");
-    let mut decoder = AacLcDecoder::from_audio_specific_config(asc).expect("create decoder");
+    let mut decoder =
+        AacLcAccessUnitDecoder::from_audio_specific_config(asc).expect("create decoder");
     for _ in 0..WARMUP_ITERATIONS {
         for frame in frames {
             let _ = decoder

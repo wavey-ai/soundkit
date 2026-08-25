@@ -24,13 +24,17 @@ The generated browser package is written to:
 soundkit-wasm/pkg/
 ```
 
-The default feature set is intended for the browser and avoids the known C
-codec blockers for AAC and Opus decode:
+The default feature set is intended for the browser and keeps AAC and Opus
+decode on Rust implementations:
 
 ```text
 detect, raw-pcm, wav, mp3, vorbis, aiff, alac, flac, webm,
-opus-debox, aac-debox, aac-lc, audio-demux
+webm-opus, opus, ogg-opus, opus-debox, aac, m4a, aac-debox,
+audio-demux, ac3, video
 ```
+
+The legacy `aac-lc` feature remains as an alias for `aac`. Both the generic
+ADTS/MP4 decoder and the raw-access-unit API enter through `soundkit-aac`.
 
 ## Import
 
@@ -114,17 +118,19 @@ Supported `newWithFormat` strings depend on enabled Cargo features:
 | `wav`, `wave` | PCM | yes |
 | `mp3` | PCM | yes |
 | `ogg`, `ogg-vorbis`, `vorbis` | PCM | yes |
-| `webm` | PCM from WebM/Vorbis | yes |
+| `webm` | PCM from WebM Vorbis or Opus | yes |
 | `aiff`, `aifc` | PCM | yes |
 | `alac`, `caf-alac` | Rejected; use the seekable packet APIs | yes |
 | `flac` | PCM | yes |
-| `aac`, `adts` | PCM via FDK AAC | no |
-| `m4a`, `mp4`, `aac-mp4` | PCM via FDK AAC | no |
-| `opus` | PCM via native Opus path | no |
-| `ogg-opus`, `opus-ogg` | PCM via native Opus path | no |
+| `aac`, `adts`, `aac-lc` | PCM via `soundkit-aac` owned AAC-LC | yes |
+| `m4a`, `mp4`, `aac-mp4` | MP4 demux plus `soundkit-aac` owned AAC-LC | yes |
+| `opus` | PCM via Rust Opus path | yes |
+| `ogg-opus`, `opus-ogg` | PCM via Rust Opus path | yes |
 
-For ADTS/M4A AAC container streams, prefer the debox APIs below. For AAC-LC raw
-access units in the SoundKit packet stream, use `WasmAacLcDecoder`.
+For seekable M4A/MP4 files, prefer `WasmMp4MediaIndex` plus
+`WasmAacLcDecoder`; this handles media-before-metadata layouts and bounded range
+reads. Use `WasmAacDeboxer` when JavaScript needs AAC packet events rather than
+PCM.
 
 The generic decoder rejects ALAC containers. Use the seekable ALAC APIs because
 required MP4 or CAF metadata can follow a large media extent.
@@ -186,8 +192,9 @@ for await (const { pcm, trim } of decodeSeekableStereoAacLc(file, wasm)) {
 The helper reuses the `pcm` array. Consume or copy the data before you request
 the next packet.
 
-Current AAC-LC wasm support is raw access-unit only. MP4/M4A deboxing is handled
-by `WasmAacDeboxer` / `WasmAudioTrackDemuxer`; raw-block `END`/`FIL` elements
+The same `soundkit-aac` facade backs generic ADTS/M4A decoding and this raw
+access-unit API. MP4/M4A deboxing is handled by `WasmAacDeboxer` /
+`WasmAudioTrackDemuxer`; raw-block `END`/`FIL` elements
 are handled. Unsupported SBR/HE-AAC, PS, program-config-element channels,
 channel layouts beyond stereo, and SBR raw-block fill payloads fail with
 explicit error messages so callers can route those streams to a fallback
@@ -561,17 +568,18 @@ build.
 | `audio-demux` | Generic audio-track demux for MP4/fMP4/CMAF/WebM/MPEG-TS | yes |
 | `aac-debox` | Demux AAC from M4A/MP4, emit ADTS packets | yes |
 | `opus-debox` | Demux Opus from Ogg/WebM/raw, emit Opus packets | yes |
-| `aac` | Decode ADTS AAC through FDK AAC | no |
-| `m4a` | Decode AAC-in-M4A through FDK AAC | no |
-| `opus` | Decode raw Opus through native Opus dependency | no |
-| `ogg-opus` | Decode Ogg Opus through native Opus dependency | no |
-| `webm-opus` | Decode WebM Opus through native Opus dependency | no |
+| `aac` | Decode supported ADTS AAC-LC through `soundkit-aac` | yes |
+| `m4a` | Demux and decode supported M4A/MP4 AAC-LC through `soundkit-aac` | yes |
+| `opus` | Decode supported raw Opus through `soundkit-opus` | yes |
+| `ogg-opus` | Demux and decode supported Ogg Opus in Rust | yes |
+| `webm-opus` | Demux and decode supported WebM Opus in Rust | yes |
 
 For browser playback/editing, the intended split is:
 
 ```text
-SoundKit WASM: container detection, demux/debox, Rust-native music decoders
-JS/WASM codecs: AAC decode, Opus decode
+SoundKit WASM: container detection, demux/debox, and owned Rust decode for the
+supported AAC-LC and Opus profiles
+Platform fallback: unsupported AAC profiles or Opus modes
 ```
 
 ## Notes

@@ -144,7 +144,7 @@ fn decode_once(
         }
     }
     loop {
-        let written = decoder.decode_i16(&[], &mut output, false)?;
+        let written = decoder.finish_i16(&mut output)?;
         if written == 0 {
             break;
         }

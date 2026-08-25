@@ -75,7 +75,7 @@ the container layout can require enough metadata/media to be buffered first.
 | WAV / RIFF PCM | `soundkit::wav` | Auto | Yes | Emits complete PCM frame runs after the `data` chunk starts. |
 | MP3 | `soundkit-mp3` / `nanomp3` | Auto | Yes | Pure Rust decode; native decoder output is `f32`. |
 | AAC ADTS | `soundkit-aac` / owned AAC-LC + FDK fallback | Auto | Yes | Supported mono/stereo AAC-LC uses SoundKit's owned decoder by default; unsupported profiles and tools route to FDK on native builds. |
-| AAC-LC/HE-AAC in M4A/MP4/MOV or Matroska | `soundkit-decoder` / Rust demux + Wavey Symphonia fork | Complete-file/seekable index | Limited | Pure Rust LC/SBR/PS decode; regular, fragmented, CMAF, DASH, and Matroska fixtures are FFmpeg-differential tested. |
+| AAC-LC in M4A/MP4/MOV or Matroska | `soundkit-aac` + owned Rust demuxers | Streaming or seekable index | Limited | Browser AAC-LC uses the production owned decoder. Native builds retain FDK fallback for HE-AAC/SBR/PS and unsupported profiles. |
 | MP2 in MPEG-TS | `soundkit-decoder` / Rust TS demux + Wavey Symphonia fork | Complete-file | EOF | Pure Rust; collected TS fixture measures 50.36 dB against FFmpeg. |
 | FLAC | `soundkit-flac` / `wavey-flac` | Auto | Yes | Unified pure-Rust encode/decode retains metadata state and only the current incomplete compressed frame. |
 | Raw Opus stream | `soundkit-opus` / Rust Opus codecs | Auto | Yes | SoundKit `OpusHead` plus length-prefixed packets. |
@@ -103,8 +103,8 @@ boundary is narrower:
 | Format / area | Current decode path | Pure Rust decode? | Notes |
 | --- | --- | --- | --- |
 | AAC ADTS | `soundkit-aac` / owned AAC-LC + optional FDK fallback | Yes for supported AAC-LC | The production API selects the owned decoder for mono/stereo AAC-LC; native FDK handles unsupported AAC. |
-| AAC-LC raw access units | `soundkit-aac-lc` + `soundkit-wasm` | Controlled production profile | Pure Rust decoding supports 1,024-sample mono/stereo AAC-LC. Other profiles return explicit fallback errors. See [`AAC_LC_PRODUCTION_STATUS.md`](AAC_LC_PRODUCTION_STATUS.md). |
-| AAC-LC/HE-AAC in MP4/MOV/Matroska | owned demux + Wavey Symphonia fork | Yes | AAC-LC measures 75.45-80.56 dB and the collected HE-AAC/SBR case 68.59 dB against FFmpeg. |
+| AAC-LC raw access units | `soundkit-aac` + `soundkit-wasm` | Controlled production profile | `soundkit-aac-lc` is the internal owned engine behind the production facade. Pure Rust decoding supports 1,024-sample mono/stereo AAC-LC. Other profiles return explicit fallback errors. See [`AAC_LC_PRODUCTION_STATUS.md`](AAC_LC_PRODUCTION_STATUS.md). |
+| AAC in MP4/MOV/Matroska | `soundkit-aac` facade + owned demuxers | AAC-LC only in Rust-only builds | AAC-LC uses the owned access-unit decoder. HE-AAC/SBR/PS requires native FDK or a platform fallback. |
 | AMR-NB | OpenCORE AMR-NB | No | Requires the native `opencore-amrnb` library via `pkg-config`. |
 | G.729 | `g729-sys` | No | Uses a native codec binding. |
 | GSM 06.10 / WAV-49 | `gsm-sys` / `libgsm` | No | Uses the native libgsm codec. |

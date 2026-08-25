@@ -22,6 +22,13 @@ mod decoder;
 #[cfg(any(feature = "owned-lc", feature = "fdk"))]
 pub use decoder::{AacDecoder, AacDecoderBackend};
 
+/// SoundKit-owned AAC-LC decoder for one raw access unit at a time.
+///
+/// Container and transport adapters should use this facade instead of taking
+/// a direct dependency on the internal `soundkit-aac-lc` implementation.
+#[cfg(feature = "owned-lc")]
+pub use soundkit_aac_lc::AacLcDecoder as AacLcAccessUnitDecoder;
+
 #[cfg(feature = "fdk")]
 pub struct AacEncoder {
     encoder: AacLibEncoder,
@@ -311,7 +318,11 @@ mod mp4_decoder {
                 self.enqueue(events)?;
                 self.demux_finished = true;
             }
-            self.decode_pending(output)
+            let written = self.decode_pending(output)?;
+            if written != 0 || !self.pending_adts.is_empty() {
+                return Ok(written);
+            }
+            self.decoder.finish_i16(output)
         }
 
         fn enqueue(&mut self, events: Vec<AacMp4DemuxEvent>) -> Result<(), String> {

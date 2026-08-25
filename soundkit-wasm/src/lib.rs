@@ -1,5 +1,5 @@
 use frame_header::{EncodingFlag, Endianness};
-#[cfg(feature = "aac-lc")]
+#[cfg(feature = "aac")]
 use js_sys::Float32Array;
 #[cfg(feature = "flac")]
 use js_sys::Int32Array;
@@ -29,14 +29,12 @@ use wasm_bindgen::JsCast;
 
 #[cfg(feature = "detect")]
 use access_unit::{detect_audio, AudioType};
-#[cfg(feature = "aac")]
-use soundkit_aac::AacDecoder;
 #[cfg(feature = "m4a")]
 use soundkit_aac::AacDecoderMp4;
+#[cfg(feature = "aac")]
+use soundkit_aac::{AacDecoder, AacLcAccessUnitDecoder};
 #[cfg(feature = "aac-debox")]
 use soundkit_aac::{AacMp4DemuxEvent, AacMp4Demuxer};
-#[cfg(feature = "aac-lc")]
-use soundkit_aac_lc::AacLcDecoder;
 #[cfg(feature = "ac3")]
 use soundkit_ac3::Ac3Decoder;
 #[cfg(feature = "aiff")]
@@ -313,10 +311,10 @@ pub struct WasmAacDeboxer {
     state: AacDeboxState,
 }
 
-#[cfg(feature = "aac-lc")]
+#[cfg(feature = "aac")]
 #[wasm_bindgen]
 pub struct WasmAacLcDecoder {
-    decoder: AacLcDecoder,
+    decoder: AacLcAccessUnitDecoder,
     interleaved: Vec<f32>,
 }
 
@@ -519,7 +517,7 @@ pub struct WasmPcm16WaveLibraryEncoder {
 #[cfg(all(
     feature = "detect",
     feature = "audio-demux",
-    feature = "aac-lc",
+    feature = "aac",
     feature = "alac",
     feature = "wav",
     feature = "opus",
@@ -529,7 +527,7 @@ pub struct WasmPcm16WaveLibraryEncoder {
 pub struct WasmStreamingLibraryEncoder {
     decoder: LibrarySourceDecoder,
     alac_decoder: Option<AlacPacketDecoder>,
-    aac_lc_decoder: Option<AacLcDecoder>,
+    aac_lc_decoder: Option<AacLcAccessUnitDecoder>,
     normalizer: StreamingStereo48kNormalizer,
     preserve_lossless: bool,
     finished: bool,
@@ -603,7 +601,7 @@ enum DecoderState {
     Finished,
 }
 
-#[cfg(all(feature = "audio-demux", feature = "aac-lc"))]
+#[cfg(all(feature = "audio-demux", feature = "aac"))]
 enum LibrarySourceDecoder {
     Detecting { buffer: Vec<u8> },
     Music(WasmMusicDecoder),
@@ -612,7 +610,7 @@ enum LibrarySourceDecoder {
     Finished,
 }
 
-#[cfg(all(feature = "audio-demux", feature = "aac-lc"))]
+#[cfg(all(feature = "audio-demux", feature = "aac"))]
 struct ContainerAudioDecoder {
     demuxer: AudioTrackDemuxer,
     decoder: Option<FormatDecoder>,
@@ -620,7 +618,7 @@ struct ContainerAudioDecoder {
     scratch: DecoderScratch,
 }
 
-#[cfg(all(feature = "audio-demux", feature = "aac-lc"))]
+#[cfg(all(feature = "audio-demux", feature = "aac"))]
 struct MxfAudioDecoder {
     demuxer: MxfMediaDemuxer,
     config: Option<MediaTrackConfig>,
@@ -635,10 +633,6 @@ enum FormatDecoder {
     Aiff(Box<AiffDecoder>),
     #[cfg(feature = "ac3")]
     Ac3(Box<Ac3Decoder>),
-    #[cfg(all(feature = "aac-lc", not(feature = "aac")))]
-    AacLcAdts(Box<AacLcAdtsDecoder>),
-    #[cfg(all(feature = "aac-lc", feature = "aac-debox", not(feature = "m4a")))]
-    AacLcMp4(Box<AacLcMp4Decoder>),
     #[cfg(feature = "flac")]
     Flac(Box<FlacDecoder>),
     #[cfg(feature = "mp3")]
@@ -676,172 +670,6 @@ impl DecoderScratch {
             self.i32_samples.resize(DEFAULT_SCRATCH_SAMPLES, 0);
         }
         &mut self.i32_samples
-    }
-}
-
-#[cfg(all(feature = "aac-lc", not(feature = "aac")))]
-struct AacLcAdtsDecoder {
-    buffer: Vec<u8>,
-    buffer_start: usize,
-    decoder: Option<AacLcDecoder>,
-    audio_specific_config: Option<[u8; 2]>,
-}
-
-#[cfg(all(feature = "aac-lc", not(feature = "aac")))]
-impl AacLcAdtsDecoder {
-    fn new() -> Self {
-        Self {
-            buffer: Vec::with_capacity(16 * 1024),
-            buffer_start: 0,
-            decoder: None,
-            audio_specific_config: None,
-        }
-    }
-
-    fn process(&mut self, bytes: &[u8], finalizing: bool) -> Result<Vec<AudioData>, String> {
-        self.compact_buffer(false);
-        let buffered_bytes = self.buffer.len().saturating_sub(self.buffer_start);
-        if buffered_bytes.saturating_add(bytes.len()) > MAX_STREAM_INPUT_CHUNK_BYTES {
-            return Err("AAC-LC ADTS buffer exceeded the streaming budget".to_owned());
-        }
-        self.buffer.extend_from_slice(bytes);
-        let mut frames = Vec::new();
-        loop {
-            let Some(sync) = self
-                .buffer
-                .get(self.buffer_start..)
-                .unwrap_or_default()
-                .windows(2)
-                .position(|bytes| bytes[0] == 0xff && (bytes[1] & 0xf6) == 0xf0)
-            else {
-                let keep = self.buffer.len().saturating_sub(self.buffer_start).min(1);
-                self.buffer_start = self.buffer.len().saturating_sub(keep);
-                break;
-            };
-            if sync > 0 {
-                self.buffer_start += sync;
-            }
-            if self.buffer.len().saturating_sub(self.buffer_start) < 7 {
-                break;
-            }
-            let base = self.buffer_start;
-            let protection_absent = self.buffer[base + 1] & 1 != 0;
-            let header_len = if protection_absent { 7 } else { 9 };
-            let frame_len = (((self.buffer[base + 3] & 3) as usize) << 11)
-                | ((self.buffer[base + 4] as usize) << 3)
-                | ((self.buffer[base + 5] as usize) >> 5);
-            if frame_len <= header_len || frame_len > 8191 {
-                return Err("AAC-LC ADTS frame has an invalid length".to_owned());
-            }
-            if self.buffer.len().saturating_sub(base) < frame_len {
-                break;
-            }
-            let object_type = ((self.buffer[base + 2] & 0xc0) >> 6) + 1;
-            let sample_rate_index = (self.buffer[base + 2] & 0x3c) >> 2;
-            let channels =
-                ((self.buffer[base + 2] & 1) << 2) | ((self.buffer[base + 3] & 0xc0) >> 6);
-            let config = [
-                (object_type << 3) | (sample_rate_index >> 1),
-                ((sample_rate_index & 1) << 7) | (channels << 3),
-            ];
-            if self.audio_specific_config != Some(config) {
-                if self.audio_specific_config.is_some() {
-                    return Err("AAC-LC format changed during the stream".to_owned());
-                }
-                self.decoder = Some(
-                    AacLcDecoder::from_audio_specific_config(&config)
-                        .map_err(|error| error.to_string())?,
-                );
-                self.audio_specific_config = Some(config);
-            }
-            let decoder = self
-                .decoder
-                .as_mut()
-                .ok_or_else(|| "AAC-LC decoder was not initialized".to_owned())?;
-            let info = decoder.frame_info();
-            let mut pcm = Vec::with_capacity(info.frames * info.channels * 2);
-            {
-                let decoded = decoder
-                    .decode_access_unit(&self.buffer[base + header_len..base + frame_len])
-                    .map_err(|error| error.to_string())?;
-                for frame in 0..decoded.frames() {
-                    for channel in decoded.channels() {
-                        pcm.extend_from_slice(&library_float_to_i16(channel[frame]).to_le_bytes());
-                    }
-                }
-            }
-            frames.push(AudioData::new(
-                16,
-                u8::try_from(info.channels)
-                    .map_err(|_| "AAC-LC channel count exceeds SoundKit".to_owned())?,
-                info.sample_rate,
-                pcm,
-                frame_header::EncodingFlag::PCMSigned,
-                frame_header::Endianness::LittleEndian,
-            ));
-            self.buffer_start += frame_len;
-        }
-        self.compact_buffer(finalizing);
-        if finalizing && !self.buffer.is_empty() {
-            return Err("AAC-LC ADTS stream ends with a truncated frame".to_owned());
-        }
-        Ok(frames)
-    }
-
-    fn compact_buffer(&mut self, force: bool) {
-        if self.buffer_start == 0 {
-            return;
-        }
-        if self.buffer_start == self.buffer.len() {
-            self.buffer.clear();
-            self.buffer_start = 0;
-            return;
-        }
-        if force
-            || (self.buffer_start >= 16 * 1024
-                && self.buffer_start.saturating_mul(2) >= self.buffer.len())
-        {
-            self.buffer.drain(..self.buffer_start);
-            self.buffer_start = 0;
-        }
-    }
-}
-
-#[cfg(all(feature = "aac-lc", feature = "aac-debox", not(feature = "m4a")))]
-struct AacLcMp4Decoder {
-    demuxer: AacMp4Demuxer,
-    decoder: AacLcAdtsDecoder,
-}
-
-#[cfg(all(feature = "aac-lc", feature = "aac-debox", not(feature = "m4a")))]
-impl AacLcMp4Decoder {
-    fn new() -> Result<Self, String> {
-        let mut demuxer = AacMp4Demuxer::new();
-        demuxer.init()?;
-        Ok(Self {
-            demuxer,
-            decoder: AacLcAdtsDecoder::new(),
-        })
-    }
-
-    fn process(&mut self, bytes: &[u8], finalizing: bool) -> Result<Vec<AudioData>, String> {
-        let events = if finalizing {
-            let mut events = self.demuxer.add(bytes)?;
-            events.extend(self.demuxer.finish()?);
-            events
-        } else {
-            self.demuxer.add(bytes)?
-        };
-        let mut frames = Vec::new();
-        for event in events {
-            if let AacMp4DemuxEvent::Frame(frame) = event {
-                frames.extend(self.decoder.process(&frame.adts, false)?);
-            }
-        }
-        if finalizing {
-            frames.extend(self.decoder.process(&[], true)?);
-        }
-        Ok(frames)
     }
 }
 
@@ -1149,7 +977,7 @@ impl WasmCanonicalPcmDecoder {
     }
 }
 
-#[cfg(all(feature = "audio-demux", feature = "aac-lc"))]
+#[cfg(all(feature = "audio-demux", feature = "aac"))]
 impl LibrarySourceDecoder {
     fn new() -> Self {
         Self::Detecting { buffer: Vec::new() }
@@ -1228,7 +1056,7 @@ impl LibrarySourceDecoder {
     }
 }
 
-#[cfg(all(feature = "audio-demux", feature = "aac-lc"))]
+#[cfg(all(feature = "audio-demux", feature = "aac"))]
 impl ContainerAudioDecoder {
     fn new(format: &str) -> Result<Self, String> {
         Ok(Self {
@@ -1285,7 +1113,14 @@ impl ContainerAudioDecoder {
             }
         }
         self.decoder = match config.codec {
-            AudioCodec::Aac => Some(FormatDecoder::AacLcAdts(Box::new(AacLcAdtsDecoder::new()))),
+            AudioCodec::Aac => {
+                let mut decoder = AacDecoder::new();
+                decoder.init()?;
+                if !config.codec_private.is_empty() {
+                    decoder.set_audio_specific_config(&config.codec_private)?;
+                }
+                Some(FormatDecoder::Aac(Box::new(decoder)))
+            }
             #[cfg(feature = "ac3")]
             AudioCodec::Ac3 => Some(FormatDecoder::Ac3(Box::new(Ac3Decoder::try_new()?))),
             #[cfg(feature = "mp3")]
@@ -1303,7 +1138,7 @@ impl ContainerAudioDecoder {
     }
 }
 
-#[cfg(all(feature = "audio-demux", feature = "aac-lc"))]
+#[cfg(all(feature = "audio-demux", feature = "aac"))]
 impl MxfAudioDecoder {
     fn new() -> Self {
         Self {
@@ -1343,14 +1178,14 @@ impl MxfAudioDecoder {
     }
 }
 
-#[cfg(all(feature = "audio-demux", feature = "aac-lc"))]
+#[cfg(all(feature = "audio-demux", feature = "aac"))]
 fn looks_like_mxf_source(bytes: &[u8]) -> bool {
     bytes
         .windows(4)
         .any(|window| window == [0x06, 0x0e, 0x2b, 0x34])
 }
 
-#[cfg(all(feature = "audio-demux", feature = "aac-lc"))]
+#[cfg(all(feature = "audio-demux", feature = "aac"))]
 fn looks_like_mpeg_ts_source(bytes: &[u8]) -> bool {
     [0usize, 4].into_iter().any(|offset| {
         [0usize, 188, 376]
@@ -1359,7 +1194,7 @@ fn looks_like_mpeg_ts_source(bytes: &[u8]) -> bool {
     })
 }
 
-#[cfg(all(feature = "audio-demux", feature = "aac-lc"))]
+#[cfg(all(feature = "audio-demux", feature = "aac"))]
 fn audio_data_from_container_pcm(
     config: &AudioTrackConfig,
     data: Vec<u8>,
@@ -1374,7 +1209,7 @@ fn audio_data_from_container_pcm(
     )
 }
 
-#[cfg(all(feature = "audio-demux", feature = "aac-lc"))]
+#[cfg(all(feature = "audio-demux", feature = "aac"))]
 fn audio_data_from_media_pcm(
     config: &MediaTrackConfig,
     data: Vec<u8>,
@@ -1389,7 +1224,7 @@ fn audio_data_from_media_pcm(
     )
 }
 
-#[cfg(all(feature = "audio-demux", feature = "aac-lc"))]
+#[cfg(all(feature = "audio-demux", feature = "aac"))]
 fn make_container_pcm_audio(
     sample_rate: Option<u32>,
     channels: Option<u8>,
@@ -1546,13 +1381,13 @@ impl WasmAacDeboxer {
     }
 }
 
-#[cfg(feature = "aac-lc")]
+#[cfg(feature = "aac")]
 #[wasm_bindgen]
 impl WasmAacLcDecoder {
     #[wasm_bindgen(constructor)]
     pub fn new(audio_specific_config: &[u8]) -> Result<WasmAacLcDecoder, JsValue> {
         Ok(Self {
-            decoder: AacLcDecoder::from_audio_specific_config(audio_specific_config)
+            decoder: AacLcAccessUnitDecoder::from_audio_specific_config(audio_specific_config)
                 .map_err(|error| js_error(error.to_string()))?,
             interleaved: Vec::new(),
         })
@@ -1794,7 +1629,7 @@ impl WasmMp4MediaIndex {
     /// remains within Rust throughout the operation.
     #[cfg(all(
         feature = "detect",
-        feature = "aac-lc",
+        feature = "aac",
         feature = "alac",
         feature = "wav",
         feature = "opus",
@@ -1840,7 +1675,7 @@ impl WasmMp4MediaIndex {
     /// Validate, decode, edit-list trim, and encode one indexed AAC-LC sample.
     #[cfg(all(
         feature = "detect",
-        feature = "aac-lc",
+        feature = "aac",
         feature = "alac",
         feature = "wav",
         feature = "opus",
@@ -2022,7 +1857,7 @@ impl WasmCafAlacIndex {
     #[cfg(all(
         feature = "detect",
         feature = "audio-demux",
-        feature = "aac-lc",
+        feature = "aac",
         feature = "wav",
         feature = "opus",
         feature = "flac"
@@ -3192,7 +3027,7 @@ impl WasmPcm16WaveLibraryEncoder {
 #[cfg(all(
     feature = "detect",
     feature = "audio-demux",
-    feature = "aac-lc",
+    feature = "aac",
     feature = "alac",
     feature = "wav",
     feature = "opus",
@@ -3276,7 +3111,7 @@ impl WasmStreamingLibraryEncoder {
 #[cfg(all(
     feature = "detect",
     feature = "audio-demux",
-    feature = "aac-lc",
+    feature = "aac",
     feature = "alac",
     feature = "wav",
     feature = "opus",
@@ -3328,7 +3163,7 @@ impl WasmStreamingLibraryEncoder {
         let mut encoder = Self::new_rust(preserve_lossless)?;
         encoder.decoder = LibrarySourceDecoder::Finished;
         encoder.aac_lc_decoder = Some(
-            AacLcDecoder::from_audio_specific_config(audio_specific_config)
+            AacLcAccessUnitDecoder::from_audio_specific_config(audio_specific_config)
                 .map_err(|error| error.to_string())?,
         );
         Ok(encoder)
@@ -3579,7 +3414,7 @@ impl WasmStreamingLibraryEncoder {
 #[cfg(all(
     feature = "detect",
     feature = "audio-demux",
-    feature = "aac-lc",
+    feature = "aac",
     feature = "alac",
     feature = "wav",
     feature = "opus",
@@ -3881,10 +3716,7 @@ impl WasmStreamingLibraryEncoder {
     }
 }
 
-#[cfg(any(
-    all(feature = "opus", feature = "flac"),
-    all(feature = "aac-lc", not(feature = "aac"))
-))]
+#[cfg(all(feature = "opus", feature = "flac"))]
 fn library_float_to_i16(sample: f32) -> i16 {
     let sample = if sample.is_finite() {
         sample.clamp(-1.0, 1.0)
@@ -4524,10 +4356,6 @@ impl FormatDecoder {
             FormatDecoder::Ac3(decoder) => {
                 process_add_api(decoder.as_mut(), bytes, |d, data| d.add(data))
             }
-            #[cfg(all(feature = "aac-lc", not(feature = "aac")))]
-            FormatDecoder::AacLcAdts(decoder) => decoder.process(bytes, false),
-            #[cfg(all(feature = "aac-lc", feature = "aac-debox", not(feature = "m4a")))]
-            FormatDecoder::AacLcMp4(decoder) => decoder.process(bytes, false),
             #[cfg(feature = "flac")]
             FormatDecoder::Flac(decoder) => decode_i32_with_drain(
                 decoder.as_mut(),
@@ -4588,10 +4416,26 @@ impl FormatDecoder {
 
     fn flush(&mut self, scratch: &mut DecoderScratch) -> Result<Vec<AudioData>, String> {
         match self {
-            #[cfg(all(feature = "aac-lc", not(feature = "aac")))]
-            FormatDecoder::AacLcAdts(decoder) => decoder.process(&[], true),
-            #[cfg(all(feature = "aac-lc", feature = "aac-debox", not(feature = "m4a")))]
-            FormatDecoder::AacLcMp4(decoder) => decoder.process(&[], true),
+            #[cfg(feature = "aac")]
+            FormatDecoder::Aac(decoder) => finish_i16_with_drain(
+                decoder.as_mut(),
+                scratch.i16_samples(),
+                AacDecoder::finish_i16,
+                |decoder, samples, output| {
+                    let (sample_rate, channels) = (decoder.sample_rate()?, decoder.channels()?);
+                    Some(audio_data_i16(sample_rate, channels, &output[..samples]))
+                },
+            ),
+            #[cfg(feature = "m4a")]
+            FormatDecoder::M4a(decoder) => finish_i16_with_drain(
+                decoder.as_mut(),
+                scratch.i16_samples(),
+                AacDecoderMp4::finish_i16,
+                |decoder, samples, output| {
+                    let (sample_rate, channels) = (decoder.sample_rate()?, decoder.channels()?);
+                    Some(audio_data_i16(sample_rate, channels, &output[..samples]))
+                },
+            ),
             #[cfg(feature = "aiff")]
             FormatDecoder::Aiff(decoder) => {
                 process_add_api(decoder.as_mut(), &[], |d, data| d.add(data))
@@ -4669,6 +4513,30 @@ where
         }
     }
 
+    Ok(frames)
+}
+
+#[cfg(any(feature = "aac", feature = "m4a"))]
+fn finish_i16_with_drain<D, Finish, Frame>(
+    decoder: &mut D,
+    output: &mut [i16],
+    mut finish: Finish,
+    frame: Frame,
+) -> Result<Vec<AudioData>, String>
+where
+    Finish: FnMut(&mut D, &mut [i16]) -> Result<usize, String>,
+    Frame: Fn(&D, usize, &[i16]) -> Option<AudioData>,
+{
+    let mut frames = Vec::new();
+    loop {
+        let samples = finish(decoder, output)?;
+        if samples == 0 {
+            break;
+        }
+        if let Some(audio) = frame(decoder, samples, output) {
+            frames.push(audio);
+        }
+    }
     Ok(frames)
 }
 
@@ -5073,14 +4941,10 @@ fn opus_config_event(
 fn decoder_for_format(format: &str) -> Result<FormatDecoder, String> {
     match normalize_format(format).as_str() {
         #[cfg(feature = "aac")]
-        "aac" | "adts" => {
+        "aac" | "adts" | "aac-lc" => {
             let mut decoder = AacDecoder::new();
             decoder.init()?;
             Ok(FormatDecoder::Aac(Box::new(decoder)))
-        }
-        #[cfg(all(feature = "aac-lc", not(feature = "aac")))]
-        "aac" | "adts" | "aac-lc" => {
-            Ok(FormatDecoder::AacLcAdts(Box::new(AacLcAdtsDecoder::new())))
         }
         #[cfg(feature = "m4a")]
         "m4a" | "mp4" | "aac-mp4" => {
@@ -5088,8 +4952,6 @@ fn decoder_for_format(format: &str) -> Result<FormatDecoder, String> {
             decoder.init()?;
             Ok(FormatDecoder::M4a(Box::new(decoder)))
         }
-        #[cfg(all(feature = "aac-lc", feature = "aac-debox", not(feature = "m4a")))]
-        "m4a" | "mp4" | "aac-mp4" => Ok(FormatDecoder::AacLcMp4(Box::new(AacLcMp4Decoder::new()?))),
         #[cfg(feature = "aiff")]
         "aiff" | "aifc" => {
             let mut decoder = AiffDecoder::new();
@@ -5144,11 +5006,7 @@ fn detect_and_init_decoder(bytes: &[u8]) -> Result<FormatDecoder, String> {
         AudioType::MP3 => decoder_for_format("mp3"),
         #[cfg(feature = "aac")]
         AudioType::AAC => decoder_for_format("aac"),
-        #[cfg(all(feature = "aac-lc", not(feature = "aac")))]
-        AudioType::AAC => decoder_for_format("aac"),
         #[cfg(feature = "m4a")]
-        AudioType::M4A => decoder_for_format("m4a"),
-        #[cfg(all(feature = "aac-lc", feature = "aac-debox", not(feature = "m4a")))]
         AudioType::M4A => decoder_for_format("m4a"),
         #[cfg(feature = "flac")]
         AudioType::FLAC => decoder_for_format("flac"),
@@ -6760,7 +6618,7 @@ mod tests {
     #[cfg(all(
         feature = "detect",
         feature = "audio-demux",
-        feature = "aac-lc",
+        feature = "aac",
         feature = "alac",
         feature = "wav",
         feature = "opus",
@@ -6832,7 +6690,7 @@ mod tests {
     #[cfg(all(
         feature = "detect",
         feature = "audio-demux",
-        feature = "aac-lc",
+        feature = "aac",
         feature = "alac",
         feature = "wav",
         feature = "opus",
@@ -6881,7 +6739,7 @@ mod tests {
     #[cfg(all(
         feature = "detect",
         feature = "audio-demux",
-        feature = "aac-lc",
+        feature = "aac",
         feature = "alac",
         feature = "wav",
         feature = "opus",
@@ -6978,26 +6836,29 @@ mod tests {
         assert_eq!(frames[0].bits_per_sample(), 16);
     }
 
-    #[cfg(all(feature = "aac-lc", not(feature = "aac")))]
+    #[cfg(feature = "aac")]
     #[test]
-    fn aac_lc_adts_push_drains_pcm_frames() {
-        let data =
-            fixture("../soundkit-decoder/testdata/aac/A_Tusk_is_used_to_make_costly_gifts.aac");
+    fn aac_adts_production_facade_drains_music_pcm() {
+        let data = fixture("../golden/aac/stereo-music-44100-192k.aac");
         let frames = decode_all("aac", &data, 997);
         assert!(!frames.is_empty());
         assert_eq!(frames[0].bits_per_sample(), 16);
+        assert_eq!(frames[0].channel_count(), 2);
+        assert_eq!(frames[0].sampling_rate(), 44_100);
     }
 
-    #[cfg(all(feature = "aac-lc", feature = "aac-debox", not(feature = "m4a")))]
+    #[cfg(feature = "m4a")]
     #[test]
-    fn aac_lc_mp4_push_drains_pcm_frames() {
-        let data = fixture("video-compat/never-final/h264-high-aac.mp4");
+    fn m4a_production_facade_drains_music_pcm() {
+        let data = fixture("../golden/aac/stereo-music-44100-192k.m4a");
         let frames = decode_all("m4a", &data, 997);
         assert!(!frames.is_empty());
         assert_eq!(frames[0].bits_per_sample(), 16);
+        assert_eq!(frames[0].channel_count(), 2);
+        assert_eq!(frames[0].sampling_rate(), 44_100);
     }
 
-    #[cfg(all(feature = "audio-demux", feature = "aac-lc"))]
+    #[cfg(all(feature = "audio-demux", feature = "aac"))]
     #[test]
     fn mxf_dnx_pcm_library_source_drains_bounded_audio_frames() {
         let data = fixture("video-compat/never-final/dnxhr-hqx-pcm.mxf");

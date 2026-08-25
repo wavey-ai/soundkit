@@ -27,7 +27,7 @@ browser-audio = [
   "ogg-opus",
   "opus-debox",
   "aac-debox",
-  "aac-lc",
+  "m4a",
   "audio-demux",
   "ac3",
 ]
@@ -44,8 +44,10 @@ flac = [
 aac = ["dep:soundkit-aac", "soundkit-aac/owned-lc"]
 m4a = ["aac", "soundkit-aac/mp4-decoder"]
 aac-debox = ["dep:soundkit-aac", "soundkit-aac/mp4-demux"]
-aac-lc = ["dep:soundkit-aac-lc"]
-aac-lc-bench = ["aac-lc"]
+# Compatibility aliases. All production and packet-level AAC decoding now
+# enters through `soundkit-aac`; `soundkit-aac-lc` is its internal engine.
+aac-lc = ["aac"]
+aac-lc-bench = ["aac"]
 alac = ["dep:soundkit-alac"]
 aiff = ["dep:soundkit-aiff"]
 opus = ["dep:soundkit-opus"]
@@ -66,7 +68,6 @@ wasm-bindgen = "0.2"
 soundkit-audio-demux = { path = "../soundkit-audio-demux", optional = true }
 soundkit-video = { path = "../soundkit-video", optional = true }
 soundkit-aac = { path = "../soundkit-aac", default-features = false, optional = true }
-soundkit-aac-lc = { path = "../soundkit-aac-lc", optional = true }
 soundkit-ac3 = { path = "../soundkit-ac3", optional = true }
 soundkit-aiff = { path = "../soundkit-aiff", optional = true }
 soundkit-alac = { path = "../soundkit-alac", optional = true }

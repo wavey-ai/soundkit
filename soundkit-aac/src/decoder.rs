@@ -25,6 +25,7 @@ pub struct AacDecoder {
     sample_rate: Option<u32>,
     channels: Option<u8>,
     decoded_frames: u64,
+    input_finished: bool,
     #[cfg(feature = "fdk")]
     fdk_pcm: Vec<i16>,
     #[cfg(feature = "fdk")]
@@ -135,6 +136,7 @@ impl AacDecoder {
             sample_rate: None,
             channels: None,
             decoded_frames: 0,
+            input_finished: false,
             #[cfg(feature = "fdk")]
             fdk_pcm: Vec::new(),
             #[cfg(feature = "fdk")]
@@ -152,6 +154,17 @@ impl AacDecoder {
 
     pub fn channels(&self) -> Option<u8> {
         self.channels
+    }
+
+    /// Drain complete buffered ADTS frames and reject a truncated final frame.
+    /// Once finishing begins, the decoder no longer accepts additional input.
+    pub fn finish_i16(&mut self, output: &mut [i16]) -> Result<usize, String> {
+        self.finish_samples(output)
+    }
+
+    /// Float-output counterpart to [`Self::finish_i16`].
+    pub fn finish_f32(&mut self, output: &mut [f32]) -> Result<usize, String> {
+        self.finish_samples(output)
     }
 
     pub fn backend(&self) -> AacDecoderBackend {
@@ -216,6 +229,9 @@ impl AacDecoder {
         input: &[u8],
         output: &mut [T],
     ) -> Result<usize, String> {
+        if self.input_finished && !input.is_empty() {
+            return Err("AAC decoder is already finished".to_string());
+        }
         self.append_input(input)?;
         if output.is_empty() {
             return Ok(0);
@@ -245,6 +261,18 @@ impl AacDecoder {
                 }
             }
         }
+    }
+
+    fn finish_samples<T: OutputSample>(&mut self, output: &mut [T]) -> Result<usize, String> {
+        self.input_finished = true;
+        if output.is_empty() {
+            return Ok(0);
+        }
+        let written = self.decode_samples(&[], output)?;
+        if written == 0 && self.buffered_len() != 0 {
+            return Err("AAC ADTS stream ends with a truncated frame".to_string());
+        }
+        Ok(written)
     }
 
     fn append_input(&mut self, input: &[u8]) -> Result<(), String> {
@@ -889,6 +917,55 @@ mod tests {
             0
         );
         assert_eq!(decoder.buffered_len(), 1);
+    }
+
+    #[test]
+    #[cfg(feature = "owned-lc")]
+    fn finish_rejects_a_truncated_adts_frame_and_new_input() {
+        let fixture =
+            include_bytes!("../../golden/aac/A_Tusk_is_used_to_make_costly_gifts_encoded.aac");
+        let frame_len = (((fixture[3] & 3) as usize) << 11)
+            | ((fixture[4] as usize) << 3)
+            | ((fixture[5] as usize) >> 5);
+        let truncated = &fixture[..frame_len - 1];
+        let mut decoder = AacDecoder::new();
+        let mut output = [0i16; 2048];
+
+        assert_eq!(
+            decoder.decode_i16(truncated, &mut output, false).unwrap(),
+            0
+        );
+        assert_eq!(decoder.finish_i16(&mut []).unwrap(), 0);
+        assert!(decoder
+            .finish_i16(&mut output)
+            .unwrap_err()
+            .contains("truncated frame"));
+        assert!(decoder
+            .decode_i16(&fixture[..frame_len], &mut output, false)
+            .unwrap_err()
+            .contains("already finished"));
+    }
+
+    #[test]
+    #[cfg(feature = "owned-lc")]
+    fn finish_with_empty_output_preserves_a_complete_buffered_frame() {
+        let fixture =
+            include_bytes!("../../golden/aac/A_Tusk_is_used_to_make_costly_gifts_encoded.aac");
+        let frame_len = (((fixture[3] & 3) as usize) << 11)
+            | ((fixture[4] as usize) << 3)
+            | ((fixture[5] as usize) >> 5);
+        let mut decoder = AacDecoder::new();
+        let mut output = [0i16; 2048];
+
+        assert_eq!(
+            decoder
+                .decode_i16(&fixture[..frame_len], &mut [], false)
+                .unwrap(),
+            0
+        );
+        assert_eq!(decoder.finish_i16(&mut []).unwrap(), 0);
+        assert_eq!(decoder.finish_i16(&mut output).unwrap(), output.len());
+        assert_eq!(decoder.finish_i16(&mut output).unwrap(), 0);
     }
 
     #[test]

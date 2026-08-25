@@ -808,6 +808,235 @@ export class WasmFlacEncoder {
 if (Symbol.dispose) WasmFlacEncoder.prototype[Symbol.dispose] = WasmFlacEncoder.prototype.free;
 
 /**
+ * Persistent raw-FLAC packet decoder for low-latency transports.
+ *
+ * Each call consumes one raw FLAC frame and returns one interleaved PCM
+ * block. The decoder and its PCM allocation are reused across calls.
+ */
+export class WasmFlacFrameDecoder {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmFlacFrameDecoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmflacframedecoder_free(ptr, 0);
+    }
+    /**
+     * Decode a packet already copied into `inputPacketView`.
+     * @param {number} packet_length
+     * @returns {number}
+     */
+    decodeBuffered(packet_length) {
+        const ret = wasm.wasmflacframedecoder_decodeBuffered(this.__wbg_ptr, packet_length);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
+    }
+    /**
+     * Decode exactly one raw FLAC frame into interleaved PCM.
+     * @param {Uint8Array} packet
+     * @returns {Int32Array}
+     */
+    decodeInterleavedI32(packet) {
+        const ptr0 = passArray8ToWasm0(packet, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmflacframedecoder_decodeInterleavedI32(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Decode one packet and return an ephemeral zero-copy PCM view.
+     *
+     * The view must be consumed before another call into WebAssembly that can
+     * grow memory, and its samples are overwritten by the next decode call.
+     * Use `decodeInterleavedI32` when the returned PCM must be retained.
+     * @param {Uint8Array} packet
+     * @returns {Int32Array}
+     */
+    decodeInterleavedI32View(packet) {
+        const ptr0 = passArray8ToWasm0(packet, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmflacframedecoder_decodeInterleavedI32View(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Return the persistent decoded PCM output buffer.
+     *
+     * Its samples are overwritten by the next decode call. Reacquire the view
+     * after any unrelated call that can grow WebAssembly memory.
+     * @returns {Int32Array}
+     */
+    decodedPcmView() {
+        const ret = wasm.wasmflacframedecoder_decodedPcmView(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Return the reusable encoded-packet input buffer.
+     *
+     * Copy one packet into this view, then call `decodeBuffered` with its byte
+     * length. Reacquire the view after any unrelated call that can grow
+     * WebAssembly memory.
+     * @returns {Uint8Array}
+     */
+    inputPacketView() {
+        const ret = wasm.wasmflacframedecoder_inputPacketView(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @param {number} sample_rate
+     * @param {number} channels
+     * @param {number} bits_per_sample
+     * @param {number} frame_size
+     */
+    constructor(sample_rate, channels, bits_per_sample, frame_size) {
+        const ret = wasm.wasmflacframedecoder_new(sample_rate, channels, bits_per_sample, frame_size);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmFlacFrameDecoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {number}
+     */
+    get packetCapacity() {
+        const ret = wasm.wasmflacframedecoder_packetCapacity(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    reset() {
+        const ret = wasm.wasmflacframedecoder_reset(this.__wbg_ptr);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * @returns {number}
+     */
+    get sampleCount() {
+        const ret = wasm.wasmflacframedecoder_sampleCount(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {boolean} enabled
+     */
+    setVerifyChecksums(enabled) {
+        wasm.wasmflacframedecoder_setVerifyChecksums(this.__wbg_ptr, enabled);
+    }
+}
+if (Symbol.dispose) WasmFlacFrameDecoder.prototype[Symbol.dispose] = WasmFlacFrameDecoder.prototype.free;
+
+/**
+ * Persistent raw-FLAC packet encoder for low-latency transports.
+ *
+ * Each call consumes exactly one configured PCM block and returns one raw
+ * FLAC frame. The encoder and its packet allocation are reused across calls.
+ */
+export class WasmFlacFrameEncoder {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmFlacFrameEncoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmflacframeencoder_free(ptr, 0);
+    }
+    /**
+     * Encode `inputPcmView` and return an ephemeral zero-copy packet view.
+     * @returns {Uint8Array}
+     */
+    encodeBufferedView() {
+        const ret = wasm.wasmflacframeencoder_encodeBufferedView(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Encode exactly one interleaved PCM block into one raw FLAC frame.
+     * @param {Int32Array} interleaved
+     * @returns {Uint8Array}
+     */
+    encodeInterleavedI32(interleaved) {
+        const ptr0 = passArray32ToWasm0(interleaved, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmflacframeencoder_encodeInterleavedI32(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Encode one block and return an ephemeral zero-copy view of the packet.
+     *
+     * The view must be consumed before another call into WebAssembly that can
+     * grow memory, and its bytes are overwritten by the next encode call. Use
+     * `encodeInterleavedI32` when the returned packet must be retained.
+     * @param {Int32Array} interleaved
+     * @returns {Uint8Array}
+     */
+    encodeInterleavedI32View(interleaved) {
+        const ptr0 = passArray32ToWasm0(interleaved, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmflacframeencoder_encodeInterleavedI32View(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Return the reusable PCM input block for the buffer-reusing API.
+     *
+     * Fill this view, then call `encodeBufferedView`. WebAssembly memory growth
+     * invalidates the view, so reacquire it after calling unrelated Wasm APIs
+     * that can allocate.
+     * @returns {Int32Array}
+     */
+    inputPcmView() {
+        const ret = wasm.wasmflacframeencoder_inputPcmView(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @param {number} sample_rate
+     * @param {number} channels
+     * @param {number} bits_per_sample
+     * @param {number} frame_size
+     * @param {number} compression_level
+     */
+    constructor(sample_rate, channels, bits_per_sample, frame_size, compression_level) {
+        const ret = wasm.wasmflacframeencoder_new(sample_rate, channels, bits_per_sample, frame_size, compression_level);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmFlacFrameEncoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    reset() {
+        wasm.wasmflacframeencoder_reset(this.__wbg_ptr);
+    }
+    /**
+     * @returns {number}
+     */
+    get sampleCount() {
+        const ret = wasm.wasmflacframeencoder_sampleCount(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) WasmFlacFrameEncoder.prototype[Symbol.dispose] = WasmFlacFrameEncoder.prototype.free;
+
+/**
  * Streaming Rust fragmented-MP4/CMAF audio-and-video demuxer.
  */
 export class WasmMp4MediaDemuxer {
@@ -2150,57 +2379,65 @@ export function wasmMemoryBytes() {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
-        __wbg___wbindgen_memory_de265df8aadd6273: function() {
+        __wbg___wbindgen_memory_5dc2a138835b0f8e: function() {
             const ret = wasm.memory;
             return ret;
         },
-        __wbg___wbindgen_throw_344f42d3211c4765: function(arg0, arg1) {
+        __wbg___wbindgen_throw_bb96b2010945f0bc: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
-        __wbg_buffer_0f212447ac64c53b: function(arg0) {
+        __wbg_buffer_8117fe4dab119813: function(arg0) {
             const ret = arg0.buffer;
             return ret;
         },
-        __wbg_byteLength_41862ca4020b9c43: function(arg0) {
+        __wbg_byteLength_336bc7d303511ba0: function(arg0) {
             const ret = arg0.byteLength;
             return ret;
         },
-        __wbg_length_98f10d1e2f4ea968: function(arg0) {
+        __wbg_length_1009454859bb3e03: function(arg0) {
             const ret = arg0.length;
             return ret;
         },
-        __wbg_new_32b398fb48b6d94a: function() {
+        __wbg_new_116be93542d39019: function() {
             const ret = new Array();
             return ret;
         },
-        __wbg_new_cd45aabdf6073e84: function(arg0) {
+        __wbg_new_77cc4f4f472aeb81: function(arg0) {
             const ret = new Uint8Array(arg0);
             return ret;
         },
-        __wbg_new_da52cf8fe3429cb2: function() {
+        __wbg_new_ebe3e0f6837f0879: function() {
             const ret = new Object();
             return ret;
         },
-        __wbg_new_from_slice_77cdfb7977362f3c: function(arg0, arg1) {
+        __wbg_new_from_slice_1f7a0d975f26baea: function(arg0, arg1) {
+            const ret = new Int32Array(getArrayI32FromWasm0(arg0, arg1));
+            return ret;
+        },
+        __wbg_new_from_slice_3eea173078478cfe: function(arg0, arg1) {
             const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
             return ret;
         },
-        __wbg_new_from_slice_ddf8b82c4d6af38e: function(arg0, arg1) {
+        __wbg_new_from_slice_709ab7061ebcc5da: function(arg0, arg1) {
             const ret = new Float32Array(getArrayF32FromWasm0(arg0, arg1));
             return ret;
         },
-        __wbg_push_d2ae3af0c1217ae6: function(arg0, arg1) {
+        __wbg_new_with_length_3ffc1c56427c525c: function(arg0) {
+            const ret = new Uint8Array(arg0 >>> 0);
+            return ret;
+        },
+        __wbg_push_adb0107829f02d75: function(arg0, arg1) {
             const ret = arg0.push(arg1);
             return ret;
         },
-        __wbg_set_1e016b6a1b5f7cb3: function(arg0, arg1, arg2) {
+        __wbg_set_577f5f7485b6744e: function(arg0, arg1, arg2) {
             arg0.set(getArrayF32FromWasm0(arg1, arg2));
         },
-        __wbg_set_8535240470bf2500: function() { return handleError(function (arg0, arg1, arg2) {
+        __wbg_set_8155bb79a948541b: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = Reflect.set(arg0, arg1, arg2);
             return ret;
         }, arguments); },
-        __wbg_subarray_9c4c11e61a1051bd: function(arg0, arg1, arg2) {
+        __wbg_subarray_095365bb46f94afd: function(arg0, arg1, arg2) {
             const ret = arg0.subarray(arg1 >>> 0, arg2 >>> 0);
             return ret;
         },
@@ -2210,6 +2447,16 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
+            // Cast intrinsic for `Ref(Slice(I32)) -> NamedExternref("Int32Array")`.
+            const ret = getArrayI32FromWasm0(arg0, arg1);
+            return ret;
+        },
+        __wbindgen_cast_0000000000000003: function(arg0, arg1) {
+            // Cast intrinsic for `Ref(Slice(U8)) -> NamedExternref("Uint8Array")`.
+            const ret = getArrayU8FromWasm0(arg0, arg1);
+            return ret;
+        },
+        __wbindgen_cast_0000000000000004: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
             return ret;
@@ -2260,6 +2507,12 @@ const WasmCanonicalPcmDecoderFinalization = (typeof FinalizationRegistry === 'un
 const WasmFlacEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmflacencoder_free(ptr, 1));
+const WasmFlacFrameDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmflacframedecoder_free(ptr, 1));
+const WasmFlacFrameEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmflacframeencoder_free(ptr, 1));
 const WasmMp4MediaDemuxerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmmp4mediademuxer_free(ptr, 1));
@@ -2328,6 +2581,11 @@ function getArrayI16FromWasm0(ptr, len) {
     return getInt16ArrayMemory0().subarray(ptr / 2, ptr / 2 + len);
 }
 
+function getArrayI32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getInt32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
@@ -2347,6 +2605,14 @@ function getInt16ArrayMemory0() {
         cachedInt16ArrayMemory0 = new Int16Array(wasm.memory.buffer);
     }
     return cachedInt16ArrayMemory0;
+}
+
+let cachedInt32ArrayMemory0 = null;
+function getInt32ArrayMemory0() {
+    if (cachedInt32ArrayMemory0 === null || cachedInt32ArrayMemory0.byteLength === 0) {
+        cachedInt32ArrayMemory0 = new Int32Array(wasm.memory.buffer);
+    }
+    return cachedInt32ArrayMemory0;
 }
 
 function getStringFromWasm0(ptr, len) {
@@ -2493,6 +2759,7 @@ function __wbg_finalize_init(instance, module) {
     wasmModule = module;
     cachedFloat32ArrayMemory0 = null;
     cachedInt16ArrayMemory0 = null;
+    cachedInt32ArrayMemory0 = null;
     cachedUint16ArrayMemory0 = null;
     cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
@@ -2502,11 +2769,15 @@ function __wbg_finalize_init(instance, module) {
 
 async function __wbg_load(module, imports) {
     if (typeof Response === 'function' && module instanceof Response) {
+        if (!module.ok) {
+            throw new Error(`failed to fetch Wasm: ${module.status} ${module.statusText} fetching '${module.url}'`);
+        }
+
         if (typeof WebAssembly.instantiateStreaming === 'function') {
             try {
                 return await WebAssembly.instantiateStreaming(module, imports);
             } catch (e) {
-                const validResponse = module.ok && expectedResponseType(module.type);
+                const validResponse = expectedResponseType(module.type);
 
                 if (validResponse && module.headers.get('Content-Type') !== 'application/wasm') {
                     console.warn("`WebAssembly.instantiateStreaming` failed because your server does not serve Wasm with `application/wasm` MIME type. Falling back to `WebAssembly.instantiate` which is slower. Original error:\n", e);
