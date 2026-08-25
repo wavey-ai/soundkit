@@ -89,7 +89,7 @@ the container layout can require enough metadata/media to be buffered first.
 | Raw AC-3 syncframes | `soundkit-ac3` / `oxideav-ac3` | Auto or explicit | Yes | Raw elementary AC-3 stream, not containerized AC-3. |
 | AMR-NB | `soundkit-amr` / OpenCORE AMR-NB | Explicit | Yes | 3GPP `.amr` magic and raw frame streams; C FFI backend. |
 | G.711 u-law / A-law | `soundkit-g711` | Explicit | Yes | Pure Rust PCMU/PCMA decode. |
-| G.722 | `soundkit-g722` / `ezk-g722` | Explicit | Yes | Pure Rust 64 kbit/s wideband speech decode. |
+| G.722 | `soundkit-g722` | Explicit | Yes | SoundKit-authored, allocation-free 64 kbit/s encode/decode; bit-exact with the FFmpeg fixtures. |
 | G.726 | `soundkit-g726` | Explicit | Yes | Pure Rust 16/24/32/40 kbit/s profiles. |
 | G.729 | `soundkit-g729` / `g729-sys` | Explicit | Yes | Frame-buffered 8 kbit/s speech decode. |
 | GSM 06.10 / WAV-49 | `soundkit-gsm` / `libgsm` | Explicit | Yes | Standard raw GSM and Microsoft WAV-49 packet framing. |
@@ -197,7 +197,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Dependency family | Distribution note |
 | --- | --- |
-| Pure Rust codec crates (`lewton`, `alac`, `aifc`, `oxideav-*`, `ezk-g722`) | Mostly permissive; keep crate license notices in packaged distributions. |
+| Pure Rust codec crates (`lewton`, `alac`, `aifc`, `oxideav-*`) | Mostly permissive; keep crate license notices in packaged distributions. |
 | `mp4parse` on the ALAC M4A path | MPL-2.0 dependency. |
 | `libFLAC`, `mp3lame`, `fdk-aac`, OpenCORE AMR-NB, `libgsm`, Rubber Band | C/C++ library dependencies; ship notices and review binary distribution requirements. |
 | `libgsm` | Preserve the upstream notice in source and binary distributions. |

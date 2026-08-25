@@ -1,20 +1,21 @@
-use ezk_g722::libg722::{
-    decoder::Decoder as InnerDecoder, encoder::Encoder as InnerEncoder, Bitrate,
-};
 use soundkit::audio_packet::{Decoder, Encoder};
+
+mod core;
+
+use core::{DecoderCore, EncoderCore};
 
 pub const G722_SAMPLE_RATE: u32 = 16_000;
 pub const G722_CHANNELS: u8 = 1;
 
 pub struct G722Encoder {
-    inner: InnerEncoder,
+    inner: EncoderCore,
     pending_sample: Option<i16>,
 }
 
 impl G722Encoder {
     pub fn new_64k() -> Self {
         Self {
-            inner: InnerEncoder::new(Bitrate::Mode1_64000, false, false),
+            inner: EncoderCore::new(),
             pending_sample: None,
         }
     }
@@ -38,9 +39,7 @@ impl G722Encoder {
             return Err("Output buffer too small for G.722 flush: need 1, have 0".to_string());
         }
 
-        let encoded = self.inner.encode(&[sample, 0]);
-        output[..encoded.len()].copy_from_slice(&encoded);
-        Ok(encoded.len())
+        Ok(self.inner.encode(&[sample, 0], output))
     }
 
     pub fn flush_to_vec(&mut self, output: &mut Vec<u8>) -> Result<usize, String> {
@@ -102,9 +101,7 @@ impl Encoder for G722Encoder {
             self.pending_sample = samples.pop();
         }
 
-        let encoded = self.inner.encode(&samples);
-        output[..encoded.len()].copy_from_slice(&encoded);
-        Ok(encoded.len())
+        Ok(self.inner.encode(&samples, output))
     }
 
     fn encode_i32(&mut self, input: &[i32], output: &mut [u8]) -> Result<usize, String> {
@@ -113,20 +110,20 @@ impl Encoder for G722Encoder {
     }
 
     fn reset(&mut self) -> Result<(), String> {
-        self.inner = InnerEncoder::new(Bitrate::Mode1_64000, false, false);
+        self.inner = EncoderCore::new();
         self.pending_sample = None;
         Ok(())
     }
 }
 
 pub struct G722Decoder {
-    inner: InnerDecoder,
+    inner: DecoderCore,
 }
 
 impl G722Decoder {
     pub fn new_64k() -> Self {
         Self {
-            inner: InnerDecoder::new(Bitrate::Mode1_64000, false, false),
+            inner: DecoderCore::new(),
         }
     }
 
@@ -161,9 +158,7 @@ impl Decoder for G722Decoder {
             ));
         }
 
-        let decoded = self.inner.decode(input);
-        output[..decoded.len()].copy_from_slice(&decoded);
-        Ok(decoded.len())
+        Ok(self.inner.decode(input, output))
     }
 
     fn decode_i32(
@@ -181,11 +176,20 @@ impl Decoder for G722Decoder {
             ));
         }
 
-        let decoded = self.inner.decode(input);
-        for (dst, sample) in output.iter_mut().zip(decoded) {
-            *dst = i32::from(sample) << 16;
+        const STACK_SAMPLES: usize = 512;
+        let mut scratch = [0i16; STACK_SAMPLES];
+        let mut written = 0;
+        for chunk in input.chunks(STACK_SAMPLES / 2) {
+            let decoded = self.inner.decode(chunk, &mut scratch);
+            for (&sample, dst) in scratch[..decoded]
+                .iter()
+                .zip(&mut output[written..written + decoded])
+            {
+                *dst = i32::from(sample) << 16;
+            }
+            written += decoded;
         }
-        Ok(required)
+        Ok(written)
     }
 
     fn decode_f32(
@@ -203,11 +207,20 @@ impl Decoder for G722Decoder {
             ));
         }
 
-        let decoded = self.inner.decode(input);
-        for (dst, sample) in output.iter_mut().zip(decoded) {
-            *dst = f32::from(sample) / 32768.0;
+        const STACK_SAMPLES: usize = 512;
+        let mut scratch = [0i16; STACK_SAMPLES];
+        let mut written = 0;
+        for chunk in input.chunks(STACK_SAMPLES / 2) {
+            let decoded = self.inner.decode(chunk, &mut scratch);
+            for (&sample, dst) in scratch[..decoded]
+                .iter()
+                .zip(&mut output[written..written + decoded])
+            {
+                *dst = f32::from(sample) / 32768.0;
+            }
+            written += decoded;
         }
-        Ok(required)
+        Ok(written)
     }
 }
 
@@ -329,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_g722_fixture_and_write_golden_wav() {
+    fn decoder_is_bit_exact_with_committed_reference_fixture() {
         let fixture = fs::read(testdata_path(
             "g722/A_Tusk_is_used_to_make_costly_gifts.g722",
         ))
@@ -353,8 +366,34 @@ mod tests {
             G722_SAMPLE_RATE,
         )
         .unwrap();
-        let output_path = golden_path("g722/A_Tusk_is_used_to_make_costly_gifts.decoded.wav");
-        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
-        fs::write(output_path, wav).unwrap();
+        let reference = fs::read(golden_path(
+            "g722/A_Tusk_is_used_to_make_costly_gifts.decoded.wav",
+        ))
+        .unwrap();
+        assert_eq!(wav, reference);
+    }
+
+    #[test]
+    fn encoder_is_bit_exact_with_committed_reference_fixture() {
+        let pcm = fs::read(testdata_path(
+            "linear16/A_Tusk_is_used_to_make_costly_gifts.s16le",
+        ))
+        .unwrap();
+        let samples: Vec<i16> = pcm
+            .chunks_exact(2)
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect();
+        let reference = fs::read(testdata_path(
+            "g722/A_Tusk_is_used_to_make_costly_gifts.g722",
+        ))
+        .unwrap();
+
+        let mut encoder = G722Encoder::new_64k();
+        let mut encoded = vec![0u8; samples.len().div_ceil(2)];
+        let written = encoder.encode_i16(&samples, &mut encoded).unwrap();
+        encoded.truncate(written);
+        encoder.flush_to_vec(&mut encoded).unwrap();
+
+        assert_eq!(encoded, reference);
     }
 }
