@@ -1,0 +1,223 @@
+2026-08-25T01:26:50+00:00
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           52 bits physical, 57 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  4
+On-line CPU(s) list:                     0-3
+Vendor ID:                               GenuineIntel
+Model name:                              INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz
+CPU family:                              6
+Model:                                   207
+Thread(s) per core:                      2
+Core(s) per socket:                      2
+Socket(s):                               1
+Stepping:                                2
+BogoMIPS:                                4600.00
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology nonstop_tsc cpuid tsc_known_freq pni pclmulqdq monitor ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch invpcid_single ssbd ibrs ibpb stibp ibrs_enhanced fsgsbase tsc_adjust bmi1 hle avx2 smep bmi2 erms invpcid rtm avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx_vnni avx512_bf16 wbnoinvd arat avx512vbmi umip avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq la57 rdpid cldemote movdiri movdir64b fsrm md_clear serialize tsxldtrk amx_bf16 avx512_fp16 amx_tile amx_int8 arch_capabilities
+Hypervisor vendor:                       KVM
+Virtualization type:                     full
+L1d cache:                               96 KiB (2 instances)
+L1i cache:                               64 KiB (2 instances)
+L2 cache:                                4 MiB (2 instances)
+L3 cache:                                260 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-3
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; PBRSB-eIBRS SW sequence; BHI BHI_DIS_S
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Not affected
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo 1.97.1 (c980f4866 2026-06-30)
+ffmpeg version 5.1.9-0+deb12u1 Copyright (c) 2000-2026 the FFmpeg developers
+flac 1.4.2
+v18.20.4
+wasm-opt version 132 (version_132)
+2c170faf695a71d8a62db846d0e9b87075c70d0d005d837c7aac8e84643b5543  aac-wasm-bench/pkg-current/aac_wasm_bench_bg.wasm
+cdc919ecffba1ef63d740825affeaba21b8ec071f71c386bc51b99ab5c7652ad  aac-wasm-bench/reference/pkg-ffmpeg/ffmpeg-aac.wasm
+526bbd378bd32c0d0459bc1a54732f2389e0a403c44ec8029a86bec0ae72fa52  aac-wasm-bench/reference/pkg-fdk-fast/fdk-aac.wasm
+wasm-aac-decode fixture=bill-evans-secret-sessions-48k-256k.aac iterations=3 rounds=7 mode=all rust_package=pkg-current ffmpeg_package=pkg-ffmpeg fdk_package=pkg-fdk-fast node=v18.20.4
+round=1 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=220.000 rtf=0.000733 frames_per_sec=63940.9 checksum=3508b3e470afd492
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=266.081 rtf=0.000887 frames_per_sec=52867.4 checksum=e4ef59fd8321c616
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1549.221 rtf=0.005162 frames_per_sec=9080.0 checksum=137ae95d80f43025
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=324.000 rtf=0.001080 frames_per_sec=43416.7 checksum=df35c0dfc5622ac0
+round=2 order=symphonia,fdk,ffmpeg,soundkit
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=323.000 rtf=0.001076 frames_per_sec=43551.1 checksum=df35c0dfc5622ac0
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1542.527 rtf=0.005140 frames_per_sec=9119.4 checksum=137ae95d80f43025
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=257.792 rtf=0.000859 frames_per_sec=54567.3 checksum=e4ef59fd8321c616
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=224.000 rtf=0.000746 frames_per_sec=62799.1 checksum=3508b3e470afd492
+round=3 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=220.000 rtf=0.000733 frames_per_sec=63940.9 checksum=3508b3e470afd492
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=256.861 rtf=0.000856 frames_per_sec=54765.0 checksum=e4ef59fd8321c616
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1548.122 rtf=0.005159 frames_per_sec=9086.5 checksum=137ae95d80f43025
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=324.000 rtf=0.001080 frames_per_sec=43416.7 checksum=df35c0dfc5622ac0
+round=4 order=symphonia,fdk,ffmpeg,soundkit
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=323.000 rtf=0.001076 frames_per_sec=43551.1 checksum=df35c0dfc5622ac0
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1551.640 rtf=0.005170 frames_per_sec=9065.9 checksum=137ae95d80f43025
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=257.056 rtf=0.000857 frames_per_sec=54723.4 checksum=e4ef59fd8321c616
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=220.000 rtf=0.000733 frames_per_sec=63940.9 checksum=3508b3e470afd492
+round=5 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=223.000 rtf=0.000743 frames_per_sec=63080.7 checksum=3508b3e470afd492
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=257.671 rtf=0.000859 frames_per_sec=54592.9 checksum=e4ef59fd8321c616
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1543.041 rtf=0.005142 frames_per_sec=9116.4 checksum=137ae95d80f43025
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=323.000 rtf=0.001076 frames_per_sec=43551.1 checksum=df35c0dfc5622ac0
+round=6 order=symphonia,fdk,ffmpeg,soundkit
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=323.000 rtf=0.001076 frames_per_sec=43551.1 checksum=df35c0dfc5622ac0
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1542.051 rtf=0.005139 frames_per_sec=9122.3 checksum=137ae95d80f43025
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=256.660 rtf=0.000855 frames_per_sec=54807.9 checksum=e4ef59fd8321c616
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=220.000 rtf=0.000733 frames_per_sec=63940.9 checksum=3508b3e470afd492
+round=7 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=220.000 rtf=0.000733 frames_per_sec=63940.9 checksum=3508b3e470afd492
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=256.716 rtf=0.000855 frames_per_sec=54796.0 checksum=e4ef59fd8321c616
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1554.898 rtf=0.005181 frames_per_sec=9046.9 checksum=137ae95d80f43025
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=323.000 rtf=0.001076 frames_per_sec=43551.1 checksum=df35c0dfc5622ac0
+soundkit median_elapsed_ms=220.000 best_elapsed_ms=220.000 median_frames_per_sec=63940.9 checksum=3508b3e470afd492
+ffmpeg median_elapsed_ms=257.056 best_elapsed_ms=256.660 median_frames_per_sec=54723.4 checksum=e4ef59fd8321c616
+fdk median_elapsed_ms=1548.122 best_elapsed_ms=1542.051 median_frames_per_sec=9086.5 checksum=137ae95d80f43025
+symphonia median_elapsed_ms=323.000 best_elapsed_ms=323.000 median_frames_per_sec=43551.1 checksum=df35c0dfc5622ac0
+wasm-comparison soundkit_vs_ffmpeg=0.8558x soundkit_delta_pct=-14.42
+wasm-comparison soundkit_vs_fdk=0.1421x soundkit_delta_pct=-85.79
+wasm-comparison soundkit_vs_symphonia=0.6811x soundkit_delta_pct=-31.89
+wasm-aac-decode fixture=blue-nile-hats-48k-256k.aac iterations=3 rounds=7 mode=all rust_package=pkg-current ffmpeg_package=pkg-ffmpeg fdk_package=pkg-fdk-fast node=v18.20.4
+round=1 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=217.000 rtf=0.000723 frames_per_sec=64824.9 checksum=02043fbf2a75e59b
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=261.003 rtf=0.000870 frames_per_sec=53895.8 checksum=a67f24d5beb5bea7
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1579.388 rtf=0.005263 frames_per_sec=8906.6 checksum=23167184c8fa23e9
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=328.000 rtf=0.001093 frames_per_sec=42887.2 checksum=f2045d09a8605eb6
+round=2 order=symphonia,fdk,ffmpeg,soundkit
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=329.000 rtf=0.001096 frames_per_sec=42756.8 checksum=f2045d09a8605eb6
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1580.144 rtf=0.005265 frames_per_sec=8902.4 checksum=23167184c8fa23e9
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=251.697 rtf=0.000839 frames_per_sec=55888.5 checksum=a67f24d5beb5bea7
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=217.000 rtf=0.000723 frames_per_sec=64824.9 checksum=02043fbf2a75e59b
+round=3 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=218.000 rtf=0.000726 frames_per_sec=64527.5 checksum=02043fbf2a75e59b
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=251.030 rtf=0.000836 frames_per_sec=56037.1 checksum=a67f24d5beb5bea7
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1559.281 rtf=0.005196 frames_per_sec=9021.5 checksum=23167184c8fa23e9
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=329.000 rtf=0.001096 frames_per_sec=42756.8 checksum=f2045d09a8605eb6
+round=4 order=symphonia,fdk,ffmpeg,soundkit
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=329.000 rtf=0.001096 frames_per_sec=42756.8 checksum=f2045d09a8605eb6
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1557.111 rtf=0.005189 frames_per_sec=9034.0 checksum=23167184c8fa23e9
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=251.085 rtf=0.000837 frames_per_sec=56025.0 checksum=a67f24d5beb5bea7
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=217.000 rtf=0.000723 frames_per_sec=64824.9 checksum=02043fbf2a75e59b
+round=5 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=218.000 rtf=0.000726 frames_per_sec=64527.5 checksum=02043fbf2a75e59b
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=250.412 rtf=0.000834 frames_per_sec=56175.5 checksum=a67f24d5beb5bea7
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1577.615 rtf=0.005257 frames_per_sec=8916.6 checksum=23167184c8fa23e9
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=329.000 rtf=0.001096 frames_per_sec=42756.8 checksum=f2045d09a8605eb6
+round=6 order=symphonia,fdk,ffmpeg,soundkit
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=329.000 rtf=0.001096 frames_per_sec=42756.8 checksum=f2045d09a8605eb6
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1563.554 rtf=0.005210 frames_per_sec=8996.8 checksum=23167184c8fa23e9
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=251.355 rtf=0.000838 frames_per_sec=55964.8 checksum=a67f24d5beb5bea7
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=217.000 rtf=0.000723 frames_per_sec=64824.9 checksum=02043fbf2a75e59b
+round=7 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=217.000 rtf=0.000723 frames_per_sec=64824.9 checksum=02043fbf2a75e59b
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=250.736 rtf=0.000836 frames_per_sec=56102.9 checksum=a67f24d5beb5bea7
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1577.150 rtf=0.005255 frames_per_sec=8919.3 checksum=23167184c8fa23e9
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=329.000 rtf=0.001096 frames_per_sec=42756.8 checksum=f2045d09a8605eb6
+soundkit median_elapsed_ms=217.000 best_elapsed_ms=217.000 median_frames_per_sec=64824.9 checksum=02043fbf2a75e59b
+ffmpeg median_elapsed_ms=251.085 best_elapsed_ms=250.412 median_frames_per_sec=56025.0 checksum=a67f24d5beb5bea7
+fdk median_elapsed_ms=1577.150 best_elapsed_ms=1557.111 median_frames_per_sec=8919.3 checksum=23167184c8fa23e9
+symphonia median_elapsed_ms=329.000 best_elapsed_ms=328.000 median_frames_per_sec=42756.8 checksum=f2045d09a8605eb6
+wasm-comparison soundkit_vs_ffmpeg=0.8643x soundkit_delta_pct=-13.57
+wasm-comparison soundkit_vs_fdk=0.1376x soundkit_delta_pct=-86.24
+wasm-comparison soundkit_vs_symphonia=0.6596x soundkit_delta_pct=-34.04
+wasm-aac-decode fixture=lori-asha-48k-256k.aac iterations=3 rounds=7 mode=all rust_package=pkg-current ffmpeg_package=pkg-ffmpeg fdk_package=pkg-fdk-fast node=v18.20.4
+round=1 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=215.000 rtf=0.000716 frames_per_sec=65427.9 checksum=d2f44da922d5d109
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=260.909 rtf=0.000869 frames_per_sec=53915.4 checksum=fe88f64e8b24d354
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1601.547 rtf=0.005337 frames_per_sec=8783.4 checksum=d25bb3be956df3c3
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=337.000 rtf=0.001123 frames_per_sec=41741.8 checksum=982cd7c673d1f8ee
+round=2 order=symphonia,fdk,ffmpeg,soundkit
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=339.000 rtf=0.001130 frames_per_sec=41495.6 checksum=982cd7c673d1f8ee
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1644.215 rtf=0.005479 frames_per_sec=8555.4 checksum=d25bb3be956df3c3
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=251.738 rtf=0.000839 frames_per_sec=55879.5 checksum=fe88f64e8b24d354
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=215.000 rtf=0.000716 frames_per_sec=65427.9 checksum=d2f44da922d5d109
+round=3 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=218.000 rtf=0.000726 frames_per_sec=64527.5 checksum=d2f44da922d5d109
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=251.598 rtf=0.000838 frames_per_sec=55910.7 checksum=fe88f64e8b24d354
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1649.064 rtf=0.005495 frames_per_sec=8530.3 checksum=d25bb3be956df3c3
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=344.000 rtf=0.001146 frames_per_sec=40892.4 checksum=982cd7c673d1f8ee
+round=4 order=symphonia,fdk,ffmpeg,soundkit
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=337.000 rtf=0.001123 frames_per_sec=41741.8 checksum=982cd7c673d1f8ee
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1626.066 rtf=0.005418 frames_per_sec=8650.9 checksum=d25bb3be956df3c3
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=250.598 rtf=0.000835 frames_per_sec=56133.7 checksum=fe88f64e8b24d354
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=216.000 rtf=0.000720 frames_per_sec=65125.0 checksum=d2f44da922d5d109
+round=5 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=215.000 rtf=0.000716 frames_per_sec=65427.9 checksum=d2f44da922d5d109
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=250.283 rtf=0.000834 frames_per_sec=56204.4 checksum=fe88f64e8b24d354
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1630.147 rtf=0.005432 frames_per_sec=8629.3 checksum=d25bb3be956df3c3
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=337.000 rtf=0.001123 frames_per_sec=41741.8 checksum=982cd7c673d1f8ee
+round=6 order=symphonia,fdk,ffmpeg,soundkit
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=337.000 rtf=0.001123 frames_per_sec=41741.8 checksum=982cd7c673d1f8ee
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1641.232 rtf=0.005469 frames_per_sec=8571.0 checksum=d25bb3be956df3c3
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=254.207 rtf=0.000847 frames_per_sec=55336.9 checksum=fe88f64e8b24d354
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=220.000 rtf=0.000733 frames_per_sec=63940.9 checksum=d2f44da922d5d109
+round=7 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=216.000 rtf=0.000720 frames_per_sec=65125.0 checksum=d2f44da922d5d109
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=249.599 rtf=0.000832 frames_per_sec=56358.5 checksum=fe88f64e8b24d354
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1635.777 rtf=0.005451 frames_per_sec=8599.6 checksum=d25bb3be956df3c3
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=339.000 rtf=0.001130 frames_per_sec=41495.6 checksum=982cd7c673d1f8ee
+soundkit median_elapsed_ms=216.000 best_elapsed_ms=215.000 median_frames_per_sec=65125.0 checksum=d2f44da922d5d109
+ffmpeg median_elapsed_ms=251.598 best_elapsed_ms=249.599 median_frames_per_sec=55910.7 checksum=fe88f64e8b24d354
+fdk median_elapsed_ms=1635.777 best_elapsed_ms=1601.547 median_frames_per_sec=8599.6 checksum=d25bb3be956df3c3
+symphonia median_elapsed_ms=337.000 best_elapsed_ms=337.000 median_frames_per_sec=41741.8 checksum=982cd7c673d1f8ee
+wasm-comparison soundkit_vs_ffmpeg=0.8585x soundkit_delta_pct=-14.15
+wasm-comparison soundkit_vs_fdk=0.1320x soundkit_delta_pct=-86.80
+wasm-comparison soundkit_vs_symphonia=0.6409x soundkit_delta_pct=-35.91
+wasm-aac-decode fixture=nocturnal-animals-48k-256k.aac iterations=3 rounds=7 mode=all rust_package=pkg-current ffmpeg_package=pkg-ffmpeg fdk_package=pkg-fdk-fast node=v18.20.4
+round=1 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=205.000 rtf=0.000683 frames_per_sec=68619.5 checksum=2773b4dc85d843fd
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=250.688 rtf=0.000835 frames_per_sec=56113.5 checksum=83f34e703ffe50b6
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1725.687 rtf=0.005750 frames_per_sec=8151.5 checksum=ec58b68bca85a460
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=358.000 rtf=0.001193 frames_per_sec=39293.3 checksum=abf507e2455353fa
+round=2 order=symphonia,fdk,ffmpeg,soundkit
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=363.000 rtf=0.001210 frames_per_sec=38752.1 checksum=abf507e2455353fa
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1728.869 rtf=0.005761 frames_per_sec=8136.5 checksum=ec58b68bca85a460
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=242.682 rtf=0.000809 frames_per_sec=57964.7 checksum=83f34e703ffe50b6
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=208.000 rtf=0.000693 frames_per_sec=67629.8 checksum=2773b4dc85d843fd
+round=3 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=206.000 rtf=0.000686 frames_per_sec=68286.4 checksum=2773b4dc85d843fd
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=244.717 rtf=0.000815 frames_per_sec=57482.8 checksum=83f34e703ffe50b6
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1728.317 rtf=0.005759 frames_per_sec=8139.1 checksum=ec58b68bca85a460
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=357.000 rtf=0.001190 frames_per_sec=39403.4 checksum=abf507e2455353fa
+round=4 order=symphonia,fdk,ffmpeg,soundkit
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=358.000 rtf=0.001193 frames_per_sec=39293.3 checksum=abf507e2455353fa
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1701.215 rtf=0.005669 frames_per_sec=8268.8 checksum=ec58b68bca85a460
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=242.485 rtf=0.000808 frames_per_sec=58011.8 checksum=83f34e703ffe50b6
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=205.000 rtf=0.000683 frames_per_sec=68619.5 checksum=2773b4dc85d843fd
+round=5 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=206.000 rtf=0.000686 frames_per_sec=68286.4 checksum=2773b4dc85d843fd
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=243.043 rtf=0.000810 frames_per_sec=57878.6 checksum=83f34e703ffe50b6
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1731.883 rtf=0.005771 frames_per_sec=8122.4 checksum=ec58b68bca85a460
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=360.000 rtf=0.001200 frames_per_sec=39075.0 checksum=abf507e2455353fa
+round=6 order=symphonia,fdk,ffmpeg,soundkit
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=359.000 rtf=0.001196 frames_per_sec=39183.8 checksum=abf507e2455353fa
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1715.902 rtf=0.005718 frames_per_sec=8198.0 checksum=ec58b68bca85a460
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=242.591 rtf=0.000808 frames_per_sec=57986.5 checksum=83f34e703ffe50b6
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=205.000 rtf=0.000683 frames_per_sec=68619.5 checksum=2773b4dc85d843fd
+round=7 order=soundkit,ffmpeg,fdk,symphonia
+soundkit-lc-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=205.000 rtf=0.000683 frames_per_sec=68619.5 checksum=2773b4dc85d843fd
+ffmpeg-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=242.226 rtf=0.000807 frames_per_sec=58073.9 checksum=83f34e703ffe50b6
+fdk-aac-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=1701.791 rtf=0.005671 frames_per_sec=8266.0 checksum=ec58b68bca85a460
+symphonia-wasm decoded_frames=14067 samples_per_channel=14404608 elapsed_ms=358.000 rtf=0.001193 frames_per_sec=39293.3 checksum=abf507e2455353fa
+soundkit median_elapsed_ms=205.000 best_elapsed_ms=205.000 median_frames_per_sec=68619.5 checksum=2773b4dc85d843fd
+ffmpeg median_elapsed_ms=242.682 best_elapsed_ms=242.226 median_frames_per_sec=57964.7 checksum=83f34e703ffe50b6
+fdk median_elapsed_ms=1725.687 best_elapsed_ms=1701.215 median_frames_per_sec=8151.5 checksum=ec58b68bca85a460
+symphonia median_elapsed_ms=358.000 best_elapsed_ms=357.000 median_frames_per_sec=39293.3 checksum=abf507e2455353fa
+wasm-comparison soundkit_vs_ffmpeg=0.8447x soundkit_delta_pct=-15.53
+wasm-comparison soundkit_vs_fdk=0.1188x soundkit_delta_pct=-88.12
+wasm-comparison soundkit_vs_symphonia=0.5726x soundkit_delta_pct=-42.74
