@@ -174,11 +174,14 @@ impl AacLcDecoder {
             ));
         }
         let _tag = tag.ok_or(AacLcError::InvalidBitstream("missing SCE instance tag"))?;
-        let mut scale_factor_decoder = StandardScaleFactorDecoder;
+        let mut scale_factor_decoder = StandardScaleFactorDecoder::new();
         let stream = IndividualChannelStream::read(reader, None, &mut scale_factor_decoder)?;
 
+        #[cfg(not(feature = "bench-ablate-spectrum"))]
         self.decode_channel_spectrum(0, reader, &stream, false)?;
+        #[cfg(not(feature = "bench-ablate-tools"))]
         self.apply_channel_tns(0, &stream)?;
+        #[cfg(not(feature = "bench-ablate-synth"))]
         self.synthesize_channel(0, &stream.prefix.ics_info)?;
         Ok(())
     }
@@ -196,23 +199,30 @@ impl AacLcDecoder {
 
         let tag = tag.ok_or(AacLcError::InvalidBitstream("missing CPE instance tag"))?;
         let header = ChannelPairElementHeader::read(reader, tag)?;
-        let mut scale_factor_decoder = StandardScaleFactorDecoder;
+        let mut scale_factor_decoder = StandardScaleFactorDecoder::new();
 
         let left =
             IndividualChannelStream::read(reader, header.common_ics, &mut scale_factor_decoder)?;
+        #[cfg(not(feature = "bench-ablate-spectrum"))]
         self.decode_channel_spectrum(0, reader, &left, false)?;
 
         let right =
             IndividualChannelStream::read(reader, header.common_ics, &mut scale_factor_decoder)?;
+        #[cfg(not(feature = "bench-ablate-spectrum"))]
         self.decode_channel_spectrum(1, reader, &right, true)?;
 
+        #[cfg(not(feature = "bench-ablate-tools"))]
         self.apply_common_stereo_tools(&header, &left.prefix.ics_info, &left, &right)?;
         // TNS filters the reconstructed left/right spectra. Applying it to
         // mid/side or intensity-coded spectra produces a channel-dependent
         // error even when the noiseless coefficients are correct.
+        #[cfg(not(feature = "bench-ablate-tools"))]
         self.apply_channel_tns(0, &left)?;
+        #[cfg(not(feature = "bench-ablate-tools"))]
         self.apply_channel_tns(1, &right)?;
+        #[cfg(not(feature = "bench-ablate-synth"))]
         self.synthesize_channel(0, &left.prefix.ics_info)?;
+        #[cfg(not(feature = "bench-ablate-synth"))]
         self.synthesize_channel(1, &right.prefix.ics_info)?;
         Ok(())
     }

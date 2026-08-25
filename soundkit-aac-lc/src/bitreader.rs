@@ -4,20 +4,11 @@ use crate::error::{AacLcError, Result};
 pub struct BitReader<'a> {
     data: &'a [u8],
     bit_pos: usize,
-    byte_pos: usize,
-    cache: u64,
-    cache_bits: u8,
 }
 
 impl<'a> BitReader<'a> {
     pub const fn new(data: &'a [u8]) -> Self {
-        Self {
-            data,
-            bit_pos: 0,
-            byte_pos: 0,
-            cache: 0,
-            cache_bits: 0,
-        }
+        Self { data, bit_pos: 0 }
     }
 
     pub const fn bit_pos(&self) -> usize {
@@ -76,8 +67,7 @@ impl<'a> BitReader<'a> {
             });
         }
 
-        self.fill_until(bits);
-        Ok((self.cache >> (u64::BITS - bits as u32)) as u32)
+        Ok(self.peek_bits_unchecked(bits))
     }
 
     pub(crate) fn peek_prefix(&mut self, max_bits: u8) -> Result<(u32, u8)> {
@@ -90,14 +80,33 @@ impl<'a> BitReader<'a> {
             ));
         }
 
-        let remaining = self.remaining_bits();
-        let bits = max_bits.min(remaining.min(u8::MAX as usize) as u8);
+        let bits = max_bits.min(self.remaining_bits().min(u8::MAX as usize) as u8);
         if bits == 0 {
             return Ok((0, 0));
         }
 
-        self.fill_until(bits);
-        Ok(((self.cache >> (u64::BITS - bits as u32)) as u32, bits))
+        Ok((self.peek_bits_unchecked(bits), bits))
+    }
+
+    /// Fast fixed-width prefix access for padded interior bytes. AAC VLC
+    /// tables need at most 19 bits, so four source bytes cover the prefix at
+    /// every bit alignment. Only the final three bytes take the checked tail
+    /// path.
+    #[inline(always)]
+    pub(crate) fn peek_prefix_fast<const MAX_BITS: u8>(&mut self) -> Result<(u32, u8)> {
+        debug_assert!(MAX_BITS > 0 && MAX_BITS <= 24);
+        let byte_pos = self.bit_pos >> 3;
+        if self.data.len() - byte_pos >= 4 {
+            let word = unsafe {
+                core::ptr::read_unaligned(self.data.as_ptr().add(byte_pos).cast::<u32>())
+            };
+            let bit_offset = (self.bit_pos & 7) as u32;
+            return Ok((
+                (u32::from_be(word) << bit_offset) >> (32 - u32::from(MAX_BITS)),
+                MAX_BITS,
+            ));
+        }
+        self.peek_prefix(MAX_BITS)
     }
 
     pub fn read_bits(&mut self, bits: u8) -> Result<u32> {
@@ -116,9 +125,8 @@ impl<'a> BitReader<'a> {
             });
         }
 
-        self.fill_until(bits);
-        let value = (self.cache >> (u64::BITS - bits as u32)) as u32;
-        self.consume_cached(bits);
+        let value = self.peek_bits_unchecked(bits);
+        self.bit_pos += usize::from(bits);
         Ok(value)
     }
 
@@ -129,25 +137,47 @@ impl<'a> BitReader<'a> {
                 remaining_bits: self.remaining_bits(),
             });
         }
-
-        let cached = bits.min(self.cache_bits as usize);
-        self.consume_cached(cached as u8);
-
-        let bits = bits - cached;
-        let whole_bytes = bits / 8;
-        self.byte_pos += whole_bytes;
-        self.bit_pos += whole_bytes * 8;
-
-        let tail_bits = (bits % 8) as u8;
-        if tail_bits != 0 {
-            self.fill_until(tail_bits);
-            self.consume_cached(tail_bits);
-        }
+        self.bit_pos += bits;
         Ok(())
     }
 
     pub(crate) fn consume_cached_prefix(&mut self, bits: u8) {
-        self.consume_cached(bits);
+        debug_assert!(usize::from(bits) <= self.remaining_bits());
+        self.bit_pos += usize::from(bits);
+    }
+
+    /// Reads a single sign bit without the full `read_bits` accounting path.
+    #[inline]
+    pub(crate) fn read_sign_bit(&mut self) -> Result<bool> {
+        if self.remaining_bits() == 0 {
+            return Err(AacLcError::UnexpectedEof {
+                requested_bits: 1,
+                remaining_bits: 0,
+            });
+        }
+        let bit = self.peek_bits_unchecked(1);
+        self.bit_pos += 1;
+        Ok(bit != 0)
+    }
+
+    /// Reads up to four consecutive spectral sign bits. AAC codebooks never
+    /// need more than four signs per tuple.
+    #[inline(always)]
+    pub(crate) fn read_sign_bits(&mut self, bits: u8) -> Result<u32> {
+        debug_assert!(bits <= 4);
+        if bits == 0 {
+            return Ok(0);
+        }
+        if self.remaining_bits() < usize::from(bits) {
+            return Err(AacLcError::UnexpectedEof {
+                requested_bits: bits,
+                remaining_bits: self.remaining_bits(),
+            });
+        }
+
+        let value = self.peek_bits_unchecked(bits);
+        self.bit_pos += usize::from(bits);
+        Ok(value)
     }
 
     pub fn align_to_byte(&mut self) {
@@ -158,29 +188,32 @@ impl<'a> BitReader<'a> {
         }
     }
 
-    fn fill_until(&mut self, target_bits: u8) {
-        while self.cache_bits < target_bits && self.byte_pos < self.data.len() {
-            debug_assert!(self.cache_bits <= 56);
-            let shift = u64::BITS - 8 - self.cache_bits as u32;
-            self.cache |= u64::from(self.data[self.byte_pos]) << shift;
-            self.cache_bits += 8;
-            self.byte_pos += 1;
-        }
-    }
+    #[inline(always)]
+    fn peek_bits_unchecked(&self, bits: u8) -> u32 {
+        debug_assert!(bits > 0 && bits <= 32);
+        debug_assert!(usize::from(bits) <= self.remaining_bits());
 
-    fn consume_cached(&mut self, bits: u8) {
-        debug_assert!(bits <= self.cache_bits);
-        if bits == 0 {
-            return;
+        let byte_pos = self.bit_pos >> 3;
+        let bit_offset = (self.bit_pos & 7) as u32;
+        if u32::from(bits) + bit_offset <= 32 && self.data.len() - byte_pos >= 4 {
+            // AAC stores bits most-significant first. An unaligned native word
+            // load plus a byte swap maps directly to FFmpeg's AV_RB32-style
+            // bit access on little-endian Wasm and x86 hosts.
+            let word = unsafe {
+                core::ptr::read_unaligned(self.data.as_ptr().add(byte_pos).cast::<u32>())
+            };
+            return (u32::from_be(word) << bit_offset) >> (32 - u32::from(bits));
         }
 
-        if bits == u64::BITS as u8 {
-            self.cache = 0;
-        } else {
-            self.cache <<= bits as u32;
+        // Only reads at the end of the input or 25-32-bit unaligned reads take
+        // this path. Syntax and Huffman fields use the direct word path above.
+        let mut value = 0u32;
+        for offset in 0..usize::from(bits) {
+            let position = self.bit_pos + offset;
+            value =
+                (value << 1) | u32::from((self.data[position >> 3] >> (7 - (position & 7))) & 1);
         }
-        self.cache_bits -= bits;
-        self.bit_pos += bits as usize;
+        value
     }
 }
 
@@ -225,6 +258,18 @@ mod tests {
         assert_eq!(reader.bit_pos(), 3);
         assert_eq!(reader.read_bits(9).unwrap(), 0b0_1100_0110);
         assert_eq!(reader.bit_pos(), 12);
+    }
+
+    #[test]
+    fn reads_batched_sign_bits_from_cache() {
+        let mut reader = BitReader::new(&[0b1011_0010, 0b1100_0000]);
+
+        assert_eq!(reader.peek_u32(8).unwrap(), 0b1011_0010);
+        assert_eq!(reader.read_sign_bits(3).unwrap(), 0b101);
+        assert_eq!(reader.read_sign_bits(0).unwrap(), 0);
+        assert_eq!(reader.read_sign_bits(4).unwrap(), 0b1001);
+        assert_eq!(reader.read_sign_bits(4).unwrap(), 0b0110);
+        assert_eq!(reader.bit_pos(), 11);
     }
 
     #[test]

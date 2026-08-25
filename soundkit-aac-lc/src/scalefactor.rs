@@ -3,7 +3,7 @@ use crate::channel::IndividualChannelStreamPrefix;
 use crate::dsp::scalefactor_multiplier;
 use crate::error::{AacLcError, Result};
 use crate::ics::MAX_WINDOW_GROUPS;
-use crate::section::{SectionCodebook, MAX_SCALE_FACTOR_BANDS};
+use crate::section::{SectionCodebook, MAX_SCALE_FACTOR_BANDS, MAX_SCALE_FACTOR_ENTRIES};
 use crate::vlc::VlcTable;
 use std::sync::OnceLock;
 
@@ -21,8 +21,8 @@ pub enum ScaleFactorValue {
 pub struct ScaleFactorData {
     max_sfb: u8,
     num_window_groups: u8,
-    values: [[ScaleFactorValue; MAX_SCALE_FACTOR_BANDS]; MAX_WINDOW_GROUPS],
-    multipliers: [[f32; MAX_SCALE_FACTOR_BANDS]; MAX_WINDOW_GROUPS],
+    values: [ScaleFactorValue; MAX_SCALE_FACTOR_ENTRIES],
+    multipliers: [f32; MAX_SCALE_FACTOR_ENTRIES],
 }
 
 impl PartialEq for ScaleFactorData {
@@ -67,12 +67,28 @@ impl ScaleFactorDecoder for VlcScaleFactorDecoder<'_> {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct StandardScaleFactorDecoder;
+#[derive(Debug)]
+pub struct StandardScaleFactorDecoder {
+    lookup: &'static [u32],
+}
+
+impl StandardScaleFactorDecoder {
+    pub fn new() -> Self {
+        Self {
+            lookup: standard_scalefactor_lookup(),
+        }
+    }
+}
+
+impl Default for StandardScaleFactorDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ScaleFactorDecoder for StandardScaleFactorDecoder {
     fn read_delta(&mut self, reader: &mut BitReader<'_>) -> Result<i16> {
-        read_standard_scalefactor_delta(reader)
+        read_standard_scalefactor_delta(reader, self.lookup)
     }
 }
 
@@ -89,16 +105,24 @@ impl ScaleFactorData {
                 "max_sfb exceeds scalefactor parser capacity",
             ));
         }
+        let entry_count = max_sfb * num_window_groups;
+        if num_window_groups > MAX_WINDOW_GROUPS || entry_count > MAX_SCALE_FACTOR_ENTRIES {
+            return Err(AacLcError::InvalidBitstream(
+                "scale-factor layout exceeds parser capacity",
+            ));
+        }
 
-        let mut values = [[ScaleFactorValue::Zero; MAX_SCALE_FACTOR_BANDS]; MAX_WINDOW_GROUPS];
-        let mut multipliers = [[0.0; MAX_SCALE_FACTOR_BANDS]; MAX_WINDOW_GROUPS];
+        let mut values = [ScaleFactorValue::Zero; MAX_SCALE_FACTOR_ENTRIES];
+        let mut multipliers = [0.0; MAX_SCALE_FACTOR_ENTRIES];
         let mut spectral = prefix.global_gain as i16;
         let mut noise = prefix.global_gain as i16 - 90;
         let mut intensity = 0i16;
         let mut first_noise = true;
 
-        for (group, group_values) in values.iter_mut().enumerate().take(num_window_groups) {
-            for (sfb, value) in group_values.iter_mut().enumerate().take(max_sfb) {
+        for group in 0..num_window_groups {
+            for sfb in 0..max_sfb {
+                let index = group * max_sfb + sfb;
+                let value = &mut values[index];
                 *value = match prefix.section_data.codebook(group, sfb).ok_or(
                     AacLcError::InvalidBitstream("missing section codebook for scalefactor band"),
                 )? {
@@ -107,7 +131,7 @@ impl ScaleFactorData {
                         spectral = spectral.checked_add(decoder.read_delta(reader)?).ok_or(
                             AacLcError::InvalidBitstream("spectral scalefactor overflow"),
                         )?;
-                        multipliers[group][sfb] = scalefactor_multiplier(spectral);
+                        multipliers[index] = scalefactor_multiplier(spectral);
                         ScaleFactorValue::Spectral(spectral)
                     }
                     SectionCodebook::Noise => {
@@ -121,21 +145,21 @@ impl ScaleFactorData {
                                 AacLcError::InvalidBitstream("noise scalefactor overflow"),
                             )?;
                         }
-                        multipliers[group][sfb] = scalefactor_multiplier(noise);
+                        multipliers[index] = scalefactor_multiplier(noise);
                         ScaleFactorValue::Noise(noise)
                     }
                     SectionCodebook::Intensity => {
                         intensity = intensity.checked_add(decoder.read_delta(reader)?).ok_or(
                             AacLcError::InvalidBitstream("intensity scalefactor overflow"),
                         )?;
-                        multipliers[group][sfb] = intensity_multiplier(intensity);
+                        multipliers[index] = intensity_multiplier(intensity);
                         ScaleFactorValue::Intensity(intensity)
                     }
                     SectionCodebook::IntensityNegative => {
                         intensity = intensity.checked_add(decoder.read_delta(reader)?).ok_or(
                             AacLcError::InvalidBitstream("intensity scalefactor overflow"),
                         )?;
-                        multipliers[group][sfb] = intensity_multiplier(intensity);
+                        multipliers[index] = intensity_multiplier(intensity);
                         ScaleFactorValue::IntensityNegative(intensity)
                     }
                 };
@@ -162,14 +186,16 @@ impl ScaleFactorData {
         if group >= self.num_window_groups as usize || sfb >= self.max_sfb as usize {
             return None;
         }
-        Some(self.values[group][sfb])
+        Some(self.values[group * self.max_sfb as usize + sfb])
     }
 
     pub fn spectral_multiplier(&self, group: usize, sfb: usize) -> Result<f32> {
         match self.value(group, sfb).ok_or(AacLcError::InvalidBitstream(
             "missing scalefactor value for band",
         ))? {
-            ScaleFactorValue::Spectral(_) => Ok(self.multipliers[group][sfb]),
+            ScaleFactorValue::Spectral(_) => {
+                Ok(self.multipliers[group * self.max_sfb as usize + sfb])
+            }
             _ => Err(AacLcError::InvalidBitstream(
                 "spectral band does not have spectral scalefactor",
             )),
@@ -180,7 +206,7 @@ impl ScaleFactorData {
         match self.value(group, sfb).ok_or(AacLcError::InvalidBitstream(
             "missing noise scalefactor value",
         ))? {
-            ScaleFactorValue::Noise(_) => Ok(self.multipliers[group][sfb]),
+            ScaleFactorValue::Noise(_) => Ok(self.multipliers[group * self.max_sfb as usize + sfb]),
             _ => Err(AacLcError::InvalidBitstream(
                 "noise band does not have a noise scalefactor",
             )),
@@ -192,7 +218,7 @@ impl ScaleFactorData {
             "missing intensity scalefactor value",
         ))? {
             ScaleFactorValue::Intensity(_) | ScaleFactorValue::IntensityNegative(_) => {
-                Ok(self.multipliers[group][sfb])
+                Ok(self.multipliers[group * self.max_sfb as usize + sfb])
             }
             _ => Err(AacLcError::InvalidBitstream(
                 "intensity band does not have an intensity scalefactor",
@@ -212,12 +238,13 @@ fn intensity_multiplier(position: i16) -> f32 {
 const STANDARD_SCALE_FACTOR_LAV: i16 = 60;
 const STANDARD_SCALE_FACTOR_MAX_BITS: u8 = 19;
 const STANDARD_SCALE_FACTOR_CODEBOOK_LEN: usize = 121;
-
-#[derive(Clone, Copy, Default)]
-struct ScaleFactorLookupEntry {
-    bits: u8,
-    delta: i16,
-}
+const SCALE_FACTOR_ROOT_BITS: u8 = 7;
+const SCALE_FACTOR_BLOCK_BITS: u8 = 6;
+const SCALE_FACTOR_ROOT_LEN: usize = 1 << SCALE_FACTOR_ROOT_BITS;
+const SCALE_FACTOR_BLOCK_LEN: usize = 1 << SCALE_FACTOR_BLOCK_BITS;
+const SCALE_FACTOR_LOOKUP_BITS_MASK: u32 = 0x1f;
+const SCALE_FACTOR_LOOKUP_VALUE_SHIFT: u32 = 8;
+const SCALE_FACTOR_LOOKUP_JUMP: u32 = 1 << 31;
 
 const STANDARD_SCALE_FACTOR_CODE_LENGTHS: [u8; STANDARD_SCALE_FACTOR_CODEBOOK_LEN] = [
     0x12, 0x12, 0x12, 0x12, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13,
@@ -249,15 +276,29 @@ const STANDARD_SCALE_FACTOR_CODES: [u32; STANDARD_SCALE_FACTOR_CODEBOOK_LEN] = [
     0x0007fff3,
 ];
 
-fn read_standard_scalefactor_delta(reader: &mut BitReader<'_>) -> Result<i16> {
-    let (lookahead, lookahead_bits) = reader.peek_prefix(STANDARD_SCALE_FACTOR_MAX_BITS)?;
-    let index =
+fn read_standard_scalefactor_delta(reader: &mut BitReader<'_>, table: &[u32]) -> Result<i16> {
+    let (lookahead, lookahead_bits) =
+        reader.peek_prefix_fast::<STANDARD_SCALE_FACTOR_MAX_BITS>()?;
+    let padded =
         (lookahead as usize) << (STANDARD_SCALE_FACTOR_MAX_BITS as usize - lookahead_bits as usize);
-    let entry = standard_scalefactor_lookup()[index];
+    let mut entry = unsafe {
+        *table.get_unchecked(padded >> (STANDARD_SCALE_FACTOR_MAX_BITS - SCALE_FACTOR_ROOT_BITS))
+    };
+    if entry & SCALE_FACTOR_LOOKUP_JUMP != 0 {
+        let base = (entry & !SCALE_FACTOR_LOOKUP_JUMP) as usize;
+        let index = (padded >> SCALE_FACTOR_BLOCK_BITS) & (SCALE_FACTOR_BLOCK_LEN - 1);
+        entry = unsafe { *table.get_unchecked(base + index) };
+        if entry & SCALE_FACTOR_LOOKUP_JUMP != 0 {
+            let base = (entry & !SCALE_FACTOR_LOOKUP_JUMP) as usize;
+            entry = unsafe { *table.get_unchecked(base + (padded & (SCALE_FACTOR_BLOCK_LEN - 1))) };
+        }
+    }
 
-    if entry.bits != 0 && entry.bits <= lookahead_bits {
-        reader.consume_cached_prefix(entry.bits);
-        return Ok(entry.delta);
+    let bits = (entry & SCALE_FACTOR_LOOKUP_BITS_MASK) as u8;
+    if bits != 0 && bits <= lookahead_bits {
+        reader.consume_cached_prefix(bits);
+        let value = ((entry >> SCALE_FACTOR_LOOKUP_VALUE_SHIFT) & 0xff) as i16;
+        return Ok(value - STANDARD_SCALE_FACTOR_LAV);
     }
 
     Err(AacLcError::InvalidBitstream(
@@ -265,16 +306,16 @@ fn read_standard_scalefactor_delta(reader: &mut BitReader<'_>) -> Result<i16> {
     ))
 }
 
-fn standard_scalefactor_lookup() -> &'static [ScaleFactorLookupEntry] {
-    static LOOKUP: OnceLock<Box<[ScaleFactorLookupEntry]>> = OnceLock::new();
+fn standard_scalefactor_lookup() -> &'static [u32] {
+    static LOOKUP: OnceLock<Box<[u32]>> = OnceLock::new();
     LOOKUP
         .get_or_init(build_standard_scalefactor_lookup)
         .as_ref()
 }
 
-fn build_standard_scalefactor_lookup() -> Box<[ScaleFactorLookupEntry]> {
-    let mut table =
-        vec![ScaleFactorLookupEntry::default(); 1usize << STANDARD_SCALE_FACTOR_MAX_BITS];
+fn build_standard_scalefactor_lookup() -> Box<[u32]> {
+    let mut table = vec![0u32; SCALE_FACTOR_ROOT_LEN];
+    let mut jump_bases = vec![usize::MAX; SCALE_FACTOR_ROOT_LEN];
 
     for index in 0..STANDARD_SCALE_FACTOR_CODEBOOK_LEN {
         let bits = STANDARD_SCALE_FACTOR_CODE_LENGTHS[index];
@@ -283,19 +324,61 @@ fn build_standard_scalefactor_lookup() -> Box<[ScaleFactorLookupEntry]> {
         }
 
         let code = STANDARD_SCALE_FACTOR_CODES[index] as usize;
-        let prefix = code << (STANDARD_SCALE_FACTOR_MAX_BITS - bits);
-        let slots = 1usize << (STANDARD_SCALE_FACTOR_MAX_BITS - bits);
-        let entry = ScaleFactorLookupEntry {
-            bits,
-            delta: index as i16 - STANDARD_SCALE_FACTOR_LAV,
-        };
-        for slot in &mut table[prefix..prefix + slots] {
-            debug_assert_eq!(slot.bits, 0);
-            *slot = entry;
+        let entry = u32::from(bits) | ((index as u32) << SCALE_FACTOR_LOOKUP_VALUE_SHIFT);
+        if bits <= SCALE_FACTOR_ROOT_BITS {
+            let prefix = code << (SCALE_FACTOR_ROOT_BITS - bits);
+            let slots = 1usize << (SCALE_FACTOR_ROOT_BITS - bits);
+            fill_scalefactor_entries(&mut table, prefix, slots, entry);
+            continue;
         }
+
+        let remaining = bits - SCALE_FACTOR_ROOT_BITS;
+        let root_index = code >> remaining;
+        let second_base = ensure_scalefactor_block(&mut table, &mut jump_bases, root_index);
+        if remaining <= SCALE_FACTOR_BLOCK_BITS {
+            let suffix_mask = (1usize << remaining) - 1;
+            let prefix = (code & suffix_mask) << (SCALE_FACTOR_BLOCK_BITS - remaining);
+            let slots = 1usize << (SCALE_FACTOR_BLOCK_BITS - remaining);
+            fill_scalefactor_entries(&mut table, second_base + prefix, slots, entry);
+            continue;
+        }
+
+        let tail_bits = remaining - SCALE_FACTOR_BLOCK_BITS;
+        let second_index = (code >> tail_bits) & (SCALE_FACTOR_BLOCK_LEN - 1);
+        let third_base =
+            ensure_scalefactor_block(&mut table, &mut jump_bases, second_base + second_index);
+        let suffix_mask = (1usize << tail_bits) - 1;
+        let prefix = (code & suffix_mask) << (SCALE_FACTOR_BLOCK_BITS - tail_bits);
+        let slots = 1usize << (SCALE_FACTOR_BLOCK_BITS - tail_bits);
+        fill_scalefactor_entries(&mut table, third_base + prefix, slots, entry);
     }
 
     table.into_boxed_slice()
+}
+
+fn ensure_scalefactor_block(
+    table: &mut Vec<u32>,
+    jump_bases: &mut Vec<usize>,
+    jump_index: usize,
+) -> usize {
+    if jump_bases[jump_index] != usize::MAX {
+        return jump_bases[jump_index];
+    }
+
+    let base = table.len();
+    table.resize(base + SCALE_FACTOR_BLOCK_LEN, 0);
+    jump_bases.resize(base + SCALE_FACTOR_BLOCK_LEN, usize::MAX);
+    debug_assert_eq!(table[jump_index], 0);
+    table[jump_index] = SCALE_FACTOR_LOOKUP_JUMP | base as u32;
+    jump_bases[jump_index] = base;
+    base
+}
+
+fn fill_scalefactor_entries(table: &mut [u32], start: usize, slots: usize, entry: u32) {
+    for slot in &mut table[start..start + slots] {
+        debug_assert_eq!(*slot, 0);
+        *slot = entry;
+    }
 }
 
 #[cfg(test)]
@@ -363,7 +446,7 @@ mod tests {
     #[test]
     fn parses_spectral_scalefactors_with_standard_aac_codebook() {
         let prefix = prefix_with_sections(100, 3, &[(1, 4), (3, 5)]);
-        let mut decoder = StandardScaleFactorDecoder;
+        let mut decoder = StandardScaleFactorDecoder::new();
         let mut reader = BitReader::new(&[0b1000_1010]);
 
         let data = ScaleFactorData::read(&mut reader, &prefix, &mut decoder).unwrap();

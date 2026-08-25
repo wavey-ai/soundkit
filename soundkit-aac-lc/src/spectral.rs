@@ -212,20 +212,31 @@ fn finish_unsigned_escape_pair(reader: &mut BitReader<'_>, tuple: &mut [i32; 2])
 }
 
 fn read_escape_magnitude(reader: &mut BitReader<'_>) -> Result<i32> {
-    let mut extra_bits = 4u8;
-    while reader.read_bool()? {
-        extra_bits = extra_bits
-            .checked_add(1)
-            .ok_or(AacLcError::InvalidBitstream(
-                "AAC escape value is too large",
-            ))?;
-        if extra_bits > 16 {
-            return Err(AacLcError::UnsupportedFeature(
-                "AAC escape value above 16 extra bits",
-            ));
-        }
+    const MAX_PREFIX_BITS: u8 = 13;
+
+    let (prefix, available_bits) = reader.peek_prefix_fast::<MAX_PREFIX_BITS>()?;
+    if available_bits == 0 {
+        return Err(AacLcError::UnexpectedEof {
+            requested_bits: 1,
+            remaining_bits: 0,
+        });
+    }
+    let padded = prefix << (u32::BITS - u32::from(available_bits));
+    let leading_ones = (!padded).leading_zeros() as u8;
+    if leading_ones >= MAX_PREFIX_BITS {
+        return Err(AacLcError::UnsupportedFeature(
+            "AAC escape value above 16 extra bits",
+        ));
+    }
+    if leading_ones == available_bits {
+        return Err(AacLcError::UnexpectedEof {
+            requested_bits: 1,
+            remaining_bits: 0,
+        });
     }
 
+    reader.consume_cached_prefix(leading_ones + 1);
+    let extra_bits = 4 + leading_ones;
     Ok((1i32 << extra_bits) + reader.read_u32(extra_bits)? as i32)
 }
 
@@ -327,6 +338,7 @@ impl StandardSpectralDecoder {
     fn read_scaled(
         &mut self,
         reader: &mut BitReader<'_>,
+        codebooks: &StandardCodebooks,
         codebook: u8,
         scale: f32,
         pow43: &[f32],
@@ -336,7 +348,7 @@ impl StandardSpectralDecoder {
             1 => decode_standard_signed_quad_scaled(
                 reader,
                 out,
-                standard_quad_lookup(1),
+                &codebooks.quads[0],
                 STANDARD_CODEBOOK_1_MAX_BITS,
                 scale,
                 pow43,
@@ -344,7 +356,7 @@ impl StandardSpectralDecoder {
             2 => decode_standard_signed_quad_scaled(
                 reader,
                 out,
-                standard_quad_lookup(2),
+                &codebooks.quads[1],
                 STANDARD_CODEBOOK_2_MAX_BITS,
                 scale,
                 pow43,
@@ -352,7 +364,7 @@ impl StandardSpectralDecoder {
             3 => decode_standard_unsigned_quad_scaled(
                 reader,
                 out,
-                standard_quad_lookup(3),
+                &codebooks.quads[2],
                 STANDARD_CODEBOOK_3_MAX_BITS,
                 scale,
                 pow43,
@@ -360,7 +372,7 @@ impl StandardSpectralDecoder {
             4 => decode_standard_unsigned_quad_scaled(
                 reader,
                 out,
-                standard_quad_lookup(4),
+                &codebooks.quads[3],
                 STANDARD_CODEBOOK_4_MAX_BITS,
                 scale,
                 pow43,
@@ -368,7 +380,7 @@ impl StandardSpectralDecoder {
             5 => decode_standard_signed_pair_scaled(
                 reader,
                 out,
-                standard_pair_lookup(5),
+                &codebooks.pairs[0],
                 STANDARD_CODEBOOK_5_MAX_BITS,
                 scale,
                 pow43,
@@ -376,7 +388,7 @@ impl StandardSpectralDecoder {
             6 => decode_standard_signed_pair_scaled(
                 reader,
                 out,
-                standard_pair_lookup(6),
+                &codebooks.pairs[1],
                 STANDARD_CODEBOOK_6_MAX_BITS,
                 scale,
                 pow43,
@@ -384,7 +396,7 @@ impl StandardSpectralDecoder {
             7 => decode_standard_unsigned_pair_scaled(
                 reader,
                 out,
-                standard_pair_lookup(7),
+                &codebooks.pairs[2],
                 STANDARD_CODEBOOK_7_MAX_BITS,
                 scale,
                 pow43,
@@ -392,7 +404,7 @@ impl StandardSpectralDecoder {
             8 => decode_standard_unsigned_pair_scaled(
                 reader,
                 out,
-                standard_pair_lookup(8),
+                &codebooks.pairs[3],
                 STANDARD_CODEBOOK_8_MAX_BITS,
                 scale,
                 pow43,
@@ -400,7 +412,7 @@ impl StandardSpectralDecoder {
             9 => decode_standard_unsigned_pair_scaled(
                 reader,
                 out,
-                standard_pair_lookup(9),
+                &codebooks.pairs[4],
                 STANDARD_CODEBOOK_9_MAX_BITS,
                 scale,
                 pow43,
@@ -408,12 +420,12 @@ impl StandardSpectralDecoder {
             10 => decode_standard_unsigned_pair_scaled(
                 reader,
                 out,
-                standard_pair_lookup(10),
+                &codebooks.pairs[5],
                 STANDARD_CODEBOOK_10_MAX_BITS,
                 scale,
                 pow43,
             ),
-            11 => decode_standard_escape_pair_scaled(reader, out, scale, pow43),
+            11 => decode_standard_escape_pair_scaled(reader, out, &codebooks.escape, scale, pow43),
             _ => {
                 SpectralCodebookKind::from_codebook_id(codebook)?;
                 Err(AacLcError::NotImplemented("AAC spectral Huffman codebook"))
@@ -428,32 +440,274 @@ enum LengthHalf {
     Low,
 }
 
-#[derive(Clone, Copy, Default)]
-struct QuadLookupEntry {
-    bits: u8,
-    value: [i16; 4],
+const LOOKUP_BLOCK_BITS: u8 = 8;
+const LOOKUP_BLOCK_LEN: usize = 1 << LOOKUP_BLOCK_BITS;
+const LOOKUP_BITS_MASK: u32 = 0x1f;
+const LOOKUP_VALUE_SHIFT: u32 = 8;
+const LOOKUP_VALUE_MASK: u32 = 0x0fff;
+const LOOKUP_SIGN_COUNT_SHIFT: u32 = 20;
+const LOOKUP_SIGN_COUNT_MASK: u32 = 0x7;
+const LOOKUP_NONZERO_MASK_SHIFT: u32 = 23;
+const LOOKUP_NONZERO_MASK: u32 = 0xf;
+const ESCAPE_LOOKUP_A_SHIFT: u32 = 8;
+const ESCAPE_LOOKUP_B_SHIFT: u32 = 13;
+const ESCAPE_LOOKUP_COMPONENT_MASK: u32 = 0x1f;
+const ESCAPE_LOOKUP_BITS: u8 = 12;
+const ESCAPE_LOOKUP_LEN: usize = 1 << ESCAPE_LOOKUP_BITS;
+const PAIR_SIGN_MASKS: [u64; 16] = [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0x0000_0000_8000_0000,
+    0,
+    0,
+    0,
+    0x8000_0000_0000_0000,
+    0,
+    0,
+    0,
+    0x8000_0000_0000_0000,
+    0x0000_0000_8000_0000,
+    0x8000_0000_8000_0000,
+];
+const QUAD_LOOKUP_JUMP: u32 = 1 << 31;
+const PAIR_LOOKUP_JUMP: u32 = 1 << 31;
+
+#[derive(Debug)]
+struct QuadCodebook {
+    entries: Box<[u32]>,
+    quantized: Box<[[i16; 4]]>,
+    dequantized: Box<[[f32; 4]]>,
 }
 
-#[derive(Clone, Copy, Default)]
-struct PairLookupEntry {
-    bits: u8,
-    value: [i16; 2],
+#[derive(Debug)]
+struct PairCodebook {
+    entries: Box<[u32]>,
+    quantized: Box<[[i16; 2]]>,
+    dequantized: Box<[[f32; 2]]>,
+}
+
+#[derive(Debug)]
+struct StandardCodebooks {
+    quads: [QuadCodebook; 4],
+    pairs: [PairCodebook; 6],
+    escape: PairCodebook,
+}
+
+#[inline(always)]
+fn peek_quad_lookup_entry(
+    reader: &mut BitReader<'_>,
+    lookup: &QuadCodebook,
+) -> Result<(u32, u32, u8)> {
+    let (lookahead, lookahead_bits) = reader.peek_prefix_fast::<24>()?;
+    let padded = lookup_prefix_16(lookahead, lookahead_bits);
+    let mut packed = unsafe { *lookup.entries.get_unchecked(padded >> LOOKUP_BLOCK_BITS) };
+    if packed & QUAD_LOOKUP_JUMP != 0 {
+        let base = (packed & !QUAD_LOOKUP_JUMP) as usize;
+        packed = unsafe {
+            *lookup
+                .entries
+                .get_unchecked(base + (padded & (LOOKUP_BLOCK_LEN - 1)))
+        };
+    }
+
+    let bits = (packed & LOOKUP_BITS_MASK) as u8;
+    if bits == 0 || bits > lookahead_bits {
+        return Err(AacLcError::InvalidBitstream(
+            "invalid AAC spectral Huffman codeword",
+        ));
+    }
+    Ok((packed, lookahead, lookahead_bits))
+}
+
+#[inline(always)]
+fn read_quad_lookup_entry(reader: &mut BitReader<'_>, lookup: &QuadCodebook) -> Result<u32> {
+    let (packed, _, _) = peek_quad_lookup_entry(reader, lookup)?;
+    reader.consume_cached_prefix((packed & LOOKUP_BITS_MASK) as u8);
+    Ok(packed)
+}
+
+#[inline(always)]
+fn read_unsigned_quad_lookup_entry(
+    reader: &mut BitReader<'_>,
+    lookup: &QuadCodebook,
+) -> Result<(u32, u32)> {
+    let (packed, lookahead, lookahead_bits) = peek_quad_lookup_entry(reader, lookup)?;
+    let code_bits = (packed & LOOKUP_BITS_MASK) as u8;
+    let sign_count = lookup_sign_count(packed);
+    let total_bits = code_bits + sign_count;
+    if total_bits > lookahead_bits {
+        return Err(AacLcError::UnexpectedEof {
+            requested_bits: sign_count,
+            remaining_bits: reader
+                .remaining_bits()
+                .saturating_sub(usize::from(code_bits)),
+        });
+    }
+    let sign_bits =
+        (lookahead >> (u32::from(lookahead_bits - total_bits))) & ((1 << sign_count) - 1);
+    reader.consume_cached_prefix(total_bits);
+    Ok((packed, sign_bits))
+}
+
+#[inline(always)]
+fn read_quad_lookup(reader: &mut BitReader<'_>, lookup: &QuadCodebook) -> Result<usize> {
+    Ok(lookup_value_index(read_quad_lookup_entry(reader, lookup)?))
+}
+
+#[inline(always)]
+fn peek_pair_lookup_entry(
+    reader: &mut BitReader<'_>,
+    lookup: &PairCodebook,
+) -> Result<(u32, u32, u8)> {
+    let (lookahead, lookahead_bits) = reader.peek_prefix_fast::<24>()?;
+    let padded = lookup_prefix_16(lookahead, lookahead_bits);
+    let mut packed = unsafe { *lookup.entries.get_unchecked(padded >> LOOKUP_BLOCK_BITS) };
+    if packed & PAIR_LOOKUP_JUMP != 0 {
+        let base = (packed & !PAIR_LOOKUP_JUMP) as usize;
+        packed = unsafe {
+            *lookup
+                .entries
+                .get_unchecked(base + (padded & (LOOKUP_BLOCK_LEN - 1)))
+        };
+    }
+
+    let bits = (packed & LOOKUP_BITS_MASK) as u8;
+    if bits == 0 || bits > lookahead_bits {
+        return Err(AacLcError::InvalidBitstream(
+            "invalid AAC spectral Huffman codeword",
+        ));
+    }
+    Ok((packed, lookahead, lookahead_bits))
+}
+
+#[inline(always)]
+fn read_pair_lookup_entry(reader: &mut BitReader<'_>, lookup: &PairCodebook) -> Result<u32> {
+    let (packed, _, _) = peek_pair_lookup_entry(reader, lookup)?;
+    reader.consume_cached_prefix((packed & LOOKUP_BITS_MASK) as u8);
+    Ok(packed)
+}
+
+#[inline(always)]
+fn read_unsigned_pair_lookup_entry(
+    reader: &mut BitReader<'_>,
+    lookup: &PairCodebook,
+) -> Result<(u32, u32)> {
+    let (packed, lookahead, lookahead_bits) = peek_pair_lookup_entry(reader, lookup)?;
+    let code_bits = (packed & LOOKUP_BITS_MASK) as u8;
+    let sign_count = lookup_sign_count(packed);
+    let total_bits = code_bits + sign_count;
+    if total_bits > lookahead_bits {
+        return Err(AacLcError::UnexpectedEof {
+            requested_bits: sign_count,
+            remaining_bits: reader
+                .remaining_bits()
+                .saturating_sub(usize::from(code_bits)),
+        });
+    }
+    let sign_bits =
+        (lookahead >> (u32::from(lookahead_bits - total_bits))) & ((1 << sign_count) - 1);
+    reader.consume_cached_prefix(total_bits);
+    Ok((packed, sign_bits))
+}
+
+#[inline(always)]
+fn peek_escape_lookup_entry(
+    reader: &mut BitReader<'_>,
+    lookup: &PairCodebook,
+) -> Result<(u32, u32, u8)> {
+    let (lookahead, lookahead_bits) = reader.peek_prefix_fast::<16>()?;
+    let prefix = if lookahead_bits >= ESCAPE_LOOKUP_BITS {
+        lookahead >> u32::from(lookahead_bits - ESCAPE_LOOKUP_BITS)
+    } else {
+        lookahead << u32::from(ESCAPE_LOOKUP_BITS - lookahead_bits)
+    };
+    let packed = unsafe { *lookup.entries.get_unchecked(prefix as usize) };
+    let bits = (packed & LOOKUP_BITS_MASK) as u8;
+    if bits == 0 || bits > lookahead_bits {
+        return Err(AacLcError::InvalidBitstream(
+            "invalid AAC spectral Huffman codeword",
+        ));
+    }
+    Ok((packed, lookahead, lookahead_bits))
+}
+
+#[inline(always)]
+fn read_escape_lookup_entry(reader: &mut BitReader<'_>, lookup: &PairCodebook) -> Result<u32> {
+    let (packed, _, _) = peek_escape_lookup_entry(reader, lookup)?;
+    reader.consume_cached_prefix((packed & LOOKUP_BITS_MASK) as u8);
+    Ok(packed)
+}
+
+#[inline(always)]
+fn read_unsigned_escape_lookup_entry(
+    reader: &mut BitReader<'_>,
+    lookup: &PairCodebook,
+) -> Result<(u32, u32)> {
+    let (packed, lookahead, lookahead_bits) = peek_escape_lookup_entry(reader, lookup)?;
+    let code_bits = (packed & LOOKUP_BITS_MASK) as u8;
+    let sign_count = lookup_sign_count(packed);
+    let total_bits = code_bits + sign_count;
+    if total_bits > lookahead_bits {
+        return Err(AacLcError::UnexpectedEof {
+            requested_bits: sign_count,
+            remaining_bits: reader
+                .remaining_bits()
+                .saturating_sub(usize::from(code_bits)),
+        });
+    }
+    let sign_bits = (lookahead >> u32::from(lookahead_bits - total_bits)) & ((1 << sign_count) - 1);
+    reader.consume_cached_prefix(total_bits);
+    Ok((packed, sign_bits))
+}
+
+#[inline(always)]
+fn read_pair_lookup(reader: &mut BitReader<'_>, lookup: &PairCodebook) -> Result<usize> {
+    Ok(lookup_value_index(read_pair_lookup_entry(reader, lookup)?))
+}
+
+#[inline(always)]
+fn lookup_value_index(packed: u32) -> usize {
+    ((packed >> LOOKUP_VALUE_SHIFT) & LOOKUP_VALUE_MASK) as usize
+}
+
+#[inline(always)]
+fn lookup_prefix_16(lookahead: u32, lookahead_bits: u8) -> usize {
+    if lookahead_bits >= 16 {
+        (lookahead >> u32::from(lookahead_bits - 16)) as usize
+    } else {
+        (lookahead as usize) << (16 - usize::from(lookahead_bits))
+    }
+}
+
+#[inline(always)]
+fn lookup_sign_count(packed: u32) -> u8 {
+    ((packed >> LOOKUP_SIGN_COUNT_SHIFT) & LOOKUP_SIGN_COUNT_MASK) as u8
+}
+
+#[inline(always)]
+fn lookup_nonzero_mask(packed: u32) -> u8 {
+    ((packed >> LOOKUP_NONZERO_MASK_SHIFT) & LOOKUP_NONZERO_MASK) as u8
+}
+
+#[inline(always)]
+fn escape_lookup_components(packed: u32) -> [i32; 2] {
+    [
+        ((packed >> ESCAPE_LOOKUP_A_SHIFT) & ESCAPE_LOOKUP_COMPONENT_MASK) as i32,
+        ((packed >> ESCAPE_LOOKUP_B_SHIFT) & ESCAPE_LOOKUP_COMPONENT_MASK) as i32,
+    ]
 }
 
 pub(crate) fn warm_standard_spectral_tables() {
-    for codebook in 1..=4 {
-        let _ = standard_quad_lookup(codebook);
-    }
-    for codebook in 5..=10 {
-        let _ = standard_pair_lookup(codebook);
-    }
-    let _ = standard_escape_pair_lookup();
+    let _ = standard_codebooks();
 }
 
 fn decode_standard_signed_quad(
     reader: &mut BitReader<'_>,
     out: &mut [i32],
-    lookup: &[QuadLookupEntry],
+    lookup: &QuadCodebook,
     max_bits: u8,
 ) -> Result<()> {
     if out.len() % 4 != 0 {
@@ -472,7 +726,7 @@ fn decode_standard_signed_quad(
 fn decode_standard_unsigned_quad(
     reader: &mut BitReader<'_>,
     out: &mut [i32],
-    lookup: &[QuadLookupEntry],
+    lookup: &QuadCodebook,
     max_bits: u8,
 ) -> Result<()> {
     if out.len() % 4 != 0 {
@@ -497,10 +751,10 @@ fn decode_standard_unsigned_quad(
 fn decode_standard_signed_quad_scaled(
     reader: &mut BitReader<'_>,
     out: &mut [f32],
-    lookup: &[QuadLookupEntry],
-    max_bits: u8,
+    lookup: &QuadCodebook,
+    _max_bits: u8,
     scale: f32,
-    pow43: &[f32],
+    _pow43: &[f32],
 ) -> Result<()> {
     if out.len() % 4 != 0 {
         return Err(AacLcError::InvalidConfig(
@@ -509,8 +763,9 @@ fn decode_standard_signed_quad_scaled(
     }
 
     for chunk in out.chunks_exact_mut(4) {
-        let tuple = read_standard_quad_tuple(reader, lookup, max_bits)?;
-        write_scaled_tuple(&tuple, scale, pow43, chunk);
+        let value_index = read_quad_lookup(reader, lookup)?;
+        let values = unsafe { lookup.dequantized.get_unchecked(value_index) };
+        write_scaled_quad(values, scale, chunk);
     }
 
     Ok(())
@@ -519,10 +774,10 @@ fn decode_standard_signed_quad_scaled(
 fn decode_standard_unsigned_quad_scaled(
     reader: &mut BitReader<'_>,
     out: &mut [f32],
-    lookup: &[QuadLookupEntry],
-    max_bits: u8,
+    lookup: &QuadCodebook,
+    _max_bits: u8,
     scale: f32,
-    pow43: &[f32],
+    _pow43: &[f32],
 ) -> Result<()> {
     if out.len() % 4 != 0 {
         return Err(AacLcError::InvalidConfig(
@@ -531,9 +786,10 @@ fn decode_standard_unsigned_quad_scaled(
     }
 
     for chunk in out.chunks_exact_mut(4) {
-        let mut tuple = read_standard_quad_tuple(reader, lookup, max_bits)?;
-        apply_unsigned_signs(reader, &mut tuple)?;
-        write_scaled_tuple(&tuple, scale, pow43, chunk);
+        let (entry, sign_bits) = read_unsigned_quad_lookup_entry(reader, lookup)?;
+        let value_index = lookup_value_index(entry) + sign_bits as usize;
+        let values = unsafe { lookup.dequantized.get_unchecked(value_index) };
+        write_scaled_quad(values, scale, chunk);
     }
 
     Ok(())
@@ -541,26 +797,17 @@ fn decode_standard_unsigned_quad_scaled(
 
 fn read_standard_quad_tuple(
     reader: &mut BitReader<'_>,
-    lookup: &[QuadLookupEntry],
-    max_bits: u8,
+    lookup: &QuadCodebook,
+    _max_bits: u8,
 ) -> Result<[i32; 4]> {
-    let (lookahead, lookahead_bits) = reader.peek_prefix(max_bits)?;
-    let index = (lookahead as usize) << (max_bits as usize - lookahead_bits as usize);
-    let entry = lookup[index];
-
-    if entry.bits != 0 && entry.bits <= lookahead_bits {
-        reader.consume_cached_prefix(entry.bits);
-        return Ok([
-            entry.value[0] as i32,
-            entry.value[1] as i32,
-            entry.value[2] as i32,
-            entry.value[3] as i32,
-        ]);
-    }
-
-    Err(AacLcError::InvalidBitstream(
-        "invalid AAC spectral Huffman codeword",
-    ))
+    let value_index = read_quad_lookup(reader, lookup)?;
+    let value = unsafe { *lookup.quantized.get_unchecked(value_index) };
+    Ok([
+        value[0] as i32,
+        value[1] as i32,
+        value[2] as i32,
+        value[3] as i32,
+    ])
 }
 
 fn standard_quad_len(
@@ -581,7 +828,7 @@ fn standard_quad_len(
 fn decode_standard_signed_pair(
     reader: &mut BitReader<'_>,
     out: &mut [i32],
-    lookup: &[PairLookupEntry],
+    lookup: &PairCodebook,
     max_bits: u8,
 ) -> Result<()> {
     if out.len() % 2 != 0 {
@@ -600,7 +847,7 @@ fn decode_standard_signed_pair(
 fn decode_standard_unsigned_pair(
     reader: &mut BitReader<'_>,
     out: &mut [i32],
-    lookup: &[PairLookupEntry],
+    lookup: &PairCodebook,
     max_bits: u8,
 ) -> Result<()> {
     if out.len() % 2 != 0 {
@@ -625,10 +872,10 @@ fn decode_standard_unsigned_pair(
 fn decode_standard_signed_pair_scaled(
     reader: &mut BitReader<'_>,
     out: &mut [f32],
-    lookup: &[PairLookupEntry],
-    max_bits: u8,
+    lookup: &PairCodebook,
+    _max_bits: u8,
     scale: f32,
-    pow43: &[f32],
+    _pow43: &[f32],
 ) -> Result<()> {
     if out.len() % 2 != 0 {
         return Err(AacLcError::InvalidConfig(
@@ -637,8 +884,9 @@ fn decode_standard_signed_pair_scaled(
     }
 
     for chunk in out.chunks_exact_mut(2) {
-        let tuple = read_standard_pair_tuple(reader, lookup, max_bits)?;
-        write_scaled_tuple(&tuple, scale, pow43, chunk);
+        let value_index = read_pair_lookup(reader, lookup)?;
+        let values = unsafe { lookup.dequantized.get_unchecked(value_index) };
+        write_scaled_pair(values, scale, chunk);
     }
 
     Ok(())
@@ -647,10 +895,10 @@ fn decode_standard_signed_pair_scaled(
 fn decode_standard_unsigned_pair_scaled(
     reader: &mut BitReader<'_>,
     out: &mut [f32],
-    lookup: &[PairLookupEntry],
-    max_bits: u8,
+    lookup: &PairCodebook,
+    _max_bits: u8,
     scale: f32,
-    pow43: &[f32],
+    _pow43: &[f32],
 ) -> Result<()> {
     if out.len() % 2 != 0 {
         return Err(AacLcError::InvalidConfig(
@@ -659,9 +907,10 @@ fn decode_standard_unsigned_pair_scaled(
     }
 
     for chunk in out.chunks_exact_mut(2) {
-        let mut tuple = read_standard_pair_tuple(reader, lookup, max_bits)?;
-        apply_unsigned_signs(reader, &mut tuple)?;
-        write_scaled_tuple(&tuple, scale, pow43, chunk);
+        let (entry, sign_bits) = read_unsigned_pair_lookup_entry(reader, lookup)?;
+        let value_index = lookup_value_index(entry) + sign_bits as usize;
+        let values = unsafe { lookup.dequantized.get_unchecked(value_index) };
+        write_scaled_pair(values, scale, chunk);
     }
 
     Ok(())
@@ -669,26 +918,62 @@ fn decode_standard_unsigned_pair_scaled(
 
 fn read_standard_pair_tuple(
     reader: &mut BitReader<'_>,
-    lookup: &[PairLookupEntry],
-    max_bits: u8,
+    lookup: &PairCodebook,
+    _max_bits: u8,
 ) -> Result<[i32; 2]> {
-    let (lookahead, lookahead_bits) = reader.peek_prefix(max_bits)?;
-    let index = (lookahead as usize) << (max_bits as usize - lookahead_bits as usize);
-    let entry = lookup[index];
+    let value_index = read_pair_lookup(reader, lookup)?;
+    let value = unsafe { *lookup.quantized.get_unchecked(value_index) };
+    Ok([value[0] as i32, value[1] as i32])
+}
 
-    if entry.bits != 0 && entry.bits <= lookahead_bits {
-        reader.consume_cached_prefix(entry.bits);
-        return Ok([entry.value[0] as i32, entry.value[1] as i32]);
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+#[inline(always)]
+fn write_scaled_quad(values: &[f32; 4], scale: f32, out: &mut [f32]) {
+    out[0] = values[0] * scale;
+    out[1] = values[1] * scale;
+    out[2] = values[2] * scale;
+    out[3] = values[3] * scale;
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline(always)]
+fn write_scaled_quad(values: &[f32; 4], scale: f32, out: &mut [f32]) {
+    use core::arch::wasm32::{f32x4_mul, f32x4_splat, v128, v128_load, v128_store};
+
+    unsafe {
+        let value = v128_load(values.as_ptr().cast::<v128>());
+        v128_store(
+            out.as_mut_ptr().cast::<v128>(),
+            f32x4_mul(value, f32x4_splat(scale)),
+        );
     }
+}
 
-    Err(AacLcError::InvalidBitstream(
-        "invalid AAC spectral Huffman codeword",
-    ))
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+#[inline(always)]
+fn write_scaled_pair(values: &[f32; 2], scale: f32, out: &mut [f32]) {
+    out[0] = values[0] * scale;
+    out[1] = values[1] * scale;
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline(always)]
+fn write_scaled_pair(values: &[f32; 2], scale: f32, out: &mut [f32]) {
+    use core::arch::wasm32::{f32x4_mul, f32x4_splat, v128_load64_zero, v128_store64_lane};
+
+    unsafe {
+        let value = v128_load64_zero(values.as_ptr().cast::<u64>());
+        v128_store64_lane::<0>(
+            f32x4_mul(value, f32x4_splat(scale)),
+            out.as_mut_ptr().cast::<u64>(),
+        );
+    }
 }
 
 fn decode_standard_escape_pair_scaled(
     reader: &mut BitReader<'_>,
     out: &mut [f32],
+    escape_lookup: &PairCodebook,
     scale: f32,
     pow43: &[f32],
 ) -> Result<()> {
@@ -699,30 +984,49 @@ fn decode_standard_escape_pair_scaled(
     }
 
     for chunk in out.chunks_exact_mut(2) {
-        let mut tuple = read_standard_pair_tuple(
-            reader,
-            standard_escape_pair_lookup(),
-            STANDARD_CODEBOOK_11_MAX_BITS,
-        )?;
-        finish_unsigned_escape_pair(reader, &mut tuple)?;
-        write_scaled_tuple(&tuple, scale, pow43, chunk);
-    }
+        let (entry, sign_bits) = read_unsigned_escape_lookup_entry(reader, escape_lookup)?;
+        let [mut a, mut b] = escape_lookup_components(entry);
+        let sign_mask_index = usize::from(lookup_nonzero_mask(entry)) * 4 + sign_bits as usize;
+        let sign_mask = unsafe { *PAIR_SIGN_MASKS.get_unchecked(sign_mask_index) };
 
-    Ok(())
-}
-
-fn apply_unsigned_signs(reader: &mut BitReader<'_>, tuple: &mut [i32]) -> Result<()> {
-    for value in tuple {
-        if *value != 0 && reader.read_bool()? {
-            *value = -*value;
+        if a == 16 {
+            a = read_escape_magnitude(reader)?;
         }
+        if b == 16 {
+            b = read_escape_magnitude(reader)?;
+        }
+
+        let (magnitude_a, magnitude_b) = if (a | b) as usize >= pow43.len() {
+            (
+                escape_dequantized_magnitude(a, pow43),
+                escape_dequantized_magnitude(b, pow43),
+            )
+        } else {
+            unsafe {
+                (
+                    *pow43.get_unchecked(a as usize),
+                    *pow43.get_unchecked(b as usize),
+                )
+            }
+        };
+        let magnitude_bits =
+            u64::from(magnitude_a.to_bits()) | (u64::from(magnitude_b.to_bits()) << u32::BITS);
+        let signed_bits = magnitude_bits ^ sign_mask;
+        let signed = [
+            f32::from_bits(signed_bits as u32),
+            f32::from_bits((signed_bits >> u32::BITS) as u32),
+        ];
+        write_scaled_pair(&signed, scale, chunk);
     }
+
     Ok(())
 }
 
-fn write_scaled_tuple(tuple: &[i32], scale: f32, pow43: &[f32], out: &mut [f32]) {
-    for (sample, value) in out.iter_mut().zip(tuple.iter().copied()) {
-        *sample = dequantize_signed_scaled(value, scale, pow43);
+#[inline]
+fn escape_dequantized_magnitude(value: i32, pow43: &[f32]) -> f32 {
+    match pow43.get(value as usize) {
+        Some(&magnitude) => magnitude,
+        None => (value as f32).powf(4.0 / 3.0),
     }
 }
 
@@ -739,145 +1043,97 @@ fn standard_pair_len<const N: usize>(
     }
 }
 
-fn standard_quad_lookup(codebook: u8) -> &'static [QuadLookupEntry] {
-    static CODEBOOK_1: OnceLock<Box<[QuadLookupEntry]>> = OnceLock::new();
-    static CODEBOOK_2: OnceLock<Box<[QuadLookupEntry]>> = OnceLock::new();
-    static CODEBOOK_3: OnceLock<Box<[QuadLookupEntry]>> = OnceLock::new();
-    static CODEBOOK_4: OnceLock<Box<[QuadLookupEntry]>> = OnceLock::new();
-
-    match codebook {
-        1 => CODEBOOK_1
-            .get_or_init(|| {
-                build_quad_lookup(
-                    &STANDARD_CODEBOOK_1_2_LENGTHS,
-                    LengthHalf::High,
-                    &STANDARD_CODEBOOK_1_CODES,
-                    STANDARD_CODEBOOK_1_MAX_BITS,
-                    -1,
-                )
-            })
-            .as_ref(),
-        2 => CODEBOOK_2
-            .get_or_init(|| {
-                build_quad_lookup(
-                    &STANDARD_CODEBOOK_1_2_LENGTHS,
-                    LengthHalf::Low,
-                    &STANDARD_CODEBOOK_2_CODES,
-                    STANDARD_CODEBOOK_2_MAX_BITS,
-                    -1,
-                )
-            })
-            .as_ref(),
-        3 => CODEBOOK_3
-            .get_or_init(|| {
-                build_quad_lookup(
-                    &STANDARD_CODEBOOK_3_4_LENGTHS,
-                    LengthHalf::High,
-                    &STANDARD_CODEBOOK_3_CODES,
-                    STANDARD_CODEBOOK_3_MAX_BITS,
-                    0,
-                )
-            })
-            .as_ref(),
-        4 => CODEBOOK_4
-            .get_or_init(|| {
-                build_quad_lookup(
-                    &STANDARD_CODEBOOK_3_4_LENGTHS,
-                    LengthHalf::Low,
-                    &STANDARD_CODEBOOK_4_CODES,
-                    STANDARD_CODEBOOK_4_MAX_BITS,
-                    0,
-                )
-            })
-            .as_ref(),
-        _ => unreachable!("standard quad codebook id"),
-    }
+fn standard_codebooks() -> &'static StandardCodebooks {
+    static CODEBOOKS: OnceLock<StandardCodebooks> = OnceLock::new();
+    CODEBOOKS.get_or_init(|| StandardCodebooks {
+        quads: [
+            build_quad_lookup(
+                &STANDARD_CODEBOOK_1_2_LENGTHS,
+                LengthHalf::High,
+                &STANDARD_CODEBOOK_1_CODES,
+                STANDARD_CODEBOOK_1_MAX_BITS,
+                -1,
+            ),
+            build_quad_lookup(
+                &STANDARD_CODEBOOK_1_2_LENGTHS,
+                LengthHalf::Low,
+                &STANDARD_CODEBOOK_2_CODES,
+                STANDARD_CODEBOOK_2_MAX_BITS,
+                -1,
+            ),
+            build_quad_lookup(
+                &STANDARD_CODEBOOK_3_4_LENGTHS,
+                LengthHalf::High,
+                &STANDARD_CODEBOOK_3_CODES,
+                STANDARD_CODEBOOK_3_MAX_BITS,
+                0,
+            ),
+            build_quad_lookup(
+                &STANDARD_CODEBOOK_3_4_LENGTHS,
+                LengthHalf::Low,
+                &STANDARD_CODEBOOK_4_CODES,
+                STANDARD_CODEBOOK_4_MAX_BITS,
+                0,
+            ),
+        ],
+        pairs: [
+            build_pair_lookup(
+                &STANDARD_CODEBOOK_5_6_LENGTHS,
+                LengthHalf::High,
+                &STANDARD_CODEBOOK_5_CODES,
+                STANDARD_CODEBOOK_5_MAX_BITS,
+                -4,
+            ),
+            build_pair_lookup(
+                &STANDARD_CODEBOOK_5_6_LENGTHS,
+                LengthHalf::Low,
+                &STANDARD_CODEBOOK_6_CODES,
+                STANDARD_CODEBOOK_6_MAX_BITS,
+                -4,
+            ),
+            build_pair_lookup(
+                &STANDARD_CODEBOOK_7_8_LENGTHS,
+                LengthHalf::High,
+                &STANDARD_CODEBOOK_7_CODES,
+                STANDARD_CODEBOOK_7_MAX_BITS,
+                0,
+            ),
+            build_pair_lookup(
+                &STANDARD_CODEBOOK_7_8_LENGTHS,
+                LengthHalf::Low,
+                &STANDARD_CODEBOOK_8_CODES,
+                STANDARD_CODEBOOK_8_MAX_BITS,
+                0,
+            ),
+            build_pair_lookup(
+                &STANDARD_CODEBOOK_9_10_LENGTHS,
+                LengthHalf::High,
+                &STANDARD_CODEBOOK_9_CODES,
+                STANDARD_CODEBOOK_9_MAX_BITS,
+                0,
+            ),
+            build_pair_lookup(
+                &STANDARD_CODEBOOK_9_10_LENGTHS,
+                LengthHalf::Low,
+                &STANDARD_CODEBOOK_10_CODES,
+                STANDARD_CODEBOOK_10_MAX_BITS,
+                0,
+            ),
+        ],
+        escape: build_escape_pair_lookup(STANDARD_CODEBOOK_11_MAX_BITS),
+    })
 }
 
-fn standard_pair_lookup(codebook: u8) -> &'static [PairLookupEntry] {
-    static CODEBOOK_5: OnceLock<Box<[PairLookupEntry]>> = OnceLock::new();
-    static CODEBOOK_6: OnceLock<Box<[PairLookupEntry]>> = OnceLock::new();
-    static CODEBOOK_7: OnceLock<Box<[PairLookupEntry]>> = OnceLock::new();
-    static CODEBOOK_8: OnceLock<Box<[PairLookupEntry]>> = OnceLock::new();
-    static CODEBOOK_9: OnceLock<Box<[PairLookupEntry]>> = OnceLock::new();
-    static CODEBOOK_10: OnceLock<Box<[PairLookupEntry]>> = OnceLock::new();
-
-    match codebook {
-        5 => CODEBOOK_5
-            .get_or_init(|| {
-                build_pair_lookup(
-                    &STANDARD_CODEBOOK_5_6_LENGTHS,
-                    LengthHalf::High,
-                    &STANDARD_CODEBOOK_5_CODES,
-                    STANDARD_CODEBOOK_5_MAX_BITS,
-                    -4,
-                )
-            })
-            .as_ref(),
-        6 => CODEBOOK_6
-            .get_or_init(|| {
-                build_pair_lookup(
-                    &STANDARD_CODEBOOK_5_6_LENGTHS,
-                    LengthHalf::Low,
-                    &STANDARD_CODEBOOK_6_CODES,
-                    STANDARD_CODEBOOK_6_MAX_BITS,
-                    -4,
-                )
-            })
-            .as_ref(),
-        7 => CODEBOOK_7
-            .get_or_init(|| {
-                build_pair_lookup(
-                    &STANDARD_CODEBOOK_7_8_LENGTHS,
-                    LengthHalf::High,
-                    &STANDARD_CODEBOOK_7_CODES,
-                    STANDARD_CODEBOOK_7_MAX_BITS,
-                    0,
-                )
-            })
-            .as_ref(),
-        8 => CODEBOOK_8
-            .get_or_init(|| {
-                build_pair_lookup(
-                    &STANDARD_CODEBOOK_7_8_LENGTHS,
-                    LengthHalf::Low,
-                    &STANDARD_CODEBOOK_8_CODES,
-                    STANDARD_CODEBOOK_8_MAX_BITS,
-                    0,
-                )
-            })
-            .as_ref(),
-        9 => CODEBOOK_9
-            .get_or_init(|| {
-                build_pair_lookup(
-                    &STANDARD_CODEBOOK_9_10_LENGTHS,
-                    LengthHalf::High,
-                    &STANDARD_CODEBOOK_9_CODES,
-                    STANDARD_CODEBOOK_9_MAX_BITS,
-                    0,
-                )
-            })
-            .as_ref(),
-        10 => CODEBOOK_10
-            .get_or_init(|| {
-                build_pair_lookup(
-                    &STANDARD_CODEBOOK_9_10_LENGTHS,
-                    LengthHalf::Low,
-                    &STANDARD_CODEBOOK_10_CODES,
-                    STANDARD_CODEBOOK_10_MAX_BITS,
-                    0,
-                )
-            })
-            .as_ref(),
-        _ => unreachable!("standard pair codebook id"),
-    }
+fn standard_quad_lookup(codebook: u8) -> &'static QuadCodebook {
+    &standard_codebooks().quads[usize::from(codebook - 1)]
 }
 
-fn standard_escape_pair_lookup() -> &'static [PairLookupEntry] {
-    static CODEBOOK_11: OnceLock<Box<[PairLookupEntry]>> = OnceLock::new();
-    CODEBOOK_11
-        .get_or_init(|| build_escape_pair_lookup(STANDARD_CODEBOOK_11_MAX_BITS))
-        .as_ref()
+fn standard_pair_lookup(codebook: u8) -> &'static PairCodebook {
+    &standard_codebooks().pairs[usize::from(codebook - 5)]
+}
+
+fn standard_escape_pair_lookup() -> &'static PairCodebook {
+    &standard_codebooks().escape
 }
 
 fn build_quad_lookup(
@@ -886,8 +1142,12 @@ fn build_quad_lookup(
     codes: &[[[[u16; 3]; 3]; 3]; 3],
     max_bits: u8,
     value_offset: i16,
-) -> Box<[QuadLookupEntry]> {
-    let mut table = vec![QuadLookupEntry::default(); 1usize << max_bits];
+) -> QuadCodebook {
+    assert!(max_bits <= 16);
+    let mut table = vec![0u32; LOOKUP_BLOCK_LEN];
+    let mut secondary = [usize::MAX; LOOKUP_BLOCK_LEN];
+    let mut quantized = Vec::new();
+    let mut dequantized = Vec::new();
 
     for a in 0..3 {
         for b in 0..3 {
@@ -903,13 +1163,35 @@ fn build_quad_lookup(
                         c as i16 + value_offset,
                         d as i16 + value_offset,
                     ];
-                    fill_quad_lookup(&mut table, max_bits, codes[a][b][c][d], bits, value);
+                    let nonzero_mask = component_nonzero_mask(&value);
+                    let sign_count = nonzero_mask.count_ones() as u8;
+                    let value_index = quantized.len();
+                    append_lookup_variants(
+                        &mut quantized,
+                        &mut dequantized,
+                        value,
+                        sign_count,
+                        value_offset == 0,
+                    );
+                    fill_quad_lookup(
+                        &mut table,
+                        &mut secondary,
+                        codes[a][b][c][d],
+                        bits,
+                        value_index,
+                        sign_count,
+                        nonzero_mask,
+                    );
                 }
             }
         }
     }
 
-    table.into_boxed_slice()
+    QuadCodebook {
+        entries: table.into_boxed_slice(),
+        quantized: quantized.into_boxed_slice(),
+        dequantized: dequantized.into_boxed_slice(),
+    }
 }
 
 fn build_pair_lookup<const N: usize>(
@@ -918,8 +1200,12 @@ fn build_pair_lookup<const N: usize>(
     codes: &[[u16; N]; N],
     max_bits: u8,
     value_offset: i16,
-) -> Box<[PairLookupEntry]> {
-    let mut table = vec![PairLookupEntry::default(); 1usize << max_bits];
+) -> PairCodebook {
+    assert!(max_bits <= 16);
+    let mut table = vec![0u32; LOOKUP_BLOCK_LEN];
+    let mut secondary = [usize::MAX; LOOKUP_BLOCK_LEN];
+    let mut quantized = Vec::new();
+    let mut dequantized = Vec::new();
 
     for a in 0..N {
         for b in 0..N {
@@ -927,21 +1213,39 @@ fn build_pair_lookup<const N: usize>(
             if bits == 0 {
                 continue;
             }
+            let value = [a as i16 + value_offset, b as i16 + value_offset];
+            let nonzero_mask = component_nonzero_mask(&value);
+            let sign_count = nonzero_mask.count_ones() as u8;
+            let value_index = quantized.len();
+            append_lookup_variants(
+                &mut quantized,
+                &mut dequantized,
+                value,
+                sign_count,
+                value_offset == 0,
+            );
             fill_pair_lookup(
                 &mut table,
-                max_bits,
+                &mut secondary,
                 codes[a][b],
                 bits,
-                [a as i16 + value_offset, b as i16 + value_offset],
+                value_index,
+                sign_count,
+                nonzero_mask,
             );
         }
     }
 
-    table.into_boxed_slice()
+    PairCodebook {
+        entries: table.into_boxed_slice(),
+        quantized: quantized.into_boxed_slice(),
+        dequantized: dequantized.into_boxed_slice(),
+    }
 }
 
-fn build_escape_pair_lookup(max_bits: u8) -> Box<[PairLookupEntry]> {
-    let mut table = vec![PairLookupEntry::default(); 1usize << max_bits];
+fn build_escape_pair_lookup(max_bits: u8) -> PairCodebook {
+    assert!(max_bits <= ESCAPE_LOOKUP_BITS);
+    let mut table = vec![0u32; ESCAPE_LOOKUP_LEN];
 
     for a in 0..17 {
         for b in 0..17 {
@@ -949,46 +1253,193 @@ fn build_escape_pair_lookup(max_bits: u8) -> Box<[PairLookupEntry]> {
             if bits == 0 {
                 continue;
             }
-            fill_pair_lookup(
-                &mut table,
-                max_bits,
-                STANDARD_CODEBOOK_11_CODES[a][b],
-                bits,
-                [a as i16, b as i16],
-            );
+            let sign_count = u8::from(a != 0) + u8::from(b != 0);
+            let packed = pack_escape_pair_lookup(bits, a as u8, b as u8, sign_count);
+            let prefix = (STANDARD_CODEBOOK_11_CODES[a][b] as usize) << (ESCAPE_LOOKUP_BITS - bits);
+            let slots = 1usize << (ESCAPE_LOOKUP_BITS - bits);
+            for entry in &mut table[prefix..prefix + slots] {
+                debug_assert_eq!(*entry, 0);
+                *entry = packed;
+            }
         }
     }
 
-    table.into_boxed_slice()
+    PairCodebook {
+        entries: table.into_boxed_slice(),
+        quantized: Box::new([]),
+        dequantized: Box::new([]),
+    }
 }
 
 fn fill_quad_lookup(
-    table: &mut [QuadLookupEntry],
-    max_bits: u8,
+    table: &mut Vec<u32>,
+    secondary: &mut [usize; LOOKUP_BLOCK_LEN],
     code: u16,
     bits: u8,
-    value: [i16; 4],
+    value_index: usize,
+    sign_count: u8,
+    nonzero_mask: u8,
 ) {
-    let prefix = (code as usize) << (max_bits - bits);
-    let slots = 1usize << (max_bits - bits);
-    for entry in &mut table[prefix..prefix + slots] {
-        debug_assert_eq!(entry.bits, 0);
-        *entry = QuadLookupEntry { bits, value };
+    let packed = pack_quad_lookup(bits, value_index, sign_count, nonzero_mask);
+    if bits <= LOOKUP_BLOCK_BITS {
+        let prefix = (code as usize) << (LOOKUP_BLOCK_BITS - bits);
+        let slots = 1usize << (LOOKUP_BLOCK_BITS - bits);
+        for entry in &mut table[prefix..prefix + slots] {
+            debug_assert_eq!(*entry, 0);
+            *entry = packed;
+        }
+        return;
+    }
+
+    let suffix_bits = bits - LOOKUP_BLOCK_BITS;
+    let primary = (code >> suffix_bits) as usize;
+    let base = if secondary[primary] == usize::MAX {
+        let base = table.len();
+        table.resize(base + LOOKUP_BLOCK_LEN, 0);
+        secondary[primary] = base;
+        debug_assert_eq!(table[primary], 0);
+        table[primary] = QUAD_LOOKUP_JUMP | base as u32;
+        base
+    } else {
+        secondary[primary]
+    };
+    let suffix_mask = (1u16 << suffix_bits) - 1;
+    let prefix = ((code & suffix_mask) as usize) << (LOOKUP_BLOCK_BITS - suffix_bits);
+    let slots = 1usize << (LOOKUP_BLOCK_BITS - suffix_bits);
+    for entry in &mut table[base + prefix..base + prefix + slots] {
+        debug_assert_eq!(*entry, 0);
+        *entry = packed;
     }
 }
 
 fn fill_pair_lookup(
-    table: &mut [PairLookupEntry],
-    max_bits: u8,
+    table: &mut Vec<u32>,
+    secondary: &mut [usize; LOOKUP_BLOCK_LEN],
     code: u16,
     bits: u8,
-    value: [i16; 2],
+    value_index: usize,
+    sign_count: u8,
+    nonzero_mask: u8,
 ) {
-    let prefix = (code as usize) << (max_bits - bits);
-    let slots = 1usize << (max_bits - bits);
-    for entry in &mut table[prefix..prefix + slots] {
-        debug_assert_eq!(entry.bits, 0);
-        *entry = PairLookupEntry { bits, value };
+    let packed = pack_pair_lookup(bits, value_index, sign_count, nonzero_mask);
+    fill_pair_lookup_entry(table, secondary, code, bits, packed);
+}
+
+fn fill_pair_lookup_entry(
+    table: &mut Vec<u32>,
+    secondary: &mut [usize; LOOKUP_BLOCK_LEN],
+    code: u16,
+    bits: u8,
+    packed: u32,
+) {
+    if bits <= LOOKUP_BLOCK_BITS {
+        let prefix = (code as usize) << (LOOKUP_BLOCK_BITS - bits);
+        let slots = 1usize << (LOOKUP_BLOCK_BITS - bits);
+        for entry in &mut table[prefix..prefix + slots] {
+            debug_assert_eq!(*entry, 0);
+            *entry = packed;
+        }
+        return;
+    }
+
+    let suffix_bits = bits - LOOKUP_BLOCK_BITS;
+    let primary = (code >> suffix_bits) as usize;
+    let base = if secondary[primary] == usize::MAX {
+        let base = table.len();
+        table.resize(base + LOOKUP_BLOCK_LEN, 0);
+        secondary[primary] = base;
+        debug_assert_eq!(table[primary], 0);
+        table[primary] = PAIR_LOOKUP_JUMP | base as u32;
+        base
+    } else {
+        secondary[primary]
+    };
+    let suffix_mask = (1u16 << suffix_bits) - 1;
+    let prefix = ((code & suffix_mask) as usize) << (LOOKUP_BLOCK_BITS - suffix_bits);
+    let slots = 1usize << (LOOKUP_BLOCK_BITS - suffix_bits);
+    for entry in &mut table[base + prefix..base + prefix + slots] {
+        debug_assert_eq!(*entry, 0);
+        *entry = packed;
+    }
+}
+
+fn pack_quad_lookup(bits: u8, value_index: usize, sign_count: u8, nonzero_mask: u8) -> u32 {
+    debug_assert!(value_index <= LOOKUP_VALUE_MASK as usize);
+    debug_assert!(sign_count <= 4);
+    debug_assert!(nonzero_mask <= 0xf);
+    u32::from(bits)
+        | ((value_index as u32) << LOOKUP_VALUE_SHIFT)
+        | (u32::from(sign_count) << LOOKUP_SIGN_COUNT_SHIFT)
+        | (u32::from(nonzero_mask) << LOOKUP_NONZERO_MASK_SHIFT)
+}
+
+fn pack_pair_lookup(bits: u8, value_index: usize, sign_count: u8, nonzero_mask: u8) -> u32 {
+    debug_assert!(value_index <= LOOKUP_VALUE_MASK as usize);
+    debug_assert!(sign_count <= 2);
+    debug_assert!(nonzero_mask <= 0x3);
+    u32::from(bits)
+        | ((value_index as u32) << LOOKUP_VALUE_SHIFT)
+        | (u32::from(sign_count) << LOOKUP_SIGN_COUNT_SHIFT)
+        | (u32::from(nonzero_mask) << LOOKUP_NONZERO_MASK_SHIFT)
+}
+
+fn pack_escape_pair_lookup(bits: u8, a: u8, b: u8, sign_count: u8) -> u32 {
+    debug_assert!(a <= 16 && b <= 16);
+    debug_assert!(sign_count <= 2);
+    let nonzero_mask = u8::from(a != 0) | (u8::from(b != 0) << 1);
+    u32::from(bits)
+        | (u32::from(a) << ESCAPE_LOOKUP_A_SHIFT)
+        | (u32::from(b) << ESCAPE_LOOKUP_B_SHIFT)
+        | (u32::from(sign_count) << LOOKUP_SIGN_COUNT_SHIFT)
+        | (u32::from(nonzero_mask) << LOOKUP_NONZERO_MASK_SHIFT)
+}
+
+fn component_nonzero_mask<const N: usize>(values: &[i16; N]) -> u8 {
+    values.iter().enumerate().fold(0, |mask, (index, value)| {
+        mask | (u8::from(*value != 0) << index)
+    })
+}
+
+fn append_lookup_variants<const N: usize>(
+    quantized: &mut Vec<[i16; N]>,
+    dequantized: &mut Vec<[f32; N]>,
+    value: [i16; N],
+    sign_count: u8,
+    uses_extra_sign_bits: bool,
+) {
+    let variants = if uses_extra_sign_bits {
+        1usize << sign_count
+    } else {
+        1
+    };
+    for sign_bits in 0..variants {
+        let mut signed = value;
+        if uses_extra_sign_bits {
+            let mut remaining_signs = sign_count;
+            for component in &mut signed {
+                if *component == 0 {
+                    continue;
+                }
+                remaining_signs -= 1;
+                if sign_bits & (1usize << remaining_signs) != 0 {
+                    *component = -*component;
+                }
+            }
+        }
+        quantized.push(signed);
+        dequantized.push(signed.map(dequantize_lookup_value));
+    }
+}
+
+fn dequantize_lookup_value(value: i16) -> f32 {
+    if value == 0 {
+        return 0.0;
+    }
+    let magnitude = pow43_table()[value.unsigned_abs() as usize];
+    if value < 0 {
+        -magnitude
+    } else {
+        magnitude
     }
 }
 
@@ -1000,11 +1451,8 @@ fn decode_standard_escape_pair(reader: &mut BitReader<'_>, out: &mut [i32]) -> R
     }
 
     for chunk in out.chunks_exact_mut(2) {
-        let mut tuple = read_standard_pair_tuple(
-            reader,
-            standard_escape_pair_lookup(),
-            STANDARD_CODEBOOK_11_MAX_BITS,
-        )?;
+        let entry = read_escape_lookup_entry(reader, standard_escape_pair_lookup())?;
+        let mut tuple = escape_lookup_components(entry);
         finish_unsigned_escape_pair(reader, &mut tuple)?;
         chunk.copy_from_slice(&tuple);
     }
@@ -1956,6 +2404,7 @@ impl SpectralCoefficients {
 
         self.dequantized.fill(0.0);
         let pow43 = pow43_table();
+        let codebooks = standard_codebooks();
         let mut decoder = StandardSpectralDecoder;
 
         let max_sfb = prefix.ics_info.max_sfb as usize;
@@ -1981,6 +2430,7 @@ impl SpectralCoefficients {
                     let scale = spectral_scale(scale_factors, 0, sfb)?;
                     decoder.read_scaled(
                         reader,
+                        codebooks,
                         codebook_id,
                         scale,
                         pow43,
@@ -2035,6 +2485,7 @@ impl SpectralCoefficients {
 
         self.dequantized.fill(0.0);
         let pow43 = pow43_table();
+        let codebooks = standard_codebooks();
         let mut decoder = StandardSpectralDecoder;
         let max_sfb = prefix.ics_info.max_sfb as usize;
         let mut window_start = 0usize;
@@ -2073,6 +2524,7 @@ impl SpectralCoefficients {
                             let end = window * SHORT_WINDOW_COEFFICIENTS + range.end;
                             decoder.read_scaled(
                                 reader,
+                                codebooks,
                                 codebook_id,
                                 scale,
                                 pow43,

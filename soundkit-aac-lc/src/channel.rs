@@ -209,7 +209,7 @@ pub fn read_zero_spectral_channel(
     reader: &mut BitReader<'_>,
     common_ics: Option<IcsInfo>,
 ) -> Result<IndividualChannelStreamPrefix> {
-    let mut scale_factor_decoder = StandardScaleFactorDecoder;
+    let mut scale_factor_decoder = StandardScaleFactorDecoder::new();
     let stream = IndividualChannelStream::read(reader, common_ics, &mut scale_factor_decoder)?;
     stream.ensure_zero_spectral_payload()?;
     Ok(stream.prefix)

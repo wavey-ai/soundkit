@@ -1,10 +1,7 @@
 use crate::error::{AacLcError, Result};
+use crate::fft::{Complex, ForwardFft};
 use crate::ics::{WindowSequence, WindowShape};
-use rustfft::{num_complex::Complex32, Fft, FftPlanner};
-use std::{
-    fmt,
-    sync::{Arc, OnceLock},
-};
+use std::{fmt, sync::OnceLock};
 
 pub const LONG_SPECTRUM_LEN: usize = 1024;
 pub const LONG_WINDOW_LEN: usize = LONG_SPECTRUM_LEN * 2;
@@ -74,9 +71,8 @@ pub struct ImdctTransform {
     input_len: usize,
     output_len: usize,
     output_scale: f32,
-    twiddle: Vec<Complex32>,
-    fft: Arc<dyn Fft<f32>>,
-    fft_scratch_len: usize,
+    twiddle: Vec<Complex>,
+    fft: ForwardFft,
 }
 
 impl fmt::Debug for ImdctTransform {
@@ -85,7 +81,6 @@ impl fmt::Debug for ImdctTransform {
             .field("input_len", &self.input_len)
             .field("output_len", &self.output_len)
             .field("output_scale", &self.output_scale)
-            .field("fft_scratch_len", &self.fft_scratch_len)
             .finish_non_exhaustive()
     }
 }
@@ -101,20 +96,16 @@ impl ImdctTransform {
         let twiddle_scale = output_scale.sqrt();
         let twiddle = (0..fft_len)
             .map(|bin| {
-                complex_cis(std::f32::consts::PI / nf * (bin as f32 + 0.125)) * twiddle_scale
+                complex_cis(std::f32::consts::PI / nf * (bin as f32 + 0.125)).scale(twiddle_scale)
             })
             .collect();
-        let mut planner = FftPlanner::<f32>::new();
-        let fft = planner.plan_fft_forward(fft_len);
-        let fft_scratch_len = fft.get_inplace_scratch_len();
 
         Self {
             input_len,
             output_len,
             output_scale,
             twiddle,
-            fft,
-            fft_scratch_len,
+            fft: ForwardFft::new(fft_len),
         }
     }
 
@@ -126,17 +117,13 @@ impl ImdctTransform {
         self.output_len
     }
 
-    pub const fn fft_scratch_len(&self) -> usize {
-        self.fft_scratch_len
-    }
-
     pub const fn fft_len(&self) -> usize {
         self.input_len / 2
     }
 }
 
-fn complex_cis(angle: f32) -> Complex32 {
-    Complex32::new(angle.cos(), angle.sin())
+fn complex_cis(angle: f32) -> Complex {
+    Complex::new(angle.cos(), angle.sin())
 }
 
 #[derive(Debug, Clone)]
@@ -145,10 +132,10 @@ pub struct DspChannel {
     previous_window_shape: WindowShape,
     imdct: Vec<f32>,
     short_imdct: Vec<f32>,
-    long_fft: Vec<Complex32>,
-    long_fft_scratch: Vec<Complex32>,
-    short_fft: Vec<Complex32>,
-    short_fft_scratch: Vec<Complex32>,
+    long_fft: Vec<Complex>,
+    long_fft_scratch: Vec<Complex>,
+    short_fft: Vec<Complex>,
+    short_fft_scratch: Vec<Complex>,
 }
 
 impl DspChannel {
@@ -163,10 +150,10 @@ impl DspChannel {
             previous_window_shape: WindowShape::Sine,
             imdct: vec![0.0; frame_len * 2],
             short_imdct: vec![0.0; SHORT_WINDOW_LEN],
-            long_fft: vec![Complex32::default(); long_fft_len],
-            long_fft_scratch: vec![Complex32::default(); long_fft_scratch_len],
-            short_fft: vec![Complex32::default(); short_fft_len],
-            short_fft_scratch: vec![Complex32::default(); short_fft_scratch_len],
+            long_fft: vec![Complex::default(); long_fft_len],
+            long_fft_scratch: vec![Complex::default(); long_fft_scratch_len],
+            short_fft: vec![Complex::default(); short_fft_len],
+            short_fft_scratch: vec![Complex::default(); short_fft_scratch_len],
         }
     }
 
@@ -217,12 +204,15 @@ impl DspChannel {
             &mut self.long_fft_scratch,
         )?;
 
-        for i in 0..n {
-            let first = self.imdct[i] * window[i];
-            let second = self.imdct[i + n] * window[i + n];
-            output[i] = first + self.delay[i];
-            self.delay[i] = second;
-        }
+        let (first, second) = self.imdct.split_at(n);
+        overlap_windowed(
+            first,
+            second,
+            &window[..n],
+            &window[n..],
+            &mut self.delay,
+            output,
+        );
 
         Ok(())
     }
@@ -264,18 +254,71 @@ impl DspChannel {
             &mut self.long_fft_scratch,
         )?;
 
-        for i in 0..n {
-            let first = self.imdct[i]
-                * long_sequence_first_window(
-                    sequence,
-                    previous_long_window,
-                    previous_short_window,
-                    i,
+        let (first, second) = self.imdct.split_at(n);
+        match sequence {
+            WindowSequence::OnlyLong => overlap_windowed(
+                first,
+                second,
+                &previous_long_window[..n],
+                &long_window[n..],
+                &mut self.delay,
+                output,
+            ),
+            WindowSequence::LongStart => {
+                const FLAT: usize = (LONG_SPECTRUM_LEN - SHORT_SPECTRUM_LEN) / 2;
+                const SHORT_END: usize = FLAT + SHORT_SPECTRUM_LEN;
+
+                overlap_first_window_second_copy(
+                    &first[..FLAT],
+                    &second[..FLAT],
+                    &previous_long_window[..FLAT],
+                    &mut self.delay[..FLAT],
+                    &mut output[..FLAT],
                 );
-            let second = self.imdct[i + n]
-                * long_sequence_second_window(sequence, long_window, short_window, i);
-            output[i] = first + self.delay[i];
-            self.delay[i] = second;
+                overlap_windowed(
+                    &first[FLAT..SHORT_END],
+                    &second[FLAT..SHORT_END],
+                    &previous_long_window[FLAT..SHORT_END],
+                    &short_window[SHORT_SPECTRUM_LEN..SHORT_WINDOW_LEN],
+                    &mut self.delay[FLAT..SHORT_END],
+                    &mut output[FLAT..SHORT_END],
+                );
+                overlap_first_window_second_zero(
+                    &first[SHORT_END..],
+                    &second[SHORT_END..],
+                    &previous_long_window[SHORT_END..n],
+                    &mut self.delay[SHORT_END..],
+                    &mut output[SHORT_END..],
+                );
+            }
+            WindowSequence::LongStop => {
+                const FLAT: usize = (LONG_SPECTRUM_LEN - SHORT_SPECTRUM_LEN) / 2;
+                const SHORT_END: usize = FLAT + SHORT_SPECTRUM_LEN;
+
+                overlap_first_zero_second_windowed(
+                    &first[..FLAT],
+                    &second[..FLAT],
+                    &long_window[n..n + FLAT],
+                    &mut self.delay[..FLAT],
+                    &mut output[..FLAT],
+                );
+                overlap_windowed(
+                    &first[FLAT..SHORT_END],
+                    &second[FLAT..SHORT_END],
+                    &previous_short_window[..SHORT_SPECTRUM_LEN],
+                    &long_window[n + FLAT..n + SHORT_END],
+                    &mut self.delay[FLAT..SHORT_END],
+                    &mut output[FLAT..SHORT_END],
+                );
+                overlap_first_copy_second_windowed(
+                    &first[SHORT_END..],
+                    &second[SHORT_END..],
+                    &long_window[n + SHORT_END..],
+                    &mut self.delay[SHORT_END..],
+                    &mut output[SHORT_END..],
+                );
+            }
+            WindowSequence::EightShort => unreachable!("short sequence is handled separately"),
         }
 
         Ok(())
@@ -350,6 +393,144 @@ impl DspChannel {
     }
 }
 
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+fn overlap_windowed(
+    first: &[f32],
+    second: &[f32],
+    first_window: &[f32],
+    second_window: &[f32],
+    delay: &mut [f32],
+    output: &mut [f32],
+) {
+    debug_assert_eq!(first.len(), second.len());
+    debug_assert_eq!(first.len(), first_window.len());
+    debug_assert_eq!(first.len(), second_window.len());
+    debug_assert_eq!(first.len(), delay.len());
+    debug_assert_eq!(first.len(), output.len());
+
+    for index in 0..first.len() {
+        output[index] = first[index] * first_window[index] + delay[index];
+        delay[index] = second[index] * second_window[index];
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn overlap_windowed(
+    first: &[f32],
+    second: &[f32],
+    first_window: &[f32],
+    second_window: &[f32],
+    delay: &mut [f32],
+    output: &mut [f32],
+) {
+    use core::arch::wasm32::{f32x4_add, f32x4_mul, v128, v128_load, v128_store};
+
+    debug_assert_eq!(first.len(), second.len());
+    debug_assert_eq!(first.len(), first_window.len());
+    debug_assert_eq!(first.len(), second_window.len());
+    debug_assert_eq!(first.len(), delay.len());
+    debug_assert_eq!(first.len(), output.len());
+
+    let mut index = 0;
+    while index + 4 <= first.len() {
+        unsafe {
+            let first_value = f32x4_mul(
+                v128_load(first.as_ptr().add(index).cast::<v128>()),
+                v128_load(first_window.as_ptr().add(index).cast::<v128>()),
+            );
+            let second_value = f32x4_mul(
+                v128_load(second.as_ptr().add(index).cast::<v128>()),
+                v128_load(second_window.as_ptr().add(index).cast::<v128>()),
+            );
+            let delayed = v128_load(delay.as_ptr().add(index).cast::<v128>());
+            v128_store(
+                output.as_mut_ptr().add(index).cast::<v128>(),
+                f32x4_add(first_value, delayed),
+            );
+            v128_store(delay.as_mut_ptr().add(index).cast::<v128>(), second_value);
+        }
+        index += 4;
+    }
+    while index < first.len() {
+        output[index] = first[index] * first_window[index] + delay[index];
+        delay[index] = second[index] * second_window[index];
+        index += 1;
+    }
+}
+
+fn overlap_first_window_second_copy(
+    first: &[f32],
+    second: &[f32],
+    first_window: &[f32],
+    delay: &mut [f32],
+    output: &mut [f32],
+) {
+    debug_assert_eq!(first.len(), second.len());
+    debug_assert_eq!(first.len(), first_window.len());
+    debug_assert_eq!(first.len(), delay.len());
+    debug_assert_eq!(first.len(), output.len());
+
+    for index in 0..first.len() {
+        output[index] = first[index] * first_window[index] + delay[index];
+        delay[index] = second[index];
+    }
+}
+
+fn overlap_first_window_second_zero(
+    first: &[f32],
+    second: &[f32],
+    first_window: &[f32],
+    delay: &mut [f32],
+    output: &mut [f32],
+) {
+    debug_assert_eq!(first.len(), second.len());
+    debug_assert_eq!(first.len(), first_window.len());
+    debug_assert_eq!(first.len(), delay.len());
+    debug_assert_eq!(first.len(), output.len());
+
+    for index in 0..first.len() {
+        output[index] = first[index] * first_window[index] + delay[index];
+        delay[index] = second[index] * 0.0;
+    }
+}
+
+fn overlap_first_zero_second_windowed(
+    first: &[f32],
+    second: &[f32],
+    second_window: &[f32],
+    delay: &mut [f32],
+    output: &mut [f32],
+) {
+    debug_assert_eq!(first.len(), second.len());
+    debug_assert_eq!(first.len(), second_window.len());
+    debug_assert_eq!(first.len(), delay.len());
+    debug_assert_eq!(first.len(), output.len());
+
+    for index in 0..first.len() {
+        output[index] = first[index] * 0.0 + delay[index];
+        delay[index] = second[index] * second_window[index];
+    }
+}
+
+fn overlap_first_copy_second_windowed(
+    first: &[f32],
+    second: &[f32],
+    second_window: &[f32],
+    delay: &mut [f32],
+    output: &mut [f32],
+) {
+    debug_assert_eq!(first.len(), second.len());
+    debug_assert_eq!(first.len(), second_window.len());
+    debug_assert_eq!(first.len(), delay.len());
+    debug_assert_eq!(first.len(), output.len());
+
+    for index in 0..first.len() {
+        output[index] = first[index] + delay[index];
+        delay[index] = second[index] * second_window[index];
+    }
+}
+
+#[cfg(test)]
 fn long_sequence_first_window(
     sequence: WindowSequence,
     previous_long_window: &[f32],
@@ -367,6 +548,7 @@ fn long_sequence_first_window(
     }
 }
 
+#[cfg(test)]
 fn long_sequence_second_window(
     sequence: WindowSequence,
     long_window: &[f32],
@@ -477,13 +659,13 @@ fn imdct_fast(
     input: &[f32],
     output: &mut [f32],
     transform: &ImdctTransform,
-    fft: &mut [Complex32],
-    fft_scratch: &mut [Complex32],
+    fft: &mut [Complex],
+    fft_scratch: &mut [Complex],
 ) -> Result<()> {
     if input.len() != transform.input_len
         || output.len() != transform.output_len
         || fft.len() != transform.fft_len()
-        || fft_scratch.len() < transform.fft_scratch_len
+        || fft_scratch.len() < transform.fft.scratch_len()
     {
         return Err(AacLcError::InvalidConfig("invalid IMDCT buffer length"));
     }
@@ -492,51 +674,164 @@ fn imdct_fast(
     let half = n / 2;
     let quarter = n / 4;
 
-    for idx in 0..half {
-        let even = input[idx * 2];
-        let odd = -input[n - 1 - idx * 2];
-        let twiddle = transform.twiddle[idx];
-        fft[idx] = Complex32::new(
-            odd * twiddle.im - even * twiddle.re,
-            odd * twiddle.re + even * twiddle.im,
-        );
-    }
+    prepare_imdct_fft(input, &transform.twiddle, fft);
 
-    transform.fft.process_with_scratch(fft, fft_scratch);
+    transform.fft.process_inplace_with_scratch(fft, fft_scratch);
 
     let (out0, rest) = output.split_at_mut(half);
     let (out1, rest) = rest.split_at_mut(half);
     let (out2, out3) = rest.split_at_mut(half);
 
+    // Pair the transform's low and mirrored high bins. This writes adjacent
+    // output samples instead of four separate stride-two streams, matching
+    // the symmetry used by native C IMDCT implementations.
     for idx in 0..quarter {
-        let value = transform.twiddle[idx] * fft[idx].conj();
+        let mirror = half - 1 - idx;
+        let low = unsafe { *transform.twiddle.get_unchecked(idx) * fft.get_unchecked(idx).conj() };
+        let high =
+            unsafe { *transform.twiddle.get_unchecked(mirror) * fft.get_unchecked(mirror).conj() };
         let forward = idx * 2;
-        let reverse = half - 1 - idx * 2;
+        let reverse = half - 2 - forward;
 
-        out0[reverse] = -value.im;
-        out1[forward] = value.im;
-        out2[reverse] = value.re;
-        out3[forward] = value.re;
-    }
-
-    for idx in quarter..half {
-        let value = transform.twiddle[idx] * fft[idx].conj();
-        let local = idx - quarter;
-        let forward = local * 2;
-        let reverse = half - 1 - local * 2;
-
-        out0[forward] = -value.re;
-        out1[reverse] = value.re;
-        out2[forward] = value.im;
-        out3[reverse] = value.im;
+        unsafe {
+            *out0.get_unchecked_mut(reverse) = -high.re;
+            *out0.get_unchecked_mut(reverse + 1) = -low.im;
+            *out1.get_unchecked_mut(forward) = low.im;
+            *out1.get_unchecked_mut(forward + 1) = high.re;
+            *out2.get_unchecked_mut(reverse) = high.im;
+            *out2.get_unchecked_mut(reverse + 1) = low.re;
+            *out3.get_unchecked_mut(forward) = low.re;
+            *out3.get_unchecked_mut(forward + 1) = high.im;
+        }
     }
 
     Ok(())
 }
 
 fn fft_scratch_len(len: usize) -> usize {
-    let mut planner = FftPlanner::<f32>::new();
-    planner.plan_fft_inverse(len).get_inplace_scratch_len()
+    ForwardFft::new(len).scratch_len()
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+fn prepare_imdct_fft(input: &[f32], twiddles: &[Complex], fft: &mut [Complex]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        unsafe { prepare_imdct_fft_avx2(input, twiddles, fft) };
+        return;
+    }
+
+    let n = input.len();
+    for idx in 0..fft.len() {
+        let even = input[idx * 2];
+        let odd = -input[n - 1 - idx * 2];
+        let twiddle = twiddles[idx];
+        fft[idx] = Complex::new(
+            odd * twiddle.im - even * twiddle.re,
+            odd * twiddle.re + even * twiddle.im,
+        );
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn prepare_imdct_fft_avx2(input: &[f32], twiddles: &[Complex], fft: &mut [Complex]) {
+    use core::arch::x86_64::{
+        __m256, _mm256_addsub_ps, _mm256_castps128_ps256, _mm256_insertf128_ps, _mm256_loadu_ps,
+        _mm256_mul_ps, _mm256_permute_ps, _mm256_storeu_ps, _mm_loadu_ps, _mm_shuffle_ps,
+        _mm_xor_ps,
+    };
+
+    debug_assert_eq!(twiddles.len(), fft.len());
+    debug_assert_eq!(input.len(), fft.len() * 2);
+
+    let n = input.len();
+    let sign = _mm_loadu_ps([-0.0f32; 4].as_ptr());
+    let mut idx = 0usize;
+    while idx + 4 <= fft.len() {
+        let forward0 = _mm_loadu_ps(input.as_ptr().add(idx * 2));
+        let forward1 = _mm_loadu_ps(input.as_ptr().add(idx * 2 + 4));
+        let even = _mm_shuffle_ps::<0x88>(forward0, forward1);
+
+        let reverse = input.as_ptr().add(n - idx * 2 - 8);
+        let reverse0 = _mm_loadu_ps(reverse);
+        let reverse1 = _mm_loadu_ps(reverse.add(4));
+        let odd = _mm_xor_ps(_mm_shuffle_ps::<0x77>(reverse1, reverse0), sign);
+
+        let even_lo = core::arch::x86_64::_mm_unpacklo_ps(even, even);
+        let even_hi = core::arch::x86_64::_mm_unpackhi_ps(even, even);
+        let even_pairs: __m256 =
+            _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(even_lo), even_hi);
+        let odd_lo = core::arch::x86_64::_mm_unpacklo_ps(odd, odd);
+        let odd_hi = core::arch::x86_64::_mm_unpackhi_ps(odd, odd);
+        let odd_pairs: __m256 = _mm256_insertf128_ps::<1>(_mm256_castps128_ps256(odd_lo), odd_hi);
+
+        let twiddle = _mm256_loadu_ps(twiddles.as_ptr().add(idx).cast::<f32>());
+        let swapped_twiddle = _mm256_permute_ps::<0xb1>(twiddle);
+        let value = _mm256_addsub_ps(
+            _mm256_mul_ps(odd_pairs, swapped_twiddle),
+            _mm256_mul_ps(even_pairs, twiddle),
+        );
+        _mm256_storeu_ps(fft.as_mut_ptr().add(idx).cast::<f32>(), value);
+        idx += 4;
+    }
+
+    while idx < fft.len() {
+        let even = input[idx * 2];
+        let odd = -input[n - 1 - idx * 2];
+        let twiddle = twiddles[idx];
+        fft[idx] = Complex::new(
+            odd * twiddle.im - even * twiddle.re,
+            odd * twiddle.re + even * twiddle.im,
+        );
+        idx += 1;
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn prepare_imdct_fft(input: &[f32], twiddles: &[Complex], fft: &mut [Complex]) {
+    use core::arch::wasm32::{
+        f32x4_add, f32x4_mul, i32x4, i32x4_shuffle, v128, v128_load, v128_store, v128_xor,
+    };
+
+    debug_assert_eq!(twiddles.len(), fft.len());
+    debug_assert_eq!(input.len(), fft.len() * 2);
+    debug_assert_eq!(
+        std::mem::size_of::<Complex>(),
+        2 * std::mem::size_of::<f32>()
+    );
+
+    let n = input.len();
+    let mut idx = 0;
+    while idx + 2 <= fft.len() {
+        unsafe {
+            let even_source = v128_load(input.as_ptr().add(idx * 2).cast::<v128>());
+            let odd_source = v128_load(input.as_ptr().add(n - 4 - idx * 2).cast::<v128>());
+            let twiddle = v128_load(twiddles.as_ptr().add(idx).cast::<v128>());
+
+            let even = i32x4_shuffle::<0, 0, 2, 2>(even_source, even_source);
+            let odd = v128_xor(
+                i32x4_shuffle::<3, 3, 1, 1>(odd_source, odd_source),
+                i32x4(i32::MIN, i32::MIN, i32::MIN, i32::MIN),
+            );
+            let swapped_twiddle = i32x4_shuffle::<1, 0, 3, 2>(twiddle, twiddle);
+            let signed_even_product =
+                v128_xor(f32x4_mul(even, twiddle), i32x4(i32::MIN, 0, i32::MIN, 0));
+            let value = f32x4_add(f32x4_mul(odd, swapped_twiddle), signed_even_product);
+            v128_store(fft.as_mut_ptr().add(idx).cast::<v128>(), value);
+        }
+        idx += 2;
+    }
+
+    while idx < fft.len() {
+        let even = input[idx * 2];
+        let odd = -input[n - 1 - idx * 2];
+        let twiddle = twiddles[idx];
+        fft[idx] = Complex::new(
+            odd * twiddle.im - even * twiddle.re,
+            odd * twiddle.re + even * twiddle.im,
+        );
+        idx += 1;
+    }
 }
 
 fn sine_window(len: usize) -> Vec<f32> {
@@ -629,8 +924,8 @@ mod tests {
         let transform = ImdctTransform::new(input.len());
         let mut reference = [0.0f32; 16];
         let mut fast_output = [0.0f32; 16];
-        let mut fft = vec![Complex32::default(); transform.fft_len()];
-        let mut fft_scratch = vec![Complex32::default(); transform.fft_scratch_len()];
+        let mut fft = vec![Complex::default(); transform.fft_len()];
+        let mut fft_scratch = vec![Complex::default(); transform.fft.scratch_len()];
 
         imdct(&input, &mut reference).unwrap();
         imdct_fast(
@@ -669,8 +964,8 @@ mod tests {
             let transform = ImdctTransform::new(len);
             let mut reference = vec![0.0f32; len * 2];
             let mut fast_output = vec![0.0f32; len * 2];
-            let mut fft = vec![Complex32::default(); transform.fft_len()];
-            let mut fft_scratch = vec![Complex32::default(); transform.fft_scratch_len()];
+            let mut fft = vec![Complex::default(); transform.fft_len()];
+            let mut fft_scratch = vec![Complex::default(); transform.fft.scratch_len()];
 
             imdct(&input, &mut reference).unwrap();
             imdct_fast(
@@ -699,8 +994,8 @@ mod tests {
                 let transform = ImdctTransform::new(len);
                 let mut reference = vec![0.0f32; len * 2];
                 let mut fast_output = vec![0.0f32; len * 2];
-                let mut fft = vec![Complex32::default(); transform.fft_len()];
-                let mut fft_scratch = vec![Complex32::default(); transform.fft_scratch_len()];
+                let mut fft = vec![Complex::default(); transform.fft_len()];
+                let mut fft_scratch = vec![Complex::default(); transform.fft.scratch_len()];
 
                 imdct(&input, &mut reference).unwrap();
                 imdct_fast(

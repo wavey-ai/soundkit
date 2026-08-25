@@ -784,7 +784,7 @@ fn parse_soundkit_lc_frame_features(
 
     match header.id {
         ElementId::SingleChannel => {
-            let mut scale_factor_decoder = StandardScaleFactorDecoder;
+            let mut scale_factor_decoder = StandardScaleFactorDecoder::new();
             let stream =
                 IndividualChannelStream::read(&mut reader, None, &mut scale_factor_decoder)
                     .map_err(|err| format!("parse SCE frame {frame_index} failed: {err}"))?;
@@ -804,7 +804,7 @@ fn parse_soundkit_lc_frame_features(
                 .ok_or_else(|| format!("missing CPE tag in frame {frame_index}"))?;
             let pair = ChannelPairElementHeader::read(&mut reader, tag)
                 .map_err(|err| format!("parse CPE header for frame {frame_index} failed: {err}"))?;
-            let mut scale_factor_decoder = StandardScaleFactorDecoder;
+            let mut scale_factor_decoder = StandardScaleFactorDecoder::new();
             let left = IndividualChannelStream::read(
                 &mut reader,
                 pair.common_ics,
@@ -1628,13 +1628,24 @@ pub fn bench_soundkit_lc_fixture(iterations: usize) -> Result<BenchResult, Strin
     not(any(target_arch = "wasm32", target_arch = "wasm64"))
 ))]
 pub fn bench_soundkit_lc_fixture_reused(iterations: usize) -> Result<BenchResult, String> {
+    bench_soundkit_lc_data_reused(FIXTURE, iterations)
+}
+
+#[cfg(all(
+    feature = "soundkit-lc",
+    not(any(target_arch = "wasm32", target_arch = "wasm64"))
+))]
+pub fn bench_soundkit_lc_data_reused(
+    data: &[u8],
+    iterations: usize,
+) -> Result<BenchResult, String> {
     use std::hint::black_box;
     use std::time::Instant;
 
     use soundkit_aac_lc::AacLcDecoder;
 
     let iterations = iterations.max(1);
-    let frames = parse_adts_frames(FIXTURE)?;
+    let frames = parse_adts_frames(data)?;
     let first = frames
         .first()
         .ok_or_else(|| "fixture has no ADTS frames".to_string())?;
@@ -2014,5 +2025,217 @@ mod tests {
             wav.push(((clamped >> 16) & 0xff) as u8);
         }
         wav
+    }
+}
+
+#[cfg(all(feature = "wasm-bindgen-api", target_arch = "wasm32"))]
+mod wasm_bindgen_api {
+    use super::{parse_adts_frames, AdtsFrame, FIXTURE};
+    use js_sys::Date;
+    use wasm_bindgen::prelude::*;
+
+    const WARMUP_ITERATIONS: usize = 1;
+
+    fn checksum_planar_point(checksum: u64, value: f32) -> u64 {
+        let mut checksum = checksum ^ (value.to_bits() as u64);
+        checksum = checksum.wrapping_mul(0x100000001b3);
+        checksum
+    }
+
+    fn sample_points(frames: usize) -> [usize; 3] {
+        [0, frames / 2, frames - 1]
+    }
+
+    fn format_result(
+        name: &str,
+        iterations: usize,
+        decoded_frames: u64,
+        samples_per_channel: u64,
+        sample_rate: u32,
+        elapsed_ms: f64,
+        checksum: u64,
+    ) -> String {
+        let audio_seconds = samples_per_channel as f64 / sample_rate as f64;
+        let rtf = (elapsed_ms / 1000.0) / audio_seconds;
+        let frames_per_sec = decoded_frames as f64 / (elapsed_ms / 1000.0);
+        format!(
+            "name={name} iterations={iterations} decoded_frames={decoded_frames} samples_per_channel={samples_per_channel} sample_rate={sample_rate} elapsed_ms={elapsed_ms:.3} rtf={rtf:.6} frames_per_sec={frames_per_sec:.1} checksum={checksum:016x}"
+        )
+    }
+
+    fn bench_soundkit_lc_data(data: &[u8], iterations: usize) -> Result<String, String> {
+        use soundkit_aac_lc::AacLcDecoder;
+
+        let iterations = iterations.max(1);
+        let frames = parse_adts_frames(data)?;
+        let first = frames.first().ok_or("fixture has no frames")?;
+        let asc = first.audio_specific_config();
+        let mut decoder =
+            AacLcDecoder::from_audio_specific_config(&asc).map_err(|err| err.to_string())?;
+
+        for _ in 0..WARMUP_ITERATIONS {
+            for frame in &frames {
+                decoder
+                    .decode_access_unit(frame.raw)
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+
+        let started = Date::now();
+        let mut decoded_frames = 0u64;
+        let mut samples_per_channel = 0u64;
+        let mut checksum = 0xcbf29ce484222325u64;
+
+        for _ in 0..iterations {
+            for frame in &frames {
+                let decoded = decoder
+                    .decode_access_unit(frame.raw)
+                    .map_err(|err| err.to_string())?;
+                decoded_frames += 1;
+                let channel_frames = decoded.frames();
+                samples_per_channel += channel_frames as u64;
+                for channel in decoded.channels() {
+                    for index in sample_points(channel_frames) {
+                        checksum = checksum_planar_point(checksum, channel[index]);
+                    }
+                }
+            }
+        }
+
+        Ok(format_result(
+            "soundkit-lc-wasm",
+            iterations,
+            decoded_frames,
+            samples_per_channel,
+            first.sample_rate,
+            Date::now() - started,
+            checksum,
+        ))
+    }
+
+    #[wasm_bindgen]
+    pub fn bench_soundkit_lc_wasm(iterations: usize) -> Result<String, String> {
+        bench_soundkit_lc_data(FIXTURE, iterations)
+    }
+
+    #[wasm_bindgen]
+    pub fn bench_soundkit_lc_data_wasm(data: &[u8], iterations: usize) -> Result<String, String> {
+        bench_soundkit_lc_data(data, iterations)
+    }
+
+    #[cfg(feature = "symphonia")]
+    fn bench_symphonia_data(data: &[u8], iterations: usize) -> Result<String, String> {
+        use std::io::Cursor;
+
+        use symphonia_codec_aac::{AacDecoder, AdtsReader};
+        use symphonia_core::audio::GenericAudioBufferRef;
+        use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
+        use symphonia_core::codecs::CodecParameters;
+        use symphonia_core::formats::probe::ProbeableFormat;
+        use symphonia_core::formats::FormatReader;
+        use symphonia_core::formats::TrackType;
+        use symphonia_core::io::MediaSourceStream;
+
+        fn open_reader(data: &[u8]) -> Result<Box<dyn FormatReader>, String> {
+            let cursor = Cursor::new(data.to_vec());
+            let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+            AdtsReader::try_probe_new(mss, Default::default())
+                .map_err(|err| format!("create ADTS reader failed: {err}"))
+        }
+
+        let iterations = iterations.max(1);
+        let frames: Vec<AdtsFrame<'_>> = parse_adts_frames(data)?;
+        let first = frames.first().ok_or("fixture has no frames")?;
+
+        let mut reader = open_reader(data)?;
+        let track = reader
+            .default_track(TrackType::Audio)
+            .ok_or_else(|| "ADTS reader produced no default track".to_string())?;
+        let codec_params = match &track.codec_params {
+            Some(CodecParameters::Audio(params)) => params.clone(),
+            None => return Err("ADTS track has no codec parameters".to_string()),
+            _ => return Err("ADTS track is not audio".to_string()),
+        };
+        let mut decoder = AacDecoder::try_new(&codec_params, &AudioDecoderOptions::default())
+            .map_err(|err| format!("create AAC decoder failed: {err}"))?;
+
+        let mut packets = Vec::with_capacity(frames.len());
+        while let Some(packet) = reader
+            .next_packet()
+            .map_err(|err| format!("read ADTS packet failed: {err}"))?
+        {
+            packets.push(packet);
+        }
+        if packets.len() != frames.len() {
+            return Err(format!(
+                "ADTS reader produced {} packets for {} frames",
+                packets.len(),
+                frames.len()
+            ));
+        }
+
+        let run_pass = |decoder: &mut AacDecoder| -> Result<(u64, u64, u64), String> {
+            let mut decoded_frames = 0u64;
+            let mut samples_per_channel = 0u64;
+            let mut checksum = 0xcbf29ce484222325u64;
+
+            for packet in &packets {
+                let decoded = decoder
+                    .decode(packet)
+                    .map_err(|err| format!("decode failed: {err}"))?;
+                decoded_frames += 1;
+                let channel_frames = decoded.frames();
+                samples_per_channel += channel_frames as u64;
+                let buffer = match decoded {
+                    GenericAudioBufferRef::F32(buffer) => buffer,
+                    _ => return Err("symphonia did not decode to f32 output".to_string()),
+                };
+                let points = sample_points(channel_frames);
+                for index in points {
+                    checksum = checksum_planar_point(checksum, buffer[0][index]);
+                    checksum = checksum_planar_point(checksum, buffer[1][index]);
+                }
+            }
+
+            Ok((decoded_frames, samples_per_channel, checksum))
+        };
+
+        for _ in 0..WARMUP_ITERATIONS {
+            run_pass(&mut decoder)?;
+        }
+
+        let started = Date::now();
+        let mut total_frames = 0u64;
+        let mut total_samples = 0u64;
+        let mut checksum = 0xcbf29ce484222325u64;
+        for _ in 0..iterations {
+            let (decoded_frames, samples_per_channel, pass_checksum) = run_pass(&mut decoder)?;
+            total_frames += decoded_frames;
+            total_samples += samples_per_channel;
+            checksum ^= pass_checksum;
+            checksum = checksum.wrapping_mul(0x100000001b3);
+        }
+
+        Ok(format_result(
+            "symphonia-wasm",
+            iterations,
+            total_frames,
+            total_samples,
+            first.sample_rate,
+            Date::now() - started,
+            checksum,
+        ))
+    }
+
+    #[cfg(feature = "symphonia")]
+    #[wasm_bindgen]
+    pub fn bench_symphonia_wasm(iterations: usize) -> Result<String, String> {
+        bench_symphonia_data(FIXTURE, iterations)
+    }
+
+    #[cfg(feature = "symphonia")]
+    #[wasm_bindgen]
+    pub fn bench_symphonia_data_wasm(data: &[u8], iterations: usize) -> Result<String, String> {
+        bench_symphonia_data(data, iterations)
     }
 }

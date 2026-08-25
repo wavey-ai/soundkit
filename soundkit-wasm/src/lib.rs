@@ -3882,7 +3882,10 @@ impl WasmStreamingLibraryEncoder {
     }
 }
 
-#[cfg(all(feature = "opus", feature = "flac"))]
+#[cfg(any(
+    all(feature = "opus", feature = "flac"),
+    all(feature = "aac-lc", not(feature = "aac"))
+))]
 fn library_float_to_i16(sample: f32) -> i16 {
     let sample = if sample.is_finite() {
         sample.clamp(-1.0, 1.0)

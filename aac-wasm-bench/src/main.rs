@@ -11,6 +11,66 @@ use aac_wasm_bench::{
 
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.first().map(String::as_str) == Some("bench-soundkit-file") {
+        let path = args
+            .get(1)
+            .map(PathBuf::from)
+            .expect("bench-soundkit-file requires an ADTS AAC path");
+        let iterations = args
+            .get(2)
+            .and_then(|arg| arg.parse::<usize>().ok())
+            .filter(|count| *count > 0)
+            .unwrap_or(DEFAULT_ITERATIONS);
+        #[cfg(feature = "soundkit-lc")]
+        {
+            let data = std::fs::read(&path).expect("read ADTS AAC benchmark file");
+            println!(
+                "{}",
+                format_bench_result(
+                    &aac_wasm_bench::bench_soundkit_lc_data_reused(&data, iterations)
+                        .expect("benchmark SoundKit AAC-LC file")
+                )
+            );
+        }
+        #[cfg(not(feature = "soundkit-lc"))]
+        panic!("bench-soundkit-file requires --features soundkit-lc");
+        return;
+    }
+    if args.first().map(String::as_str) == Some("bench-soundkit-reused") {
+        let iterations = args
+            .get(1)
+            .and_then(|arg| arg.parse::<usize>().ok())
+            .filter(|count| *count > 0)
+            .unwrap_or(DEFAULT_ITERATIONS);
+        #[cfg(feature = "soundkit-lc")]
+        println!(
+            "{}",
+            format_bench_result(
+                &aac_wasm_bench::bench_soundkit_lc_fixture_reused(iterations)
+                    .expect("benchmark SoundKit AAC-LC")
+            )
+        );
+        #[cfg(not(feature = "soundkit-lc"))]
+        panic!("bench-soundkit-reused requires --features soundkit-lc");
+        return;
+    }
+    if args.first().map(String::as_str) == Some("bench-fdk") {
+        let iterations = args
+            .get(1)
+            .and_then(|arg| arg.parse::<usize>().ok())
+            .filter(|count| *count > 0)
+            .unwrap_or(DEFAULT_ITERATIONS);
+        #[cfg(feature = "fdk")]
+        println!(
+            "{}",
+            format_bench_result(
+                &aac_wasm_bench::bench_fdk_fixture(iterations).expect("benchmark FDK-AAC")
+            )
+        );
+        #[cfg(not(feature = "fdk"))]
+        panic!("bench-fdk requires --features fdk");
+        return;
+    }
     if args.first().map(String::as_str) == Some("quality-hotspots") {
         let limit = args
             .get(1)

@@ -163,3 +163,4 @@ soundkit-mp3/outputs/
 soundkit-opus/outputs/
 soundkit-ogg-opus/outputs/
 aac-wasm-bench/pkg-*/
+aac-wasm-bench/reference/pkg-*/

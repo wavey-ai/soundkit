@@ -3,6 +3,7 @@ use crate::error::{AacLcError, Result};
 use crate::ics::{IcsInfo, MAX_WINDOW_GROUPS};
 
 pub const MAX_SCALE_FACTOR_BANDS: usize = 64;
+pub(crate) const MAX_SCALE_FACTOR_ENTRIES: usize = MAX_WINDOW_GROUPS * 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionCodebook {
@@ -53,7 +54,7 @@ impl Default for SectionCodebook {
 pub struct SectionData {
     max_sfb: u8,
     num_window_groups: u8,
-    codebooks: [[SectionCodebook; MAX_SCALE_FACTOR_BANDS]; MAX_WINDOW_GROUPS],
+    codebooks: [SectionCodebook; MAX_SCALE_FACTOR_ENTRIES],
 }
 
 impl SectionData {
@@ -72,7 +73,13 @@ impl SectionData {
         let section_escape = (1u8 << section_len_bits) - 1;
         let max_sfb = info.max_sfb as usize;
         let num_window_groups = info.num_window_groups as usize;
-        let mut codebooks = [[SectionCodebook::Zero; MAX_SCALE_FACTOR_BANDS]; MAX_WINDOW_GROUPS];
+        let entry_count = max_sfb * num_window_groups;
+        if num_window_groups > MAX_WINDOW_GROUPS || entry_count > MAX_SCALE_FACTOR_ENTRIES {
+            return Err(AacLcError::InvalidBitstream(
+                "scale-factor layout exceeds parser capacity",
+            ));
+        }
+        let mut codebooks = [SectionCodebook::Zero; MAX_SCALE_FACTOR_ENTRIES];
 
         for group in 0..num_window_groups {
             let mut sfb = 0usize;
@@ -98,7 +105,7 @@ impl SectionData {
                 }
 
                 for band in sfb..sfb + section_len {
-                    codebooks[group][band] = codebook;
+                    codebooks[group * max_sfb + band] = codebook;
                 }
                 sfb += section_len;
             }
@@ -123,32 +130,24 @@ impl SectionData {
         if group >= self.num_window_groups as usize || sfb >= self.max_sfb as usize {
             return None;
         }
-        Some(self.codebooks[group][sfb])
+        Some(self.codebooks[group * self.max_sfb as usize + sfb])
     }
 
     pub fn is_all_zero(&self) -> bool {
-        for group in 0..self.num_window_groups as usize {
-            for sfb in 0..self.max_sfb as usize {
-                if self.codebooks[group][sfb] != SectionCodebook::Zero {
-                    return false;
-                }
-            }
-        }
-        true
+        let entry_count = self.num_window_groups as usize * self.max_sfb as usize;
+        self.codebooks[..entry_count]
+            .iter()
+            .all(|&codebook| codebook == SectionCodebook::Zero)
     }
 
     pub fn has_intensity_stereo(&self) -> bool {
-        for group in 0..self.num_window_groups as usize {
-            for sfb in 0..self.max_sfb as usize {
-                if matches!(
-                    self.codebooks[group][sfb],
-                    SectionCodebook::Intensity | SectionCodebook::IntensityNegative
-                ) {
-                    return true;
-                }
-            }
-        }
-        false
+        let entry_count = self.num_window_groups as usize * self.max_sfb as usize;
+        self.codebooks[..entry_count].iter().any(|&codebook| {
+            matches!(
+                codebook,
+                SectionCodebook::Intensity | SectionCodebook::IntensityNegative
+            )
+        })
     }
 }
 

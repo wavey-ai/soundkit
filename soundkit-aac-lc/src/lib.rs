@@ -4,6 +4,7 @@ mod config;
 mod decoder;
 mod dsp;
 mod error;
+mod fft;
 mod ics;
 mod pulse;
 mod scalefactor;

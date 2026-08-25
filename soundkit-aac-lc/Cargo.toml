@@ -11,5 +11,12 @@ repository = "https://github.com/wavey-ai/soundkit"
 name = "soundkit_aac_lc"
 path = "src/lib.rs"
 
+[features]
+bench-ablate-spectrum = []
+bench-ablate-tools = []
+bench-ablate-synth = []
+
 [dependencies]
+
+[target.'cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))'.dependencies]
 rustfft = "6.4.1"
