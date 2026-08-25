@@ -16,7 +16,7 @@ tracing = "0.1.40"
 
 [features]
 default = ["opus", "vorbis"]
-opus = ["dep:soundkit-opus"]
+opus = ["dep:soundkit-opus", "soundkit-opus/full-opus"]
 vorbis = ["dep:soundkit-vorbis"]
 
 [lib]

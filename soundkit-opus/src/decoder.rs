@@ -5,7 +5,8 @@ use crate::celt::mathops::float_to_i16;
 use crate::celt::modes::CeltMode;
 use crate::celt::pitch::{comb_filter_in_place, COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD};
 use crate::celt::synthesis::{
-    celt_synthesis_with_overlap_into, deemphasis_interleaved_i24_into, deemphasis_interleaved_into,
+    celt_synthesis_with_overlap_into, deemphasis_interleaved_f32_slice,
+    deemphasis_interleaved_i24_into, deemphasis_interleaved_i24_slice, deemphasis_interleaved_into,
     SynthesisScratch,
 };
 use crate::constants::{valid_channels, valid_sample_rate, Bandwidth};
@@ -122,6 +123,28 @@ impl Decoder {
         Ok(pcm.len() / channels)
     }
 
+    /// Decodes directly into caller-owned signed 16-bit PCM storage.
+    pub(crate) fn decode_i16_into_slice(
+        &mut self,
+        packet: &[u8],
+        decode_fec: bool,
+        pcm: &mut [i16],
+    ) -> Result<usize> {
+        let channels = self.decode_channels(packet, decode_fec)?;
+        deemphasis_interleaved_into(
+            &self.mode,
+            &self.synthesis_channels[..channels],
+            &mut self.preemph_mem,
+            &mut self.pcm_f32_scratch,
+        )?;
+        let sample_count = self.pcm_f32_scratch.len();
+        let pcm = pcm.get_mut(..sample_count).ok_or(Error::BufferTooSmall)?;
+        for (output, &sample) in pcm.iter_mut().zip(&self.pcm_f32_scratch) {
+            *output = float_to_i16(sample);
+        }
+        Ok(sample_count / channels)
+    }
+
     /// Decodes to signed 24-bit PCM stored sign-extended in `i32` samples.
     pub fn decode_i24(&mut self, packet: &[u8], decode_fec: bool) -> Result<Vec<i32>> {
         let mut pcm = Vec::new();
@@ -146,6 +169,22 @@ impl Decoder {
         Ok(pcm.len() / channels)
     }
 
+    /// Decodes directly into caller-owned signed 24-bit PCM storage.
+    pub(crate) fn decode_i24_into_slice(
+        &mut self,
+        packet: &[u8],
+        decode_fec: bool,
+        pcm: &mut [i32],
+    ) -> Result<usize> {
+        let channels = self.decode_channels(packet, decode_fec)?;
+        deemphasis_interleaved_i24_slice(
+            &self.mode,
+            &self.synthesis_channels[..channels],
+            &mut self.preemph_mem,
+            pcm,
+        )
+    }
+
     pub fn decode_f32(&mut self, packet: &[u8], decode_fec: bool) -> Result<Vec<f32>> {
         let mut pcm = Vec::new();
         self.decode_f32_into(packet, decode_fec, &mut pcm)?;
@@ -166,6 +205,22 @@ impl Decoder {
             pcm,
         )?;
         Ok(pcm.len() / channels)
+    }
+
+    /// Decodes directly into caller-owned floating-point PCM storage.
+    pub(crate) fn decode_f32_into_slice(
+        &mut self,
+        packet: &[u8],
+        decode_fec: bool,
+        pcm: &mut [f32],
+    ) -> Result<usize> {
+        let channels = self.decode_channels(packet, decode_fec)?;
+        deemphasis_interleaved_f32_slice(
+            &self.mode,
+            &self.synthesis_channels[..channels],
+            &mut self.preemph_mem,
+            pcm,
+        )
     }
 
     fn decode_channels(&mut self, packet: &[u8], _decode_fec: bool) -> Result<usize> {

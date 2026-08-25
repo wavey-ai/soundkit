@@ -27,10 +27,11 @@ pub use soft_clip::*;
 use crate::decoder::Decoder as CeltOpusDecoder;
 use crate::encoder::Encoder as CeltOpusEncoder;
 use frame_header::{EncodingFlag, Endianness};
+#[cfg(feature = "full-opus")]
 use ropus::{Channels, DecodeMode, Decoder as FullOpusDecoder};
 use soundkit::audio_packet::{Decoder as SoundkitDecoderTrait, Encoder as SoundkitEncoderTrait};
 use soundkit::audio_types::AudioData;
-use tracing::{debug, trace};
+use tracing::debug;
 
 type AdapterResult<T> = std::result::Result<T, String>;
 
@@ -229,16 +230,12 @@ fn opus_packet_samples_per_channel(packet: &[u8], sample_rate: u32) -> Option<us
 
 enum OpusDecoderBackend {
     /// SoundKit's 5 ms audio encoder always emits 48 kHz CELT.
-    /// This decoder retains all codec and output workspaces after warm-up.
-    Celt {
-        decoder: CeltOpusDecoder,
-        i16_output: Vec<i16>,
-        i24_output: Vec<i32>,
-        f32_output: Vec<f32>,
-    },
+    /// The codec writes directly into caller-owned output storage.
+    Celt { decoder: CeltOpusDecoder },
     /// General containers can switch between SILK, hybrid, and CELT. Keep one
     /// full decoder for the complete logical stream so transition state stays
     /// correct.
+    #[cfg(feature = "full-opus")]
     Full(FullOpusDecoder),
 }
 
@@ -250,28 +247,46 @@ pub struct OpusDecoder {
 }
 
 impl OpusDecoder {
-    /// Creates a decoder for general Opus streams.
+    /// Creates the best decoder available in this build.
     ///
-    /// Use [`Self::new_celt_only`] only when the stream contract guarantees
-    /// that every packet uses the CELT mode.
+    /// With `full-opus`, this accepts general Opus streams. The dependency-free
+    /// default build uses SoundKit's authored 48 kHz CELT decoder and rejects
+    /// SILK or hybrid packets.
     pub fn new(sample_rate: usize, channels: usize) -> AdapterResult<Self> {
-        Self::new_full(sample_rate, channels)
+        #[cfg(feature = "full-opus")]
+        {
+            Self::new_full(sample_rate, channels)
+        }
+        #[cfg(not(feature = "full-opus"))]
+        {
+            Self::new_celt_only(sample_rate, channels)
+        }
     }
 
     /// Creates a decoder for streams that can contain SILK, hybrid, CELT, or
     /// legal mode transitions.
     pub fn new_full(sample_rate: usize, channels: usize) -> AdapterResult<Self> {
         validate_decoder_config(sample_rate, channels)?;
-        let channel_layout = channel_layout(channels);
-        let decoder = FullOpusDecoder::new(sample_rate as u32, channel_layout)
-            .map_err(|error| format!("failed to create Opus decoder: {error}"))?;
+        #[cfg(feature = "full-opus")]
+        {
+            let channel_layout = channel_layout(channels);
+            let decoder = FullOpusDecoder::new(sample_rate as u32, channel_layout)
+                .map_err(|error| format!("failed to create Opus decoder: {error}"))?;
 
-        Ok(Self {
-            backend: OpusDecoderBackend::Full(decoder),
-            sample_rate: sample_rate as u32,
-            channels: channels as u8,
-            first_frame_logged: false,
-        })
+            Ok(Self {
+                backend: OpusDecoderBackend::Full(decoder),
+                sample_rate: sample_rate as u32,
+                channels: channels as u8,
+                first_frame_logged: false,
+            })
+        }
+        #[cfg(not(feature = "full-opus"))]
+        {
+            Err(
+                "general Opus decoding requires the `full-opus` feature; the dependency-free build supports 48 kHz CELT streams"
+                    .to_string(),
+            )
+        }
     }
 
     /// Creates a decoder that rejects non-CELT packets instead of silently
@@ -285,12 +300,7 @@ impl OpusDecoder {
             .map_err(|error| format!("failed to create CELT Opus decoder: {error}"))?;
 
         Ok(Self {
-            backend: OpusDecoderBackend::Celt {
-                decoder,
-                i16_output: vec![0; MAX_OPUS_FRAME_SAMPLES * channels],
-                i24_output: vec![0; MAX_OPUS_FRAME_SAMPLES * channels],
-                f32_output: vec![0.0; MAX_OPUS_FRAME_SAMPLES * channels],
-            },
+            backend: OpusDecoderBackend::Celt { decoder },
             sample_rate: sample_rate as u32,
             channels: channels as u8,
             first_frame_logged: false,
@@ -305,18 +315,11 @@ impl OpusDecoder {
     /// caller-owned session or its reusable output workspaces.
     pub fn reset(&mut self) -> AdapterResult<()> {
         match &mut self.backend {
-            OpusDecoderBackend::Celt {
-                decoder,
-                i16_output,
-                i24_output,
-                f32_output,
-            } => {
+            OpusDecoderBackend::Celt { decoder } => {
                 *decoder = CeltOpusDecoder::new(self.sample_rate as i32, self.channels as usize)
                     .map_err(|error| format!("failed to reset CELT Opus decoder: {error}"))?;
-                i16_output.fill(0);
-                i24_output.fill(0);
-                f32_output.fill(0.0);
             }
+            #[cfg(feature = "full-opus")]
             OpusDecoderBackend::Full(decoder) => {
                 *decoder =
                     FullOpusDecoder::new(self.sample_rate, channel_layout(self.channels as usize))
@@ -355,6 +358,7 @@ fn validate_decoder_config(sample_rate: usize, channels: usize) -> AdapterResult
     Ok(())
 }
 
+#[cfg(feature = "full-opus")]
 fn channel_layout(channels: usize) -> Channels {
     if channels == 1 {
         Channels::Mono
@@ -368,7 +372,7 @@ fn validate_celt_output(
     output_len: usize,
     sample_rate: u32,
     channels: usize,
-) -> AdapterResult<()> {
+) -> AdapterResult<usize> {
     if !input
         .first()
         .is_some_and(|toc| opus_packet_mode(*toc) == OpusPacketMode::CeltOnly)
@@ -388,42 +392,35 @@ fn validate_celt_output(
             "opus decode output too large: {sample_count} > {output_len}"
         ));
     }
-    Ok(())
+    Ok(samples_per_channel)
 }
 
 impl SoundkitDecoderTrait for OpusDecoder {
     fn decode_i16(&mut self, input: &[u8], output: &mut [i16], fec: bool) -> AdapterResult<usize> {
         let decoded_samples_per_channel = match &mut self.backend {
-            OpusDecoderBackend::Celt {
-                decoder,
-                i16_output,
-                ..
-            } => {
+            OpusDecoderBackend::Celt { decoder } => {
                 if fec {
                     return Err(
                         "Opus FEC decode is not implemented by the CELT backend".to_string()
                     );
                 }
-                validate_celt_output(
+                let expected_frames = validate_celt_output(
                     input,
                     output.len(),
                     self.sample_rate,
                     self.channels as usize,
                 )?;
-                let expected_frames = opus_packet_samples_per_channel(input, self.sample_rate)
-                    .ok_or_else(|| "invalid Opus packet duration".to_string())?;
                 let frames = decoder
-                    .decode_i16_into(input, false, i16_output)
+                    .decode_i16_into_slice(input, false, output)
                     .map_err(|error| error.to_string())?;
                 if frames != expected_frames {
                     return Err(format!(
                         "CELT decoder returned {frames} frames; expected {expected_frames}"
                     ));
                 }
-                let decoded_count = frames * self.channels as usize;
-                output[..decoded_count].copy_from_slice(&i16_output[..decoded_count]);
                 frames
             }
+            #[cfg(feature = "full-opus")]
             OpusDecoderBackend::Full(decoder) => {
                 let decode_mode = if fec {
                     DecodeMode::Fec
@@ -445,84 +442,64 @@ impl SoundkitDecoderTrait for OpusDecoder {
                 pcm_samples_written = decoded_count,
                 "decoded Opus packet"
             );
-        } else {
-            trace!(
-                sample_rate_hz = self.sample_rate,
-                channels = self.channels,
-                packet_len = input.len(),
-                pcm_samples_written = decoded_count,
-                "decoded Opus packet"
-            );
+            self.first_frame_logged = true;
         }
-        self.first_frame_logged = true;
 
         Ok(decoded_samples_per_channel)
     }
     fn decode_i32(&mut self, input: &[u8], output: &mut [i32], fec: bool) -> AdapterResult<usize> {
-        let OpusDecoderBackend::Celt {
-            decoder,
-            i24_output,
-            ..
-        } = &mut self.backend
-        else {
-            return Err("24-bit Opus output requires the 48 kHz CELT decoder".to_string());
+        let decoder = match &mut self.backend {
+            OpusDecoderBackend::Celt { decoder } => decoder,
+            #[cfg(feature = "full-opus")]
+            OpusDecoderBackend::Full(_) => {
+                return Err("24-bit Opus output requires the 48 kHz CELT decoder".to_string());
+            }
         };
         if fec {
             return Err("Opus FEC decode is not implemented by the CELT backend".to_string());
         }
-        validate_celt_output(
+        let expected_frames = validate_celt_output(
             input,
             output.len(),
             self.sample_rate,
             self.channels as usize,
         )?;
-        let expected_frames = opus_packet_samples_per_channel(input, self.sample_rate)
-            .ok_or_else(|| "invalid Opus packet duration".to_string())?;
         let frames = decoder
-            .decode_i24_into(input, false, i24_output)
+            .decode_i24_into_slice(input, false, output)
             .map_err(|error| error.to_string())?;
         if frames != expected_frames {
             return Err(format!(
                 "CELT decoder returned {frames} frames; expected {expected_frames}"
             ));
         }
-        let decoded_count = frames * self.channels as usize;
-        output[..decoded_count].copy_from_slice(&i24_output[..decoded_count]);
         Ok(frames)
     }
 
     fn decode_f32(&mut self, input: &[u8], output: &mut [f32], fec: bool) -> AdapterResult<usize> {
         match &mut self.backend {
-            OpusDecoderBackend::Celt {
-                decoder,
-                f32_output,
-                ..
-            } => {
+            OpusDecoderBackend::Celt { decoder } => {
                 if fec {
                     return Err(
                         "Opus FEC decode is not implemented by the CELT backend".to_string()
                     );
                 }
-                validate_celt_output(
+                let expected_frames = validate_celt_output(
                     input,
                     output.len(),
                     self.sample_rate,
                     self.channels as usize,
                 )?;
-                let expected_frames = opus_packet_samples_per_channel(input, self.sample_rate)
-                    .ok_or_else(|| "invalid Opus packet duration".to_string())?;
                 let frames = decoder
-                    .decode_f32_into(input, false, f32_output)
+                    .decode_f32_into_slice(input, false, output)
                     .map_err(|error| error.to_string())?;
                 if frames != expected_frames {
                     return Err(format!(
                         "CELT decoder returned {frames} frames; expected {expected_frames}"
                     ));
                 }
-                let decoded_count = frames * self.channels as usize;
-                output[..decoded_count].copy_from_slice(&f32_output[..decoded_count]);
                 Ok(frames)
             }
+            #[cfg(feature = "full-opus")]
             OpusDecoderBackend::Full(decoder) => {
                 let decode_mode = if fec {
                     DecodeMode::Fec
@@ -540,6 +517,12 @@ impl SoundkitDecoderTrait for OpusDecoder {
 const MAX_OPUS_FRAME_SAMPLES: usize = 5760; // 120 ms @ 48 kHz
 const MAX_OPUS_STREAM_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
+#[derive(Clone, Copy)]
+enum OpusStreamProfile {
+    General,
+    SoundKitCelt,
+}
+
 /// Streaming decoder for raw Opus format (OpusHead + length-prefixed packets)
 pub struct OpusStreamDecoder {
     buffer: Vec<u8>,
@@ -550,6 +533,7 @@ pub struct OpusStreamDecoder {
     channels: Option<u8>,
     pre_skip_remaining: usize,
     header_parsed: bool,
+    profile: OpusStreamProfile,
 }
 
 impl Default for OpusStreamDecoder {
@@ -560,6 +544,17 @@ impl Default for OpusStreamDecoder {
 
 impl OpusStreamDecoder {
     pub fn new() -> Self {
+        Self::with_profile(OpusStreamProfile::General)
+    }
+
+    /// Creates a streaming decoder for raw streams emitted by
+    /// [`OpusEncoder`]. Those streams are always 48 kHz CELT, so this path
+    /// stays entirely inside SoundKit and rejects any other packet mode.
+    pub fn for_soundkit_stream() -> Self {
+        Self::with_profile(OpusStreamProfile::SoundKitCelt)
+    }
+
+    fn with_profile(profile: OpusStreamProfile) -> Self {
         Self {
             buffer: Vec::new(),
             buffer_start: 0,
@@ -569,6 +564,7 @@ impl OpusStreamDecoder {
             channels: None,
             pre_skip_remaining: 0,
             header_parsed: false,
+            profile,
         }
     }
 
@@ -642,8 +638,15 @@ impl OpusStreamDecoder {
             self.pre_skip_remaining = pre_skip as usize * self.channels.unwrap() as usize;
 
             let channels = self.channels.unwrap();
-            let decoder =
-                OpusDecoder::new_full(self.sample_rate.unwrap() as usize, channels as usize)?;
+            let decoder = match self.profile {
+                OpusStreamProfile::General => {
+                    OpusDecoder::new_full(self.sample_rate.unwrap() as usize, channels as usize)?
+                }
+                OpusStreamProfile::SoundKitCelt => OpusDecoder::new_celt_only(
+                    self.sample_rate.unwrap() as usize,
+                    channels as usize,
+                )?,
+            };
 
             self.decoder = Some(decoder);
             self.scratch_buffer
@@ -736,6 +739,7 @@ impl OpusStreamDecoder {
 mod tests {
     use super::*;
     use soundkit::audio_bytes::s16le_to_i16;
+    #[cfg(feature = "full-opus")]
     use soundkit::test_utils::{print_waveform_with_header, DecodeResult};
     use soundkit::wav::WavStreamProcessor;
     use std::fs::{self, File};
@@ -745,8 +749,10 @@ mod tests {
     use std::sync::Once;
     use std::time::Instant;
     use tracing::debug;
+    #[cfg(feature = "full-opus")]
     const TEST_FILE: &str = "A_Tusk_is_used_to_make_costly_gifts";
 
+    #[cfg(feature = "full-opus")]
     #[derive(Debug)]
     struct RawOpusHeader {
         sample_rate: u32,
@@ -778,6 +784,7 @@ mod tests {
             .join(file)
     }
 
+    #[cfg(feature = "full-opus")]
     #[test]
     fn opus_decoder_accepts_all_supported_decode_rates() {
         for sample_rate in [8_000, 12_000, 16_000, 24_000, 48_000] {
@@ -803,6 +810,20 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "full-opus"))]
+    #[test]
+    fn dependency_free_default_is_owned_celt_only() {
+        let decoder = OpusDecoder::new(48_000, 2).unwrap();
+        assert_eq!(decoder.sample_rate(), 48_000);
+        assert_eq!(decoder.channels(), 2);
+        assert!(OpusDecoder::new(16_000, 1).is_err());
+        assert!(OpusDecoder::new_full(48_000, 2)
+            .err()
+            .unwrap()
+            .contains("full-opus"));
+    }
+
+    #[cfg(feature = "full-opus")]
     fn parse_length_prefixed_opus(data: &[u8]) -> AdapterResult<(RawOpusHeader, Vec<&[u8]>)> {
         if data.len() < 19 || !data.starts_with(b"OpusHead") {
             return Err("Missing OpusHead".to_string());
@@ -870,6 +891,143 @@ mod tests {
         assert!(decoded.iter().any(|sample| *sample != 0));
     }
 
+    #[test]
+    fn soundkit_stream_profile_decodes_owned_encoder_packets() {
+        const SAMPLE_RATE: u32 = 48_000;
+        const CHANNELS: u32 = 2;
+        const FRAME_SIZE: u32 = 960;
+        const PACKETS: usize = 4;
+
+        let mut encoder = OpusEncoder::new(SAMPLE_RATE, 16, CHANNELS, FRAME_SIZE, 128_000);
+        encoder.init().unwrap();
+        let mut stream = Vec::new();
+        stream.extend_from_slice(b"OpusHead");
+        stream.push(1);
+        stream.push(CHANNELS as u8);
+        stream.extend_from_slice(&0_u16.to_le_bytes());
+        stream.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+        stream.extend_from_slice(&0_i16.to_le_bytes());
+        stream.push(0);
+
+        for packet_index in 0..PACKETS {
+            let input = (0..FRAME_SIZE as usize)
+                .flat_map(|frame| {
+                    let absolute_frame = packet_index * FRAME_SIZE as usize + frame;
+                    let phase =
+                        absolute_frame as f32 * 440.0 * std::f32::consts::TAU / SAMPLE_RATE as f32;
+                    let sample = (phase.sin() * i16::MAX as f32 * 0.25) as i16;
+                    [sample, sample]
+                })
+                .collect::<Vec<_>>();
+            let mut packet = vec![0_u8; 4_096];
+            let packet_len = encoder.encode_i16(&input, &mut packet).unwrap();
+            stream.extend_from_slice(&(packet_len as u16).to_le_bytes());
+            stream.extend_from_slice(&packet[..packet_len]);
+        }
+
+        let mut decoder = OpusStreamDecoder::for_soundkit_stream();
+        let mut decoded_bytes = 0_usize;
+        if let Some(audio) = decoder.add(&stream).unwrap() {
+            decoded_bytes += audio.data().len();
+        }
+        while let Some(audio) = decoder.add(&[]).unwrap() {
+            decoded_bytes += audio.data().len();
+        }
+
+        assert_eq!(decoder.sample_rate(), Some(SAMPLE_RATE));
+        assert_eq!(decoder.channels(), Some(CHANNELS as u8));
+        assert_eq!(
+            decoded_bytes,
+            PACKETS * FRAME_SIZE as usize * CHANNELS as usize * size_of::<i16>()
+        );
+    }
+
+    #[test]
+    fn facade_direct_output_matches_core_for_all_pcm_types() {
+        const SAMPLE_RATE: u32 = 48_000;
+        const CHANNELS: usize = 2;
+        const FRAME_SIZE: usize = 240;
+        const PACKETS: usize = 8;
+
+        let mut encoder =
+            OpusEncoder::new(SAMPLE_RATE, 24, CHANNELS as u32, FRAME_SIZE as u32, 256_000);
+        encoder.init().unwrap();
+        let mut packets = Vec::with_capacity(PACKETS);
+        for packet_index in 0..PACKETS {
+            let input = (0..FRAME_SIZE)
+                .flat_map(|frame| {
+                    let absolute_frame = packet_index * FRAME_SIZE + frame;
+                    let phase =
+                        absolute_frame as f32 * 997.0 * std::f32::consts::TAU / SAMPLE_RATE as f32;
+                    let sample = (phase.sin() * 4_000_000.0) as i32;
+                    [sample, -sample]
+                })
+                .collect::<Vec<_>>();
+            let mut packet = vec![0_u8; 4_096];
+            let packet_len = encoder.encode_i32(&input, &mut packet).unwrap();
+            packet.truncate(packet_len);
+            packets.push(packet);
+        }
+
+        let mut core = Decoder::new(SAMPLE_RATE as i32, CHANNELS).unwrap();
+        let mut facade = OpusDecoder::new_celt_only(SAMPLE_RATE as usize, CHANNELS).unwrap();
+        for packet in &packets {
+            let mut expected = Vec::new();
+            assert_eq!(
+                core.decode_i16_into(packet, false, &mut expected).unwrap(),
+                FRAME_SIZE
+            );
+            let mut actual = vec![i16::MIN; FRAME_SIZE * CHANNELS + 8];
+            assert_eq!(
+                facade.decode_i16(packet, &mut actual, false).unwrap(),
+                FRAME_SIZE
+            );
+            assert_eq!(&actual[..FRAME_SIZE * CHANNELS], expected);
+            assert!(actual[FRAME_SIZE * CHANNELS..]
+                .iter()
+                .all(|sample| *sample == i16::MIN));
+        }
+
+        let mut core = Decoder::new(SAMPLE_RATE as i32, CHANNELS).unwrap();
+        let mut facade = OpusDecoder::new_celt_only(SAMPLE_RATE as usize, CHANNELS).unwrap();
+        for packet in &packets {
+            let mut expected = Vec::new();
+            assert_eq!(
+                core.decode_i24_into(packet, false, &mut expected).unwrap(),
+                FRAME_SIZE
+            );
+            let mut actual = vec![i32::MIN; FRAME_SIZE * CHANNELS + 8];
+            assert_eq!(
+                facade.decode_i32(packet, &mut actual, false).unwrap(),
+                FRAME_SIZE
+            );
+            assert_eq!(&actual[..FRAME_SIZE * CHANNELS], expected);
+            assert!(actual[FRAME_SIZE * CHANNELS..]
+                .iter()
+                .all(|sample| *sample == i32::MIN));
+        }
+
+        let mut core = Decoder::new(SAMPLE_RATE as i32, CHANNELS).unwrap();
+        let mut facade = OpusDecoder::new_celt_only(SAMPLE_RATE as usize, CHANNELS).unwrap();
+        for packet in &packets {
+            let mut expected = Vec::new();
+            assert_eq!(
+                core.decode_f32_into(packet, false, &mut expected).unwrap(),
+                FRAME_SIZE
+            );
+            let mut actual = vec![f32::NAN; FRAME_SIZE * CHANNELS + 8];
+            assert_eq!(
+                facade.decode_f32(packet, &mut actual, false).unwrap(),
+                FRAME_SIZE
+            );
+            assert_eq!(&actual[..FRAME_SIZE * CHANNELS], expected);
+            assert!(actual[FRAME_SIZE * CHANNELS..]
+                .iter()
+                .all(|sample| sample.is_nan()));
+        }
+    }
+
+    #[cfg(feature = "full-opus")]
     #[test]
     fn soundkit_cbr_packets_are_celt_and_full_decoder_compatible() {
         const SAMPLE_RATE: u32 = 48_000;
@@ -1035,6 +1193,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "full-opus")]
     #[test]
     fn test_opus_decodes_silk_fixture_waveform() {
         let input_path = testdata_path(&format!("opus/{}.opus", TEST_FILE));
@@ -1089,6 +1248,7 @@ mod tests {
         print_waveform_with_header("Opus", &result);
     }
 
+    #[cfg(feature = "full-opus")]
     #[test]
     fn default_48khz_decoder_accepts_silk_packets() {
         let input_path = testdata_path("opus/A_Tusk_is_used_to_make_costly_gifts.opus");
@@ -1112,6 +1272,7 @@ mod tests {
         assert!(decoded_frames > 0);
     }
 
+    #[cfg(feature = "full-opus")]
     #[test]
     fn test_opus_decoder_streaming_decode() {
         // decode the real fixture opus stream; it is already length-prefixed

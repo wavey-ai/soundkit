@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--application", choices=("audio", "restricted-lowdelay"), default="audio"
     )
+    parser.add_argument(
+        "--baseline-decode-api", choices=("core", "adapter"), default="core"
+    )
+    parser.add_argument(
+        "--candidate-decode-api", choices=("core", "adapter"), default="core"
+    )
     parser.add_argument("--cpu", type=int)
     parser.add_argument("--json", type=Path)
     return parser.parse_args()
@@ -70,6 +76,7 @@ def run_once(
     *,
     seconds: int,
     repeats: int,
+    decode_api: str,
 ) -> dict[str, Any]:
     command = [
         str(binary),
@@ -90,6 +97,8 @@ def run_once(
         "--pcm-bits",
         str(args.pcm_bits),
         "--skip-quality",
+        "--decode-api",
+        decode_api,
     ]
     if args.cpu is not None:
         command = ["taskset", "-c", str(args.cpu), *command]
@@ -191,6 +200,7 @@ def main() -> None:
                 args,
                 seconds=warmup_seconds,
                 repeats=1,
+                decode_api=getattr(args, f"{implementation}_decode_api"),
             )
 
     for round_index in range(args.rounds):
@@ -208,6 +218,7 @@ def main() -> None:
                     args,
                     seconds=args.seconds,
                     repeats=args.repeats,
+                    decode_api=getattr(args, f"{implementation}_decode_api"),
                 )
                 results.append(
                     {"source": name, "implementation": implementation, "row": row}
@@ -244,6 +255,8 @@ def main() -> None:
                         "bitrate": args.bitrate,
                         "frame_size": args.frame_size,
                         "application": args.application,
+                        "baseline_decode_api": args.baseline_decode_api,
+                        "candidate_decode_api": args.candidate_decode_api,
                         "cpu": args.cpu,
                     },
                     "baseline": str(args.baseline),

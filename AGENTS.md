@@ -43,11 +43,5 @@ Alternate SoundKit and reference runs to reduce thermal and scheduler bias.
 Keep input files and output checks identical for each comparison.
 Do not use GPU or hardware-accelerated codec paths for CPU comparisons.
 
-Stop the host immediately after the test:
-
-```sh
-gcloud compute instances stop yl-encodec-1 --zone=europe-west2-b
-```
-
-A stopped host does not incur virtual CPU or memory charges.
-The persistent disk and reserved external IP address continue to incur charges.
+Keep the host running after tests so it is available for subsequent benchmark work.
+Stop it only when the user explicitly requests that it be stopped.

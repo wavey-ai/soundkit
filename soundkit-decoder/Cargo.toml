@@ -28,7 +28,7 @@ symphonia-bundle-mp3 = { git = "https://github.com/wavey-ai/Symphonia.git", bran
 symphonia-core = { git = "https://github.com/wavey-ai/Symphonia.git", branch = "main" }
 soundkit-audio-demux = { path = "../soundkit-audio-demux", default-features = false, features = ["mp4", "mpeg-ts", "mxf"] }
 soundkit-flac = { path = "../soundkit-flac" }
-soundkit-opus = { path = "../soundkit-opus" }
+soundkit-opus = { path = "../soundkit-opus", features = ["full-opus"] }
 soundkit-ogg-opus = { path = "../soundkit-ogg-opus" }
 soundkit-webm = { path = "../soundkit-webm" }
 frame-header = "0.2.1"

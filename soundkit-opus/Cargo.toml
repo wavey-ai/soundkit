@@ -18,11 +18,13 @@ exclude = [
 
 [features]
 default = []
+full-opus = ["dep:ropus"]
 wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
-# Full SILK, hybrid, and CELT coverage for general Opus containers.
-ropus = "0.12.18"
+# Compatibility fallback for SILK, hybrid, FEC, and legal mode transitions.
+# SoundKit's authored CELT codec remains the dependency-free default.
+ropus = { version = "0.12.18", optional = true }
 soundkit = { version = "0.12.3", path = "../soundkit" }
 frame-header = "0.2.2"
 tracing = "0.1.40"

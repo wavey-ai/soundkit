@@ -85,6 +85,12 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     parser.add_argument(
         "--application", choices=("audio", "restricted-lowdelay"), default="audio"
     )
+    parser.add_argument(
+        "--decode-api",
+        choices=("core", "adapter"),
+        default="core",
+        help="Rust decode entry point to measure; C always uses the reference API",
+    )
     parser.add_argument("--direct-cubic", action="store_true")
     quality_group = parser.add_mutually_exclusive_group()
     quality_group.add_argument("--skip-quality", action="store_true")
@@ -302,6 +308,8 @@ def benchmark_command(
     implementation: str,
     corpus: CorpusInput,
     pcm_bits: int,
+    mode: str,
+    bitrate: int,
     args: argparse.Namespace,
     *,
     seconds: int,
@@ -315,7 +323,9 @@ def benchmark_command(
         "--seconds",
         str(seconds),
         "--mode",
-        args.mode,
+        mode,
+        "--bitrate",
+        str(bitrate),
         "--application",
         args.application,
         "--frame-size",
@@ -325,10 +335,10 @@ def benchmark_command(
         "--pcm-bits",
         str(pcm_bits),
     ]
-    if args.bitrate is not None:
-        command.extend(("--bitrate", str(args.bitrate)))
     if implementation == "rust" and args.direct_cubic:
         command.append("--direct-cubic")
+    if implementation == "rust":
+        command.extend(("--decode-api", args.decode_api))
     if skip_quality:
         command.append("--skip-quality")
     else:
@@ -347,6 +357,8 @@ def invoke_benchmark(
     implementation: str,
     corpus: CorpusInput,
     pcm_bits: int,
+    mode: str,
+    bitrate: int,
     args: argparse.Namespace,
     repo_root: Path,
     *,
@@ -359,13 +371,27 @@ def invoke_benchmark(
         implementation,
         corpus,
         pcm_bits,
+        mode,
+        bitrate,
         args,
         seconds=seconds,
         repeats=repeats,
         skip_quality=skip_quality,
     )
     result = run(command, cwd=repo_root, capture=True)
-    return parse_rows(result.stdout, implementation)
+    rows = parse_rows(result.stdout, implementation)
+    if len(rows) != 1:
+        raise RuntimeError(
+            f"expected one isolated {implementation} row for {mode}/{bitrate}, "
+            f"received {len(rows)}"
+        )
+    row = rows[0]
+    if row["mode"] != mode or row["bitrate"] != bitrate:
+        raise RuntimeError(
+            f"isolated {implementation} row was {row['mode']}/{row['bitrate']}, "
+            f"expected {mode}/{bitrate}"
+        )
+    return rows
 
 
 def row_cell(corpus: CorpusInput, pcm_bits: int, row: dict[str, Any]) -> Cell:
@@ -524,6 +550,7 @@ def serializable_results(
             "bitrate": args.bitrate,
             "frame_size": FRAME_SIZE,
             "application": args.application,
+            "decode_api": args.decode_api,
             "direct_cubic": args.direct_cubic,
             "quality_only": args.quality_only,
             "rounds": args.rounds,
@@ -618,15 +645,22 @@ def main() -> None:
     )
 
     binaries = {"rust": rust_bin, "c": c_bin}
-    groups = [(corpus, pcm_bits) for corpus in inputs for pcm_bits in args.pcm_bits]
+    groups = [
+        (corpus, pcm_bits, mode, bitrate)
+        for corpus in inputs
+        for pcm_bits in args.pcm_bits
+        for mode in selected_modes(args)
+        for bitrate in selected_bitrates(args)
+    ]
     timings: dict[Cell, dict[str, list[dict[str, Any]]]] = {}
     quality: dict[Cell, dict[str, dict[str, Any]]] = {}
 
-    for group_index, (corpus, pcm_bits) in enumerate(groups):
+    for group_index, (corpus, pcm_bits, mode, bitrate) in enumerate(groups):
         order = ("rust", "c") if group_index % 2 == 0 else ("c", "rust")
         if not args.quality_only:
             print(
-                f"Warm-up {group_index + 1}/{len(groups)}: {corpus.name}, {pcm_bits}-bit.",
+                f"Warm-up {group_index + 1}/{len(groups)}: {corpus.name}, "
+                f"{pcm_bits}-bit, {mode}, {bitrate // 1000} kb/s.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -636,6 +670,8 @@ def main() -> None:
                     implementation,
                     corpus,
                     pcm_bits,
+                    mode,
+                    bitrate,
                     args,
                     repo_root,
                     seconds=warmup_seconds,
@@ -645,7 +681,8 @@ def main() -> None:
 
         if not args.skip_quality:
             print(
-                f"Quality {group_index + 1}/{len(groups)}: {corpus.name}, {pcm_bits}-bit.",
+                f"Quality {group_index + 1}/{len(groups)}: {corpus.name}, "
+                f"{pcm_bits}-bit, {mode}, {bitrate // 1000} kb/s.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -655,6 +692,8 @@ def main() -> None:
                     implementation,
                     corpus,
                     pcm_bits,
+                    mode,
+                    bitrate,
                     args,
                     repo_root,
                     seconds=seconds,
@@ -673,9 +712,10 @@ def main() -> None:
                 file=sys.stderr,
                 flush=True,
             )
-            for group_index, (corpus, pcm_bits) in enumerate(groups):
+            for group_index, (corpus, pcm_bits, mode, bitrate) in enumerate(groups):
                 print(
-                    f"  Group {group_index + 1}/{len(groups)}: {corpus.name}, {pcm_bits}-bit.",
+                    f"  Group {group_index + 1}/{len(groups)}: {corpus.name}, "
+                    f"{pcm_bits}-bit, {mode}, {bitrate // 1000} kb/s.",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -687,6 +727,8 @@ def main() -> None:
                         implementation,
                         corpus,
                         pcm_bits,
+                        mode,
+                        bitrate,
                         args,
                         repo_root,
                         seconds=seconds,

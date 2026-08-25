@@ -1036,8 +1036,9 @@ fn decode_with_soundkit(
     _track: &TrackData,
     packets: &[Vec<u8>],
 ) -> Result<PacketDecodeResult, String> {
-    let mut decoder = SoundkitDecoder::new(TARGET_SAMPLE_RATE as usize, TARGET_CHANNELS as usize)
-        .map_err(|e| format!("soundkit-opus decoder construction failed: {e}"))?;
+    let mut decoder =
+        SoundkitDecoder::new_celt_only(TARGET_SAMPLE_RATE as usize, TARGET_CHANNELS as usize)
+            .map_err(|e| format!("soundkit-opus decoder construction failed: {e}"))?;
     decoder
         .init()
         .map_err(|e| format!("soundkit-opus decoder init failed: {}", e))?;

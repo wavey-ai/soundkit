@@ -1,4 +1,7 @@
-use soundkit_opus::{Application, Decoder, Encoder, CELT_FRAME_SIZES_48K, CELT_MAX_FRAME_BYTES};
+use soundkit::audio_packet::Decoder as SoundkitDecoderTrait;
+use soundkit_opus::{
+    Application, Decoder, Encoder, OpusDecoder, CELT_FRAME_SIZES_48K, CELT_MAX_FRAME_BYTES,
+};
 use std::env;
 use std::fs;
 use std::hint::black_box;
@@ -28,6 +31,12 @@ enum PcmFormat {
     F32,
     I16,
     I24,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DecodeApi {
+    Core,
+    Adapter,
 }
 
 #[derive(Clone, Copy)]
@@ -79,6 +88,7 @@ struct Options {
     quality_lag: Option<isize>,
     application: Application,
     direct_cubic: bool,
+    decode_api: DecodeApi,
 }
 
 struct EncodeResult {
@@ -87,7 +97,7 @@ struct EncodeResult {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: raw_celt_bench [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--application audio|restricted-lowdelay] [--direct-cubic] [--frame-size n] [--bitrate n] [--fixture mixed|tone] [--input-s32le path] [--pcm-bits 16|24] [--quality-lag frames] [--skip-quality] [--dump-packets n]"
+        "usage: raw_celt_bench [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--application audio|restricted-lowdelay] [--decode-api core|adapter] [--direct-cubic] [--frame-size n] [--bitrate n] [--fixture mixed|tone] [--input-s32le path] [--pcm-bits 16|24] [--quality-lag frames] [--skip-quality] [--dump-packets n]"
     );
     std::process::exit(2);
 }
@@ -107,6 +117,7 @@ fn parse_options() -> Options {
         quality_lag: None,
         application: Application::Audio,
         direct_cubic: false,
+        decode_api: DecodeApi::Core,
     };
     let args = env::args().collect::<Vec<_>>();
     let mut i = 1usize;
@@ -144,6 +155,14 @@ fn parse_options() -> Options {
                 };
             }
             "--direct-cubic" => options.direct_cubic = true,
+            "--decode-api" => {
+                i += 1;
+                options.decode_api = match args.get(i).map(String::as_str) {
+                    Some("core") => DecodeApi::Core,
+                    Some("adapter") => DecodeApi::Adapter,
+                    _ => usage(),
+                };
+            }
             "--dump-packets" => {
                 i += 1;
                 options.dump_packets = Some(
@@ -208,6 +227,9 @@ fn parse_options() -> Options {
         i += 1;
     }
     if options.repeats == 0 || options.seconds == 0 || options.dump_packets == Some(0) {
+        usage();
+    }
+    if options.decode_api == DecodeApi::Adapter && options.direct_cubic {
         usage();
     }
     options
@@ -374,6 +396,19 @@ fn decode_packets(
     frame_size: usize,
     format: PcmFormat,
     direct_cubic: bool,
+    decode_api: DecodeApi,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    match decode_api {
+        DecodeApi::Core => decode_packets_core(packets, frame_size, format, direct_cubic),
+        DecodeApi::Adapter => decode_packets_adapter(packets, frame_size, format),
+    }
+}
+
+fn decode_packets_core(
+    packets: &[Vec<u8>],
+    frame_size: usize,
+    format: PcmFormat,
+    direct_cubic: bool,
 ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let mut decoder = Decoder::new(SAMPLE_RATE as i32, CHANNELS)?;
     decoder.set_experimental_direct_cubic(direct_cubic);
@@ -407,6 +442,48 @@ fn decode_packets(
                 let decoded_frames =
                     decoder.decode_f32_into(black_box(packet), false, &mut frame)?;
                 if decoded_frames != frame_size || frame.len() != frame_size * CHANNELS {
+                    return Err("unexpected decoded frame size".into());
+                }
+                decoded.extend_from_slice(&frame);
+            }
+        }
+    }
+    Ok(decoded)
+}
+
+fn decode_packets_adapter(
+    packets: &[Vec<u8>],
+    frame_size: usize,
+    format: PcmFormat,
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let mut decoder = OpusDecoder::new_celt_only(SAMPLE_RATE, CHANNELS)?;
+    let mut decoded = Vec::with_capacity(packets.len() * frame_size * CHANNELS);
+    match format {
+        PcmFormat::I16 => {
+            let mut frame = vec![0_i16; frame_size * CHANNELS];
+            for packet in packets {
+                let decoded_frames = decoder.decode_i16(black_box(packet), &mut frame, false)?;
+                if decoded_frames != frame_size {
+                    return Err("unexpected decoded frame size".into());
+                }
+                decoded.extend(frame.iter().map(|&sample| sample as f32 / 32_768.0));
+            }
+        }
+        PcmFormat::I24 => {
+            let mut frame = vec![0_i32; frame_size * CHANNELS];
+            for packet in packets {
+                let decoded_frames = decoder.decode_i32(black_box(packet), &mut frame, false)?;
+                if decoded_frames != frame_size {
+                    return Err("unexpected decoded frame size".into());
+                }
+                decoded.extend(frame.iter().map(|&sample| sample as f32 / 8_388_608.0));
+            }
+        }
+        PcmFormat::F32 => {
+            let mut frame = vec![0.0_f32; frame_size * CHANNELS];
+            for packet in packets {
+                let decoded_frames = decoder.decode_f32(black_box(packet), &mut frame, false)?;
+                if decoded_frames != frame_size {
                     return Err("unexpected decoded frame size".into());
                 }
                 decoded.extend_from_slice(&frame);
@@ -591,6 +668,20 @@ fn time_decode(
     repeats: usize,
     format: PcmFormat,
     direct_cubic: bool,
+    decode_api: DecodeApi,
+) -> Result<(f64, u64), Box<dyn std::error::Error>> {
+    match decode_api {
+        DecodeApi::Core => time_decode_core(packets, frame_size, repeats, format, direct_cubic),
+        DecodeApi::Adapter => time_decode_adapter(packets, frame_size, repeats, format),
+    }
+}
+
+fn time_decode_core(
+    packets: &[Vec<u8>],
+    frame_size: usize,
+    repeats: usize,
+    format: PcmFormat,
+    direct_cubic: bool,
 ) -> Result<(f64, u64), Box<dyn std::error::Error>> {
     let mut times = Vec::with_capacity(repeats);
     let mut last_checksum = 0u64;
@@ -642,6 +733,74 @@ fn time_decode(
                     let decoded_frames =
                         decoder.decode_f32_into(black_box(packet), false, &mut decoded_f32)?;
                     if decoded_frames != frame_size || decoded_f32.len() != frame_size * CHANNELS {
+                        return Err("unexpected decoded frame size".into());
+                    }
+                    checksum += decoded_checksum(&decoded_f32);
+                }
+                black_box(checksum);
+                u64::from(checksum.to_bits())
+            }
+        };
+        times.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    Ok((median(&mut times), last_checksum))
+}
+
+fn time_decode_adapter(
+    packets: &[Vec<u8>],
+    frame_size: usize,
+    repeats: usize,
+    format: PcmFormat,
+) -> Result<(f64, u64), Box<dyn std::error::Error>> {
+    let mut times = Vec::with_capacity(repeats);
+    let mut last_checksum = 0_u64;
+    for _ in 0..repeats {
+        let mut decoder = OpusDecoder::new_celt_only(SAMPLE_RATE, CHANNELS)?;
+        let mut decoded_i16 = vec![0_i16; frame_size * CHANNELS];
+        let mut decoded_i24 = vec![0_i32; frame_size * CHANNELS];
+        let mut decoded_f32 = vec![0.0_f32; frame_size * CHANNELS];
+        let start = Instant::now();
+        last_checksum = match format {
+            PcmFormat::I16 => {
+                let mut checksum = 0_i64;
+                for packet in packets {
+                    let decoded_frames =
+                        decoder.decode_i16(black_box(packet), &mut decoded_i16, false)?;
+                    if decoded_frames != frame_size {
+                        return Err("unexpected decoded frame size".into());
+                    }
+                    let first = decoded_i16.first().copied().unwrap_or(0) as i64;
+                    let middle =
+                        decoded_i16.get(decoded_i16.len() / 2).copied().unwrap_or(0) as i64;
+                    let last = decoded_i16.last().copied().unwrap_or(0) as i64;
+                    checksum = checksum.wrapping_add(first + middle + last);
+                }
+                black_box(checksum);
+                checksum as u64
+            }
+            PcmFormat::I24 => {
+                let mut checksum = 0_i64;
+                for packet in packets {
+                    let decoded_frames =
+                        decoder.decode_i32(black_box(packet), &mut decoded_i24, false)?;
+                    if decoded_frames != frame_size {
+                        return Err("unexpected decoded frame size".into());
+                    }
+                    let first = decoded_i24.first().copied().unwrap_or(0) as i64;
+                    let middle =
+                        decoded_i24.get(decoded_i24.len() / 2).copied().unwrap_or(0) as i64;
+                    let last = decoded_i24.last().copied().unwrap_or(0) as i64;
+                    checksum = checksum.wrapping_add(first + middle + last);
+                }
+                black_box(checksum);
+                checksum as u64
+            }
+            PcmFormat::F32 => {
+                let mut checksum = 0.0_f32;
+                for packet in packets {
+                    let decoded_frames =
+                        decoder.decode_f32(black_box(packet), &mut decoded_f32, false)?;
+                    if decoded_frames != frame_size {
                         return Err("unexpected decoded frame size".into());
                     }
                     checksum += decoded_checksum(&decoded_f32);
@@ -786,6 +945,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         frame_size,
                         input.format(),
                         options.direct_cubic,
+                        options.decode_api,
                     )?;
                     if let Some(lag) = options.quality_lag {
                         let total_frames = pcm.len().min(decoded.len()) / CHANNELS;
@@ -801,6 +961,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     options.repeats,
                     input.format(),
                     options.direct_cubic,
+                    options.decode_api,
                 )?;
                 let checksum = encode_checksum ^ decode_checksum;
                 println!(

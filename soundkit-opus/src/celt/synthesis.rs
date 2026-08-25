@@ -195,12 +195,7 @@ pub fn deemphasis_interleaved(
     Ok(pcm)
 }
 
-pub fn deemphasis_interleaved_into(
-    mode: &CeltMode,
-    channels: &[Vec<f32>],
-    preemph_mem: &mut [f32],
-    pcm: &mut Vec<f32>,
-) -> Result<()> {
+fn deemphasis_shape(channels: &[Vec<f32>], preemph_mem: &[f32]) -> Result<(usize, usize)> {
     if channels.is_empty() || channels.len() > 2 || preemph_mem.len() < channels.len() {
         return Err(Error::BadArg);
     }
@@ -208,10 +203,44 @@ pub fn deemphasis_interleaved_into(
     if channels.iter().any(|channel| channel.len() != n) {
         return Err(Error::BadArg);
     }
+    Ok((n, channels.len()))
+}
 
+pub fn deemphasis_interleaved_into(
+    mode: &CeltMode,
+    channels: &[Vec<f32>],
+    preemph_mem: &mut [f32],
+    pcm: &mut Vec<f32>,
+) -> Result<()> {
+    let (n, c_count) = deemphasis_shape(channels, preemph_mem)?;
+    pcm.resize(n * c_count, 0.0);
+    deemphasis_interleaved_f32_prepared(mode, channels, preemph_mem, pcm);
+    Ok(())
+}
+
+pub(crate) fn deemphasis_interleaved_f32_slice(
+    mode: &CeltMode,
+    channels: &[Vec<f32>],
+    preemph_mem: &mut [f32],
+    pcm: &mut [f32],
+) -> Result<usize> {
+    let (n, c_count) = deemphasis_shape(channels, preemph_mem)?;
+    let required = n.checked_mul(c_count).ok_or(Error::BadArg)?;
+    let pcm = pcm.get_mut(..required).ok_or(Error::BufferTooSmall)?;
+    deemphasis_interleaved_f32_prepared(mode, channels, preemph_mem, pcm);
+    Ok(n)
+}
+
+fn deemphasis_interleaved_f32_prepared(
+    mode: &CeltMode,
+    channels: &[Vec<f32>],
+    preemph_mem: &mut [f32],
+    pcm: &mut [f32],
+) {
+    let n = channels[0].len();
     let c_count = channels.len();
     let coef0 = mode.preemph[0];
-    pcm.resize(n * c_count, 0.0);
+    debug_assert_eq!(pcm.len(), n * c_count);
 
     if c_count == 2 {
         // The two IIR chains are independent. Advancing them together exposes
@@ -232,7 +261,7 @@ pub fn deemphasis_interleaved_into(
         }
         preemph_mem[0] = mem0;
         preemph_mem[1] = mem1;
-        return Ok(());
+        return;
     }
 
     for c in 0..c_count {
@@ -244,7 +273,6 @@ pub fn deemphasis_interleaved_into(
         }
         preemph_mem[c] = mem;
     }
-    Ok(())
 }
 
 pub fn deemphasis_interleaved_i16_into(
@@ -253,17 +281,22 @@ pub fn deemphasis_interleaved_i16_into(
     preemph_mem: &mut [f32],
     pcm: &mut Vec<i16>,
 ) -> Result<()> {
-    if channels.is_empty() || channels.len() > 2 || preemph_mem.len() < channels.len() {
-        return Err(Error::BadArg);
-    }
-    let n = channels[0].len();
-    if channels.iter().any(|channel| channel.len() != n) {
-        return Err(Error::BadArg);
-    }
+    let (n, c_count) = deemphasis_shape(channels, preemph_mem)?;
+    pcm.resize(n * c_count, 0);
+    deemphasis_interleaved_i16_prepared(mode, channels, preemph_mem, pcm);
+    Ok(())
+}
 
+fn deemphasis_interleaved_i16_prepared(
+    mode: &CeltMode,
+    channels: &[Vec<f32>],
+    preemph_mem: &mut [f32],
+    pcm: &mut [i16],
+) {
+    let n = channels[0].len();
     let c_count = channels.len();
     let coef0 = mode.preemph[0];
-    pcm.resize(n * c_count, 0);
+    debug_assert_eq!(pcm.len(), n * c_count);
 
     if c_count == 2 {
         let mut mem0 = preemph_mem[0];
@@ -281,7 +314,7 @@ pub fn deemphasis_interleaved_i16_into(
         }
         preemph_mem[0] = mem0;
         preemph_mem[1] = mem1;
-        return Ok(());
+        return;
     }
 
     for c in 0..c_count {
@@ -293,7 +326,6 @@ pub fn deemphasis_interleaved_i16_into(
         }
         preemph_mem[c] = mem;
     }
-    Ok(())
 }
 
 pub fn deemphasis_interleaved_i24_into(
@@ -302,17 +334,35 @@ pub fn deemphasis_interleaved_i24_into(
     preemph_mem: &mut [f32],
     pcm: &mut Vec<i32>,
 ) -> Result<()> {
-    if channels.is_empty() || channels.len() > 2 || preemph_mem.len() < channels.len() {
-        return Err(Error::BadArg);
-    }
-    let n = channels[0].len();
-    if channels.iter().any(|channel| channel.len() != n) {
-        return Err(Error::BadArg);
-    }
+    let (n, c_count) = deemphasis_shape(channels, preemph_mem)?;
+    pcm.resize(n * c_count, 0);
+    deemphasis_interleaved_i24_prepared(mode, channels, preemph_mem, pcm);
+    Ok(())
+}
 
+pub(crate) fn deemphasis_interleaved_i24_slice(
+    mode: &CeltMode,
+    channels: &[Vec<f32>],
+    preemph_mem: &mut [f32],
+    pcm: &mut [i32],
+) -> Result<usize> {
+    let (n, c_count) = deemphasis_shape(channels, preemph_mem)?;
+    let required = n.checked_mul(c_count).ok_or(Error::BadArg)?;
+    let pcm = pcm.get_mut(..required).ok_or(Error::BufferTooSmall)?;
+    deemphasis_interleaved_i24_prepared(mode, channels, preemph_mem, pcm);
+    Ok(n)
+}
+
+fn deemphasis_interleaved_i24_prepared(
+    mode: &CeltMode,
+    channels: &[Vec<f32>],
+    preemph_mem: &mut [f32],
+    pcm: &mut [i32],
+) {
+    let n = channels[0].len();
     let c_count = channels.len();
     let coef0 = mode.preemph[0];
-    pcm.resize(n * c_count, 0);
+    debug_assert_eq!(pcm.len(), n * c_count);
 
     if c_count == 2 {
         if crate::kernels::deemphasis_stereo_i24(
@@ -322,7 +372,7 @@ pub fn deemphasis_interleaved_i24_into(
             preemph_mem,
             pcm,
         ) {
-            return Ok(());
+            return;
         }
 
         let mut mem0 = preemph_mem[0];
@@ -340,7 +390,7 @@ pub fn deemphasis_interleaved_i24_into(
         }
         preemph_mem[0] = mem0;
         preemph_mem[1] = mem1;
-        return Ok(());
+        return;
     }
 
     for c in 0..c_count {
@@ -352,7 +402,6 @@ pub fn deemphasis_interleaved_i24_into(
         }
         preemph_mem[c] = mem;
     }
-    Ok(())
 }
 
 #[cfg(test)]
