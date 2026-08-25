@@ -1,0 +1,202 @@
+[
+  {
+    "case": 1,
+    "track": "nocturnal-animals",
+    "excerpt": 2,
+    "configuration": "i24_cbr_5ms_192k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.36154305,
+    "c_mos_lqo": 4.33065756
+  },
+  {
+    "case": 2,
+    "track": "nocturnal-animals",
+    "excerpt": 2,
+    "configuration": "i24_vbr_5ms_192k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.36184114,
+    "c_mos_lqo": 4.3334818
+  },
+  {
+    "case": 3,
+    "track": "nocturnal-animals",
+    "excerpt": 5,
+    "configuration": "i16_cbr_5ms_192k",
+    "A": "c",
+    "B": "rust",
+    "rust_mos_lqo": 4.16533081,
+    "c_mos_lqo": 4.14060128
+  },
+  {
+    "case": 4,
+    "track": "nocturnal-animals",
+    "excerpt": 3,
+    "configuration": "i24_cbr_5ms_256k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.37147185,
+    "c_mos_lqo": 4.39079203
+  },
+  {
+    "case": 5,
+    "track": "nocturnal-animals",
+    "excerpt": 3,
+    "configuration": "i16_cbr_5ms_256k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.37179105,
+    "c_mos_lqo": 4.39072243
+  },
+  {
+    "case": 6,
+    "track": "nocturnal-animals",
+    "excerpt": 3,
+    "configuration": "i16_vbr_5ms_192k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.16468038,
+    "c_mos_lqo": 4.18220643
+  },
+  {
+    "case": 7,
+    "track": "nocturnal-animals",
+    "excerpt": 3,
+    "configuration": "i24_vbr_5ms_192k",
+    "A": "c",
+    "B": "rust",
+    "rust_mos_lqo": 4.16365186,
+    "c_mos_lqo": 4.18000384
+  },
+  {
+    "case": 8,
+    "track": "bill-evans-secret-sessions",
+    "excerpt": 4,
+    "configuration": "i16_vbr_5ms_192k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.56293314,
+    "c_mos_lqo": 4.54742733
+  },
+  {
+    "case": 9,
+    "track": "bill-evans-secret-sessions",
+    "excerpt": 4,
+    "configuration": "i16_cbr_5ms_192k",
+    "A": "c",
+    "B": "rust",
+    "rust_mos_lqo": 4.55755859,
+    "c_mos_lqo": 4.54225241
+  },
+  {
+    "case": 10,
+    "track": "nocturnal-animals",
+    "excerpt": 2,
+    "configuration": "i16_vbr_5ms_192k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.35176885,
+    "c_mos_lqo": 4.33649738
+  },
+  {
+    "case": 11,
+    "track": "nocturnal-animals",
+    "excerpt": 2,
+    "configuration": "i24_vbr_5ms_256k",
+    "A": "c",
+    "B": "rust",
+    "rust_mos_lqo": 4.41651508,
+    "c_mos_lqo": 4.40219745
+  },
+  {
+    "case": 12,
+    "track": "nocturnal-animals",
+    "excerpt": 4,
+    "configuration": "i24_cbr_5ms_192k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.01361213,
+    "c_mos_lqo": 4.02745939
+  },
+  {
+    "case": 13,
+    "track": "nocturnal-animals",
+    "excerpt": 1,
+    "configuration": "i16_vbr_5ms_192k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.14317476,
+    "c_mos_lqo": 4.12981767
+  },
+  {
+    "case": 14,
+    "track": "nocturnal-animals",
+    "excerpt": 2,
+    "configuration": "i24_cbr_5ms_256k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.41460249,
+    "c_mos_lqo": 4.40218958
+  },
+  {
+    "case": 15,
+    "track": "nocturnal-animals",
+    "excerpt": 3,
+    "configuration": "i16_vbr_5ms_256k",
+    "A": "c",
+    "B": "rust",
+    "rust_mos_lqo": 4.38049066,
+    "c_mos_lqo": 4.39269073
+  },
+  {
+    "case": 16,
+    "track": "bill-evans-secret-sessions",
+    "excerpt": 4,
+    "configuration": "i24_cbr_5ms_256k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.60274269,
+    "c_mos_lqo": 4.61479957
+  },
+  {
+    "case": 17,
+    "track": "nocturnal-animals",
+    "excerpt": 2,
+    "configuration": "i16_vbr_5ms_256k",
+    "A": "c",
+    "B": "rust",
+    "rust_mos_lqo": 4.41660429,
+    "c_mos_lqo": 4.40471565
+  },
+  {
+    "case": 18,
+    "track": "bill-evans-secret-sessions",
+    "excerpt": 4,
+    "configuration": "i24_vbr_5ms_192k",
+    "A": "c",
+    "B": "rust",
+    "rust_mos_lqo": 4.55979254,
+    "c_mos_lqo": 4.54908013
+  },
+  {
+    "case": 19,
+    "track": "nocturnal-animals",
+    "excerpt": 4,
+    "configuration": "i24_vbr_5ms_256k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.22719139,
+    "c_mos_lqo": 4.21662001
+  },
+  {
+    "case": 20,
+    "track": "nocturnal-animals",
+    "excerpt": 1,
+    "configuration": "i24_vbr_5ms_192k",
+    "A": "rust",
+    "B": "c",
+    "rust_mos_lqo": 4.14536173,
+    "c_mos_lqo": 4.13516599
+  }
+]

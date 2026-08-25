@@ -56,29 +56,30 @@ production replacements for libopus.
 The current encoder follows the best available upstream 48 kHz CELT behavior.
 It does not target byte identity with one libopus release.
 
-### Real-Music Quality Checkpoint
+### High-Rate Real-Music Quality Checkpoint
 
-Official ViSQOL Audio scored 120 matched Rust and libopus 1.6.1 round trips
-from *Westside* and *After Dark Confirmation*.
+Official ViSQOL Audio scored 240 matched Rust and trunk libopus round trips from
+20 excerpts in the four-source SoundKit `diverse-v1` corpus.
 
-The corpus used five repeatable random eight-second excerpts from each 48 kHz,
-24-bit master. It covered 96, 128, and 192 kb/s, 5 and 20 ms frames, CBR, and
-constrained VBR.
+The matrix used 5 ms frames at 192, 256, and 320 kb/s. It covered CBR,
+constrained VBR, and the signed 16-bit and signed 24-bit APIs.
 
-Rust scored `4.5840` MOS-LQO. C scored `4.5850`. The paired Rust-minus-C
-difference was `-0.0010`, with a 95% confidence interval from `-0.0019` to
-`-0.0001`.
+Rust scored `4.5731` MOS-LQO. C scored `4.5724`. The paired Rust-minus-C
+difference was `+0.0006`.
 
-CBR showed no material difference. The only repeatable signal was 20 ms
-constrained VBR at 128 kb/s. Rust scored `4.6139`; C scored `4.6258`.
-The difference was `-0.0119`.
+The conservative excerpt-level 95% confidence interval was `-0.0012` to
+`+0.0024`. All 12 configuration intervals included zero.
 
-This corpus shows no material overall quality gap. It does not prove
-transparency or replace a controlled listening test. ViSQOL Audio downmixes
-stereo to mono. Separate side-channel diagnostics found no material stereo
-regression.
+Rust scored `4.5368` at 192 kb/s, `4.5848` at 256 kb/s, and `4.5975` at
+320 kb/s. The difficult `nocturnal-animals` source gained the most from the
+higher rates.
 
-See [the complete 2026-08-22 quality result](quality-results/2026-08-22-westside-after-dark/README.md).
+This result shows parity with trunk libopus. It does not prove transparency or
+replace a controlled listening test. ViSQOL Audio downmixes stereo to mono.
+
+See [the complete 2026-08-25 quality result](quality-results/2026-08-25-soundkit-diverse-v1-5ms/README.md).
+The [2026-08-22 result](quality-results/2026-08-22-westside-after-dark/README.md)
+contains the earlier 96-192 kb/s and 5-20 ms matrix.
 
 A one-second, 72-row mixed fixture compares Rust with libopus 1.6.1. The mean
 absolute aligned-SNR gap is `0.032 dB`. The maximum gap is `0.18 dB`.

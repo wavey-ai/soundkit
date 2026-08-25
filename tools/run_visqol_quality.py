@@ -37,6 +37,7 @@ class Track:
 
 @dataclass(frozen=True)
 class Configuration:
+    pcm_bits: int
     frame_size: int
     bitrate: int
     mode: str
@@ -44,7 +45,7 @@ class Configuration:
     @property
     def key(self) -> str:
         frame_ms = self.frame_size * 1000 / SAMPLE_RATE
-        return f"{self.mode}_{frame_ms:g}ms_{self.bitrate // 1000}k"
+        return f"i{self.pcm_bits}_{self.mode}_{frame_ms:g}ms_{self.bitrate // 1000}k"
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,12 +59,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--rust-bin", type=Path, required=True)
     parser.add_argument("--c-bin", type=Path, required=True)
+    parser.add_argument(
+        "--libopus-source",
+        type=Path,
+        help="Record the tested libopus source revision from this Git worktree.",
+    )
     parser.add_argument("--visqol", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--excerpts-per-track", type=int, default=5)
     parser.add_argument("--excerpt-seconds", type=float, default=8.0)
     parser.add_argument("--edge-margin-seconds", type=float, default=5.0)
+    parser.add_argument("--pcm-bits", default="16,24")
     parser.add_argument("--bitrates", default="192000,256000,320000")
     parser.add_argument("--frame-sizes", default="240,960")
     parser.add_argument("--modes", default="cbr,vbr")
@@ -99,6 +106,13 @@ def parse_int_list(value: str, label: str) -> list[int]:
     if not values or any(item <= 0 for item in values):
         raise ValueError(f"invalid {label}: {value}")
     return values
+
+
+def parse_pcm_bits(value: str) -> list[int]:
+    values = parse_int_list(value, "PCM bits")
+    if any(item not in (16, 24) for item in values):
+        raise ValueError("PCM bits must contain only 16 or 24")
+    return list(dict.fromkeys(values))
 
 
 def parse_modes(value: str) -> list[str]:
@@ -167,6 +181,39 @@ def write_f32le(path: Path, audio: np.ndarray) -> None:
     np.asarray(audio, dtype="<f4").tofile(path)
 
 
+def write_i16le(path: Path, audio: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.asarray(audio, dtype="<i2").tofile(path)
+
+
+def write_i24_s32le(path: Path, audio: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.asarray(audio, dtype="<i4").tofile(path)
+
+
+def read_source(track: Track) -> tuple[np.ndarray, np.ndarray, str]:
+    if track.path.name.endswith(".s32le"):
+        source_i24 = np.fromfile(track.path, dtype="<i4")
+        if source_i24.size % CHANNELS != 0:
+            raise ValueError(f"{track.path} has a partial stereo frame")
+        if np.any(source_i24 < -8_388_608) or np.any(source_i24 > 8_388_607):
+            raise ValueError(f"{track.path} contains samples outside signed 24-bit range")
+        source_i24 = source_i24.reshape(-1, CHANNELS)
+        source = source_i24.astype(np.float32) * np.float32(1.0 / 8_388_608.0)
+        return source, source_i24, "PCM_24_IN_S32LE"
+
+    info = sf.info(track.path)
+    if info.samplerate != SAMPLE_RATE or info.channels != CHANNELS:
+        raise ValueError(f"{track.path} must be 48 kHz stereo")
+    source, sample_rate = sf.read(track.path, dtype="float32", always_2d=True)
+    if sample_rate != SAMPLE_RATE or source.shape != (info.frames, CHANNELS):
+        raise ValueError(f"unexpected decoded shape for {track.path}")
+    source_i24 = np.rint(source.astype(np.float64) * 8_388_608.0)
+    source_i24 = np.clip(source_i24, -8_388_608, 8_388_607).astype(np.int32)
+    exact_source = source_i24.astype(np.float32) * np.float32(1.0 / 8_388_608.0)
+    return exact_source, source_i24, info.subtype
+
+
 def read_f32le(path: Path, frame_count: int) -> np.ndarray:
     audio = np.fromfile(path, dtype="<f4")
     expected = frame_count * CHANNELS
@@ -214,22 +261,28 @@ def aligned_audio(
     return aligned_reference, aligned_candidates
 
 
-def snr_db(reference: np.ndarray, candidate: np.ndarray) -> float:
+def snr_db(reference: np.ndarray, candidate: np.ndarray) -> float | None:
     signal_energy = float(np.sum(np.square(reference, dtype=np.float64)))
     error_energy = float(np.sum(np.square(reference - candidate, dtype=np.float64)))
+    if signal_energy <= np.finfo(float).tiny:
+        return None
     return 10.0 * math.log10(signal_energy / max(error_energy, np.finfo(float).tiny))
 
 
-def si_sdr_db(reference: np.ndarray, candidate: np.ndarray) -> float:
+def si_sdr_db(reference: np.ndarray, candidate: np.ndarray) -> float | None:
     ref = reference.astype(np.float64).reshape(-1)
     deg = candidate.astype(np.float64).reshape(-1)
     denominator = float(np.dot(ref, ref))
+    if denominator <= np.finfo(float).tiny:
+        return None
     scale = float(np.dot(deg, ref)) / max(denominator, np.finfo(float).tiny)
     target = scale * ref
     noise = deg - target
+    target_energy = float(np.dot(target, target))
+    if target_energy <= np.finfo(float).tiny:
+        return None
     return 10.0 * math.log10(
-        float(np.dot(target, target))
-        / max(float(np.dot(noise, noise)), np.finfo(float).tiny)
+        target_energy / max(float(np.dot(noise, noise)), np.finfo(float).tiny)
     )
 
 
@@ -349,62 +402,97 @@ def run_visqol_shard(
     ]
 
 
-def aggregate(rows: list[dict], configurations: list[Configuration]) -> dict:
+def paired_summary(rows: list[dict]) -> dict:
     paired = {}
     for row in rows:
         key = (row["track"], row["excerpt"], row["configuration"])
         paired.setdefault(key, {})[row["treatment"]] = row["mos_lqo"]
+    incomplete = [key for key, scores in paired.items() if set(scores) != {"rust", "c"}]
+    if incomplete:
+        raise ValueError(f"incomplete matched treatments for {incomplete[0]}")
     differences = [scores["rust"] - scores["c"] for scores in paired.values()]
-    overall_ci = confidence_interval(differences)
+    ci = confidence_interval(differences)
+    return {
+        "pairs": len(differences),
+        "rust_mean": statistics.fmean(
+            row["mos_lqo"] for row in rows if row["treatment"] == "rust"
+        ),
+        "c_mean": statistics.fmean(
+            row["mos_lqo"] for row in rows if row["treatment"] == "c"
+        ),
+        "paired_difference_mean": statistics.fmean(differences),
+        "paired_difference_ci95": list(ci),
+        "rust_wins": sum(value > 0 for value in differences),
+        "ties": sum(value == 0 for value in differences),
+        "c_wins": sum(value < 0 for value in differences),
+    }
+
+
+def mean_defined(values: list[float | None]) -> float | None:
+    defined = [value for value in values if value is not None and math.isfinite(value)]
+    return statistics.fmean(defined) if defined else None
+
+
+def aggregate(rows: list[dict], configurations: list[Configuration]) -> dict:
+    overall = paired_summary(rows)
+    excerpt_differences = []
+    excerpt_keys = sorted({(row["track"], row["excerpt"]) for row in rows})
+    for track, excerpt in excerpt_keys:
+        selected = [
+            row
+            for row in rows
+            if row["track"] == track and row["excerpt"] == excerpt
+        ]
+        excerpt_differences.append(paired_summary(selected)["paired_difference_mean"])
+    excerpt_ci = confidence_interval(excerpt_differences)
+    overall["excerpt_aggregate_count"] = len(excerpt_differences)
+    overall["excerpt_aggregate_ci95"] = list(excerpt_ci)
+
     result = {
-        "overall": {
-            "pairs": len(differences),
-            "rust_mean": statistics.fmean(row["mos_lqo"] for row in rows if row["treatment"] == "rust"),
-            "c_mean": statistics.fmean(row["mos_lqo"] for row in rows if row["treatment"] == "c"),
-            "paired_difference_mean": statistics.fmean(differences),
-            "paired_difference_ci95": list(overall_ci),
-            "rust_wins": sum(value > 0 for value in differences),
-            "ties": sum(value == 0 for value in differences),
-            "c_wins": sum(value < 0 for value in differences),
-        },
+        "overall": overall,
+        "pcm_bits": {},
+        "tracks": {},
         "configurations": {},
     }
+    for pcm_bits in sorted({row["pcm_bits"] for row in rows}):
+        selected = [row for row in rows if row["pcm_bits"] == pcm_bits]
+        result["pcm_bits"][str(pcm_bits)] = paired_summary(selected)
+    for track in sorted({row["track"] for row in rows}):
+        selected = [row for row in rows if row["track"] == track]
+        result["tracks"][track] = paired_summary(selected)
+
     for configuration in configurations:
         key = configuration.key
         selected = [row for row in rows if row["configuration"] == key]
-        rust_scores = [row["mos_lqo"] for row in selected if row["treatment"] == "rust"]
-        c_scores = [row["mos_lqo"] for row in selected if row["treatment"] == "c"]
-        config_differences = [
-            scores["rust"] - scores["c"]
-            for pair_key, scores in paired.items()
-            if pair_key[2] == key
-        ]
-        ci = confidence_interval(config_differences)
         result["configurations"][key] = {
-            "pairs": len(config_differences),
-            "rust_mean": statistics.fmean(rust_scores),
-            "c_mean": statistics.fmean(c_scores),
-            "paired_difference_mean": statistics.fmean(config_differences),
-            "paired_difference_ci95": list(ci),
-            "rust_snr_mean": statistics.fmean(
-                row["diagnostics"]["snr_db"]
-                for row in selected
-                if row["treatment"] == "rust"
+            **paired_summary(selected),
+            "rust_snr_mean": mean_defined(
+                [
+                    row["diagnostics"]["snr_db"]
+                    for row in selected
+                    if row["treatment"] == "rust"
+                ]
             ),
-            "c_snr_mean": statistics.fmean(
-                row["diagnostics"]["snr_db"]
-                for row in selected
-                if row["treatment"] == "c"
+            "c_snr_mean": mean_defined(
+                [
+                    row["diagnostics"]["snr_db"]
+                    for row in selected
+                    if row["treatment"] == "c"
+                ]
             ),
-            "rust_side_snr_mean": statistics.fmean(
-                row["diagnostics"]["side_snr_db"]
-                for row in selected
-                if row["treatment"] == "rust"
+            "rust_side_snr_mean": mean_defined(
+                [
+                    row["diagnostics"]["side_snr_db"]
+                    for row in selected
+                    if row["treatment"] == "rust"
+                ]
             ),
-            "c_side_snr_mean": statistics.fmean(
-                row["diagnostics"]["side_snr_db"]
-                for row in selected
-                if row["treatment"] == "c"
+            "c_side_snr_mean": mean_defined(
+                [
+                    row["diagnostics"]["side_snr_db"]
+                    for row in selected
+                    if row["treatment"] == "c"
+                ]
             ),
         }
     return result
@@ -471,13 +559,16 @@ def write_blind_set(
 
 
 def markdown_report(report: dict) -> str:
+    def format_db(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.2f} dB"
+
     overall = report["summary"]["overall"]
     lines = [
         "# CELT ViSQOL quality comparison",
         "",
         "Official ViSQOL Audio scored matched random excerpts from the source masters.",
         "",
-        "The codec input uses exact `f32` conversion from signed 24-bit PCM.",
+        "The codec inputs use the exact signed 16-bit and signed 24-bit APIs.",
         "ViSQOL input uses matched PCM16 copies with shared gain.",
         "",
         "## Overall result",
@@ -489,20 +580,56 @@ def markdown_report(report: dict) -> str:
         "- Paired 95% confidence interval: "
         f"{overall['paired_difference_ci95'][0]:+.4f} to "
         f"{overall['paired_difference_ci95'][1]:+.4f}",
+        "- Excerpt-aggregate 95% confidence interval: "
+        f"{overall['excerpt_aggregate_ci95'][0]:+.4f} to "
+        f"{overall['excerpt_aggregate_ci95'][1]:+.4f}",
         f"- Pair wins: Rust {overall['rust_wins']}, tie {overall['ties']}, C {overall['c_wins']}",
         "",
-        "## Configuration results",
+        "## PCM-depth results",
         "",
-        "| Configuration | Rust MOS | C MOS | Rust - C | 95% CI | Rust SNR | C SNR | Rust side SNR | C side SNR |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| PCM | Rust MOS | C MOS | Rust - C | 95% CI |",
+        "|---:|---:|---:|---:|---:|",
     ]
+    for pcm_bits, values in report["summary"]["pcm_bits"].items():
+        ci = values["paired_difference_ci95"]
+        lines.append(
+            f"| {pcm_bits}-bit | {values['rust_mean']:.4f} | "
+            f"{values['c_mean']:.4f} | {values['paired_difference_mean']:+.4f} | "
+            f"{ci[0]:+.4f} to {ci[1]:+.4f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Source results",
+            "",
+            "| Source | Rust MOS | C MOS | Rust - C | 95% CI |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for track, values in report["summary"]["tracks"].items():
+        ci = values["paired_difference_ci95"]
+        lines.append(
+            f"| `{track}` | {values['rust_mean']:.4f} | {values['c_mean']:.4f} | "
+            f"{values['paired_difference_mean']:+.4f} | "
+            f"{ci[0]:+.4f} to {ci[1]:+.4f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Configuration results",
+            "",
+            "| Configuration | Rust MOS | C MOS | Rust - C | 95% CI | Rust SNR | C SNR | Rust side SNR | C side SNR |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
     for key, values in report["summary"]["configurations"].items():
         ci = values["paired_difference_ci95"]
         lines.append(
             f"| `{key}` | {values['rust_mean']:.4f} | {values['c_mean']:.4f} | "
             f"{values['paired_difference_mean']:+.4f} | {ci[0]:+.4f} to {ci[1]:+.4f} | "
-            f"{values['rust_snr_mean']:.2f} dB | {values['c_snr_mean']:.2f} dB | "
-            f"{values['rust_side_snr_mean']:.2f} dB | {values['c_side_snr_mean']:.2f} dB |"
+            f"{format_db(values['rust_snr_mean'])} | {format_db(values['c_snr_mean'])} | "
+            f"{format_db(values['rust_side_snr_mean'])} | "
+            f"{format_db(values['c_side_snr_mean'])} |"
         )
     lines.extend(
         [
@@ -521,25 +648,37 @@ def markdown_report(report: dict) -> str:
 def main() -> None:
     args = parse_args()
     tracks = parse_tracks(args.track)
+    pcm_bits = parse_pcm_bits(args.pcm_bits)
     bitrates = parse_int_list(args.bitrates, "bitrates")
     frame_sizes = parse_int_list(args.frame_sizes, "frame sizes")
     if any(frame_size not in VALID_FRAME_SIZES for frame_size in frame_sizes):
         raise ValueError(f"frame sizes must be in {sorted(VALID_FRAME_SIZES)}")
     modes = parse_modes(args.modes)
     configurations = [
-        Configuration(frame_size=frame_size, bitrate=bitrate, mode=mode)
+        Configuration(
+            pcm_bits=bits,
+            frame_size=frame_size,
+            bitrate=bitrate,
+            mode=mode,
+        )
+        for bits in pcm_bits
         for mode in modes
         for frame_size in frame_sizes
         for bitrate in bitrates
     ]
     rust_bin = args.rust_bin.expanduser().resolve()
     c_bin = args.c_bin.expanduser().resolve()
+    libopus_source = (
+        args.libopus_source.expanduser().resolve() if args.libopus_source else None
+    )
     # Keep the Bazel symlink path because the model is relative to its workspace.
     visqol = args.visqol.expanduser().absolute()
     output_root = args.out_dir.expanduser().resolve()
     for executable in [rust_bin, c_bin, visqol]:
         if not executable.is_file() or not os.access(executable, os.X_OK):
             raise ValueError(f"executable is unavailable: {executable}")
+    if libopus_source is not None and not libopus_source.is_dir():
+        raise ValueError(f"libopus source directory is unavailable: {libopus_source}")
     if output_root.exists():
         raise ValueError(f"output directory already exists: {output_root}")
     if args.visqol_jobs <= 0:
@@ -557,37 +696,51 @@ def main() -> None:
     pending_rows = []
 
     for track in tracks:
-        info = sf.info(track.path)
-        if info.samplerate != SAMPLE_RATE or info.channels != CHANNELS:
-            raise ValueError(f"{track.path} must be 48 kHz stereo")
+        audio, source_i24, subtype = read_source(track)
+        frame_count = audio.shape[0]
         source_hash = sha256_file(track.path)
         source_rows.append(
             {
                 "name": track.name,
                 "path": str(track.path),
                 "sha256": source_hash,
-                "frames": info.frames,
-                "seconds": info.frames / SAMPLE_RATE,
-                "subtype": info.subtype,
+                "frames": frame_count,
+                "seconds": frame_count / SAMPLE_RATE,
+                "subtype": subtype,
             }
         )
-        print(f"[source] {track.name}: {info.frames / SAMPLE_RATE:.3f}s {info.subtype}", flush=True)
-        audio, sample_rate = sf.read(track.path, dtype="float32", always_2d=True)
-        if sample_rate != SAMPLE_RATE or audio.shape != (info.frames, CHANNELS):
-            raise ValueError(f"unexpected decoded shape for {track.path}")
+        print(
+            f"[source] {track.name}: {frame_count / SAMPLE_RATE:.3f}s {subtype}",
+            flush=True,
+        )
         starts = choose_starts(
-            info.frames,
+            frame_count,
             excerpt_frames,
             margin_frames,
             args.excerpts_per_track,
             rng,
         )
         for excerpt_index, start in enumerate(starts, start=1):
-            excerpt = audio[start : start + excerpt_frames]
+            excerpt_i24 = source_i24[start : start + excerpt_frames]
             excerpt_key = f"{track.name}_{excerpt_index:02d}"
             excerpt_dir = output_root / "raw" / excerpt_key
-            input_path = excerpt_dir / "master.f32le"
-            write_f32le(input_path, excerpt)
+            codec_inputs = {}
+            codec_references = {}
+            if 16 in pcm_bits:
+                input_i16 = (excerpt_i24 >> 8).astype(np.int16)
+                input_i16_path = excerpt_dir / "master.s16le"
+                write_i16le(input_i16_path, input_i16)
+                codec_inputs[16] = input_i16_path
+                codec_references[16] = (
+                    input_i16.astype(np.float32) * np.float32(1.0 / 32_768.0)
+                )
+            if 24 in pcm_bits:
+                input_i24_path = excerpt_dir / "master.s24.s32le"
+                write_i24_s32le(input_i24_path, excerpt_i24)
+                codec_inputs[24] = input_i24_path
+                codec_references[24] = (
+                    excerpt_i24.astype(np.float32) * np.float32(1.0 / 8_388_608.0)
+                )
             excerpt_rows.append(
                 {
                     "track": track.name,
@@ -605,6 +758,8 @@ def main() -> None:
                 )
                 config_dir = excerpt_dir / configuration.key
                 config_dir.mkdir(parents=True, exist_ok=True)
+                reference = codec_references[configuration.pcm_bits]
+                input_path = codec_inputs[configuration.pcm_bits]
                 raw_paths = {
                     "rust": config_dir / "rust.f32le",
                     "c": config_dir / "c.f32le",
@@ -613,6 +768,8 @@ def main() -> None:
                     "rust": run_json(
                         [
                             str(rust_bin),
+                            "--pcm-bits",
+                            str(configuration.pcm_bits),
                             str(configuration.frame_size),
                             str(configuration.bitrate),
                             configuration.mode,
@@ -623,6 +780,8 @@ def main() -> None:
                     "c": run_json(
                         [
                             str(c_bin),
+                            "--pcm-bits",
+                            str(configuration.pcm_bits),
                             str(configuration.frame_size),
                             str(configuration.bitrate),
                             configuration.mode,
@@ -635,10 +794,12 @@ def main() -> None:
                     name: read_f32le(path, excerpt_frames) for name, path in raw_paths.items()
                 }
                 lags = {
-                    name: estimate_lag(excerpt, candidate)
+                    name: estimate_lag(reference, candidate)
                     for name, candidate in candidates.items()
                 }
-                aligned_reference, aligned_candidates = aligned_audio(excerpt, candidates, lags)
+                aligned_reference, aligned_candidates = aligned_audio(
+                    reference, candidates, lags
+                )
                 evaluation_paths = write_evaluation_wavs(
                     output_root / "evaluation" / excerpt_key / configuration.key,
                     aligned_reference,
@@ -652,6 +813,7 @@ def main() -> None:
                             "track": track.name,
                             "excerpt": excerpt_index,
                             "configuration": configuration.key,
+                            "pcm_bits": configuration.pcm_bits,
                             "treatment": treatment,
                             **codec_stats,
                             "effective_kbps": codec_stats["packet_bytes"]
@@ -666,6 +828,7 @@ def main() -> None:
                             "excerpt": excerpt_index,
                             "start_seconds": start / SAMPLE_RATE,
                             "configuration": configuration.key,
+                            "pcm_bits": configuration.pcm_bits,
                             "frame_size": configuration.frame_size,
                             "bitrate": configuration.bitrate,
                             "mode": configuration.mode,
@@ -685,7 +848,8 @@ def main() -> None:
                         raw_path.unlink()
                     config_dir.rmdir()
             if not args.keep_raw:
-                input_path.unlink()
+                for input_path in codec_inputs.values():
+                    input_path.unlink()
                 excerpt_dir.rmdir()
 
     visqol_root = visqol.parent.parent
@@ -758,6 +922,7 @@ def main() -> None:
             "excerpt_seconds": args.excerpt_seconds,
             "edge_margin_seconds": args.edge_margin_seconds,
             "headroom_db": args.headroom_db,
+            "pcm_bits": pcm_bits,
             "bitrates": bitrates,
             "frame_sizes": frame_sizes,
             "modes": modes,
@@ -766,6 +931,24 @@ def main() -> None:
         "tools": {
             "rust_bin": str(rust_bin),
             "c_bin": str(c_bin),
+            "libopus_source": str(libopus_source) if libopus_source else None,
+            "libopus_c_commit": (
+                git_value(libopus_source, "rev-parse", "HEAD")
+                if libopus_source
+                else None
+            ),
+            "libopus_c_worktree_dirty": (
+                bool(git_value(libopus_source, "status", "--porcelain"))
+                if libopus_source
+                else None
+            ),
+            "libopus_c_version": sorted(
+                {
+                    row["codec"]
+                    for row in packet_rows
+                    if row["treatment"] == "c"
+                }
+            ),
             "visqol": str(visqol),
             "visqol_commit": git_value(visqol_root, "rev-parse", "HEAD"),
             "libopus_rs_commit": git_value(repository_root, "rev-parse", "HEAD"),
