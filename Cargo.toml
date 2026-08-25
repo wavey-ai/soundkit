@@ -35,6 +35,7 @@ exclude = ["vendor/rusty_av1d", "vendor/rusty_h264-decoder"]
 
 [patch.crates-io]
 rusty_av1d = { path = "vendor/rusty_av1d" }
+soundkit-opus = { path = "soundkit-opus" }
 
 [profile.release]
 codegen-units = 1

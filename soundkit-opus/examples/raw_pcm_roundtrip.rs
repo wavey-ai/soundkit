@@ -149,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let total_samples = input.len();
     let frame_samples = frame_size * CHANNELS;
-    let mut encoder = Encoder::new(SAMPLE_RATE, CHANNELS, Application::Audio)?;
+    let mut encoder = Encoder::with_application(SAMPLE_RATE, CHANNELS, Application::Audio)?;
     encoder.set_bitrate(bitrate)?;
     encoder.set_vbr(vbr)?;
     let mut decoder = Decoder::new(SAMPLE_RATE, CHANNELS)?;
@@ -165,17 +165,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             PcmInput::F32(samples) => {
                 let mut padded = vec![0.0f32; frame_samples];
                 padded[..copied].copy_from_slice(&samples[offset..offset + copied]);
-                encoder.encode_f32(&padded, frame_size)?
+                encoder.encode_f32_vec(&padded, frame_size)?
             }
             PcmInput::I16(samples) => {
                 let mut padded = vec![0i16; frame_samples];
                 padded[..copied].copy_from_slice(&samples[offset..offset + copied]);
-                encoder.encode_i16(&padded, frame_size)?
+                encoder.encode_i16_vec(&padded, frame_size)?
             }
             PcmInput::I24(samples) => {
                 let mut padded = vec![0i32; frame_samples];
                 padded[..copied].copy_from_slice(&samples[offset..offset + copied]);
-                encoder.encode_i24(&padded, frame_size)?
+                encoder.encode_i24_vec(&padded, frame_size)?
             }
         };
         packet_bytes += packet.len();
@@ -183,16 +183,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         packet_min = packet_min.min(packet.len());
         packet_max = packet_max.max(packet.len());
         match &input {
-            PcmInput::F32(_) => output.extend(decoder.decode_f32(&packet, false)?),
+            PcmInput::F32(_) => output.extend(decoder.decode_f32_vec(&packet, false)?),
             PcmInput::I16(_) => output.extend(
                 decoder
-                    .decode_i16(&packet, false)?
+                    .decode_i16_vec(&packet, false)?
                     .into_iter()
                     .map(|sample| f32::from(sample) * (1.0 / 32_768.0)),
             ),
             PcmInput::I24(_) => output.extend(
                 decoder
-                    .decode_i24(&packet, false)?
+                    .decode_i24_vec(&packet, false)?
                     .into_iter()
                     .map(|sample| sample as f32 * (1.0 / 8_388_608.0)),
             ),

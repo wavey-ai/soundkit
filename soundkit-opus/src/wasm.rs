@@ -33,8 +33,8 @@ impl Encoder {
                 "soundkit-opus wasm currently supports 48 kHz CELT-only Opus",
             ));
         }
-        let mut inner =
-            RustEncoder::new(sample_rate, channels, Application::Audio).map_err(opus_error)?;
+        let mut inner = RustEncoder::with_application(sample_rate, channels, Application::Audio)
+            .map_err(opus_error)?;
         inner.set_bitrate(bitrate).map_err(opus_error)?;
         inner.set_vbr(false).map_err(opus_error)?;
         Ok(Self {
@@ -58,7 +58,7 @@ impl Encoder {
         }
         let encoded = self
             .inner
-            .encode_i16(&input[..required], self.frame_size)
+            .encode_i16_vec(&input[..required], self.frame_size)
             .map_err(opus_error)?;
         Ok(EncodeResult { encoded })
     }
@@ -74,7 +74,7 @@ impl Encoder {
         }
         let encoded = self
             .inner
-            .encode_i24(&input[..required], self.frame_size)
+            .encode_i24_vec(&input[..required], self.frame_size)
             .map_err(opus_error)?;
         Ok(EncodeResult { encoded })
     }

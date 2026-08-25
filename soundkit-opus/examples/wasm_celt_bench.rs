@@ -39,7 +39,7 @@ pub extern "C" fn raw_celt_encode_bench(frames: u32, frame_size: u32, bitrate: u
     let frames = frames.max(1) as usize;
     let frame_size = frame_size.clamp(120, 960) as usize;
     let mut encoder =
-        Encoder::new(SAMPLE_RATE, CHANNELS, Application::Audio).expect("encoder init");
+        Encoder::with_application(SAMPLE_RATE, CHANNELS, Application::Audio).expect("encoder init");
     encoder.set_bitrate(bitrate as i32).expect("set bitrate");
     encoder.set_vbr(false).expect("set vbr");
 
@@ -47,7 +47,7 @@ pub extern "C" fn raw_celt_encode_bench(frames: u32, frame_size: u32, bitrate: u
     let mut checksum = 0u32;
     for frame in 0..frames {
         fill_frame(&mut pcm, frame, frame_size);
-        let packet = encoder.encode_f32(&pcm, frame_size).expect("encode");
+        let packet = encoder.encode_f32_vec(&pcm, frame_size).expect("encode");
         checksum = checksum
             .wrapping_add(packet.len() as u32)
             .wrapping_add((packet.first().copied().unwrap_or(0) as u32) << 8)

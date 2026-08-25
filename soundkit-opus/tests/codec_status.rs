@@ -52,7 +52,8 @@ fn raw_celt_bench_frame(frame_size: usize, frame_index: usize) -> Vec<f32> {
 }
 
 fn vbr_stats(frame_size: usize, bitrate: i32, frames: usize) -> (usize, usize, usize) {
-    let mut encoder = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    let mut encoder =
+        Encoder::with_application(48_000, 2, Application::RestrictedLowDelay).unwrap();
     encoder.set_bitrate(bitrate).unwrap();
     encoder.set_vbr(true).unwrap();
 
@@ -61,7 +62,7 @@ fn vbr_stats(frame_size: usize, bitrate: i32, frames: usize) -> (usize, usize, u
     let mut max_packet = 0usize;
     for frame in 0..frames {
         let packet = encoder
-            .encode_f32(&raw_celt_bench_frame(frame_size, frame), frame_size)
+            .encode_f32_vec(&raw_celt_bench_frame(frame_size, frame), frame_size)
             .unwrap();
         bytes += packet.len();
         min_packet = min_packet.min(packet.len());
@@ -76,7 +77,7 @@ fn hex(bytes: &[u8]) -> String {
 
 #[test]
 fn encode_and_decode_48k_celt_only_smoke_path() {
-    let mut encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut encoder = Encoder::with_application(48_000, 2, Application::Audio).unwrap();
     let pcm = (0..960)
         .flat_map(|i| {
             let left = (i as f32 * 0.011).sin() * 0.2;
@@ -84,11 +85,11 @@ fn encode_and_decode_48k_celt_only_smoke_path() {
             [left, right]
         })
         .collect::<Vec<_>>();
-    let packet = encoder.encode_f32(&pcm, 960).unwrap();
+    let packet = encoder.encode_f32_vec(&pcm, 960).unwrap();
     assert!(!packet.is_empty());
 
     let mut decoder = Decoder::new(48_000, 2).unwrap();
-    let decoded = decoder.decode_f32(&packet, false).unwrap();
+    let decoded = decoder.decode_f32_vec(&packet, false).unwrap();
     assert_eq!(decoded.len(), pcm.len());
     assert!(decoded.iter().all(|sample| sample.is_finite()));
     assert!(decoded.iter().any(|sample| sample.abs() > 1e-5));
@@ -102,7 +103,7 @@ fn encode_and_decode_48k_celt_only_smoke_path() {
     assert_eq!(decoded_f32_into, decoded);
 
     let mut decoder = Decoder::new(48_000, 2).unwrap();
-    let decoded_i16 = decoder.decode_i16(&packet, false).unwrap();
+    let decoded_i16 = decoder.decode_i16_vec(&packet, false).unwrap();
     let mut decoder = Decoder::new(48_000, 2).unwrap();
     let mut decoded_into = Vec::new();
     let decoded_samples = decoder
@@ -116,7 +117,7 @@ fn encode_and_decode_48k_celt_only_smoke_path() {
         .map(|&sample| soundkit_opus::celt::mathops::float_to_i24(sample))
         .collect::<Vec<_>>();
     let mut decoder = Decoder::new(48_000, 2).unwrap();
-    let decoded_i24 = decoder.decode_i24(&packet, false).unwrap();
+    let decoded_i24 = decoder.decode_i24_vec(&packet, false).unwrap();
     assert_eq!(decoded_i24, expected_i24);
     let mut decoder = Decoder::new(48_000, 2).unwrap();
     let mut decoded_i24_into = Vec::new();
@@ -132,8 +133,8 @@ fn encode_and_decode_48k_celt_only_smoke_path() {
 #[test]
 fn experimental_direct_cubic_round_trips_5ms_stereo() {
     let frame_size = 240;
-    let mut standard = Encoder::new(48_000, 2, Application::Audio).unwrap();
-    let mut cubic = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut standard = Encoder::with_application(48_000, 2, Application::Audio).unwrap();
+    let mut cubic = Encoder::with_application(48_000, 2, Application::Audio).unwrap();
     standard.set_bitrate(512_000).unwrap();
     cubic.set_bitrate(512_000).unwrap();
     standard.set_vbr(false).unwrap();
@@ -151,12 +152,12 @@ fn experimental_direct_cubic_round_trips_5ms_stereo() {
     let mut packets_differ = false;
     for frame in 0..24 {
         let pcm = raw_celt_bench_frame(frame_size, frame);
-        let standard_packet = standard.encode_f32(&pcm, frame_size).unwrap();
-        let cubic_packet = cubic.encode_f32(&pcm, frame_size).unwrap();
+        let standard_packet = standard.encode_f32_vec(&pcm, frame_size).unwrap();
+        let cubic_packet = cubic.encode_f32_vec(&pcm, frame_size).unwrap();
         assert_eq!(cubic_packet.len(), standard_packet.len());
         packets_differ |= cubic_packet != standard_packet;
 
-        let decoded = decoder.decode_f32(&cubic_packet, false).unwrap();
+        let decoded = decoder.decode_f32_vec(&cubic_packet, false).unwrap();
         assert_eq!(decoded.len(), pcm.len());
         assert!(decoded.iter().all(|sample| sample.is_finite()));
         assert!(decoded.iter().any(|sample| sample.abs() > 1e-5));
@@ -166,14 +167,15 @@ fn experimental_direct_cubic_round_trips_5ms_stereo() {
 
 #[test]
 fn celt_encoder_carries_final_range_rng_between_frames() {
-    let mut encoder = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    let mut encoder =
+        Encoder::with_application(48_000, 2, Application::RestrictedLowDelay).unwrap();
     encoder.set_bitrate(128_000).unwrap();
     encoder.set_vbr(false).unwrap();
 
     let mut packet = Vec::new();
     for frame in 0..=91 {
         packet = encoder
-            .encode_f32(&raw_celt_bench_frame(120, frame), 120)
+            .encode_f32_vec(&raw_celt_bench_frame(120, frame), 120)
             .unwrap();
     }
 
@@ -185,14 +187,15 @@ fn celt_encoder_carries_final_range_rng_between_frames() {
 
 #[test]
 fn celt_encoder_keeps_decay_limited_coarse_energy_regression() {
-    let mut encoder = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    let mut encoder =
+        Encoder::with_application(48_000, 2, Application::RestrictedLowDelay).unwrap();
     encoder.set_bitrate(128_000).unwrap();
     encoder.set_vbr(false).unwrap();
 
     let mut packet = Vec::new();
     for frame in 0..=227 {
         packet = encoder
-            .encode_f32(&raw_celt_bench_frame(120, frame), 120)
+            .encode_f32_vec(&raw_celt_bench_frame(120, frame), 120)
             .unwrap();
     }
 
@@ -218,14 +221,14 @@ fn encode_i16_matches_equivalent_f32_input() {
         .map(|sample| *sample as f32 / 32768.0)
         .collect::<Vec<_>>();
 
-    let mut i16_encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
-    let mut f32_encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut i16_encoder = Encoder::with_application(48_000, 2, Application::Audio).unwrap();
+    let mut f32_encoder = Encoder::with_application(48_000, 2, Application::Audio).unwrap();
     i16_encoder.set_bitrate(128_000).unwrap();
     f32_encoder.set_bitrate(128_000).unwrap();
 
     assert_eq!(
-        i16_encoder.encode_i16(&pcm_i16, 960).unwrap(),
-        f32_encoder.encode_f32(&pcm_f32, 960).unwrap()
+        i16_encoder.encode_i16_vec(&pcm_i16, 960).unwrap(),
+        f32_encoder.encode_f32_vec(&pcm_f32, 960).unwrap()
     );
 }
 
@@ -247,17 +250,17 @@ fn encode_i24_matches_equivalent_f32_input() {
         .map(|sample| *sample as f32 / 8_388_608.0)
         .collect::<Vec<_>>();
 
-    let mut i24_encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
-    let mut f32_encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut i24_encoder = Encoder::with_application(48_000, 2, Application::Audio).unwrap();
+    let mut f32_encoder = Encoder::with_application(48_000, 2, Application::Audio).unwrap();
     i24_encoder.set_bitrate(128_000).unwrap();
     f32_encoder.set_bitrate(128_000).unwrap();
     assert_eq!(
-        i24_encoder.encode_i24(&pcm_i24, 960).unwrap(),
-        f32_encoder.encode_f32(&pcm_f32, 960).unwrap()
+        i24_encoder.encode_i24_vec(&pcm_i24, 960).unwrap(),
+        f32_encoder.encode_f32_vec(&pcm_f32, 960).unwrap()
     );
 
-    let mut i24_encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
-    let mut f32_encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut i24_encoder = Encoder::with_application(48_000, 2, Application::Audio).unwrap();
+    let mut f32_encoder = Encoder::with_application(48_000, 2, Application::Audio).unwrap();
     assert_eq!(
         i24_encoder
             .encode_i24_with_frame_bytes(&pcm_i24, 960, 320)
@@ -267,10 +270,10 @@ fn encode_i24_matches_equivalent_f32_input() {
             .unwrap()
     );
 
-    let mut encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut encoder = Encoder::with_application(48_000, 2, Application::Audio).unwrap();
     let mut invalid = pcm_i24;
     invalid[0] = PCM_I24_MAX + 1;
-    assert_eq!(encoder.encode_i24(&invalid, 960), Err(Error::BadArg));
+    assert_eq!(encoder.encode_i24_vec(&invalid, 960), Err(Error::BadArg));
     invalid[0] = PCM_I24_MIN - 1;
     assert_eq!(
         encoder.encode_i24_with_frame_bytes(&invalid, 960, 320),
@@ -290,15 +293,17 @@ fn encode_i24_into_reuses_packet_storage_and_matches_allocating_api() {
             ]
         })
         .collect::<Vec<_>>();
-    let mut allocating = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
-    let mut reusing = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    let mut allocating =
+        Encoder::with_application(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    let mut reusing =
+        Encoder::with_application(48_000, 2, Application::RestrictedLowDelay).unwrap();
     allocating.set_bitrate(96_000).unwrap();
     reusing.set_bitrate(96_000).unwrap();
 
     let mut packet = Vec::with_capacity(64);
     let allocation = packet.as_ptr();
     for _ in 0..8 {
-        let expected = allocating.encode_i24(&pcm_i24, frame_size).unwrap();
+        let expected = allocating.encode_i24_vec(&pcm_i24, frame_size).unwrap();
         let encoded_size = reusing
             .encode_i24_into(&pcm_i24, frame_size, &mut packet)
             .unwrap();
@@ -323,7 +328,8 @@ fn celt_raw_frames_cover_supported_sizes_and_payload_budgets() {
             budgets.dedup();
 
             for frame_bytes in budgets {
-                let mut encoder = Encoder::new(48_000, channels, Application::Audio).unwrap();
+                let mut encoder =
+                    Encoder::with_application(48_000, channels, Application::Audio).unwrap();
                 let mut decoder = Decoder::new(48_000, channels).unwrap();
                 let packet = encoder
                     .encode_f32_with_frame_bytes(
@@ -335,7 +341,7 @@ fn celt_raw_frames_cover_supported_sizes_and_payload_budgets() {
                 assert_eq!(packet.len(), frame_bytes + 1);
                 assert_eq!(decoder.validate_packet(&packet).unwrap(), frame_size);
 
-                let decoded = decoder.decode_f32(&packet, false).unwrap();
+                let decoded = decoder.decode_f32_vec(&packet, false).unwrap();
                 assert_eq!(decoded.len(), frame_size * channels);
                 assert!(decoded.iter().all(|sample| sample.is_finite()));
             }
@@ -346,25 +352,26 @@ fn celt_raw_frames_cover_supported_sizes_and_payload_budgets() {
 #[test]
 fn celt_bitrate_control_scales_raw_frame_size() {
     for &frame_size in &CELT_FRAME_SIZES_48K {
-        let mut encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+        let mut encoder = Encoder::with_application(48_000, 2, Application::Audio).unwrap();
         encoder.set_bitrate(128_000).unwrap();
         let expected = ((128_000 * frame_size as i32 + 48_000 * 4) / (48_000 * 8)) as usize;
         let packet = encoder
-            .encode_f32(&tone(frame_size, 2, 0), frame_size)
+            .encode_f32_vec(&tone(frame_size, 2, 0), frame_size)
             .unwrap();
         assert_eq!(packet.len(), expected);
     }
 
-    let mut encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut encoder = Encoder::with_application(48_000, 2, Application::Audio).unwrap();
     assert!(encoder.set_bitrate(499).is_err());
     assert!(encoder.set_bitrate(512_001).is_err());
 }
 
 #[test]
 fn celt_cbr_packet_size_is_capped_to_opus_packet_limit() {
-    let mut encoder = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    let mut encoder =
+        Encoder::with_application(48_000, 2, Application::RestrictedLowDelay).unwrap();
     encoder.set_bitrate(512_000).unwrap();
-    let packet = encoder.encode_f32(&tone(960, 2, 0), 960).unwrap();
+    let packet = encoder.encode_f32_vec(&tone(960, 2, 0), 960).unwrap();
 
     assert_eq!(packet.len(), CELT_MAX_FRAME_BYTES + 1);
     assert_eq!(packet.len(), 1275);
@@ -372,21 +379,22 @@ fn celt_cbr_packet_size_is_capped_to_opus_packet_limit() {
 
 #[test]
 fn low_rate_stereo_celt_can_emit_mono_packets() {
-    let mut encoder = Encoder::new(48_000, 2, Application::Audio).unwrap();
+    let mut encoder = Encoder::with_application(48_000, 2, Application::Audio).unwrap();
     encoder.set_bitrate(48_000).unwrap();
-    let packet = encoder.encode_f32(&tone(120, 2, 0), 120).unwrap();
+    let packet = encoder.encode_f32_vec(&tone(120, 2, 0), 120).unwrap();
     assert_eq!(packet.len(), 15);
     assert_eq!(packet_channels(&packet).unwrap(), 1);
 
     let mut decoder = Decoder::new(48_000, 2).unwrap();
-    let decoded = decoder.decode_f32(&packet, false).unwrap();
+    let decoded = decoder.decode_f32_vec(&packet, false).unwrap();
     assert_eq!(decoded.len(), 120 * 2);
     assert!(decoded.iter().all(|sample| sample.is_finite()));
 }
 
 #[test]
 fn vbr_packet_budget_varies_with_signal_shape() {
-    let mut encoder = Encoder::new(48_000, 2, Application::RestrictedLowDelay).unwrap();
+    let mut encoder =
+        Encoder::with_application(48_000, 2, Application::RestrictedLowDelay).unwrap();
     encoder.set_bitrate(96_000).unwrap();
     encoder.set_vbr(true).unwrap();
 
@@ -407,14 +415,20 @@ fn vbr_packet_budget_varies_with_signal_shape() {
         })
         .collect::<Vec<_>>();
 
-    let quiet_packet = encoder.encode_f32(&quiet, 120).unwrap();
-    let transient_packet = encoder.encode_f32(&transient, 120).unwrap();
+    let quiet_packet = encoder.encode_f32_vec(&quiet, 120).unwrap();
+    let transient_packet = encoder.encode_f32_vec(&transient, 120).unwrap();
     assert_ne!(quiet_packet.len(), transient_packet.len());
 
     let mut decoder = Decoder::new(48_000, 2).unwrap();
-    assert_eq!(decoder.decode_f32(&quiet_packet, false).unwrap().len(), 240);
     assert_eq!(
-        decoder.decode_f32(&transient_packet, false).unwrap().len(),
+        decoder.decode_f32_vec(&quiet_packet, false).unwrap().len(),
+        240
+    );
+    assert_eq!(
+        decoder
+            .decode_f32_vec(&transient_packet, false)
+            .unwrap()
+            .len(),
         240
     );
 }

@@ -8,6 +8,13 @@ Rust was faster than trunk libopus in all 12 aggregate timing cells.
 
 Encoding used `1.19-2.36%` less time. Decoding used `1.50-4.64%` less time.
 
+Decoder-method correction (2026-08-25): these decoder cells timed each
+implementation on packets produced by its own encoder. CBR packet bytes match,
+but constrained-VBR streams differ, so those VBR cells are end-to-end results,
+not an isolated decoder comparison. The replacement same-packet i24 gate at
+192 kb/s measured SoundKit at `+0.51%` on C packets, `-0.30%` on SoundKit
+packets, and `+0.10%` combined across 40 alternating music-corpus pairs.
+
 The comparison used direct, in-process codec calls. FFmpeg did not run inside
 the measured loops.
 

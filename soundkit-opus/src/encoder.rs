@@ -16,6 +16,7 @@ use crate::celt::quant_bands::{amp2_log2, E_MEANS};
 use crate::constants::{valid_channels, valid_sample_rate, PCM_I24_MAX, PCM_I24_MIN};
 use crate::packet;
 use crate::{Error, Result};
+use soundkit::audio_packet::Encoder as SoundkitEncoder;
 use wide::{i32x8, CmpGt, CmpLt};
 
 pub const CELT_FRAME_SIZES_48K: [usize; 4] = [120, 240, 480, 960];
@@ -133,6 +134,8 @@ pub struct Encoder {
     sample_rate: i32,
     channels: usize,
     application: Application,
+    bits_per_sample: u32,
+    packet_frame_size: usize,
     experimental_direct_cubic: bool,
     mode: &'static CeltMode,
     bitrate: i32,
@@ -167,6 +170,7 @@ pub struct Encoder {
     mdct_scratch: MdctScratch,
     spectral_scratch: CeltFrameEncodeScratch,
     pcm_f32_scratch: Vec<f32>,
+    packet_scratch: Vec<u8>,
     filtered_scratch: Vec<f32>,
     tone_scratch: Vec<f32>,
     transient_scratch: Vec<f32>,
@@ -175,7 +179,12 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    pub fn new(sample_rate: i32, channels: usize, application: Application) -> Result<Self> {
+    /// Creates the authored CELT codec with explicit low-level controls.
+    pub fn with_application(
+        sample_rate: i32,
+        channels: usize,
+        application: Application,
+    ) -> Result<Self> {
         if !valid_sample_rate(sample_rate) || !valid_channels(channels as i32) {
             return Err(Error::BadArg);
         }
@@ -185,6 +194,8 @@ impl Encoder {
             sample_rate,
             channels,
             application,
+            bits_per_sample: 16,
+            packet_frame_size: 960,
             experimental_direct_cubic: false,
             bitrate,
             old_band_e: vec![0.0; channels * mode.nb_ebands],
@@ -218,6 +229,7 @@ impl Encoder {
             mdct_scratch: MdctScratch::default(),
             spectral_scratch: CeltFrameEncodeScratch::default(),
             pcm_f32_scratch: Vec::new(),
+            packet_scratch: Vec::with_capacity(CELT_MAX_FRAME_BYTES + 1),
             filtered_scratch: Vec::new(),
             tone_scratch: Vec::new(),
             transient_scratch: Vec::new(),
@@ -225,6 +237,71 @@ impl Encoder {
             frame_scratch: EncoderFrameScratch::default(),
             mode,
         })
+    }
+
+    /// Creates the production SoundKit Opus encoder.
+    ///
+    /// This is the same authored codec used by the low-level API. The stored
+    /// frame size lets callers use the drop-in SoundKit packet interface
+    /// without an adapter object around the codec.
+    pub fn new(
+        sample_rate: u32,
+        bits_per_sample: u32,
+        channels: u32,
+        frame_size: u32,
+        bitrate: u32,
+    ) -> Self {
+        Self::try_new(sample_rate, bits_per_sample, channels, frame_size, bitrate)
+            .expect("failed to create SoundKit Opus encoder")
+    }
+
+    pub fn try_new(
+        sample_rate: u32,
+        bits_per_sample: u32,
+        channels: u32,
+        frame_size: u32,
+        bitrate: u32,
+    ) -> std::result::Result<Self, String> {
+        if !matches!(bits_per_sample, 16 | 24) {
+            return Err(format!(
+                "unsupported Opus PCM precision {bits_per_sample}; expected 16 or 24 bits"
+            ));
+        }
+        if !CELT_FRAME_SIZES_48K.contains(&(frame_size as usize)) {
+            return Err(format!(
+                "unsupported 48 kHz CELT frame size {frame_size}; expected 120, 240, 480, or 960 samples"
+            ));
+        }
+
+        let mut encoder =
+            Self::with_application(sample_rate as i32, channels as usize, Application::Audio)
+                .map_err(|error| error.to_string())?;
+        encoder.bits_per_sample = bits_per_sample;
+        encoder.packet_frame_size = frame_size as usize;
+        encoder
+            .set_bitrate(bitrate as i32)
+            .map_err(|error| error.to_string())?;
+        encoder.set_vbr(false).map_err(|error| error.to_string())?;
+        Ok(encoder)
+    }
+
+    pub fn init(&mut self) -> std::result::Result<(), String> {
+        self.reset()
+    }
+
+    pub fn reset(&mut self) -> std::result::Result<(), String> {
+        let mut encoder = Self::with_application(self.sample_rate, self.channels, self.application)
+            .map_err(|error| error.to_string())?;
+        encoder.bits_per_sample = self.bits_per_sample;
+        encoder.packet_frame_size = self.packet_frame_size;
+        encoder
+            .set_bitrate(self.bitrate)
+            .map_err(|error| error.to_string())?;
+        encoder
+            .set_vbr(self.vbr)
+            .map_err(|error| error.to_string())?;
+        *self = encoder;
+        Ok(())
     }
 
     pub const fn sample_rate(&self) -> i32 {
@@ -1288,7 +1365,7 @@ impl Encoder {
         self.stream_channels
     }
 
-    pub fn encode_i16(&mut self, pcm: &[i16], frame_size: usize) -> Result<Vec<u8>> {
+    pub fn encode_i16_vec(&mut self, pcm: &[i16], frame_size: usize) -> Result<Vec<u8>> {
         let mut packet = Vec::new();
         self.encode_i16_into(pcm, frame_size, &mut packet)?;
         Ok(packet)
@@ -1352,7 +1429,7 @@ impl Encoder {
     /// Encodes signed 24-bit PCM stored sign-extended in `i32` samples.
     ///
     /// Every sample must be in `PCM_I24_MIN..=PCM_I24_MAX`.
-    pub fn encode_i24(&mut self, pcm: &[i32], frame_size: usize) -> Result<Vec<u8>> {
+    pub fn encode_i24_vec(&mut self, pcm: &[i32], frame_size: usize) -> Result<Vec<u8>> {
         let mut packet = Vec::new();
         self.encode_i24_into(pcm, frame_size, &mut packet)?;
         Ok(packet)
@@ -1426,7 +1503,7 @@ impl Encoder {
         result
     }
 
-    pub fn encode_f32(&mut self, pcm: &[f32], frame_size: usize) -> Result<Vec<u8>> {
+    pub fn encode_f32_vec(&mut self, pcm: &[f32], frame_size: usize) -> Result<Vec<u8>> {
         let mut packet = Vec::new();
         self.encode_f32_into(pcm, frame_size, &mut packet)?;
         Ok(packet)
@@ -1502,6 +1579,111 @@ impl Encoder {
         );
         self.filtered_scratch = filtered;
         result
+    }
+
+    /// Encodes one configured SoundKit PCM16 frame directly through this codec
+    /// instance, without a separate adapter object.
+    pub fn encode_i16(
+        &mut self,
+        input: &[i16],
+        output: &mut [u8],
+    ) -> std::result::Result<usize, String> {
+        let required = self.packet_frame_size * self.channels;
+        if input.len() < required {
+            return Err(format!(
+                "opus input too small: {} < {required}",
+                input.len()
+            ));
+        }
+
+        let mut packet = std::mem::take(&mut self.packet_scratch);
+        let encoded = self
+            .encode_i16_into(&input[..required], self.packet_frame_size, &mut packet)
+            .map_err(|error| error.to_string());
+        let result = copy_packet_to_output(encoded, &packet, output);
+        self.packet_scratch = packet;
+        result
+    }
+
+    /// Encodes one configured signed 24-bit SoundKit frame.
+    pub fn encode_i32(
+        &mut self,
+        input: &[i32],
+        output: &mut [u8],
+    ) -> std::result::Result<usize, String> {
+        if self.bits_per_sample != 24 {
+            return Err(format!(
+                "signed i32 Opus input requires a 24-bit encoder; configured for {} bits",
+                self.bits_per_sample
+            ));
+        }
+        let required = self.packet_frame_size * self.channels;
+        if input.len() < required {
+            return Err(format!(
+                "opus input too small: {} < {required}",
+                input.len()
+            ));
+        }
+
+        let mut packet = std::mem::take(&mut self.packet_scratch);
+        let encoded = self
+            .encode_i24_into(&input[..required], self.packet_frame_size, &mut packet)
+            .map_err(|error| error.to_string());
+        let result = copy_packet_to_output(encoded, &packet, output);
+        self.packet_scratch = packet;
+        result
+    }
+}
+
+fn copy_packet_to_output(
+    encoded: std::result::Result<usize, String>,
+    packet: &[u8],
+    output: &mut [u8],
+) -> std::result::Result<usize, String> {
+    let encoded_len = encoded?;
+    if encoded_len > output.len() {
+        return Err(format!(
+            "opus encode output too large: {encoded_len} > {}",
+            output.len()
+        ));
+    }
+    output[..encoded_len].copy_from_slice(&packet[..encoded_len]);
+    Ok(encoded_len)
+}
+
+impl SoundkitEncoder for Encoder {
+    fn new(
+        sample_rate: u32,
+        bits_per_sample: u32,
+        channels: u32,
+        frame_size: u32,
+        bitrate: u32,
+    ) -> Self {
+        Encoder::new(sample_rate, bits_per_sample, channels, frame_size, bitrate)
+    }
+
+    fn init(&mut self) -> std::result::Result<(), String> {
+        Encoder::init(self)
+    }
+
+    fn encode_i16(
+        &mut self,
+        input: &[i16],
+        output: &mut [u8],
+    ) -> std::result::Result<usize, String> {
+        Encoder::encode_i16(self, input, output)
+    }
+
+    fn encode_i32(
+        &mut self,
+        input: &[i32],
+        output: &mut [u8],
+    ) -> std::result::Result<usize, String> {
+        Encoder::encode_i32(self, input, output)
+    }
+
+    fn reset(&mut self) -> std::result::Result<(), String> {
+        Encoder::reset(self)
     }
 }
 

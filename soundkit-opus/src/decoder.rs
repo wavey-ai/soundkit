@@ -12,6 +12,7 @@ use crate::celt::synthesis::{
 use crate::constants::{valid_channels, valid_sample_rate, Bandwidth};
 use crate::packet;
 use crate::{Error, Result};
+use soundkit::audio_packet::Decoder as SoundkitDecoder;
 
 #[derive(Clone, Debug)]
 pub struct Decoder {
@@ -41,7 +42,10 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn new(sample_rate: i32, channels: usize) -> Result<Self> {
-        if !valid_sample_rate(sample_rate) || !valid_channels(channels as i32) {
+        if sample_rate != 48_000
+            || !valid_sample_rate(sample_rate)
+            || !valid_channels(channels as i32)
+        {
             return Err(Error::BadArg);
         }
         let mode = CeltMode::standard_48k_shared();
@@ -79,6 +83,16 @@ impl Decoder {
         self.channels
     }
 
+    pub fn init(&mut self) -> Result<()> {
+        self.reset()
+    }
+
+    /// Resets the packet decoder while retaining the selected stream format.
+    pub fn reset(&mut self) -> Result<()> {
+        *self = Self::new(self.sample_rate, self.channels)?;
+        Ok(())
+    }
+
     /// Reports whether this decoder accepts the experimental direct-cubic packet syntax.
     pub const fn experimental_direct_cubic(&self) -> bool {
         self.experimental_direct_cubic
@@ -97,7 +111,7 @@ impl Decoder {
         Ok(samples as usize)
     }
 
-    pub fn decode_i16(&mut self, packet: &[u8], decode_fec: bool) -> Result<Vec<i16>> {
+    pub fn decode_i16_vec(&mut self, packet: &[u8], decode_fec: bool) -> Result<Vec<i16>> {
         let mut pcm = Vec::new();
         self.decode_i16_into(packet, decode_fec, &mut pcm)?;
         Ok(pcm)
@@ -124,7 +138,7 @@ impl Decoder {
     }
 
     /// Decodes directly into caller-owned signed 16-bit PCM storage.
-    pub(crate) fn decode_i16_into_slice(
+    pub fn decode_i16_into_slice(
         &mut self,
         packet: &[u8],
         decode_fec: bool,
@@ -146,7 +160,7 @@ impl Decoder {
     }
 
     /// Decodes to signed 24-bit PCM stored sign-extended in `i32` samples.
-    pub fn decode_i24(&mut self, packet: &[u8], decode_fec: bool) -> Result<Vec<i32>> {
+    pub fn decode_i24_vec(&mut self, packet: &[u8], decode_fec: bool) -> Result<Vec<i32>> {
         let mut pcm = Vec::new();
         self.decode_i24_into(packet, decode_fec, &mut pcm)?;
         Ok(pcm)
@@ -170,7 +184,7 @@ impl Decoder {
     }
 
     /// Decodes directly into caller-owned signed 24-bit PCM storage.
-    pub(crate) fn decode_i24_into_slice(
+    pub fn decode_i24_into_slice(
         &mut self,
         packet: &[u8],
         decode_fec: bool,
@@ -185,7 +199,7 @@ impl Decoder {
         )
     }
 
-    pub fn decode_f32(&mut self, packet: &[u8], decode_fec: bool) -> Result<Vec<f32>> {
+    pub fn decode_f32_vec(&mut self, packet: &[u8], decode_fec: bool) -> Result<Vec<f32>> {
         let mut pcm = Vec::new();
         self.decode_f32_into(packet, decode_fec, &mut pcm)?;
         Ok(pcm)
@@ -208,7 +222,7 @@ impl Decoder {
     }
 
     /// Decodes directly into caller-owned floating-point PCM storage.
-    pub(crate) fn decode_f32_into_slice(
+    pub fn decode_f32_into_slice(
         &mut self,
         packet: &[u8],
         decode_fec: bool,
@@ -223,7 +237,10 @@ impl Decoder {
         )
     }
 
-    fn decode_channels(&mut self, packet: &[u8], _decode_fec: bool) -> Result<usize> {
+    fn decode_channels(&mut self, packet: &[u8], decode_fec: bool) -> Result<usize> {
+        if decode_fec {
+            return Err(Error::Unimplemented);
+        }
         if self.sample_rate != 48_000 {
             return Err(Error::Unimplemented);
         }
@@ -417,5 +434,40 @@ impl Decoder {
             self.postfilter_gain_old = self.postfilter_gain;
             self.postfilter_tapset_old = self.postfilter_tapset;
         }
+    }
+}
+
+impl SoundkitDecoder for Decoder {
+    #[inline]
+    fn decode_i16(
+        &mut self,
+        input: &[u8],
+        output: &mut [i16],
+        fec: bool,
+    ) -> std::result::Result<usize, String> {
+        self.decode_i16_into_slice(input, fec, output)
+            .map_err(|error| error.to_string())
+    }
+
+    #[inline]
+    fn decode_i32(
+        &mut self,
+        input: &[u8],
+        output: &mut [i32],
+        fec: bool,
+    ) -> std::result::Result<usize, String> {
+        self.decode_i24_into_slice(input, fec, output)
+            .map_err(|error| error.to_string())
+    }
+
+    #[inline]
+    fn decode_f32(
+        &mut self,
+        input: &[u8],
+        output: &mut [f32],
+        fec: bool,
+    ) -> std::result::Result<usize, String> {
+        self.decode_f32_into_slice(input, fec, output)
+            .map_err(|error| error.to_string())
     }
 }

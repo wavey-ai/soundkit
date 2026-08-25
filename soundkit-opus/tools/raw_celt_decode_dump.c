@@ -1,9 +1,11 @@
 #include <float.h>
+#include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <opus.h>
 
@@ -20,6 +22,8 @@ typedef struct {
 
 typedef struct {
     int seconds;
+    int repeats;
+    int pcm_bits;
     const char *implementation;
     const char *mode;
     int frame_size;
@@ -35,14 +39,14 @@ typedef struct {
 } CaseKey;
 
 static void usage(void) {
-    fprintf(stderr, "usage: raw_celt_decode_dump_c [--seconds n] [--impl c|rust] [--mode cbr|vbr] [--frame-size n] [--bitrate bps] < packet-dump.tsv\n");
+    fprintf(stderr, "usage: raw_celt_decode_dump_c [--seconds n] [--repeats n --pcm-bits 16|24] [--impl c|rust] [--mode cbr|vbr] [--frame-size n] [--bitrate bps] < packet-dump.tsv\n");
     exit(2);
 }
 
 static int parse_positive_int(const char *value) {
     char *end = NULL;
     long parsed = strtol(value, &end, 10);
-    if (end == value || *end != '\0' || parsed <= 0 || parsed > 3600) {
+    if (end == value || *end != '\0' || parsed <= 0 || parsed > INT_MAX) {
         usage();
     }
     return (int)parsed;
@@ -51,6 +55,8 @@ static int parse_positive_int(const char *value) {
 static Options parse_options(int argc, char **argv) {
     Options options;
     options.seconds = 1;
+    options.repeats = 0;
+    options.pcm_bits = 24;
     options.implementation = NULL;
     options.mode = NULL;
     options.frame_size = 0;
@@ -59,6 +65,13 @@ static Options parse_options(int argc, char **argv) {
         if (strcmp(argv[i], "--seconds") == 0) {
             if (++i >= argc) usage();
             options.seconds = parse_positive_int(argv[i]);
+        } else if (strcmp(argv[i], "--repeats") == 0) {
+            if (++i >= argc) usage();
+            options.repeats = parse_positive_int(argv[i]);
+        } else if (strcmp(argv[i], "--pcm-bits") == 0) {
+            if (++i >= argc) usage();
+            options.pcm_bits = parse_positive_int(argv[i]);
+            if (options.pcm_bits != 16 && options.pcm_bits != 24) usage();
         } else if (strcmp(argv[i], "--impl") == 0) {
             if (++i >= argc) usage();
             if (strcmp(argv[i], "c") != 0 && strcmp(argv[i], "rust") != 0) usage();
@@ -252,6 +265,124 @@ static void decode_case(
     opus_decoder_destroy(decoder);
 }
 
+static double now_ms(void) {
+    struct timespec value;
+    clock_gettime(CLOCK_MONOTONIC, &value);
+    return (double)value.tv_sec * 1000.0 + (double)value.tv_nsec / 1000000.0;
+}
+
+static int compare_double(const void *left, const void *right) {
+    double a = *(const double *)left;
+    double b = *(const double *)right;
+    return (a > b) - (a < b);
+}
+
+static double median(double *values, int count) {
+    qsort(values, (size_t)count, sizeof(*values), compare_double);
+    return values[count / 2];
+}
+
+static void benchmark_decode_case(
+    const Options *options,
+    const CaseKey *key,
+    int packet_count,
+    const unsigned char *packets,
+    const int *packet_lens
+) {
+    if (packet_count == 0) return;
+    opus_int16 *decoded_i16 = options->pcm_bits == 16
+        ? (opus_int16 *)malloc((size_t)key->frame_size * CHANNELS * sizeof(*decoded_i16))
+        : NULL;
+    opus_int32 *decoded_i24 = options->pcm_bits == 24
+        ? (opus_int32 *)malloc((size_t)key->frame_size * CHANNELS * sizeof(*decoded_i24))
+        : NULL;
+    double *times = (double *)malloc((size_t)options->repeats * sizeof(*times));
+    if ((options->pcm_bits == 16 && !decoded_i16)
+        || (options->pcm_bits == 24 && !decoded_i24)
+        || !times) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+
+    int64_t checksum = 0;
+    for (int repeat = 0; repeat < options->repeats; repeat++) {
+        int err = OPUS_OK;
+        OpusDecoder *decoder = opus_decoder_create(SAMPLE_RATE, CHANNELS, &err);
+        if (err != OPUS_OK || !decoder) {
+            fprintf(stderr, "opus_decoder_create failed: %s\n", opus_strerror(err));
+            exit(1);
+        }
+        int64_t repeat_checksum = 0;
+        double start = now_ms();
+        for (int frame = 0; frame < packet_count; frame++) {
+            const unsigned char *packet = packets + (size_t)frame * MAX_PACKET_BYTES;
+            int decoded_frames;
+            if (options->pcm_bits == 16) {
+                decoded_frames = opus_decode(
+                    decoder, packet, packet_lens[frame], decoded_i16, key->frame_size, 0);
+                if (decoded_frames != key->frame_size) {
+                    fprintf(stderr, "opus decode returned %d\n", decoded_frames);
+                    exit(1);
+                }
+                int samples = key->frame_size * CHANNELS;
+                repeat_checksum += decoded_i16[0];
+                repeat_checksum += decoded_i16[samples / 2];
+                repeat_checksum += decoded_i16[samples - 1];
+            } else {
+                decoded_frames = opus_decode24(
+                    decoder, packet, packet_lens[frame], decoded_i24, key->frame_size, 0);
+                if (decoded_frames != key->frame_size) {
+                    fprintf(stderr, "opus decode returned %d\n", decoded_frames);
+                    exit(1);
+                }
+                int samples = key->frame_size * CHANNELS;
+                repeat_checksum += decoded_i24[0];
+                repeat_checksum += decoded_i24[samples / 2];
+                repeat_checksum += decoded_i24[samples - 1];
+            }
+        }
+        times[repeat] = now_ms() - start;
+        checksum = repeat_checksum;
+        opus_decoder_destroy(decoder);
+    }
+
+    int packet_bytes = 0;
+    for (int frame = 0; frame < packet_count; frame++) {
+        packet_bytes += packet_lens[frame];
+    }
+    printf(
+        "%s\tc\t%s\t%d\t%.1f\t%d\t%d\t%d\t%d\t%.4f\t%llu\n",
+        key->implementation,
+        key->mode,
+        key->frame_size,
+        key->frame_ms,
+        key->bitrate,
+        options->pcm_bits,
+        packet_count,
+        packet_bytes,
+        median(times, options->repeats),
+        (unsigned long long)checksum);
+
+    free(times);
+    free(decoded_i16);
+    free(decoded_i24);
+}
+
+static void emit_case(
+    const Options *options,
+    const CaseKey *key,
+    int packet_count,
+    const unsigned char *packets,
+    const int *packet_lens,
+    const float *reference
+) {
+    if (options->repeats > 0) {
+        benchmark_decode_case(options, key, packet_count, packets, packet_lens);
+    } else {
+        decode_case(key, packet_count, packets, packet_lens, reference);
+    }
+}
+
 static int parse_line(char *line, CaseKey *key, int *frame, int *packet_len, char **hex) {
     char *cols[8];
     int count = 0;
@@ -281,8 +412,10 @@ static int parse_line(char *line, CaseKey *key, int *frame, int *packet_len, cha
 
 int main(int argc, char **argv) {
     Options options = parse_options(argc, argv);
-    int total_frames = 0;
-    float *reference = generate_fixture(options.seconds, &total_frames);
+    int total_frames = SAMPLE_RATE * options.seconds;
+    float *reference = options.repeats > 0
+        ? NULL
+        : generate_fixture(options.seconds, &total_frames);
     int max_packets = total_frames / 120;
     unsigned char *packets = (unsigned char *)malloc((size_t)max_packets * MAX_PACKET_BYTES);
     int *packet_lens = (int *)malloc((size_t)max_packets * sizeof(int));
@@ -291,7 +424,11 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    printf("impl\tmode\tframe_size\tframe_ms\tbitrate\tframes\tquality_lag\tquality_snr_db\n");
+    if (options.repeats > 0) {
+        printf("packet_impl\tdecoder_impl\tmode\tframe_size\tframe_ms\tbitrate\tpcm_bits\tpackets\tbytes\tdecode_ms\tchecksum\n");
+    } else {
+        printf("impl\tmode\tframe_size\tframe_ms\tbitrate\tframes\tquality_lag\tquality_snr_db\n");
+    }
 
     char line[LINE_CAPACITY];
     CaseKey current;
@@ -316,7 +453,7 @@ int main(int argc, char **argv) {
             continue;
         }
         if (have_current && !same_case(&current, &key)) {
-            decode_case(&current, packet_count, packets, packet_lens, reference);
+            emit_case(&options, &current, packet_count, packets, packet_lens, reference);
             emitted++;
             packet_count = 0;
         }
@@ -336,7 +473,7 @@ int main(int argc, char **argv) {
         packet_lens[packet_count++] = packet_len;
     }
     if (have_current) {
-        decode_case(&current, packet_count, packets, packet_lens, reference);
+        emit_case(&options, &current, packet_count, packets, packet_lens, reference);
         emitted++;
     }
     if (emitted == 0) {

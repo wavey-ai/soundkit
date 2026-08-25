@@ -2532,8 +2532,9 @@ impl WebmDecoder {
                     debug!(pre_skip = pre_skip, "parsed OpusHead pre-skip");
                 }
 
-                let mut decoder = OpusDecoder::new_full(sample_rate as usize, channels as usize)?;
-                decoder.init()?;
+                let mut decoder = OpusDecoder::new(48_000, channels as usize)
+                    .map_err(|error| error.to_string())?;
+                decoder.init().map_err(|error| error.to_string())?;
 
                 debug!(
                     sample_rate = sample_rate,
@@ -2941,8 +2942,9 @@ impl WebmDecoder {
                         config.mapping_family, config.channels
                     ));
                 }
-                let mut decoder = OpusDecoder::new_full(48_000, usize::from(config.channels))?;
-                decoder.init()?;
+                let mut decoder = OpusDecoder::new(48_000, usize::from(config.channels))
+                    .map_err(|error| error.to_string())?;
+                decoder.init().map_err(|error| error.to_string())?;
                 self.pre_skip_remaining = usize::from(config.pre_skip.unwrap_or(0));
                 self.decoder = Some(WebmAudioDecoder::Opus(decoder));
             }

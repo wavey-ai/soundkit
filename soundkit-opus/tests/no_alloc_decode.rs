@@ -1,7 +1,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use soundkit::audio_packet::{Decoder, Encoder};
+use soundkit::audio_packet::Decoder;
 use soundkit_opus::{OpusDecoder, OpusEncoder};
 
 #[global_allocator]
@@ -60,7 +60,7 @@ fn steady_state_soundkit_opus_reuses_caller_storage() {
     let mut packet = vec![0u8; 4_096];
     let packet_len = encoder.encode_i16(&pcm, &mut packet).unwrap();
 
-    let mut decoder = OpusDecoder::new_celt_only(SAMPLE_RATE as usize, CHANNELS as usize).unwrap();
+    let mut decoder = OpusDecoder::new(SAMPLE_RATE as i32, CHANNELS as usize).unwrap();
     decoder.init().unwrap();
     let mut output = vec![0.0f32; 5_760 * CHANNELS as usize];
     decoder
@@ -145,8 +145,7 @@ fn steady_state_soundkit_opus_reuses_caller_storage() {
         "steady-state 24-bit Opus encode allocated"
     );
 
-    let mut decoder_i24 =
-        OpusDecoder::new_celt_only(SAMPLE_RATE as usize, CHANNELS as usize).unwrap();
+    let mut decoder_i24 = OpusDecoder::new(SAMPLE_RATE as i32, CHANNELS as usize).unwrap();
     let mut output_i24 = vec![0i32; 5_760 * CHANNELS as usize];
     decoder_i24
         .decode_i32(&packet[..packet_len_i24], &mut output_i24, false)

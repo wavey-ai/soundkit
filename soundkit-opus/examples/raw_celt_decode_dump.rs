@@ -1,7 +1,10 @@
+use soundkit::audio_packet::Decoder as SoundkitDecoder;
 use soundkit_opus::Decoder;
 use std::collections::BTreeMap;
 use std::env;
+use std::hint::black_box;
 use std::io::{self, BufRead};
+use std::time::Instant;
 
 const SAMPLE_RATE: usize = 48_000;
 const CHANNELS: usize = 2;
@@ -23,6 +26,8 @@ struct DecodeQuality {
 #[derive(Default)]
 struct Options {
     seconds: usize,
+    repeats: Option<usize>,
+    pcm_bits: u8,
     implementation: Option<String>,
     mode: Option<String>,
     frame_size: Option<usize>,
@@ -31,7 +36,7 @@ struct Options {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: raw_celt_decode_dump [--seconds n] [--impl c|rust] [--mode cbr|vbr] [--frame-size n] [--bitrate bps] < packet-dump.tsv"
+        "usage: raw_celt_decode_dump [--seconds n] [--repeats n --pcm-bits 16|24] [--impl c|rust] [--mode cbr|vbr] [--frame-size n] [--bitrate bps] < packet-dump.tsv"
     );
     std::process::exit(2);
 }
@@ -39,6 +44,7 @@ fn usage() -> ! {
 fn parse_options() -> Options {
     let mut options = Options {
         seconds: 1,
+        pcm_bits: 24,
         ..Options::default()
     };
     let args = env::args().collect::<Vec<_>>();
@@ -51,6 +57,22 @@ fn parse_options() -> Options {
                     .get(i)
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_else(|| usage());
+            }
+            "--repeats" => {
+                i += 1;
+                options.repeats = Some(
+                    args.get(i)
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or_else(|| usage()),
+                );
+            }
+            "--pcm-bits" => {
+                i += 1;
+                options.pcm_bits = match args.get(i).map(String::as_str) {
+                    Some("16") => 16,
+                    Some("24") => 24,
+                    _ => usage(),
+                };
             }
             "--impl" => {
                 i += 1;
@@ -88,7 +110,7 @@ fn parse_options() -> Options {
         }
         i += 1;
     }
-    if options.seconds == 0 || options.frame_size == Some(0) {
+    if options.seconds == 0 || options.repeats == Some(0) || options.frame_size == Some(0) {
         usage();
     }
     options
@@ -268,29 +290,101 @@ fn decode_case(
     Ok(decoded)
 }
 
+fn median(samples: &mut [f64]) -> f64 {
+    samples.sort_by(|left, right| left.total_cmp(right));
+    samples[samples.len() / 2]
+}
+
+fn time_decode_case(
+    packets: &[Vec<u8>],
+    frame_size: usize,
+    repeats: usize,
+    pcm_bits: u8,
+) -> Result<(f64, u64), Box<dyn std::error::Error>> {
+    let mut times = Vec::with_capacity(repeats);
+    let mut checksum = 0_u64;
+    let mut output_i16 = vec![0_i16; frame_size * CHANNELS];
+    let mut output_i24 = vec![0_i32; frame_size * CHANNELS];
+
+    for _ in 0..repeats {
+        let mut decoder = Decoder::new(SAMPLE_RATE as i32, CHANNELS)?;
+        let mut repeat_checksum = 0_i64;
+        let start = Instant::now();
+        for packet in packets {
+            let decoded_frames = if pcm_bits == 16 {
+                decoder.decode_i16(black_box(packet), &mut output_i16, false)?
+            } else {
+                decoder.decode_i32(black_box(packet), &mut output_i24, false)?
+            };
+            if decoded_frames != frame_size {
+                return Err(format!("unexpected decoded frame size: {decoded_frames}").into());
+            }
+            if pcm_bits == 16 {
+                repeat_checksum = repeat_checksum
+                    .wrapping_add(i64::from(output_i16[0]))
+                    .wrapping_add(i64::from(output_i16[output_i16.len() / 2]))
+                    .wrapping_add(i64::from(output_i16[output_i16.len() - 1]));
+            } else {
+                repeat_checksum = repeat_checksum
+                    .wrapping_add(i64::from(output_i24[0]))
+                    .wrapping_add(i64::from(output_i24[output_i24.len() / 2]))
+                    .wrapping_add(i64::from(output_i24[output_i24.len() - 1]));
+            }
+        }
+        times.push(start.elapsed().as_secs_f64() * 1000.0);
+        checksum = black_box(repeat_checksum as u64);
+    }
+
+    Ok((median(&mut times), checksum))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = parse_options();
-    let reference = generate_fixture(options.seconds);
     let cases = parse_dump(&options)?;
     if cases.is_empty() {
         return Err("no matching packets found".into());
     }
 
-    println!("impl\tmode\tframe_size\tframe_ms\tbitrate\tframes\tquality_lag\tquality_snr_db");
-    for (key, packets) in cases {
-        let decoded = decode_case(&packets, key.frame_size)?;
-        let quality = aligned_quality(&reference, &decoded);
+    if let Some(repeats) = options.repeats {
         println!(
-            "{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{:.2}",
-            key.implementation,
-            key.mode,
-            key.frame_size,
-            key.frame_size as f64 * 1000.0 / SAMPLE_RATE as f64,
-            key.bitrate,
-            packets.len(),
-            quality.lag_frames,
-            quality.snr_db
+            "packet_impl\tdecoder_impl\tmode\tframe_size\tframe_ms\tbitrate\tpcm_bits\tpackets\tbytes\tdecode_ms\tchecksum"
         );
+        for (key, packets) in cases {
+            let packet_bytes = packets.iter().map(Vec::len).sum::<usize>();
+            let (decode_ms, checksum) =
+                time_decode_case(&packets, key.frame_size, repeats, options.pcm_bits)?;
+            println!(
+                "{}\trust\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{}\t{:.4}\t{}",
+                key.implementation,
+                key.mode,
+                key.frame_size,
+                key.frame_size as f64 * 1000.0 / SAMPLE_RATE as f64,
+                key.bitrate,
+                options.pcm_bits,
+                packets.len(),
+                packet_bytes,
+                decode_ms,
+                checksum
+            );
+        }
+    } else {
+        let reference = generate_fixture(options.seconds);
+        println!("impl\tmode\tframe_size\tframe_ms\tbitrate\tframes\tquality_lag\tquality_snr_db");
+        for (key, packets) in cases {
+            let decoded = decode_case(&packets, key.frame_size)?;
+            let quality = aligned_quality(&reference, &decoded);
+            println!(
+                "{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{:.2}",
+                key.implementation,
+                key.mode,
+                key.frame_size,
+                key.frame_size as f64 * 1000.0 / SAMPLE_RATE as f64,
+                key.bitrate,
+                packets.len(),
+                quality.lag_frames,
+                quality.snr_db
+            );
+        }
     }
 
     Ok(())

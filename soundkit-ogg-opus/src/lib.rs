@@ -240,8 +240,9 @@ impl OggOpusDecoder {
                 let info = parse_head(&packet)?;
                 // RFC 7845 defines the OpusHead input rate as informational.
                 // Ogg Opus granule positions and pre-skip use the 48 kHz clock.
-                let mut opus = OpusDecoder::new_full(48_000, info.channels as usize)?;
-                opus.init()?;
+                let mut opus = OpusDecoder::new(48_000, info.channels as usize)
+                    .map_err(|error| error.to_string())?;
+                opus.init().map_err(|error| error.to_string())?;
                 self.pre_skip_remaining = info.pre_skip as usize;
                 self.opus = Some(opus);
                 self.info = Some(info);

@@ -14,8 +14,6 @@ use soundkit::audio_content_crypto::{AudioContentCipher, AudioGroupMetadata};
     feature = "opus"
 ))]
 use soundkit::audio_packet::Decoder;
-#[cfg(any(feature = "flac", feature = "opus"))]
-use soundkit::audio_packet::Encoder;
 use soundkit::audio_pipeline::{
     audio_to_f32_channels, Stereo48kBlock, StreamingStereo48kNormalizer,
 };
@@ -4024,8 +4022,10 @@ impl WasmOpusDecoder {
         frame_size: usize,
     ) -> Result<WasmOpusDecoder, JsValue> {
         let mut decoder =
-            OpusDecoder::new_full(sample_rate as usize, channels).map_err(js_error)?;
-        decoder.init().map_err(js_error)?;
+            OpusDecoder::new(sample_rate, channels).map_err(|error| js_error(error.to_string()))?;
+        decoder
+            .init()
+            .map_err(|error| js_error(error.to_string()))?;
         Self::with_decoder(decoder, channels, frame_size.max(MAX_OPUS_PACKET_FRAMES))
     }
 
@@ -4038,8 +4038,10 @@ impl WasmOpusDecoder {
         frame_size: usize,
     ) -> Result<WasmOpusDecoder, JsValue> {
         let mut decoder =
-            OpusDecoder::new_celt_only(sample_rate as usize, channels).map_err(js_error)?;
-        decoder.init().map_err(js_error)?;
+            OpusDecoder::new(sample_rate, channels).map_err(|error| js_error(error.to_string()))?;
+        decoder
+            .init()
+            .map_err(|error| js_error(error.to_string()))?;
         Self::with_decoder(decoder, channels, frame_size)
     }
 

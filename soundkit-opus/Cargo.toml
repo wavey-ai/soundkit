@@ -3,7 +3,7 @@ name = "soundkit-opus"
 version = "0.13.0"
 edition = "2021"
 license = "MIT AND BSD-3-Clause"
-description = "Pure Rust Opus codec with SoundKit packet and streaming adapters"
+description = "SoundKit-authored native Opus codec with packet and streaming APIs"
 repository = "https://github.com/wavey-ai/soundkit"
 readme = "README.md"
 keywords = ["opus", "codec", "audio", "streaming", "wasm"]
@@ -18,13 +18,9 @@ exclude = [
 
 [features]
 default = []
-full-opus = ["dep:ropus"]
 wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
-# Compatibility fallback for SILK, hybrid, FEC, and legal mode transitions.
-# SoundKit's authored CELT codec remains the dependency-free default.
-ropus = { version = "0.12.18", optional = true }
 soundkit = { version = "0.12.3", path = "../soundkit" }
 frame-header = "0.2.2"
 tracing = "0.1.40"

@@ -33,12 +33,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let frame_ms = frame_size * 1000 / SAMPLE_RATE;
     let _bytes_per_frame = bitrate as usize / 8 * frame_ms / 1000;
 
-    let mut enc = Encoder::new(SAMPLE_RATE as i32, CHANNELS, Application::Audio)?;
+    let mut enc = Encoder::with_application(SAMPLE_RATE as i32, CHANNELS, Application::Audio)?;
     enc.set_bitrate(bitrate)?;
     let mut packets = Vec::new();
     for chunk in pcm.chunks(frame_size * CHANNELS) {
         if chunk.len() == frame_size * CHANNELS {
-            packets.push(enc.encode_f32(black_box(chunk), frame_size)?);
+            packets.push(enc.encode_f32_vec(black_box(chunk), frame_size)?);
         }
     }
 

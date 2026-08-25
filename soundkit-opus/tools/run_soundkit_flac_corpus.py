@@ -87,8 +87,8 @@ def parse_args(repo_root: Path) -> argparse.Namespace:
     )
     parser.add_argument(
         "--decode-api",
-        choices=("core", "adapter"),
-        default="core",
+        choices=("core", "soundkit"),
+        default="soundkit",
         help="Rust decode entry point to measure; C always uses the reference API",
     )
     parser.add_argument("--direct-cubic", action="store_true")

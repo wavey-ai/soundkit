@@ -15,7 +15,7 @@ tracing = "0.1.40"
 
 [features]
 default = ["decode"]
-decode = ["dep:frame-header", "dep:soundkit-opus", "soundkit-opus/full-opus"]
+decode = ["dep:frame-header", "dep:soundkit-opus"]
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,7 +1,5 @@
 use soundkit::audio_packet::Decoder as SoundkitDecoderTrait;
-use soundkit_opus::{
-    Application, Decoder, Encoder, OpusDecoder, CELT_FRAME_SIZES_48K, CELT_MAX_FRAME_BYTES,
-};
+use soundkit_opus::{Application, Decoder, Encoder, CELT_FRAME_SIZES_48K, CELT_MAX_FRAME_BYTES};
 use std::env;
 use std::fs;
 use std::hint::black_box;
@@ -36,7 +34,7 @@ enum PcmFormat {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DecodeApi {
     Core,
-    Adapter,
+    SoundKit,
 }
 
 #[derive(Clone, Copy)]
@@ -89,6 +87,7 @@ struct Options {
     application: Application,
     direct_cubic: bool,
     decode_api: DecodeApi,
+    decode_only: bool,
 }
 
 struct EncodeResult {
@@ -97,7 +96,7 @@ struct EncodeResult {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: raw_celt_bench [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--application audio|restricted-lowdelay] [--decode-api core|adapter] [--direct-cubic] [--frame-size n] [--bitrate n] [--fixture mixed|tone] [--input-s32le path] [--pcm-bits 16|24] [--quality-lag frames] [--skip-quality] [--dump-packets n]"
+        "usage: raw_celt_bench [--repeats n] [--seconds n] [--mode cbr|vbr|both] [--application audio|restricted-lowdelay] [--decode-api core|soundkit] [--decode-only] [--direct-cubic] [--frame-size n] [--bitrate n] [--fixture mixed|tone] [--input-s32le path] [--pcm-bits 16|24] [--quality-lag frames] [--skip-quality] [--dump-packets n]"
     );
     std::process::exit(2);
 }
@@ -117,7 +116,8 @@ fn parse_options() -> Options {
         quality_lag: None,
         application: Application::Audio,
         direct_cubic: false,
-        decode_api: DecodeApi::Core,
+        decode_api: DecodeApi::SoundKit,
+        decode_only: false,
     };
     let args = env::args().collect::<Vec<_>>();
     let mut i = 1usize;
@@ -155,11 +155,12 @@ fn parse_options() -> Options {
                 };
             }
             "--direct-cubic" => options.direct_cubic = true,
+            "--decode-only" => options.decode_only = true,
             "--decode-api" => {
                 i += 1;
                 options.decode_api = match args.get(i).map(String::as_str) {
                     Some("core") => DecodeApi::Core,
-                    Some("adapter") => DecodeApi::Adapter,
+                    Some("soundkit") => DecodeApi::SoundKit,
                     _ => usage(),
                 };
             }
@@ -227,9 +228,6 @@ fn parse_options() -> Options {
         i += 1;
     }
     if options.repeats == 0 || options.seconds == 0 || options.dump_packets == Some(0) {
-        usage();
-    }
-    if options.decode_api == DecodeApi::Adapter && options.direct_cubic {
         usage();
     }
     options
@@ -400,7 +398,7 @@ fn decode_packets(
 ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     match decode_api {
         DecodeApi::Core => decode_packets_core(packets, frame_size, format, direct_cubic),
-        DecodeApi::Adapter => decode_packets_adapter(packets, frame_size, format),
+        DecodeApi::SoundKit => decode_packets_soundkit(packets, frame_size, format, direct_cubic),
     }
 }
 
@@ -451,12 +449,14 @@ fn decode_packets_core(
     Ok(decoded)
 }
 
-fn decode_packets_adapter(
+fn decode_packets_soundkit(
     packets: &[Vec<u8>],
     frame_size: usize,
     format: PcmFormat,
+    direct_cubic: bool,
 ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    let mut decoder = OpusDecoder::new_celt_only(SAMPLE_RATE, CHANNELS)?;
+    let mut decoder = Decoder::new(SAMPLE_RATE as i32, CHANNELS)?;
+    decoder.set_experimental_direct_cubic(direct_cubic);
     let mut decoded = Vec::with_capacity(packets.len() * frame_size * CHANNELS);
     match format {
         PcmFormat::I16 => {
@@ -612,11 +612,25 @@ fn encode_packets(
     application: Application,
     direct_cubic: bool,
 ) -> Result<EncodeResult, Box<dyn std::error::Error>> {
-    let mut encoder = Encoder::new(SAMPLE_RATE as i32, CHANNELS, application)?;
+    let mut encoder = Encoder::with_application(SAMPLE_RATE as i32, CHANNELS, application)?;
     encoder.set_experimental_direct_cubic(direct_cubic);
     encoder.set_bitrate(bitrate)?;
     encoder.set_vbr(mode == BenchMode::Vbr)?;
     encode_with_encoder(&mut encoder, pcm, frame_size)
+}
+
+fn encoded_stats(encoded: &EncodeResult) -> (usize, usize, usize, u64) {
+    let mut bytes = 0;
+    let mut min_packet = usize::MAX;
+    let mut max_packet = 0;
+    let mut checksum = 0_u64;
+    for packet in &encoded.packets {
+        bytes += packet.len();
+        min_packet = min_packet.min(packet.len());
+        max_packet = max_packet.max(packet.len());
+        checksum = checksum.wrapping_add(packet_checksum(packet));
+    }
+    (bytes, min_packet, max_packet, checksum)
 }
 
 fn time_encode(
@@ -638,7 +652,7 @@ fn time_encode(
         .map(|_| Vec::with_capacity(CELT_MAX_FRAME_BYTES + 1))
         .collect::<Vec<_>>();
     for _ in 0..repeats {
-        let mut encoder = Encoder::new(SAMPLE_RATE as i32, CHANNELS, application)?;
+        let mut encoder = Encoder::with_application(SAMPLE_RATE as i32, CHANNELS, application)?;
         encoder.set_experimental_direct_cubic(direct_cubic);
         encoder.set_bitrate(bitrate)?;
         encoder.set_vbr(mode == BenchMode::Vbr)?;
@@ -672,7 +686,9 @@ fn time_decode(
 ) -> Result<(f64, u64), Box<dyn std::error::Error>> {
     match decode_api {
         DecodeApi::Core => time_decode_core(packets, frame_size, repeats, format, direct_cubic),
-        DecodeApi::Adapter => time_decode_adapter(packets, frame_size, repeats, format),
+        DecodeApi::SoundKit => {
+            time_decode_soundkit(packets, frame_size, repeats, format, direct_cubic)
+        }
     }
 }
 
@@ -746,16 +762,18 @@ fn time_decode_core(
     Ok((median(&mut times), last_checksum))
 }
 
-fn time_decode_adapter(
+fn time_decode_soundkit(
     packets: &[Vec<u8>],
     frame_size: usize,
     repeats: usize,
     format: PcmFormat,
+    direct_cubic: bool,
 ) -> Result<(f64, u64), Box<dyn std::error::Error>> {
     let mut times = Vec::with_capacity(repeats);
     let mut last_checksum = 0_u64;
     for _ in 0..repeats {
-        let mut decoder = OpusDecoder::new_celt_only(SAMPLE_RATE, CHANNELS)?;
+        let mut decoder = Decoder::new(SAMPLE_RATE as i32, CHANNELS)?;
+        decoder.set_experimental_direct_cubic(direct_cubic);
         let mut decoded_i16 = vec![0_i16; frame_size * CHANNELS];
         let mut decoded_i24 = vec![0_i32; frame_size * CHANNELS];
         let mut decoded_f32 = vec![0.0_f32; frame_size * CHANNELS];
@@ -917,23 +935,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if !bitrate_enabled(&options, bitrate) {
                     continue;
                 }
-                let (encode_ms, bytes, min_packet, max_packet, encode_checksum) = time_encode(
-                    input,
-                    frame_size,
-                    bitrate,
-                    mode,
-                    options.application,
-                    options.direct_cubic,
-                    options.repeats,
-                )?;
-                let encoded = encode_packets(
-                    input,
-                    frame_size,
-                    bitrate,
-                    mode,
-                    options.application,
-                    options.direct_cubic,
-                )?;
+                let (encode_ms, bytes, min_packet, max_packet, encode_checksum, encoded) =
+                    if options.decode_only {
+                        let encoded = encode_packets(
+                            input,
+                            frame_size,
+                            bitrate,
+                            mode,
+                            options.application,
+                            options.direct_cubic,
+                        )?;
+                        let (bytes, min_packet, max_packet, checksum) = encoded_stats(&encoded);
+                        (0.0, bytes, min_packet, max_packet, checksum, encoded)
+                    } else {
+                        let (encode_ms, bytes, min_packet, max_packet, checksum) = time_encode(
+                            input,
+                            frame_size,
+                            bitrate,
+                            mode,
+                            options.application,
+                            options.direct_cubic,
+                            options.repeats,
+                        )?;
+                        let encoded = encode_packets(
+                            input,
+                            frame_size,
+                            bitrate,
+                            mode,
+                            options.application,
+                            options.direct_cubic,
+                        )?;
+                        (encode_ms, bytes, min_packet, max_packet, checksum, encoded)
+                    };
                 let quality = if options.skip_quality {
                     DecodeQuality {
                         lag_frames: 0,

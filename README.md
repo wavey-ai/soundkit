@@ -3,7 +3,7 @@
 [![CI](https://github.com/wavey-ai/soundkit/actions/workflows/ci.yml/badge.svg)](https://github.com/wavey-ai/soundkit/actions/workflows/ci.yml)
 
 Rust media tooling for deterministic audio extraction, video decoding, PCM conversion,
-resampling, codec wrappers, and browser-safe streaming.
+resampling, authored codec implementations, and browser-safe streaming.
 
 ## At A Glance
 

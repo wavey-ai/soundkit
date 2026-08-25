@@ -105,15 +105,28 @@ pub fn deemphasis_stereo_i24(
         return false;
     }
 
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SSE2 is part of the x86-64 baseline. Keeping both channel recurrences
+        // in one vector halves the clamp and float-to-integer instruction
+        // stream while preserving the scalar operation order within each lane.
+        unsafe { deemphasis_stereo_i24_sse2(input0, input1, coef, mem, output) };
+        return true;
+    }
+
     // SAFETY: The checks above validate both n-element inputs, two state
     // values, and `2*n` output values. The inner loop clamps every float to a
     // finite range strictly inside `i32` before `to_int_unchecked`.
-    unsafe { deemphasis_stereo_i24_inner(input0, input1, coef, mem, output) };
-    true
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        unsafe { deemphasis_stereo_i24_scalar(input0, input1, coef, mem, output) };
+        true
+    }
 }
 
 #[inline]
-unsafe fn deemphasis_stereo_i24_inner(
+#[cfg(not(target_arch = "x86_64"))]
+unsafe fn deemphasis_stereo_i24_scalar(
     input0: &[f32],
     input1: &[f32],
     coef: f32,
@@ -151,6 +164,61 @@ unsafe fn deemphasis_stereo_i24_inner(
 
     mem[0] = mem0;
     mem[1] = mem1;
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn deemphasis_stereo_i24_sse2(
+    input0: &[f32],
+    input1: &[f32],
+    coef: f32,
+    mem: &mut [f32],
+    output: &mut [i32],
+) {
+    use core::arch::x86_64::{
+        __m128i, _mm_add_ps, _mm_and_si128, _mm_castps_si128, _mm_cmpgt_ps, _mm_cvtepi32_ps,
+        _mm_cvttps_epi32, _mm_max_ps, _mm_min_ps, _mm_mul_ps, _mm_set1_epi32, _mm_set1_ps,
+        _mm_setr_ps, _mm_storel_epi64, _mm_storeu_ps, _mm_sub_epi32,
+    };
+
+    let n = input0.len();
+    let input0 = input0.as_ptr();
+    let input1 = input1.as_ptr();
+    let output = output.as_mut_ptr();
+    let coef = _mm_set1_ps(coef);
+    let tiny = _mm_set1_ps(1e-30f32);
+    let scale = _mm_set1_ps(256.0);
+    let lower = _mm_set1_ps(-8_388_608.0);
+    let upper = _mm_set1_ps(8_388_607.0);
+    let half = _mm_set1_ps(0.5);
+    let one = _mm_set1_epi32(1);
+    let mut state = _mm_setr_ps(mem[0], mem[1], 0.0, 0.0);
+
+    for frame in 0..n {
+        // SAFETY: The checked wrapper validates both n-element inputs.
+        let samples = unsafe { _mm_setr_ps(*input0.add(frame), *input1.add(frame), 0.0, 0.0) };
+        let tmp = _mm_add_ps(_mm_add_ps(samples, tiny), state);
+        state = _mm_mul_ps(coef, tmp);
+        let scaled = _mm_add_ps(
+            _mm_min_ps(_mm_max_ps(_mm_mul_ps(tmp, scale), lower), upper),
+            half,
+        );
+        let truncated = _mm_cvttps_epi32(scaled);
+        let round_down = _mm_and_si128(
+            _mm_castps_si128(_mm_cmpgt_ps(_mm_cvtepi32_ps(truncated), scaled)),
+            one,
+        );
+        let converted = _mm_sub_epi32(truncated, round_down);
+        // SAFETY: The checked wrapper validates `2*n` output values. Only the
+        // low two lanes are stored.
+        unsafe { _mm_storel_epi64(output.add(2 * frame).cast::<__m128i>(), converted) };
+    }
+
+    let mut state_lanes = [0.0_f32; 4];
+    // SAFETY: `state_lanes` provides four writable f32 values.
+    unsafe { _mm_storeu_ps(state_lanes.as_mut_ptr(), state) };
+    mem[0] = state_lanes[0];
+    mem[1] = state_lanes[1];
 }
 
 /// Decodes one CWRS/PVQ index from a validated rectangular `U(n,k)` table.

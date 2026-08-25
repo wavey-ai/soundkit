@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use opus_sys;
 use soundkit::audio_bytes::i16le_to_i16;
-use soundkit::audio_packet::{Decoder as SoundkitDecoderTrait, Encoder as SoundkitEncoderTrait};
+use soundkit::audio_packet::Decoder as SoundkitDecoderTrait;
 use soundkit_decoder::{DecodeOptions, DecodePipeline};
 use soundkit_opus::{
     Application as PureApplication, Decoder as PureDecoder, Encoder as PureEncoder,
@@ -1036,9 +1036,8 @@ fn decode_with_soundkit(
     _track: &TrackData,
     packets: &[Vec<u8>],
 ) -> Result<PacketDecodeResult, String> {
-    let mut decoder =
-        SoundkitDecoder::new_celt_only(TARGET_SAMPLE_RATE as usize, TARGET_CHANNELS as usize)
-            .map_err(|e| format!("soundkit-opus decoder construction failed: {e}"))?;
+    let mut decoder = SoundkitDecoder::new(TARGET_SAMPLE_RATE as i32, TARGET_CHANNELS as usize)
+        .map_err(|e| format!("soundkit-opus decoder construction failed: {e}"))?;
     decoder
         .init()
         .map_err(|e| format!("soundkit-opus decoder init failed: {}", e))?;
@@ -1077,7 +1076,7 @@ fn encode_with_pure_libopus(
     frame_size: usize,
     bitrate: u32,
 ) -> Result<PacketEncodeResult, String> {
-    let mut encoder = PureEncoder::new(
+    let mut encoder = PureEncoder::with_application(
         TARGET_SAMPLE_RATE as i32,
         TARGET_CHANNELS as usize,
         PureApplication::Audio,
@@ -1102,7 +1101,7 @@ fn encode_with_pure_libopus(
             let chunk = &track.samples[offset..offset + frame_samples];
             let start = Instant::now();
             let packet = encoder
-                .encode_i16(chunk, frame_size)
+                .encode_i16_vec(chunk, frame_size)
                 .map_err(|e| format!("soundkit-opus encode failed: {}", e))?;
             encode_time += start.elapsed();
 
@@ -1117,7 +1116,7 @@ fn encode_with_pure_libopus(
                 padded[..tail.len()].copy_from_slice(tail);
                 let start = Instant::now();
                 let packet = encoder
-                    .encode_i16(&padded, frame_size)
+                    .encode_i16_vec(&padded, frame_size)
                     .map_err(|e| format!("soundkit-opus encode failed: {}", e))?;
                 encode_time += start.elapsed();
 

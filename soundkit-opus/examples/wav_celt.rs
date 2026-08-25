@@ -222,7 +222,7 @@ fn encode_wav(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let wav = read_wav(input)?;
     let total_samples = wav.samples.len() / wav.channels;
-    let mut encoder = Encoder::new(wav.sample_rate, wav.channels, Application::Audio)?;
+    let mut encoder = Encoder::with_application(wav.sample_rate, wav.channels, Application::Audio)?;
     if let Some(bitrate) = options.bitrate {
         encoder.set_bitrate(bitrate)?;
     }
@@ -234,7 +234,7 @@ fn encode_wav(
         let packet = if let Some(frame_bytes) = options.frame_bytes {
             encoder.encode_i16_with_frame_bytes(&padded, options.frame_size, frame_bytes)?
         } else {
-            encoder.encode_i16(&padded, options.frame_size)?
+            encoder.encode_i16_vec(&padded, options.frame_size)?
         };
         packets.push(packet);
     }
@@ -256,7 +256,7 @@ fn decode_stream(input: &Path, output: &Path) -> Result<(), Box<dyn std::error::
     let mut decoder = Decoder::new(stream.sample_rate, stream.channels)?;
     let mut samples = Vec::new();
     for packet in &stream.packets {
-        samples.extend(decoder.decode_i16(packet, false)?);
+        samples.extend(decoder.decode_i16_vec(packet, false)?);
     }
     samples.truncate(stream.total_samples * stream.channels);
     write_wav(

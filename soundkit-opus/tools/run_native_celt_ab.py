@@ -43,10 +43,10 @@ def parse_args() -> argparse.Namespace:
         "--application", choices=("audio", "restricted-lowdelay"), default="audio"
     )
     parser.add_argument(
-        "--baseline-decode-api", choices=("core", "adapter"), default="core"
+        "--baseline-decode-api", choices=("core", "soundkit"), default="core"
     )
     parser.add_argument(
-        "--candidate-decode-api", choices=("core", "adapter"), default="core"
+        "--candidate-decode-api", choices=("core", "soundkit"), default="soundkit"
     )
     parser.add_argument("--cpu", type=int)
     parser.add_argument("--json", type=Path)

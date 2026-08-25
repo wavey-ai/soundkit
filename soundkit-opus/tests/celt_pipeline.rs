@@ -149,7 +149,7 @@ fn public_celt_round_trip_preserves_tone_shape() {
     let channels = 2;
     for &frame_size in &CELT_FRAME_SIZES_48K {
         let frames = (3840 / frame_size).max(8);
-        let mut encoder = Encoder::new(48_000, channels, Application::Audio).unwrap();
+        let mut encoder = Encoder::with_application(48_000, channels, Application::Audio).unwrap();
         encoder.set_bitrate(128_000).unwrap();
         let mut decoder = Decoder::new(48_000, channels).unwrap();
         let mut original = Vec::with_capacity(frames * frame_size * channels);
@@ -162,8 +162,8 @@ fn public_celt_round_trip_preserves_tone_shape() {
                 pcm[i * channels] = 0.18 * (0.017 * t).sin() + 0.04 * (0.071 * t).cos();
                 pcm[i * channels + 1] = 0.16 * (0.019 * t + 0.4).sin() - 0.03 * (0.059 * t).cos();
             }
-            let packet = encoder.encode_f32(&pcm, frame_size).unwrap();
-            let out = decoder.decode_f32(&packet, false).unwrap();
+            let packet = encoder.encode_f32_vec(&pcm, frame_size).unwrap();
+            let out = decoder.decode_f32_vec(&packet, false).unwrap();
             original.extend_from_slice(&pcm);
             decoded.extend_from_slice(&out);
         }
