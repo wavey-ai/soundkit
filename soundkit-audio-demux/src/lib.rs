@@ -3717,12 +3717,7 @@ fn parse_ctts(data: &[u8]) -> Result<Vec<CttsEntry>, String> {
         if sample_count == 0 {
             return Err("MP4 ctts contains a zero sample count".to_string());
         }
-        let sample_offset = if version == 1 {
-            raw_offset as i32
-        } else {
-            i32::try_from(raw_offset)
-                .map_err(|_| "MP4 ctts version 0 offset exceeds i32".to_string())?
-        };
+        let sample_offset = raw_offset as i32;
         entries.push(CttsEntry {
             sample_count,
             sample_offset,
@@ -7226,5 +7221,32 @@ mod tests {
             *byte = idx as u8;
         }
         frame
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn never_final_mov_ctts_version_0_does_not_reject_large_offsets() {
+        let path = PathBuf::from(env!("HOME"))
+            .join("Documents")
+            .join("never-final.mov");
+        let Ok(data) = fs::read(&path) else {
+            eprintln!("skipping: {path:?} not present");
+            return;
+        };
+        let index = Mp4MediaIndex::from_file(&data).unwrap();
+        assert!(
+            !index.tracks.is_empty(),
+            "never-final.mov should have at least one track"
+        );
+        let audio = index
+            .tracks
+            .iter()
+            .find(|t| t.kind == MediaTrackKind::Audio)
+            .expect("never-final.mov should have an audio track");
+        assert_eq!(audio.codec, "aac");
+        assert!(
+            !index.samples.is_empty(),
+            "never-final.mov sample table should not be empty"
+        );
     }
 }
