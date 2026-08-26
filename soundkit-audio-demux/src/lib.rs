@@ -3408,6 +3408,16 @@ fn parse_stsd_audio(data: &[u8]) -> Result<Option<RegularAudioSampleEntry>, Stri
                 .as_deref()
                 .and_then(parse_asc_audio_config)
                 .unwrap_or((sample_rate, channels));
+            let (sample_rate, channels, declared_bits) = if header.name == *b"alac" {
+                find_audio_sample_entry_private(payload, b"alac")
+                    .and_then(parse_alac_specific_config)
+                    .map(|(rate, cookie_channels, bit_depth)| {
+                        (rate, cookie_channels, Some(bit_depth))
+                    })
+                    .unwrap_or((sample_rate, channels, declared_bits))
+            } else {
+                (sample_rate, channels, declared_bits)
+            };
             if sample_rate == 0 || channels == 0 {
                 return Err(
                     "QuickTime audio sample entry has zero sample rate or channels".to_string(),
@@ -4096,6 +4106,26 @@ fn parse_asc_audio_config(data: &[u8]) -> Option<(u32, u8)> {
     let sample_rate = adts_sample_rate(freq_index)?;
     let channels = (data[1] >> 3) & 0x0f;
     Some((sample_rate, channels))
+}
+
+#[cfg(feature = "mp4")]
+fn parse_alac_specific_config(data: &[u8]) -> Option<(u32, u8, u8)> {
+    // The nested `alac` box payload normally starts with FullBox
+    // version/flags, followed by the 24-byte ALACSpecificConfig. Some
+    // producers expose the config directly, so accept both representations.
+    let config = if data.len() >= 28 && data[..4] == [0, 0, 0, 0] {
+        &data[4..]
+    } else {
+        data
+    };
+    if config.len() < 24 {
+        return None;
+    }
+    let bit_depth = config[5];
+    let channels = config[9];
+    let sample_rate = be_u32(config, 20)?;
+    (sample_rate > 0 && (1..=8).contains(&channels) && matches!(bit_depth, 16 | 24 | 32))
+        .then_some((sample_rate, channels, bit_depth))
 }
 
 #[cfg(feature = "mp4")]
@@ -5729,6 +5759,33 @@ mod tests {
         )))
         .unwrap_err();
         assert!(error.contains("non-interleaved"));
+    }
+
+    #[cfg(feature = "mp4")]
+    #[test]
+    fn alac_cookie_supplies_high_sample_rate_when_version_zero_field_is_empty() {
+        let mut payload = vec![0u8; 28];
+        payload[6..8].copy_from_slice(&1u16.to_be_bytes());
+        payload[16..18].copy_from_slice(&2u16.to_be_bytes());
+        payload[18..20].copy_from_slice(&16u16.to_be_bytes());
+
+        let mut config = Vec::with_capacity(28);
+        config.extend_from_slice(&[0, 0, 0, 0]);
+        config.extend_from_slice(&4096u32.to_be_bytes());
+        config.extend_from_slice(&[0, 16, 40, 10, 14, 2]);
+        config.extend_from_slice(&255u16.to_be_bytes());
+        config.extend_from_slice(&0u32.to_be_bytes());
+        config.extend_from_slice(&0u32.to_be_bytes());
+        config.extend_from_slice(&192_000u32.to_be_bytes());
+        payload.extend(mp4_box(b"alac", &config));
+
+        let entry = parse_stsd_audio(&stsd_payload(mp4_box(b"alac", &payload)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.sample_rate, 192_000);
+        assert_eq!(entry.channels, 2);
+        assert_eq!(entry.bits_per_sample, Some(16));
+        assert_eq!(entry.codec_private, config);
     }
 
     #[cfg(feature = "mp4")]

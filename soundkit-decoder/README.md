@@ -30,7 +30,7 @@ containers and exposes explicit spawn paths for headerless telephony codecs.
 | WebM Opus / Vorbis | `spawn()` | Auto | Yes | `soundkit-webm` + owned Opus/Vorbis decoders |
 | Ogg Speex | `spawn_speex()` | Explicit | Yes | `soundkit-speex` / `oxideav-speex` |
 | Ogg Vorbis | `spawn()` or `spawn_vorbis()` | Auto or explicit | Yes | `soundkit-vorbis` owned decoder |
-| ALAC in M4A/MP4 or CAF | `spawn()` or `spawn_alac()` | Auto or explicit | EOF | `soundkit-alac` / `alac` |
+| ALAC in M4A/MP4 or CAF | `spawn()` or `spawn_alac()` | Auto or explicit | EOF | `soundkit-alac` owned decoder |
 | AIFF / AIFF-C | `spawn()` or `spawn_aiff()` | Auto or explicit | EOF | `soundkit-aiff` / `aifc` |
 | Raw AC-3 syncframes | `spawn()` or `spawn_ac3()` | Auto or explicit | Yes | `soundkit-ac3` / `oxideav-ac3` |
 | AMR-NB | `spawn_amr_nb()` | Explicit | Yes | `soundkit-amr` / OpenCORE AMR-NB |

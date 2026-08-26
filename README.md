@@ -34,7 +34,7 @@ the device and presentation services they are designed to provide.
 | Codec decode supported by SoundKit | SoundKit first | SoundKit first | Produce the same bounded decoded-frame contract across native and WASM targets. |
 | Unsupported codec profile | `AVAssetReader` or `AVAudioConverter` fallback | `AudioDecoder` fallback after `isConfigSupported()` | Demux first, supply access units, validate output, and consume fallback PCM immediately in bounded blocks. |
 | Canonical normalization and resampling | SoundKit | SoundKit | Keep channel mapping, sample rate, priming, finite-sample handling, and hashes consistent across platforms. |
-| Application Opus/FLAC creation | SoundKit only | SoundKit only | Frame, encode, hash, and build byte indexes with one cross-platform contract. |
+| Application media creation | SoundKit only | SoundKit only | Opus and FLAC are writable today. Owned AAC writing and fragmented-MP4 boxing for SoundKit LL-HLS are the final planned encoding phase. |
 | Random-access editing or cached playback | SoundKit indexed stream | SoundKit indexed stream | Resolve byte ranges and decode only the requested packets. Do not create a persistent PCM working copy. |
 | Video presentation decode | VideoToolbox may be selected | WebCodecs may be selected | Retain container/index ownership and provide Rust fallback for supported codecs and profiles. |
 
@@ -83,8 +83,8 @@ the container layout can require enough metadata/media to be buffered first.
 | WebM Opus | `soundkit-webm` / EBML parser + Rust Opus decoder | Auto | Yes | Known and unknown-size clusters emit bounded blocks before cluster EOF. |
 | Ogg Speex | `soundkit-speex` / `oxideav-speex` | Explicit | Yes | Pure Rust codec core and streaming Ogg packet parser. |
 | Ogg Vorbis | `soundkit-vorbis` owned core | Auto or explicit | Yes | In-tree Rust decoder and streaming Ogg packet parser. |
-| ALAC in M4A/MP4 | `soundkit-alac` / `alac` | Seekable MP4 index | Yes | Rust reads `moov`, then decodes one ranged ALAC packet at a time. |
-| ALAC in CAF | `soundkit-alac` / `alac` | Seekable CAF index | Yes | Rust scans bounded metadata, skips `data`, then decodes one ranged packet at a time. |
+| ALAC in M4A/MP4 | `soundkit-alac` owned core | Seekable MP4 index | Yes | Rust reads `moov`, then decodes one ranged ALAC packet at a time. |
+| ALAC in CAF | `soundkit-alac` owned core | Seekable CAF index | Yes | Rust scans bounded metadata, skips `data`, then decodes one ranged packet at a time. |
 | AIFF / AIFF-C | `soundkit-aiff` | Auto or explicit | Yes | Incremental Rust FORM parser supports integer PCM, float PCM, A-law, u-law, and IMA4. |
 | Raw AC-3 syncframes | `soundkit-ac3` / `oxideav-ac3` | Auto or explicit | Yes | Raw elementary AC-3 stream, not containerized AC-3. |
 | AMR-NB | `soundkit-amr` / OpenCORE AMR-NB | Explicit | Yes | 3GPP `.amr` magic and raw frame streams; C FFI backend. |
@@ -100,8 +100,10 @@ Native builds may retain explicit C-backed fallbacks for codec profiles the
 authored cores do not yet support. For Rust-only targets, the decode boundary
 is narrower:
 
-The current consolidation work is decoder-only for import formats. New encoder
-work targets only SoundKit Opus and FLAC.
+The current consolidation pass is decoder-first for import formats. SoundKit
+Opus and FLAC are writable today. After decoder consolidation, the final
+encoding phase will add an owned AAC writer and fragmented-MP4 boxing for
+SoundKit LL-HLS. Other import formats remain decode-only.
 
 | Format / area | Current decode path | Pure Rust decode? | Notes |
 | --- | --- | --- | --- |
@@ -115,6 +117,7 @@ work targets only SoundKit Opus and FLAC.
 | Opus / Ogg Opus / WebM Opus | `soundkit-opus` Rust core | Partial | The in-tree decoder handles 48 kHz CELT. It rejects SILK, hybrid, FEC, and mode transitions. |
 | FLAC | `wavey-flac` | Yes | SoundKit uses the standalone Wavey-owned pure-Rust codec for both encoding and decoding. |
 | Vorbis | `soundkit-vorbis` owned decoder | Yes | No external codec package or FFI boundary. SoundKit beat libvorbis C by 8.65% in elapsed time per sample. |
+| ALAC | `soundkit-alac` owned decoder | Yes | No external codec package or FFI boundary. Across the 20-file real-music corpus, SoundKit used 13.51% less elapsed time than FFmpeg C at 16-bit and 11.58% less at 24-bit; all PCM was byte-exact. |
 | H.264, HEVC, VP9, AV1, ProRes | `soundkit-video` | Yes | Rust produces bounded planar frames on native and WASM targets. |
 | DNxHD and DNxHR | `soundkit-dnx` | Yes | Rust supports progressive DNxHD and current DNxHR delivery profiles. |
 
@@ -175,24 +178,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Encode Support
 
+Canonical application encoding currently uses SoundKit Opus and FLAC. Import
+formats are decoder-only in the current consolidation pass. After the decoder
+cores are consolidated, the final encoding phase will add SoundKit-owned AAC
+writing and fragmented-MP4 boxing for SoundKit LL-HLS. Older utility encoder
+surfaces remain listed for codebase accuracy; they are not targets for new
+codec work or canonical SoundKit storage.
+
 | Format | Encoder | Streaming-friendly | Notes |
 | --- | --- | --- | --- |
 | Raw PCM | Core byte helpers | Yes | Headerless PCM is just framed bytes. |
 | WAV / RF64 | `WavStreamEncoder` / `WasmWavEncoder` | Yes | Emits an exact header, then bounded interleaved PCM chunks. Uses RF64 beyond 4 GiB. |
 | MP3 | `mp3lame` | Yes | Feature-gated encoder path. |
-| AAC ADTS | `fdk-aac` | Yes | ADTS output. |
+| AAC ADTS | `fdk-aac` | Yes | Existing native compatibility encoder. A SoundKit-owned AAC writer is planned last, after decoder consolidation. |
+| Fragmented MP4 / SoundKit LL-HLS | Planned SoundKit boxer | Planned | The final encoding phase will box SoundKit-authored AAC access units into fragmented MP4 for LL-HLS. |
 | FLAC | `wavey-flac` | Yes | The default encoder and decoder come from the standalone Wavey-owned codec. |
 | Opus | `soundkit-opus` | Yes | Pure Rust 48 kHz CELT packet encoder with 16-bit and 24-bit APIs. |
 | AMR-NB | OpenCORE AMR-NB | Yes | 160-sample speech frames. |
 | G.711 / G.722 / G.726 / G.729 / GSM | Codec crates | Yes | Frame or sample streaming, depending on codec. |
-| Vorbis / Speex / ALAC / AIFF / AC-3 / WebM | Decode-only | No | No encoder work is planned. New encoding work targets SoundKit Opus and FLAC. |
+| Vorbis / Speex / ALAC / AIFF / AC-3 / WebM | Decode-only | No | No encoder is planned for these import formats. AAC writing and fMP4 LL-HLS boxing are tracked separately. |
 
 ## Test Fixture Rule
 
 | Requirement | Current pattern |
 | --- | --- |
 | Codec fixture | Generate with FFmpeg into `testdata/<format>/...` when FFmpeg can encode it. |
-| Golden output | Decode with soundkit and write WAV under `golden/<format>/...`. |
+| Golden output | Ignored regeneration tools may write WAV under `golden/<format>/...`; normal tests are read-only. |
 | Decoder tests | Compare chunked-vs-whole decode and run pipeline explicit/autodetect tests where available. |
 | External comparison | Compare native PCM with FFmpeg PCM where practical. |
 | Formal codec integration | Run `make codec-fate-test`; see the [FFmpeg FATE codec suite](docs/FFMPEG_FATE_CODEC_SUITE.md). |
@@ -202,8 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Dependency family | Distribution note |
 | --- | --- |
-| Pure Rust codec crates (`alac`, `aifc`, `oxideav-*`) | Mostly permissive; keep crate license notices in packaged distributions. |
-| `mp4parse` on the ALAC M4A path | MPL-2.0 dependency. |
+| Bootstrapped in-tree codec cores | Preserve the upstream notices stored beside each `soundkit-*` crate. |
 | `libFLAC`, `mp3lame`, `fdk-aac`, OpenCORE AMR-NB, `libgsm`, Rubber Band | C/C++ library dependencies; ship notices and review binary distribution requirements. |
 | `libgsm` | Preserve the upstream notice in source and binary distributions. |
 

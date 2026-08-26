@@ -1,13 +1,11 @@
-#[cfg(test)]
-use alac::Reader as AlacReader;
-use alac::{Decoder as CodecDecoder, StreamInfo};
+mod decoder;
+
+use decoder::{Decoder as CodecDecoder, StreamInfo};
 use frame_header::{EncodingFlag, Endianness};
 use soundkit::audio_types::AudioData;
 pub use soundkit_audio_demux::{
     inspect_caf_chunk, validate_caf_file_header, CafAudioIndex, CafChunkRange,
 };
-#[cfg(test)]
-use std::io::Cursor;
 
 const MAX_ALAC_CHANNELS: u8 = 8;
 const MAX_ALAC_FRAMES_PER_PACKET: u32 = 65_536;
@@ -90,7 +88,7 @@ impl CafAlacPacketIndex {
         let (valid_frames, priming_frames, remainder_frames, lengths) = if bytes_per_packet == 0 {
             parse_caf_packet_table(packet_table)?
         } else {
-            if packet_bytes % u64::from(bytes_per_packet) != 0 {
+            if !packet_bytes.is_multiple_of(u64::from(bytes_per_packet)) {
                 return Err("CAF constant packet size does not divide the data chunk".to_string());
             }
             let packet_count = packet_bytes / u64::from(bytes_per_packet);
@@ -253,6 +251,31 @@ impl AlacPacketDecoder {
     }
 
     pub fn decode_packet(&mut self, packet: &[u8]) -> Result<AudioData, String> {
+        let sample_rate = self.sample_rate;
+        let channels = self.channels;
+        let bit_depth = self.bit_depth;
+        let mut pcm = Vec::new();
+        self.decode_packet_into(packet, &mut pcm)?;
+        Ok(AudioData::new(
+            bit_depth,
+            channels,
+            sample_rate,
+            pcm,
+            EncodingFlag::PCMSigned,
+            Endianness::LittleEndian,
+        ))
+    }
+
+    /// Decodes one ALAC access unit into a caller-owned, reusable PCM buffer.
+    ///
+    /// The buffer is cleared but retains its allocation between calls. Samples
+    /// are interleaved signed little-endian PCM at the stream's declared bit
+    /// depth. This is the allocation-free streaming hot path.
+    pub fn decode_packet_into<'a>(
+        &mut self,
+        packet: &[u8],
+        pcm: &'a mut Vec<u8>,
+    ) -> Result<&'a [u8], String> {
         if packet.is_empty() {
             return Err("ALAC packet is empty".to_string());
         }
@@ -261,25 +284,13 @@ impl AlacPacketDecoder {
                 "ALAC packet exceeds the {MAX_ALAC_PACKET_BYTES} byte budget"
             ));
         }
+        pcm.clear();
         let samples = self
             .decoder
             .decode_packet(packet, &mut self.scratch)
             .map_err(|error| error.to_string())?;
-        let mut pcm = Vec::with_capacity(
-            samples
-                .len()
-                .checked_mul(usize::from(self.bit_depth.div_ceil(8)))
-                .ok_or_else(|| "ALAC PCM output size overflow".to_string())?,
-        );
-        append_left_aligned_i32_samples(samples, self.bit_depth, &mut pcm)?;
-        Ok(AudioData::new(
-            self.bit_depth,
-            self.channels,
-            self.sample_rate,
-            pcm,
-            EncodingFlag::PCMSigned,
-            Endianness::LittleEndian,
-        ))
+        append_right_aligned_i32_samples(samples, self.bit_depth, pcm)?;
+        Ok(pcm)
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -352,75 +363,38 @@ impl Default for AlacDecoder {
     }
 }
 
-#[cfg(test)]
-fn decode_alac_container(data: &[u8]) -> Result<AudioData, String> {
-    if data.is_empty() {
-        return Err("ALAC input is empty".to_string());
-    }
-
-    let reader = AlacReader::new(Cursor::new(data.to_vec())).map_err(|error| format!("{error}"))?;
-    let info = reader.stream_info();
-    let sample_rate = info.sample_rate();
-    let channels = info.channels();
-    let bit_depth = info.bit_depth();
-    let max_samples = info.max_samples_per_packet() as usize;
-
-    if channels == 0 {
-        return Err("ALAC stream reports zero channels".to_string());
-    }
-    if !matches!(bit_depth, 16 | 24 | 32) {
-        return Err(format!("Unsupported ALAC bit depth: {bit_depth}"));
-    }
-
-    let mut packets = reader.into_packets::<i32>();
-    let mut packet_samples = vec![0i32; max_samples];
-    let mut pcm = Vec::new();
-
-    while let Some(samples) = packets
-        .next_into(&mut packet_samples)
-        .map_err(|error| format!("{error}"))?
-    {
-        append_left_aligned_i32_samples(samples, bit_depth, &mut pcm)?;
-    }
-
-    Ok(AudioData::new(
-        bit_depth,
-        channels,
-        sample_rate,
-        pcm,
-        EncodingFlag::PCMSigned,
-        Endianness::LittleEndian,
-    ))
-}
-
-fn append_left_aligned_i32_samples(
+fn append_right_aligned_i32_samples(
     samples: &[i32],
     bit_depth: u8,
     out: &mut Vec<u8>,
 ) -> Result<(), String> {
-    let shift = 32u8
-        .checked_sub(bit_depth)
-        .ok_or_else(|| format!("Invalid ALAC bit depth: {bit_depth}"))?;
-
+    let bytes_per_sample = usize::from(bit_depth.div_ceil(8));
+    let additional = samples
+        .len()
+        .checked_mul(bytes_per_sample)
+        .ok_or_else(|| "ALAC PCM output size overflow".to_string())?;
+    let start = out.len();
+    out.resize(
+        start
+            .checked_add(additional)
+            .ok_or_else(|| "ALAC PCM output size overflow".to_string())?,
+        0,
+    );
+    let destination = &mut out[start..];
     match bit_depth {
         16 => {
-            out.reserve(samples.len() * 2);
-            for &sample in samples {
-                let right_aligned = sample >> shift;
-                out.extend_from_slice(&(right_aligned as i16).to_le_bytes());
+            for (bytes, &sample) in destination.chunks_exact_mut(2).zip(samples) {
+                bytes.copy_from_slice(&(sample as i16).to_le_bytes());
             }
         }
         24 => {
-            out.reserve(samples.len() * 3);
-            for &sample in samples {
-                let right_aligned = sample >> shift;
-                out.extend_from_slice(&right_aligned.to_le_bytes()[..3]);
+            for (bytes, &sample) in destination.chunks_exact_mut(3).zip(samples) {
+                bytes.copy_from_slice(&sample.to_le_bytes()[..3]);
             }
         }
         32 => {
-            out.reserve(samples.len() * 4);
-            for &sample in samples {
-                out.extend_from_slice(&sample.to_le_bytes());
+            for (bytes, &sample) in destination.chunks_exact_mut(4).zip(samples) {
+                bytes.copy_from_slice(&sample.to_le_bytes());
             }
         }
         _ => return Err(format!("Unsupported ALAC bit depth: {bit_depth}")),
@@ -449,6 +423,88 @@ mod tests {
             .join("..")
             .join("golden")
             .join(file)
+    }
+
+    fn decode_m4a(data: &[u8]) -> Result<AudioData, String> {
+        let index = Mp4MediaIndex::from_file(data)?;
+        let track = index
+            .tracks
+            .iter()
+            .find(|track| track.codec == "alac")
+            .ok_or_else(|| "M4A has no ALAC track".to_string())?;
+        let mut decoder = AlacPacketDecoder::new(&track.codec_private)?;
+        let mut pcm = Vec::new();
+        for (sample_index, sample) in index.samples.iter().enumerate() {
+            if sample.track_id != track.track_id {
+                continue;
+            }
+            let start = usize::try_from(sample.absolute_offset)
+                .map_err(|_| "ALAC packet offset exceeds this platform".to_string())?;
+            let end = start
+                .checked_add(sample.size as usize)
+                .ok_or_else(|| "ALAC packet range overflow".to_string())?;
+            let packet = index.packet_from_sample_bytes(sample_index, &data[start..end])?;
+            pcm.extend_from_slice(decoder.decode_packet(&packet.data)?.data());
+        }
+        Ok(AudioData::new(
+            decoder.bit_depth(),
+            decoder.channels(),
+            decoder.sample_rate(),
+            pcm,
+            EncodingFlag::PCMSigned,
+            Endianness::LittleEndian,
+        ))
+    }
+
+    fn committed_golden_pcm() -> AudioData {
+        let wav = fs::read(golden_path(
+            "alac/A_Tusk_is_used_to_make_costly_gifts.decoded.wav",
+        ))
+        .unwrap();
+        let mut decoder = soundkit::wav::WavStreamProcessor::new();
+        decoder.add(&wav).unwrap().expect("golden WAV PCM")
+    }
+
+    fn push_bits(output: &mut Vec<u8>, bit_len: &mut usize, value: u32, bits: u8) {
+        for shift in (0..bits).rev() {
+            if *bit_len & 7 == 0 {
+                output.push(0);
+            }
+            let bit = ((value >> shift) & 1) as u8;
+            let byte_index = *bit_len >> 3;
+            output[byte_index] |= bit << (7 - (*bit_len & 7));
+            *bit_len += 1;
+        }
+    }
+
+    fn uncompressed_stereo_packet(samples: &[[i32; 2]], bit_depth: u8) -> Vec<u8> {
+        let mut packet = Vec::new();
+        let mut bit_len = 0usize;
+        push_bits(&mut packet, &mut bit_len, 1, 3); // channel-pair element
+        push_bits(&mut packet, &mut bit_len, 0, 4); // instance tag
+        push_bits(&mut packet, &mut bit_len, 0, 12); // unused
+        push_bits(&mut packet, &mut bit_len, 1, 1); // partial frame
+        push_bits(&mut packet, &mut bit_len, 0, 2); // no shifted bytes
+        push_bits(&mut packet, &mut bit_len, 1, 1); // uncompressed
+        push_bits(&mut packet, &mut bit_len, samples.len() as u32, 32);
+        for frame in samples {
+            for &sample in frame {
+                push_bits(&mut packet, &mut bit_len, sample as u32, bit_depth);
+            }
+        }
+        push_bits(&mut packet, &mut bit_len, 7, 3); // end element
+        packet
+    }
+
+    fn stereo_cookie(bit_depth: u8) -> Vec<u8> {
+        let mut cookie = Vec::new();
+        cookie.extend_from_slice(&4096u32.to_be_bytes());
+        cookie.extend_from_slice(&[0, bit_depth, 40, 10, 14, 2]);
+        cookie.extend_from_slice(&255u16.to_be_bytes());
+        cookie.extend_from_slice(&0u32.to_be_bytes());
+        cookie.extend_from_slice(&0u32.to_be_bytes());
+        cookie.extend_from_slice(&48_000u32.to_be_bytes());
+        cookie
     }
 
     fn caf_index_from_file(fixture: &[u8]) -> CafAlacPacketIndex {
@@ -513,8 +569,7 @@ mod tests {
             streamed_pcm.extend_from_slice(decoder.decode_packet(encoded).unwrap().data());
         }
 
-        let whole = decode_alac_container(&fixture).unwrap();
-        assert_eq!(streamed_pcm.as_slice(), whole.data().as_slice());
+        assert_eq!(streamed_pcm.as_slice(), committed_golden_pcm().data());
         assert!(
             index
                 .packets
@@ -604,9 +659,8 @@ mod tests {
             packet_count += 1;
         }
 
-        let whole = decode_alac_container(&fixture).unwrap();
         assert!(packet_count > 1);
-        assert_eq!(streamed_pcm.as_slice(), whole.data().as_slice());
+        assert_eq!(streamed_pcm.as_slice(), committed_golden_pcm().data());
     }
 
     #[test]
@@ -636,6 +690,22 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.contains("frame budget"));
+    }
+
+    #[test]
+    fn packet_decoder_emits_full_width_32_bit_pcm() {
+        let frames = [[0, 1], [-1, i32::MIN], [i32::MAX, 0x1234_5678]];
+        let packet = uncompressed_stereo_packet(&frames, 32);
+        let mut decoder = AlacPacketDecoder::new(&stereo_cookie(32)).unwrap();
+        let mut pcm = Vec::new();
+        decoder.decode_packet_into(&packet, &mut pcm).unwrap();
+
+        let expected: Vec<u8> = frames
+            .iter()
+            .flatten()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        assert_eq!(pcm, expected);
     }
 
     #[test]
@@ -682,12 +752,12 @@ mod tests {
     }
 
     #[test]
-    fn decode_alac_fixture_and_write_golden_wav() {
+    fn decode_alac_fixture_matches_committed_golden_wav() {
         let fixture = fs::read(testdata_path(
             "alac/A_Tusk_is_used_to_make_costly_gifts.m4a",
         ))
         .unwrap();
-        let audio = decode_alac_container(&fixture).unwrap();
+        let audio = decode_m4a(&fixture).unwrap();
         assert_eq!(audio.bits_per_sample(), 16);
         assert_eq!(audio.channel_count(), 1);
         assert_eq!(audio.sampling_rate(), 8_000);
@@ -697,19 +767,7 @@ mod tests {
             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
             .any(|sample| sample != 0));
 
-        let samples: Vec<i16> = audio
-            .data()
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-            .collect();
-        let wav = soundkit::wav::generate_wav_buffer(
-            &soundkit::audio_types::PcmData::I16(vec![samples]),
-            8_000,
-        )
-        .unwrap();
-        let output_path = golden_path("alac/A_Tusk_is_used_to_make_costly_gifts.decoded.wav");
-        fs::create_dir_all(output_path.parent().unwrap()).unwrap();
-        fs::write(output_path, wav).unwrap();
+        assert_eq!(audio.data(), committed_golden_pcm().data());
     }
 
     #[test]
@@ -726,7 +784,7 @@ mod tests {
         assert!(status.success());
 
         let fixture = fs::read(input).unwrap();
-        let audio = decode_alac_container(&fixture).unwrap();
+        let audio = decode_m4a(&fixture).unwrap();
         assert_eq!(audio.data(), &fs::read(ffmpeg_pcm).unwrap());
     }
 }

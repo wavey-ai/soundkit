@@ -2,12 +2,12 @@
 name = "soundkit-alac"
 version = "0.12.3"
 edition = "2021"
-license = "MIT"
-description = "Pure Rust ALAC decoder wrapper for soundkit."
+license = "MIT OR Apache-2.0"
+description = "In-tree pure Rust ALAC decoder for SoundKit."
 repository = "https://github.com/wavey-ai/soundkit"
+readme = "README.md"
 
 [dependencies]
-alac = { version = "0.5.0", features = ["caf"] }
 frame-header = "0.2.1"
 soundkit = { path = "../soundkit" }
 soundkit-audio-demux = { path = "../soundkit-audio-demux", default-features = false }

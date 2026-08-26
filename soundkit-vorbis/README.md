@@ -7,7 +7,9 @@ interleaved signed 16-bit PCM before end of file. The codec core is in this
 crate. It does not call an external decoder crate or C library.
 
 SoundKit uses Vorbis only as an import format. This crate does not provide a
-Vorbis encoder. New SoundKit encoder work targets the Opus and FLAC formats.
+Vorbis encoder. SoundKit currently writes Opus and FLAC; its final encoding
+phase will add AAC writing and fragmented-MP4 boxing for SoundKit LL-HLS, not a
+Vorbis encoder.
 
 ## Decode APIs
 
