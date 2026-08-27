@@ -6,6 +6,7 @@ use js_sys::Int32Array;
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use sha2::{Digest, Sha256};
 use soundkit::audio_content_crypto::{AudioContentCipher, AudioGroupMetadata};
+use std::borrow::Cow;
 #[cfg(any(
     feature = "aac",
     feature = "m4a",
@@ -13,7 +14,7 @@ use soundkit::audio_content_crypto::{AudioContentCipher, AudioGroupMetadata};
     feature = "flac",
     feature = "opus"
 ))]
-use soundkit::audio_packet::Decoder;
+use soundkit::audio_packet::Decoder as PacketDecoder;
 use soundkit::audio_pipeline::{
     audio_to_f32_channels, Stereo48kBlock, StreamingStereo48kNormalizer,
 };
@@ -44,7 +45,8 @@ use soundkit_alac::{
 };
 #[cfg(feature = "audio-demux")]
 use soundkit_audio_demux::{
-    inspect_mp4_top_level_box, AudioCodec, AudioDemuxEvent, AudioTrackConfig, AudioTrackDemuxer,
+    inspect_mp4_top_level_box, AudioCodec, AudioDemuxEvent, AudioPacketFormat, AudioTrackConfig,
+    AudioTrackDemuxer,
     CafAudioIndex, MediaSampleIndex, MediaTrackConfig, MediaTrackKind, MediaTrackPacket,
     Mp4MediaDemuxEvent, Mp4MediaDemuxer, Mp4MediaIndex, MxfMediaDemuxEvent, MxfMediaDemuxer,
     PcmEndianness,
@@ -251,7 +253,8 @@ pub fn build_audio_group_associated_data(
 }
 
 #[wasm_bindgen]
-pub struct WasmMusicDecoder {
+#[wasm_bindgen]
+pub struct Decoder {
     state: DecoderState,
     scratch: DecoderScratch,
 }
@@ -280,7 +283,7 @@ pub struct CanonicalDecodeBatch {
 /// Format-detecting decode, normalization, and hashing in one bounded session.
 #[wasm_bindgen]
 pub struct WasmCanonicalPcmDecoder {
-    decoder: WasmMusicDecoder,
+    decoder: Decoder,
     normalizer: StreamingStereo48kNormalizer,
     source_digest: Option<Sha256>,
     pending_left: Vec<i16>,
@@ -596,13 +599,21 @@ pub struct WasmOpusDecodeResult {
 enum DecoderState {
     Detecting { buffer: Vec<u8> },
     Decoding { decoder: FormatDecoder },
+    #[cfg(all(feature = "audio-demux", feature = "aac"))]
+    Demuxing { demuxer: ContainerAudioDecoder },
     Finished,
+}
+
+enum DetectedDecoder {
+    Codec(FormatDecoder),
+    #[cfg(all(feature = "audio-demux", feature = "aac"))]
+    Demux(ContainerAudioDecoder),
 }
 
 #[cfg(all(feature = "audio-demux", feature = "aac"))]
 enum LibrarySourceDecoder {
     Detecting { buffer: Vec<u8> },
-    Music(WasmMusicDecoder),
+    Music(Decoder),
     MpegTs(ContainerAudioDecoder),
     Mxf(MxfAudioDecoder),
     Finished,
@@ -614,6 +625,7 @@ struct ContainerAudioDecoder {
     decoder: Option<FormatDecoder>,
     config: Option<AudioTrackConfig>,
     scratch: DecoderScratch,
+    adts_header: Option<[u8; 7]>,
 }
 
 #[cfg(all(feature = "audio-demux", feature = "aac"))]
@@ -715,7 +727,7 @@ impl WasmSha256 {
 }
 
 impl WasmCanonicalPcmDecoder {
-    fn from_music_decoder(decoder: WasmMusicDecoder) -> Self {
+    fn from_decoder(decoder: Decoder) -> Self {
         Self {
             decoder,
             normalizer: StreamingStereo48kNormalizer::new(),
@@ -874,7 +886,7 @@ fn canonical_float_to_i16(sample: f32) -> i16 {
 }
 
 #[wasm_bindgen]
-impl WasmMusicDecoder {
+impl Decoder {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self::new_auto()
@@ -889,7 +901,7 @@ impl WasmMusicDecoder {
     }
 
     #[wasm_bindgen(js_name = newWithFormat)]
-    pub fn new_with_format(format: &str) -> Result<WasmMusicDecoder, JsValue> {
+    pub fn new_with_format(format: &str) -> Result<Decoder, JsValue> {
         let decoder = decoder_for_format(format).map_err(js_error)?;
         Ok(Self {
             state: DecoderState::Decoding { decoder },
@@ -898,7 +910,7 @@ impl WasmMusicDecoder {
     }
 
     #[wasm_bindgen(js_name = newRawLinear16)]
-    pub fn new_raw_linear16(sample_rate: u32, channels: u8) -> Result<WasmMusicDecoder, JsValue> {
+    pub fn new_raw_linear16(sample_rate: u32, channels: u8) -> Result<Decoder, JsValue> {
         let format = RawPcmFormat::linear16(sample_rate, channels).map_err(js_error)?;
         Ok(Self {
             state: DecoderState::Decoding {
@@ -909,7 +921,7 @@ impl WasmMusicDecoder {
     }
 
     #[wasm_bindgen(js_name = newRawLinear32)]
-    pub fn new_raw_linear32(sample_rate: u32, channels: u8) -> Result<WasmMusicDecoder, JsValue> {
+    pub fn new_raw_linear32(sample_rate: u32, channels: u8) -> Result<Decoder, JsValue> {
         let format = RawPcmFormat::linear32(sample_rate, channels).map_err(js_error)?;
         Ok(Self {
             state: DecoderState::Decoding {
@@ -944,12 +956,12 @@ impl WasmCanonicalPcmDecoder {
 
     #[wasm_bindgen(js_name = newAuto)]
     pub fn new_auto() -> Self {
-        Self::from_music_decoder(WasmMusicDecoder::new_auto())
+        Self::from_decoder(Decoder::new_auto())
     }
 
     #[wasm_bindgen(js_name = newWithFormat)]
     pub fn new_with_format(format: &str) -> Result<WasmCanonicalPcmDecoder, JsValue> {
-        Ok(Self::from_music_decoder(WasmMusicDecoder::new_with_format(
+        Ok(Self::from_decoder(Decoder::new_with_format(
             format,
         )?))
     }
@@ -959,8 +971,8 @@ impl WasmCanonicalPcmDecoder {
         sample_rate: u32,
         channels: u8,
     ) -> Result<WasmCanonicalPcmDecoder, JsValue> {
-        Ok(Self::from_music_decoder(
-            WasmMusicDecoder::new_raw_linear16(sample_rate, channels)?,
+        Ok(Self::from_decoder(
+            Decoder::new_raw_linear16(sample_rate, channels)?,
         ))
     }
 
@@ -997,7 +1009,7 @@ impl LibrarySourceDecoder {
                 } else if looks_like_mpeg_ts_source(&buffer) {
                     Self::MpegTs(ContainerAudioDecoder::new("mpeg-ts")?)
                 } else {
-                    Self::Music(WasmMusicDecoder::new_auto())
+                    Self::Music(Decoder::new_auto())
                 };
                 let mut frames = decoder.push_selected(&buffer)?;
                 if probe_bytes < bytes.len() {
@@ -1033,7 +1045,7 @@ impl LibrarySourceDecoder {
                 } else if looks_like_mpeg_ts_source(&buffer) {
                     Self::MpegTs(ContainerAudioDecoder::new("mpeg-ts")?)
                 } else {
-                    Self::Music(WasmMusicDecoder::new_auto())
+                    Self::Music(Decoder::new_auto())
                 };
                 let mut frames = decoder.push_selected(&buffer)?;
                 frames.extend(decoder.flush_selected()?);
@@ -1054,6 +1066,58 @@ impl LibrarySourceDecoder {
     }
 }
 
+fn adts_sample_rate_index(sample_rate: u32) -> u8 {
+    match sample_rate {
+        96_000 => 0,
+        88_200 => 1,
+        64_000 => 2,
+        48_000 => 3,
+        44_100 => 4,
+        32_000 => 5,
+        24_000 => 6,
+        22_050 => 7,
+        16_000 => 8,
+        12_000 => 9,
+        11_025 => 10,
+        8_000 => 11,
+        7_350 => 12,
+        _ => 3,
+    }
+}
+
+#[cfg(all(feature = "audio-demux", feature = "aac"))]
+fn build_adts_header_template(config: &AudioTrackConfig) -> Option<[u8; 7]> {
+    let sample_rate = config.sample_rate?;
+    let channels = config.channels?;
+    let profile = config
+        .codec_private
+        .first()
+        .map(|b| ((*b >> 3).saturating_sub(1)).min(3))
+        .unwrap_or(1);
+    let si = adts_sample_rate_index(sample_rate);
+    let cc = channels.min(7);
+
+    Some([
+        0xff,
+        0xf1,
+        (profile << 6) | (si << 2) | (cc >> 2),
+        ((cc & 0x03) << 6),
+        0,
+        0x1f,
+        0xfc,
+    ])
+}
+
+#[cfg(all(feature = "audio-demux", feature = "aac"))]
+fn wrap_aac_in_adts(template: &[u8; 7], raw_len: usize) -> [u8; 7] {
+    let frame_len = raw_len + 7;
+    let mut hdr = *template;
+    hdr[3] |= ((frame_len >> 11) & 0x03) as u8;
+    hdr[4] = ((frame_len >> 3) & 0xff) as u8;
+    hdr[5] |= (((frame_len & 0x07) << 5) & 0xe0) as u8;
+    hdr
+}
+
 #[cfg(all(feature = "audio-demux", feature = "aac"))]
 impl ContainerAudioDecoder {
     fn new(format: &str) -> Result<Self, String> {
@@ -1062,6 +1126,7 @@ impl ContainerAudioDecoder {
             decoder: None,
             config: None,
             scratch: DecoderScratch::default(),
+            adts_header: None,
         })
     }
 
@@ -1083,13 +1148,31 @@ impl ContainerAudioDecoder {
                         if config.codec == AudioCodec::Pcm {
                             frames.push(audio_data_from_container_pcm(config, packet.data)?);
                         } else {
+                            let needs_adts_wrap = config.codec == AudioCodec::Aac
+                                && matches!(
+                                    config.packet_format,
+                                    Some(AudioPacketFormat::Raw) | None
+                                );
+                            let data = if needs_adts_wrap {
+                                if let Some(ref template) = self.adts_header {
+                                    let adts = wrap_aac_in_adts(template, packet.data.len());
+                                    let mut buf = Vec::with_capacity(7 + packet.data.len());
+                                    buf.extend_from_slice(&adts);
+                                    buf.extend_from_slice(&packet.data);
+                                    Cow::Owned(buf)
+                                } else {
+                                    Cow::Borrowed(&packet.data as &[u8])
+                                }
+                            } else {
+                                Cow::Borrowed(&packet.data as &[u8])
+                            };
                             frames.extend(
                                 self.decoder
                                     .as_mut()
                                     .ok_or_else(|| {
                                         "container audio decoder has no codec".to_owned()
                                     })?
-                                    .process(&packet.data, &mut self.scratch)?,
+                                    .process(&data, &mut self.scratch)?,
                             );
                         }
                     }
@@ -1117,6 +1200,7 @@ impl ContainerAudioDecoder {
                 if !config.codec_private.is_empty() {
                     decoder.set_audio_specific_config(&config.codec_private)?;
                 }
+                self.adts_header = build_adts_header_template(&config);
                 Some(FormatDecoder::Aac(Box::new(decoder)))
             }
             #[cfg(feature = "ac3")]
@@ -3328,6 +3412,17 @@ impl WasmStreamingLibraryEncoder {
         self.encode_partial_audio_rust(decoded)
     }
 
+    /// Platform-decoded PCM for a codec SoundKit rejected. Bounded blocks go
+    /// through the same normaliser, hashes, encoders and index as every other
+    /// source, so a fallback decode never becomes a second canonical pipeline.
+    /// Pair with `new_seekable_pcm_rust` and `update_source_bytes_rust`.
+    pub fn push_decoded_pcm_rust(
+        &mut self,
+        decoded: AudioData,
+    ) -> Result<LibraryEncodeBatch, String> {
+        self.encode_partial_audio_rust(Some(decoded))
+    }
+
     pub fn push_rust(&mut self, bytes: &[u8]) -> Result<LibraryEncodeBatch, String> {
         self.ensure_active()?;
         validate_stream_input_chunk(bytes)?;
@@ -4124,7 +4219,7 @@ impl WasmSoundKitFrameDecoder {
     }
 }
 
-impl WasmMusicDecoder {
+impl Decoder {
     fn push_frames(&mut self, bytes: &[u8]) -> Result<Vec<AudioData>, String> {
         validate_stream_input_chunk(bytes)?;
         let state = std::mem::replace(&mut self.state, DecoderState::Finished);
@@ -4139,14 +4234,23 @@ impl WasmMusicDecoder {
                     return Ok(Vec::new());
                 }
 
-                match detect_and_init_decoder(&buffer) {
-                    Ok(mut decoder) => {
+                match detect_and_init(&buffer) {
+                    Ok(DetectedDecoder::Codec(mut decoder)) => {
                         let mut frames = decoder.process(&buffer, &mut self.scratch)?;
                         if probe_bytes < bytes.len() {
                             frames
                                 .extend(decoder.process(&bytes[probe_bytes..], &mut self.scratch)?);
                         }
                         self.state = DecoderState::Decoding { decoder };
+                        Ok(frames)
+                    }
+                    #[cfg(all(feature = "audio-demux", feature = "aac"))]
+                    Ok(DetectedDecoder::Demux(mut demuxer)) => {
+                        let mut frames = demuxer.process(&buffer, false)?;
+                        if probe_bytes < bytes.len() {
+                            frames.extend(demuxer.process(&bytes[probe_bytes..], false)?);
+                        }
+                        self.state = DecoderState::Demuxing { demuxer };
                         Ok(frames)
                     }
                     Err(error) if new_bytes_collected < MAX_DETECTION_BYTES => {
@@ -4169,6 +4273,12 @@ impl WasmMusicDecoder {
                 self.state = DecoderState::Decoding { decoder };
                 Ok(frames)
             }
+            #[cfg(all(feature = "audio-demux", feature = "aac"))]
+            DecoderState::Demuxing { mut demuxer } => {
+                let frames = demuxer.process(bytes, false)?;
+                self.state = DecoderState::Demuxing { demuxer };
+                Ok(frames)
+            }
             DecoderState::Finished => Err("decoder is already finished".to_string()),
         }
     }
@@ -4177,14 +4287,34 @@ impl WasmMusicDecoder {
         let state = std::mem::replace(&mut self.state, DecoderState::Finished);
         match state {
             DecoderState::Detecting { buffer } => {
-                let mut decoder = detect_and_init_decoder(&buffer)?;
-                let mut frames = decoder.process(&buffer, &mut self.scratch)?;
-                frames.extend(decoder.flush(&mut self.scratch)?);
-                Ok(frames)
+                let detected = detect_and_init(&buffer)?;
+                match detected {
+                    DetectedDecoder::Codec(mut decoder) => {
+                        let mut frames = decoder.process(&buffer, &mut self.scratch)?;
+                        frames.extend(decoder.flush(&mut self.scratch)?);
+                        Ok(frames)
+                    }
+                    #[cfg(all(feature = "audio-demux", feature = "aac"))]
+                    DetectedDecoder::Demux(mut demuxer) => {
+                        let mut frames = demuxer.process(&buffer, false)?;
+                        frames.extend(demuxer.process(&[], true)?);
+                        Ok(frames)
+                    }
+                }
             }
             DecoderState::Decoding { mut decoder } => decoder.flush(&mut self.scratch),
+            #[cfg(all(feature = "audio-demux", feature = "aac"))]
+            DecoderState::Demuxing { mut demuxer } => demuxer.process(&[], true),
             DecoderState::Finished => Ok(Vec::new()),
         }
+    }
+
+    pub fn push_rust(&mut self, bytes: &[u8]) -> Result<Vec<AudioData>, String> {
+        self.push_frames(bytes)
+    }
+
+    pub fn flush_rust(&mut self) -> Result<Vec<AudioData>, String> {
+        self.flush_frames()
     }
 }
 
@@ -4494,7 +4624,7 @@ fn decode_i16_with_drain<D, F>(
     frame: F,
 ) -> Result<Vec<AudioData>, String>
 where
-    D: Decoder,
+    D: PacketDecoder,
     F: Fn(&D, usize, &[i16]) -> Option<AudioData>,
 {
     let mut frames = Vec::new();
@@ -4550,7 +4680,7 @@ fn decode_i32_with_drain<D, F>(
     frame: F,
 ) -> Result<Vec<AudioData>, String>
 where
-    D: Decoder,
+    D: PacketDecoder,
     F: Fn(&D, usize, &[i32]) -> Option<AudioData>,
 {
     let mut frames = Vec::new();
@@ -5003,30 +5133,51 @@ fn decoder_for_format(format: &str) -> Result<FormatDecoder, String> {
 
 #[cfg(feature = "detect")]
 fn detect_and_init_decoder(bytes: &[u8]) -> Result<FormatDecoder, String> {
+    match detect_and_init(bytes)? {
+        DetectedDecoder::Codec(decoder) => Ok(decoder),
+        #[cfg(all(feature = "audio-demux", feature = "aac"))]
+        DetectedDecoder::Demux(_) => Err("container format requires demux path".to_string()),
+    }
+}
+
+#[cfg(feature = "detect")]
+fn detect_and_init(bytes: &[u8]) -> Result<DetectedDecoder, String> {
     match detect_audio(bytes) {
         #[cfg(feature = "mp3")]
-        AudioType::MP3 => decoder_for_format("mp3"),
+        AudioType::MP3 => Ok(DetectedDecoder::Codec(decoder_for_format("mp3")?)),
         #[cfg(feature = "aac")]
-        AudioType::AAC => decoder_for_format("aac"),
+        AudioType::AAC => Ok(DetectedDecoder::Codec(decoder_for_format("aac")?)),
         #[cfg(feature = "m4a")]
-        AudioType::M4A => decoder_for_format("m4a"),
+        AudioType::M4A => Ok(DetectedDecoder::Codec(decoder_for_format("m4a")?)),
         #[cfg(feature = "flac")]
-        AudioType::FLAC => decoder_for_format("flac"),
+        AudioType::FLAC => Ok(DetectedDecoder::Codec(decoder_for_format("flac")?)),
         #[cfg(feature = "opus")]
-        AudioType::Opus => decoder_for_format("opus"),
+        AudioType::Opus => Ok(DetectedDecoder::Codec(decoder_for_format("opus")?)),
         #[cfg(feature = "ogg-opus")]
-        AudioType::OggOpus => decoder_for_format("ogg-opus"),
+        AudioType::OggOpus => Ok(DetectedDecoder::Codec(decoder_for_format("ogg-opus")?)),
         #[cfg(feature = "vorbis")]
-        AudioType::OggVorbis => decoder_for_format("ogg-vorbis"),
+        AudioType::OggVorbis => Ok(DetectedDecoder::Codec(decoder_for_format("ogg-vorbis")?)),
         #[cfg(feature = "webm")]
-        AudioType::WebM => decoder_for_format("webm"),
-        AudioType::Wav => decoder_for_format("wav"),
+        AudioType::WebM => Ok(DetectedDecoder::Codec(decoder_for_format("webm")?)),
+        AudioType::Wav => Ok(DetectedDecoder::Codec(decoder_for_format("wav")?)),
         #[cfg(feature = "alac")]
-        AudioType::ALAC => decoder_for_format("alac"),
+        AudioType::ALAC => Ok(DetectedDecoder::Codec(decoder_for_format("alac")?)),
         #[cfg(feature = "aiff")]
-        AudioType::AIFF => decoder_for_format("aiff"),
+        AudioType::AIFF => Ok(DetectedDecoder::Codec(decoder_for_format("aiff")?)),
         #[cfg(feature = "ac3")]
-        AudioType::AC3 => decoder_for_format("ac3"),
+        AudioType::AC3 => Ok(DetectedDecoder::Codec(decoder_for_format("ac3")?)),
+        #[cfg(all(feature = "audio-demux", feature = "aac"))]
+        AudioType::MpegTs => Ok(DetectedDecoder::Demux(
+            ContainerAudioDecoder::new("mpeg-ts")?,
+        )),
+        #[cfg(all(feature = "audio-demux", feature = "aac"))]
+        AudioType::FragmentedMp4 => Ok(DetectedDecoder::Demux(
+            ContainerAudioDecoder::new("fmp4")?,
+        )),
+        #[cfg(all(feature = "audio-demux", feature = "webm"))]
+        AudioType::Matroska => Ok(DetectedDecoder::Demux(
+            ContainerAudioDecoder::new("mkv")?,
+        )),
         detected => Err(format!(
             "unsupported or disabled detected format: {detected:?}"
         )),
@@ -6360,7 +6511,7 @@ mod tests {
     }
 
     fn decode_all(format: &str, data: &[u8], chunk_size: usize) -> Vec<AudioData> {
-        let mut decoder = WasmMusicDecoder::new_with_format(format).unwrap();
+        let mut decoder = Decoder::new_with_format(format).unwrap();
         let mut frames = Vec::new();
         for chunk in data.chunks(chunk_size) {
             frames.extend(decoder.push_frames(chunk).unwrap());
@@ -6471,7 +6622,7 @@ mod tests {
     #[test]
     fn streaming_entry_points_reject_oversized_chunks() {
         let oversized = vec![0_u8; MAX_STREAM_INPUT_CHUNK_BYTES + 1];
-        let mut decoder = WasmMusicDecoder::new_auto();
+        let mut decoder = Decoder::new_auto();
         let error = decoder.push_frames(&oversized).unwrap_err();
         assert!(error.contains("streaming budget"));
 
@@ -6493,7 +6644,7 @@ mod tests {
     #[test]
     fn automatic_detection_never_retains_more_than_64_kib() {
         let undecidable = vec![0_u8; MAX_DETECTION_BYTES];
-        let mut decoder = WasmMusicDecoder::new_auto();
+        let mut decoder = Decoder::new_auto();
         let error = decoder.push_frames(&undecidable).unwrap_err();
         assert!(!error.is_empty());
 
@@ -6545,7 +6696,7 @@ mod tests {
     #[test]
     fn aiff_push_drains_pcm_frames() {
         let data = fixture("aiff/A_Tusk_is_used_to_make_costly_gifts.aiff");
-        let mut decoder = WasmMusicDecoder::new_with_format("aiff").unwrap();
+        let mut decoder = Decoder::new_with_format("aiff").unwrap();
         let mut frames = Vec::new();
         let mut first_output_at = None;
         for (index, chunk) in data.chunks(997).enumerate() {
