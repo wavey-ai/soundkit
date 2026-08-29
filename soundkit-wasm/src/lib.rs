@@ -1,3 +1,5 @@
+pub mod v2;
+
 use frame_header::{EncodingFlag, Endianness};
 #[cfg(feature = "aac")]
 use js_sys::Float32Array;
