@@ -7,7 +7,7 @@ description = "Zero-transcode Soundkit v2 audio to fragmented MP4 reboxing"
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-access-unit = "0.1.3"
+access-unit = { path = "../access-unit" }
 boxer = { package = "wavey-boxer", version = "0.1.1" }
 bytes = "1"
 frame-header = "0.2.2"

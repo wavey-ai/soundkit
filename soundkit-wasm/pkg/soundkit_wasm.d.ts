@@ -1,6 +1,27 @@
 /* tslint:disable */
 /* eslint-disable */
 
+export class Decoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Final EOF/drain call. The decoder should not be reused after this.
+     */
+    flush(): Array<any>;
+    constructor();
+    static newAuto(): Decoder;
+    static newRawLinear16(sample_rate: number, channels: number): Decoder;
+    static newRawLinear32(sample_rate: number, channels: number): Decoder;
+    static newWithFormat(format: string): Decoder;
+    /**
+     * Push arbitrary encoded bytes and receive all PCM frames currently available.
+     *
+     * This method drains decoder output after each push. Use `flush()` once at EOF
+     * to force final container/codec drain.
+     */
+    push(bytes: Uint8Array): Array<any>;
+}
+
 export class WasmAacDeboxer {
     free(): void;
     [Symbol.dispose](): void;
@@ -301,27 +322,6 @@ export class WasmMp4MediaIndex {
     readonly sampleCount: number;
 }
 
-export class WasmMusicDecoder {
-    free(): void;
-    [Symbol.dispose](): void;
-    /**
-     * Final EOF/drain call. The decoder should not be reused after this.
-     */
-    flush(): Array<any>;
-    constructor();
-    static newAuto(): WasmMusicDecoder;
-    static newRawLinear16(sample_rate: number, channels: number): WasmMusicDecoder;
-    static newRawLinear32(sample_rate: number, channels: number): WasmMusicDecoder;
-    static newWithFormat(format: string): WasmMusicDecoder;
-    /**
-     * Push arbitrary encoded bytes and receive all PCM frames currently available.
-     *
-     * This method drains decoder output after each push. Use `flush()` once at EOF
-     * to force final container/codec drain.
-     */
-    push(bytes: Uint8Array): Array<any>;
-}
-
 /**
  * Streaming Rust MXF KLV demuxer that emits both picture and sound essence.
  */
@@ -565,6 +565,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly __wbg_decoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmaacdeboxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmaaclcdecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmalacpacketdecoder_free: (a: number, b: number) => void;
@@ -579,7 +580,6 @@ export interface InitOutput {
     readonly __wbg_wasmflacframeencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediademuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediaindex_free: (a: number, b: number) => void;
-    readonly __wbg_wasmmusicdecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmmxfmediademuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdeboxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdecoder_free: (a: number, b: number) => void;
@@ -595,6 +595,12 @@ export interface InitOutput {
     readonly buildAudioGroupAssociatedData: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => [number, number, number];
     readonly buildSoundKitFrameHeaderV2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly buildSoundKitFrameV2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
+    readonly decoder_flush: (a: number) => [number, number, number];
+    readonly decoder_new: () => number;
+    readonly decoder_newRawLinear16: (a: number, b: number) => [number, number, number];
+    readonly decoder_newRawLinear32: (a: number, b: number) => [number, number, number];
+    readonly decoder_newWithFormat: (a: number, b: number) => [number, number, number];
+    readonly decoder_push: (a: number, b: number, c: number) => [number, number, number];
     readonly inspectCafChunk: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly inspectMp4TopLevelBox: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly validateCafFileHeader: (a: number, b: number, c: number) => [number, number];
@@ -681,12 +687,6 @@ export interface InitOutput {
     readonly wasmmp4mediaindex_sample: (a: number, b: number) => [number, number, number];
     readonly wasmmp4mediaindex_sampleCount: (a: number) => number;
     readonly wasmmp4mediaindex_tracks: (a: number) => [number, number, number];
-    readonly wasmmusicdecoder_flush: (a: number) => [number, number, number];
-    readonly wasmmusicdecoder_new: () => number;
-    readonly wasmmusicdecoder_newRawLinear16: (a: number, b: number) => [number, number, number];
-    readonly wasmmusicdecoder_newRawLinear32: (a: number, b: number) => [number, number, number];
-    readonly wasmmusicdecoder_newWithFormat: (a: number, b: number) => [number, number, number];
-    readonly wasmmusicdecoder_push: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmmxfmediademuxer_flush: (a: number) => [number, number, number];
     readonly wasmmxfmediademuxer_new: () => number;
     readonly wasmmxfmediademuxer_push: (a: number, b: number, c: number) => [number, number, number];
@@ -750,9 +750,9 @@ export interface InitOutput {
     readonly wasmaacdeboxer_newAuto: () => number;
     readonly wasmaudiotrackdemuxer_newAuto: () => number;
     readonly wasmopusdeboxer_newAuto: () => number;
-    readonly wasmmusicdecoder_newAuto: () => number;
-    readonly wasmcanonicalpcmdecoder_newAuto: () => number;
+    readonly decoder_newAuto: () => number;
     readonly wasmsoundkitframedecoder_newUnencrypted: () => number;
+    readonly wasmcanonicalpcmdecoder_newAuto: () => number;
     readonly dav1d_apply_grain: (a: number, b: number, c: number) => number;
     readonly dav1d_close: (a: number) => void;
     readonly dav1d_data_create: (a: number, b: number) => number;

@@ -18,5 +18,8 @@ bench-ablate-synth = []
 
 [dependencies]
 
+[dev-dependencies]
+rusty_aac = { version = "0.5.0", default-features = false }
+
 [target.'cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))'.dependencies]
 rustfft = "6.4.1"

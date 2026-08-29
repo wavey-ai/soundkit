@@ -4,7 +4,7 @@ This crate provides the SoundKit browser and worker WebAssembly API. It includes
 pure Rust media demuxers and supported codec decoders.
 
 The controlled AAC production profile is stereo MPEG-4 AAC-LC at 44.1 or 48
-kHz. All AAC paths enter through `soundkit-aac`: `WasmMusicDecoder` handles
+kHz. All AAC paths enter through `soundkit-aac`: `Decoder` handles
 ADTS and streamable M4A/MP4, while `WasmAacLcDecoder` handles indexed raw access
 units.
 

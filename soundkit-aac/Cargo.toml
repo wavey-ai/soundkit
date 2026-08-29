@@ -6,7 +6,7 @@ readme = "README.md"
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-access-unit = { git = "https://github.com/wavey-ai/access-unit.git", branch = "main" }
+access-unit = { path = "../access-unit" }
 fdk-aac = { git = "https://github.com/wavey-ai/fdk-aac-rs.git", branch = "main", optional = true }
 soundkit-audio-demux = { path = "../soundkit-audio-demux", default-features = false, features = ["mp4"], optional = true }
 soundkit-aac-lc = { path = "../soundkit-aac-lc", optional = true }

@@ -1,5 +1,103 @@
 /* @ts-self-types="./soundkit_wasm.d.ts" */
 
+export class Decoder {
+    static __wrap(ptr) {
+        const obj = Object.create(Decoder.prototype);
+        obj.__wbg_ptr = ptr;
+        DecoderFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        DecoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_decoder_free(ptr, 0);
+    }
+    /**
+     * Final EOF/drain call. The decoder should not be reused after this.
+     * @returns {Array<any>}
+     */
+    flush() {
+        const ret = wasm.decoder_flush(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    constructor() {
+        const ret = wasm.decoder_new();
+        this.__wbg_ptr = ret;
+        DecoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {Decoder}
+     */
+    static newAuto() {
+        const ret = wasm.decoder_newAuto();
+        return Decoder.__wrap(ret);
+    }
+    /**
+     * @param {number} sample_rate
+     * @param {number} channels
+     * @returns {Decoder}
+     */
+    static newRawLinear16(sample_rate, channels) {
+        const ret = wasm.decoder_newRawLinear16(sample_rate, channels);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return Decoder.__wrap(ret[0]);
+    }
+    /**
+     * @param {number} sample_rate
+     * @param {number} channels
+     * @returns {Decoder}
+     */
+    static newRawLinear32(sample_rate, channels) {
+        const ret = wasm.decoder_newRawLinear32(sample_rate, channels);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return Decoder.__wrap(ret[0]);
+    }
+    /**
+     * @param {string} format
+     * @returns {Decoder}
+     */
+    static newWithFormat(format) {
+        const ptr0 = passStringToWasm0(format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.decoder_newWithFormat(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return Decoder.__wrap(ret[0]);
+    }
+    /**
+     * Push arbitrary encoded bytes and receive all PCM frames currently available.
+     *
+     * This method drains decoder output after each push. Use `flush()` once at EOF
+     * to force final container/codec drain.
+     * @param {Uint8Array} bytes
+     * @returns {Array<any>}
+     */
+    push(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.decoder_push(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+}
+if (Symbol.dispose) Decoder.prototype[Symbol.dispose] = Decoder.prototype.free;
+
 export class WasmAacDeboxer {
     static __wrap(ptr) {
         const obj = Object.create(WasmAacDeboxer.prototype);
@@ -1243,104 +1341,6 @@ export class WasmMp4MediaIndex {
 }
 if (Symbol.dispose) WasmMp4MediaIndex.prototype[Symbol.dispose] = WasmMp4MediaIndex.prototype.free;
 
-export class WasmMusicDecoder {
-    static __wrap(ptr) {
-        const obj = Object.create(WasmMusicDecoder.prototype);
-        obj.__wbg_ptr = ptr;
-        WasmMusicDecoderFinalization.register(obj, obj.__wbg_ptr, obj);
-        return obj;
-    }
-    __destroy_into_raw() {
-        const ptr = this.__wbg_ptr;
-        this.__wbg_ptr = 0;
-        WasmMusicDecoderFinalization.unregister(this);
-        return ptr;
-    }
-    free() {
-        const ptr = this.__destroy_into_raw();
-        wasm.__wbg_wasmmusicdecoder_free(ptr, 0);
-    }
-    /**
-     * Final EOF/drain call. The decoder should not be reused after this.
-     * @returns {Array<any>}
-     */
-    flush() {
-        const ret = wasm.wasmmusicdecoder_flush(this.__wbg_ptr);
-        if (ret[2]) {
-            throw takeFromExternrefTable0(ret[1]);
-        }
-        return takeFromExternrefTable0(ret[0]);
-    }
-    constructor() {
-        const ret = wasm.wasmmusicdecoder_new();
-        this.__wbg_ptr = ret;
-        WasmMusicDecoderFinalization.register(this, this.__wbg_ptr, this);
-        return this;
-    }
-    /**
-     * @returns {WasmMusicDecoder}
-     */
-    static newAuto() {
-        const ret = wasm.wasmmusicdecoder_newAuto();
-        return WasmMusicDecoder.__wrap(ret);
-    }
-    /**
-     * @param {number} sample_rate
-     * @param {number} channels
-     * @returns {WasmMusicDecoder}
-     */
-    static newRawLinear16(sample_rate, channels) {
-        const ret = wasm.wasmmusicdecoder_newRawLinear16(sample_rate, channels);
-        if (ret[2]) {
-            throw takeFromExternrefTable0(ret[1]);
-        }
-        return WasmMusicDecoder.__wrap(ret[0]);
-    }
-    /**
-     * @param {number} sample_rate
-     * @param {number} channels
-     * @returns {WasmMusicDecoder}
-     */
-    static newRawLinear32(sample_rate, channels) {
-        const ret = wasm.wasmmusicdecoder_newRawLinear32(sample_rate, channels);
-        if (ret[2]) {
-            throw takeFromExternrefTable0(ret[1]);
-        }
-        return WasmMusicDecoder.__wrap(ret[0]);
-    }
-    /**
-     * @param {string} format
-     * @returns {WasmMusicDecoder}
-     */
-    static newWithFormat(format) {
-        const ptr0 = passStringToWasm0(format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.wasmmusicdecoder_newWithFormat(ptr0, len0);
-        if (ret[2]) {
-            throw takeFromExternrefTable0(ret[1]);
-        }
-        return WasmMusicDecoder.__wrap(ret[0]);
-    }
-    /**
-     * Push arbitrary encoded bytes and receive all PCM frames currently available.
-     *
-     * This method drains decoder output after each push. Use `flush()` once at EOF
-     * to force final container/codec drain.
-     * @param {Uint8Array} bytes
-     * @returns {Array<any>}
-     */
-    push(bytes) {
-        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.wasmmusicdecoder_push(this.__wbg_ptr, ptr0, len0);
-        if (ret[2]) {
-            throw takeFromExternrefTable0(ret[1]);
-        }
-        return takeFromExternrefTable0(ret[0]);
-    }
-}
-if (Symbol.dispose) WasmMusicDecoder.prototype[Symbol.dispose] = WasmMusicDecoder.prototype.free;
-
 /**
  * Streaming Rust MXF KLV demuxer that emits both picture and sound essence.
  */
@@ -2477,6 +2477,9 @@ function __wbg_get_imports() {
     };
 }
 
+const DecoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_decoder_free(ptr, 1));
 const WasmAacDeboxerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmaacdeboxer_free(ptr, 1));
@@ -2519,9 +2522,6 @@ const WasmMp4MediaDemuxerFinalization = (typeof FinalizationRegistry === 'undefi
 const WasmMp4MediaIndexFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmmp4mediaindex_free(ptr, 1));
-const WasmMusicDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
-    ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(ptr => wasm.__wbg_wasmmusicdecoder_free(ptr, 1));
 const WasmMxfMediaDemuxerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmmxfmediademuxer_free(ptr, 1));

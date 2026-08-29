@@ -59,7 +59,7 @@ ac3 = ["dep:soundkit-ac3"]
 
 [dependencies]
 soundkit = { path = "../soundkit" }
-access-unit = { git = "https://github.com/wavey-ai/access-unit.git", branch = "main", optional = true }
+access-unit = { path = "../access-unit", optional = true }
 frame-header = "0.2.2"
 js-sys = "0.3"
 sha2 = "0.10"

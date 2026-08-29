@@ -8,7 +8,7 @@ import init, {
   WasmMp4MediaDemuxer,
   WasmMp4MediaIndex,
   WasmCafAlacIndex,
-  WasmMusicDecoder,
+  Decoder,
   WasmMxfMediaDemuxer,
   WasmOpusDecoder,
   WasmVideoDecoder,
@@ -291,7 +291,7 @@ async function decodeMp4MediaFile(file, expected) {
       audioDecoder = new WasmAacLcDecoder(audio.decoderConfiguration);
       audioOutput = new Float32Array(audio.channels * 1024);
     } else if (audio.codec === "flac") {
-      audioDecoder = WasmMusicDecoder.newWithFormat("flac");
+      audioDecoder = Decoder.newWithFormat("flac");
       audioFrames += countPcmFrames(audioDecoder.push(audio.decoderConfiguration));
     }
 

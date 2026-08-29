@@ -14,7 +14,7 @@ mpeg-ts = ["dep:access-unit"]
 mxf = ["dep:soundkit-video"]
 
 [dependencies]
-access-unit = { git = "https://github.com/wavey-ai/access-unit.git", branch = "main", optional = true }
+access-unit = { path = "../access-unit", optional = true }
 soundkit-video = { path = "../soundkit-video", default-features = false, optional = true }
 soundkit-webm = { path = "../soundkit-webm", default-features = false, features = ["vorbis"], optional = true }
 

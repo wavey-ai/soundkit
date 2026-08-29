@@ -40,7 +40,7 @@ ADTS/MP4 decoder and the raw-access-unit API enter through `soundkit-aac`.
 
 ```js
 import init, {
-  WasmMusicDecoder,
+  Decoder,
   WasmAudioTrackDemuxer,
   WasmAacDeboxer,
   WasmAacLcDecoder,
@@ -74,11 +74,11 @@ detection at 8 KiB and forwards bytes beyond the retained probe immediately.
 
 ## PCM Decoder
 
-Use `WasmMusicDecoder` when SoundKit should fully decode the audio to PCM inside
+Use `Decoder` when SoundKit should fully decode the audio to PCM inside
 WASM.
 
 ```js
-const decoder = WasmMusicDecoder.newWithFormat("mp3");
+const decoder = Decoder.newWithFormat("mp3");
 const pcmFrames = [];
 
 for await (const chunk of encodedByteStream) {
@@ -91,11 +91,11 @@ pcmFrames.push(...decoder.flush());
 Constructors:
 
 ```ts
-new WasmMusicDecoder()
-WasmMusicDecoder.newAuto()
-WasmMusicDecoder.newWithFormat(format: string)
-WasmMusicDecoder.newRawLinear16(sampleRate: number, channels: number)
-WasmMusicDecoder.newRawLinear32(sampleRate: number, channels: number)
+new Decoder()
+Decoder.newAuto()
+Decoder.newWithFormat(format: string)
+Decoder.newRawLinear16(sampleRate: number, channels: number)
+Decoder.newRawLinear32(sampleRate: number, channels: number)
 ```
 
 PCM frame shape:
