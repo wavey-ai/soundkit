@@ -164,3 +164,6 @@ soundkit-opus/outputs/
 soundkit-ogg-opus/outputs/
 aac-wasm-bench/pkg-*/
 aac-wasm-bench/reference/pkg-*/
+
+# Its own crate, checked out beside this one rather than kept in it.
+/access-unit/
