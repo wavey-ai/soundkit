@@ -92,7 +92,20 @@ pub fn audio_to_f32_channels(audio: &AudioData) -> Result<Vec<Vec<f32>>, String>
 
     match pcm_data {
         PcmData::I16(data) => Ok(data.into_iter().map(vec_i16_to_f32).collect()),
-        PcmData::I32(data) => Ok(data.into_iter().map(vec_i32_to_f32).collect()),
+        // Scaled by the width the samples actually carry, not by the width
+        // of the container they arrived in. A 24-bit source deserializes to
+        // i32 — the values are 24-bit, the box is 32 — and dividing by the
+        // box's full scale makes every sample 1/256 of itself. That is
+        // silent enough to look like a decode failure and quiet enough to
+        // be mistaken for a quiet master.
+        PcmData::I32(data) => {
+            let bits = u32::from(audio.bits_per_sample()).clamp(2, 32);
+            let scale = 1.0f32 / (1u64 << (bits - 1)) as f32;
+            Ok(data
+                .into_iter()
+                .map(|channel| channel.into_iter().map(|sample| sample as f32 * scale).collect())
+                .collect())
+        }
         PcmData::F32(data) => Ok(data),
     }
 }
