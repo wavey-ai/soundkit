@@ -158,9 +158,9 @@ impl SoundKitV2Decoder {
                 // stream carries none, so one is derived from this header
                 // and pushed in front of the first packet.
                 let header = derived_flac_stream_info(rate, channels, _bits);
-                let mut sink = vec![0i16; 1 << 12];
+                let mut sink = vec![0i32; 1 << 12];
                 decoder
-                    .decode_i16(&header, &mut sink, false)
+                    .decode_i32(&header, &mut sink, false)
                     .map_err(|error| {
                         format!("the derived FLAC STREAMINFO was refused: {error}")
                     })?;
@@ -191,17 +191,39 @@ impl SoundKitV2Decoder {
             }
             #[cfg(feature = "flac")]
             (Some(Codec::Flac(decoder)), EncodingFlag::FLAC) => {
-                let mut out = vec![0i16; 1 << 16];
+                // Decoded at the stream's own depth, then brought down to
+                // 16 by the frame's declared width. The library writes the
+                // lossless copy as 24-bit, and `decode_i16` reduces a wider
+                // sample by clamping it — which turns every sample of a
+                // quiet track into full scale and hands back a square wave.
+                let mut out = vec![0i32; 1 << 16];
                 let written = decoder
-                    .decode_i16(payload, &mut out, false)
+                    .decode_i32(payload, &mut out, false)
                     .map_err(|error| error.to_string())?;
-                Ok(i16s_to_le_bytes(&out[..written]))
+                Ok(i32s_to_i16_le_bytes(&out[..written], bits))
             }
             _ => Err(format!(
                 "no decoder is standing for {encoding:?} with {channels} channels"
             )),
         }
     }
+}
+
+/// Interleaved samples at `bits` wide, as 16-bit little-endian bytes.
+///
+/// A sample wider than 16 bits is shifted down, not clipped: the low bits
+/// are what a 16-bit rendering has to lose, and taking the value's range
+/// away instead loses the audio.
+#[cfg(feature = "flac")]
+fn i32s_to_i16_le_bytes(samples: &[i32], bits: u8) -> Vec<u8> {
+    let shift = u32::from(bits.saturating_sub(16));
+    let mut bytes = Vec::with_capacity(samples.len() * 2);
+    for sample in samples {
+        let scaled = sample >> shift;
+        let value = scaled.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
 }
 
 fn i16s_to_le_bytes(samples: &[i16]) -> Vec<u8> {
@@ -497,5 +519,87 @@ mod tests {
             .push(&stream)
             .expect("a FLAC v2 frame decodes against a derived STREAMINFO");
         assert_eq!(batch.frames.len(), 1, "the packet came back as audio");
+    }
+
+    /// FLAC is lossless, so what comes back is what went in — sample for
+    /// sample. Counting the frames is not enough: a decode that saturated
+    /// every sample to full scale would still hand back exactly one frame,
+    /// and did, for as long as nothing looked at the numbers.
+    #[cfg(feature = "flac")]
+    #[test]
+    fn a_flac_packet_comes_back_at_the_level_it_went_in() {
+        // 16 is the easy case; 24 is what the library actually writes for a
+        // lossless import, and the one that came back as a square wave.
+        for bits in [16u8, 24] {
+            a_flac_packet_at(bits);
+        }
+    }
+
+    #[cfg(feature = "flac")]
+    fn a_flac_packet_at(bits: u8) {
+        use soundkit::audio_packet::Encoder as PacketEncoder;
+        use soundkit_flac::FlacEncoder;
+
+        let frame_size = 1_024usize;
+        let channels = 2usize;
+        // A quiet signal — a sixth of full scale at this depth — so anything
+        // that saturates is unmistakable.
+        let full = 1i64 << (bits - 1);
+        let amplitude = (full / 6) as f32;
+        let pcm: Vec<i32> = (0..frame_size * channels)
+            .map(|n| ((n as f32 / 30.0).sin() * amplitude) as i32)
+            .collect();
+        let mut encoder = <FlacEncoder as PacketEncoder>::new(
+            48_000,
+            u32::from(bits),
+            channels as u32,
+            frame_size as u32,
+            3,
+        );
+        encoder.init().expect("the FLAC encoder starts");
+        let mut packet = vec![0u8; 1 << 16];
+        let written = encoder
+            .encode_i32(&pcm, &mut packet)
+            .expect("a FLAC packet is produced");
+
+        let stream = frame(
+            EncodingFlag::FLAC,
+            &packet[..written],
+            frame_size as u32,
+            48_000,
+            channels as u8,
+            bits,
+        );
+        let mut decoder = SoundKitV2Decoder::new();
+        let batch = decoder.push(&stream).expect("the frame decodes");
+        let bytes = batch.frames[0].data();
+        let back: Vec<i16> = bytes
+            .chunks_exact(2)
+            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+
+        assert_eq!(
+            back.len(),
+            pcm.len(),
+            "{bits}-bit: every sample came back: got {} of {}",
+            back.len(),
+            pcm.len()
+        );
+        // What a 16-bit rendering of the same audio should be.
+        let shift = u32::from(bits.saturating_sub(16));
+        let peak = back.iter().map(|value| i32::from(*value).abs()).max().unwrap_or(0);
+        let expected_peak = pcm.iter().map(|value| (value >> shift).abs()).max().unwrap_or(0);
+        assert!(
+            (peak - expected_peak).abs() <= 1,
+            "{bits}-bit: the decode changed the level: went in at {expected_peak}, came back at {peak}"
+        );
+        for (index, (&want, &got)) in pcm.iter().zip(&back).enumerate() {
+            assert_eq!(
+                (want >> shift) as i16,
+                got,
+                "{bits}-bit: FLAC is lossless, but sample {index} went in as {want} \
+                 and came back as {got}"
+            );
+        }
     }
 }
