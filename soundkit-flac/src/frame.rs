@@ -178,17 +178,22 @@ impl DecodedFlacFrame {
         Ok(output)
     }
 
+    /// The frame rendered as 16-bit, whatever depth it was written at.
+    ///
+    /// A wider sample is shifted down by the difference rather than refused:
+    /// rendering as 16-bit is well defined from any depth, and every other
+    /// way of asking — `decode_f32`, `FlacDecoder::decode_i16` — answers it.
+    /// Refusing only moves the conversion out to the caller, which is where
+    /// it went wrong before: a 24-bit stream reduced by clamping came back
+    /// as a full-scale square wave.
     pub fn to_i16(&self) -> Result<Vec<i16>, FlacFrameError> {
-        if self.bits_per_sample != 16 {
-            return Err(FlacFrameError::FormatMismatch(format!(
-                "cannot render {}-bit FLAC as a declared S16 frame",
-                self.bits_per_sample
-            )));
-        }
+        let shift = u32::from(self.bits_per_sample.saturating_sub(16));
         Ok(self
             .samples
             .iter()
-            .map(|&sample| sample.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16)
+            .map(|&sample| {
+                (sample >> shift).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+            })
             .collect())
     }
 }
@@ -674,12 +679,6 @@ impl FlacFrameDecoder {
         payload: &[u8],
         output: &mut [i16],
     ) -> Result<usize, FlacFrameError> {
-        if self.config.bits_per_sample != 16 {
-            return Err(FlacFrameError::FormatMismatch(format!(
-                "decoder is configured for {}-bit samples, not S16",
-                self.config.bits_per_sample
-            )));
-        }
         let expected_samples = self.config.sample_count()?;
         if output.len() < expected_samples {
             return Err(FlacFrameError::InvalidInput(format!(
@@ -696,12 +695,6 @@ impl FlacFrameDecoder {
         payload: &[u8],
         output: &mut [i16],
     ) -> Result<usize, FlacFrameError> {
-        if self.config.bits_per_sample != 16 {
-            return Err(FlacFrameError::FormatMismatch(format!(
-                "decoder is configured for {}-bit samples, not S16",
-                self.config.bits_per_sample
-            )));
-        }
         self.decode_i16_impl(payload, output, true)
     }
 
@@ -779,8 +772,10 @@ impl FlacFrameDecoder {
                 output.len()
             )));
         }
+        let shift = u32::from(self.config.bits_per_sample.saturating_sub(16));
         for_each_interleaved_sample(&block, |index, sample| {
-            output[index] = sample.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+            output[index] =
+                (sample >> shift).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
         });
         self.frame_buffer = block.into_buffer();
         Ok(samples)
@@ -1047,6 +1042,38 @@ mod tests {
             );
             assert_eq!(direct, samples);
         }
+    }
+
+    /// Asking a 24-bit frame for 16-bit narrows it rather than refusing or
+    /// saturating. Both renderers answer, and both answer the same.
+    #[test]
+    fn renders_a_24_bit_frame_as_16_bit_at_its_own_level() {
+        let channels = 2;
+        let config = config(channels, 24, 240);
+        let count = config.sample_count().unwrap();
+        // A sixth of 24-bit full scale: far outside i16, so a clamp shows.
+        let samples: Vec<i32> = (0..count)
+            .map(|index| ((index as f64 / 30.0).sin() * 1_398_101.0) as i32)
+            .collect();
+
+        let mut encoder = FlacFrameEncoder::new(config).unwrap();
+        let encoded = encoder.encode_i32(&samples).unwrap();
+
+        let want: Vec<i16> = samples.iter().map(|sample| (sample >> 8) as i16).collect();
+        let mut decoder = FlacFrameDecoder::new(config).unwrap();
+        assert_eq!(
+            decoder.decode(&encoded.payload).unwrap().to_i16().unwrap(),
+            want,
+            "to_i16 did not narrow a 24-bit frame"
+        );
+        let mut direct = vec![0_i16; samples.len()];
+        assert_eq!(
+            decoder
+                .decode_i16_into(&encoded.payload, &mut direct)
+                .unwrap(),
+            samples.len()
+        );
+        assert_eq!(direct, want, "decode_i16_into did not narrow a 24-bit frame");
     }
 
     #[test]

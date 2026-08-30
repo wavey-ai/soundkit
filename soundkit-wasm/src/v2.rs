@@ -585,3 +585,125 @@ mod tests {
         }
     }
 }
+
+/// What the library import does to a track's level, measured through the
+/// real encoder rather than asserted about its shape.
+///
+/// The FLAC branch once returned a full-scale square wave for every source,
+/// and the tests of the day did not notice: they counted frames. A codec
+/// test that never looks at a sample value cannot see a decode that
+/// saturates, so these read the numbers back.
+#[cfg(all(
+    test,
+    feature = "detect",
+    feature = "audio-demux",
+    feature = "aac",
+    feature = "alac",
+    feature = "wav",
+    feature = "opus",
+    feature = "flac"
+))]
+mod library_levels {
+    use crate::v2::SoundKitV2Decoder;
+    use crate::WasmStreamingLibraryEncoder;
+
+    /// A quiet 16-bit stereo WAV: a sixth of full scale, so a decode that
+    /// saturates is unmistakable. 44.1 kHz, because that is the rate the
+    /// normaliser has to resample and the one the fault was found at.
+    fn quiet_wav(rate: u32, seconds: u32) -> Vec<u8> {
+        let frames = (rate * seconds) as usize;
+        let mut pcm = Vec::with_capacity(frames * 4);
+        for index in 0..frames {
+            let t = index as f32 / rate as f32;
+            let left = ((t * 220.0 * std::f32::consts::TAU).sin() * 5_400.0) as i16;
+            let right = ((t * 330.0 * std::f32::consts::TAU).sin() * 5_400.0) as i16;
+            pcm.extend_from_slice(&left.to_le_bytes());
+            pcm.extend_from_slice(&right.to_le_bytes());
+        }
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&pcm);
+        wav
+    }
+
+    fn rms_dbfs(samples: &[i16]) -> f64 {
+        let energy: f64 = samples
+            .iter()
+            .map(|value| f64::from(*value) * f64::from(*value))
+            .sum();
+        let full = 32_768f64;
+        10.0 * (energy / samples.len() as f64 / (full * full))
+            .max(1e-24)
+            .log10()
+    }
+
+    fn decode(stream: &[u8]) -> Vec<i16> {
+        let mut decoder = SoundKitV2Decoder::new();
+        let mut pcm = Vec::new();
+        for slice in stream.chunks(64 * 1024) {
+            for audio in decoder.push(slice).expect("the stream decodes").frames {
+                for pair in audio.data().chunks_exact(2) {
+                    pcm.push(i16::from_le_bytes([pair[0], pair[1]]));
+                }
+            }
+        }
+        pcm
+    }
+
+    /// Both streams a lossless import writes come back at the level that
+    /// went in — the Opus and the 24-bit FLAC beside it.
+    #[test]
+    fn a_lossless_import_keeps_its_level_in_both_streams() {
+        let source = quiet_wav(44_100, 4);
+        // -15.7 dBFS: a sixth of full scale on two tones.
+        let expected = {
+            let pcm: Vec<i16> = source[44..]
+                .chunks_exact(2)
+                .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            rms_dbfs(&pcm)
+        };
+
+        let mut encoder =
+            WasmStreamingLibraryEncoder::new_rust(true).expect("the library encoder starts");
+        let mut opus = Vec::new();
+        let mut flac = Vec::new();
+        for slice in source.chunks(256 * 1024) {
+            let batch = encoder.push_rust(slice).expect("the source encodes");
+            for packet in batch.opus_packets {
+                opus.extend_from_slice(&packet.bytes);
+            }
+            for packet in batch.flac_packets {
+                flac.extend_from_slice(&packet.bytes);
+            }
+        }
+        let batch = encoder.finish_rust().expect("the encode finishes");
+        for packet in batch.opus_packets {
+            opus.extend_from_slice(&packet.bytes);
+        }
+        for packet in batch.flac_packets {
+            flac.extend_from_slice(&packet.bytes);
+        }
+
+        for (name, stream) in [("opus", &opus), ("lossless", &flac)] {
+            let pcm = decode(stream);
+            assert!(!pcm.is_empty(), "the {name} stream decoded to nothing");
+            let level = rms_dbfs(&pcm);
+            assert!(
+                (level - expected).abs() < 3.0,
+                "the {name} stream came back at {level:.2} dBFS from a {expected:.2} dBFS source"
+            );
+        }
+    }
+}
