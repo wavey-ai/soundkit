@@ -7090,3 +7090,73 @@ mod tests {
         )));
     }
 }
+
+/// A stored SoundKit v2 stream, decoded back to interleaved 16-bit PCM.
+///
+/// The browser could already write one of these — the library encoder puts
+/// a track down as framed Opus, and a lossless import as framed FLAC beside
+/// it — but nothing could read one back, so a page that wanted a waveform
+/// or a transport had to deframe and then decode packet by packet, and
+/// arrive at its own answer for how a 24-bit frame becomes 16.
+///
+/// `SoundKitV2Decoder` already answers all of that in one place, including
+/// the width reduction. This is that decoder, reachable.
+#[wasm_bindgen]
+pub struct WasmSoundKitV2Decoder {
+    inner: crate::v2::SoundKitV2Decoder,
+}
+
+#[wasm_bindgen]
+impl WasmSoundKitV2Decoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: crate::v2::SoundKitV2Decoder::new(),
+        }
+    }
+
+    /// Feeds the next slice of the stream and takes whatever it completes.
+    ///
+    /// The stream may be cut anywhere; a frame split across two calls is
+    /// held until the rest of it arrives. Returns interleaved samples,
+    /// empty when the slice completed no frame.
+    pub fn push(&mut self, bytes: &[u8]) -> Result<js_sys::Int16Array, JsValue> {
+        let batch = self.inner.push(bytes).map_err(js_error)?;
+        let mut pcm: Vec<i16> = Vec::new();
+        for audio in batch.frames {
+            let data = audio.data();
+            pcm.reserve(data.len() / 2);
+            for sample in data.chunks_exact(2) {
+                pcm.push(i16::from_le_bytes([sample[0], sample[1]]));
+            }
+        }
+        Ok(js_sys::Int16Array::from(pcm.as_slice()))
+    }
+
+    /// The rate and channel count the last frame declared.
+    #[wasm_bindgen(getter, js_name = sampleRate)]
+    pub fn sample_rate(&self) -> u32 {
+        let rate = self.inner.sample_rate();
+        if rate == 0 { 48_000 } else { rate }
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn channels(&self) -> u8 {
+        self.inner.channels().max(1)
+    }
+
+    #[wasm_bindgen(js_name = bufferedBytes)]
+    pub fn buffered_bytes(&self) -> usize {
+        self.inner.buffered_bytes()
+    }
+
+    pub fn reset(&mut self) {
+        self.inner.reset();
+    }
+}
+
+impl Default for WasmSoundKitV2Decoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -1872,6 +1872,81 @@ export class WasmSoundKitFrameDecoder {
 if (Symbol.dispose) WasmSoundKitFrameDecoder.prototype[Symbol.dispose] = WasmSoundKitFrameDecoder.prototype.free;
 
 /**
+ * A stored SoundKit v2 stream, decoded back to interleaved 16-bit PCM.
+ *
+ * The browser could already write one of these — the library encoder puts
+ * a track down as framed Opus, and a lossless import as framed FLAC beside
+ * it — but nothing could read one back, so a page that wanted a waveform
+ * or a transport had to deframe and then decode packet by packet, and
+ * arrive at its own answer for how a 24-bit frame becomes 16.
+ *
+ * `SoundKitV2Decoder` already answers all of that in one place, including
+ * the width reduction. This is that decoder, reachable.
+ */
+export class WasmSoundKitV2Decoder {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmSoundKitV2DecoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmsoundkitv2decoder_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    bufferedBytes() {
+        const ret = wasm.wasmsoundkitv2decoder_bufferedBytes(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get channels() {
+        const ret = wasm.wasmsoundkitv2decoder_channels(this.__wbg_ptr);
+        return ret;
+    }
+    constructor() {
+        const ret = wasm.wasmsoundkitv2decoder_new();
+        this.__wbg_ptr = ret;
+        WasmSoundKitV2DecoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Feeds the next slice of the stream and takes whatever it completes.
+     *
+     * The stream may be cut anywhere; a frame split across two calls is
+     * held until the rest of it arrives. Returns interleaved samples,
+     * empty when the slice completed no frame.
+     * @param {Uint8Array} bytes
+     * @returns {Int16Array}
+     */
+    push(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsoundkitv2decoder_push(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    reset() {
+        wasm.wasmsoundkitv2decoder_reset(this.__wbg_ptr);
+    }
+    /**
+     * The rate and channel count the last frame declared.
+     * @returns {number}
+     */
+    get sampleRate() {
+        const ret = wasm.wasmsoundkitv2decoder_sampleRate(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) WasmSoundKitV2Decoder.prototype[Symbol.dispose] = WasmSoundKitV2Decoder.prototype.free;
+
+/**
  * Bounded, format-detecting library import pipeline.
  *
  * Encoded source bytes enter Rust once. SoundKit decodes them incrementally,
@@ -2418,6 +2493,10 @@ function __wbg_get_imports() {
             const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
             return ret;
         },
+        __wbg_new_from_slice_6fd7e6a4e2c9de83: function(arg0, arg1) {
+            const ret = new Int16Array(getArrayI16FromWasm0(arg0, arg1));
+            return ret;
+        },
         __wbg_new_from_slice_709ab7061ebcc5da: function(arg0, arg1) {
             const ret = new Float32Array(getArrayF32FromWasm0(arg0, arg1));
             return ret;
@@ -2546,6 +2625,9 @@ const WasmSha256Finalization = (typeof FinalizationRegistry === 'undefined')
 const WasmSoundKitFrameDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmsoundkitframedecoder_free(ptr, 1));
+const WasmSoundKitV2DecoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmsoundkitv2decoder_free(ptr, 1));
 const WasmStreamingLibraryEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmstreaminglibraryencoder_free(ptr, 1));

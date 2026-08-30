@@ -437,6 +437,39 @@ export class WasmSoundKitFrameDecoder {
 }
 
 /**
+ * A stored SoundKit v2 stream, decoded back to interleaved 16-bit PCM.
+ *
+ * The browser could already write one of these — the library encoder puts
+ * a track down as framed Opus, and a lossless import as framed FLAC beside
+ * it — but nothing could read one back, so a page that wanted a waveform
+ * or a transport had to deframe and then decode packet by packet, and
+ * arrive at its own answer for how a 24-bit frame becomes 16.
+ *
+ * `SoundKitV2Decoder` already answers all of that in one place, including
+ * the width reduction. This is that decoder, reachable.
+ */
+export class WasmSoundKitV2Decoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    bufferedBytes(): number;
+    constructor();
+    /**
+     * Feeds the next slice of the stream and takes whatever it completes.
+     *
+     * The stream may be cut anywhere; a frame split across two calls is
+     * held until the rest of it arrives. Returns interleaved samples,
+     * empty when the slice completed no frame.
+     */
+    push(bytes: Uint8Array): Int16Array;
+    reset(): void;
+    readonly channels: number;
+    /**
+     * The rate and channel count the last frame declared.
+     */
+    readonly sampleRate: number;
+}
+
+/**
  * Bounded, format-detecting library import pipeline.
  *
  * Encoded source bytes enter Rust once. SoundKit decodes them incrementally,
@@ -588,6 +621,7 @@ export interface InitOutput {
     readonly __wbg_wasmpcm16wavelibraryencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmsha256_free: (a: number, b: number) => void;
     readonly __wbg_wasmsoundkitframedecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmsoundkitv2decoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmstreaminglibraryencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmvideodecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmwavencoder_free: (a: number, b: number) => void;
@@ -723,6 +757,12 @@ export interface InitOutput {
     readonly wasmsoundkitframedecoder_reset: (a: number) => void;
     readonly wasmsoundkitframedecoder_setDecimalKey: (a: number, b: number, c: number) => [number, number];
     readonly wasmsoundkitframedecoder_setKeyBytes: (a: number, b: number, c: number) => [number, number];
+    readonly wasmsoundkitv2decoder_bufferedBytes: (a: number) => number;
+    readonly wasmsoundkitv2decoder_channels: (a: number) => number;
+    readonly wasmsoundkitv2decoder_new: () => number;
+    readonly wasmsoundkitv2decoder_push: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmsoundkitv2decoder_reset: (a: number) => void;
+    readonly wasmsoundkitv2decoder_sampleRate: (a: number) => number;
     readonly wasmstreaminglibraryencoder_finish: (a: number) => [number, number, number];
     readonly wasmstreaminglibraryencoder_new: (a: number) => [number, number, number];
     readonly wasmstreaminglibraryencoder_newAacLc: (a: number, b: number, c: number) => [number, number, number];
