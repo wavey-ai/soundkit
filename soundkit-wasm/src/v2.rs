@@ -611,14 +611,19 @@ mod library_levels {
     /// saturates is unmistakable. 44.1 kHz, because that is the rate the
     /// normaliser has to resample and the one the fault was found at.
     fn quiet_wav(rate: u32, seconds: u32) -> Vec<u8> {
+        quiet_wav_geometry(rate, seconds, 2)
+    }
+
+    fn quiet_wav_geometry(rate: u32, seconds: u32, channels: u16) -> Vec<u8> {
         let frames = (rate * seconds) as usize;
         let mut pcm = Vec::with_capacity(frames * 4);
         for index in 0..frames {
             let t = index as f32 / rate as f32;
-            let left = ((t * 220.0 * std::f32::consts::TAU).sin() * 5_400.0) as i16;
-            let right = ((t * 330.0 * std::f32::consts::TAU).sin() * 5_400.0) as i16;
-            pcm.extend_from_slice(&left.to_le_bytes());
-            pcm.extend_from_slice(&right.to_le_bytes());
+            for channel in 0..channels {
+                let hertz = if channel == 0 { 220.0 } else { 330.0 };
+                let value = ((t * hertz * std::f32::consts::TAU).sin() * 5_400.0) as i16;
+                pcm.extend_from_slice(&value.to_le_bytes());
+            }
         }
         let mut wav = Vec::new();
         wav.extend_from_slice(b"RIFF");
@@ -626,10 +631,10 @@ mod library_levels {
         wav.extend_from_slice(b"WAVEfmt ");
         wav.extend_from_slice(&16u32.to_le_bytes());
         wav.extend_from_slice(&1u16.to_le_bytes());
-        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
         wav.extend_from_slice(&rate.to_le_bytes());
-        wav.extend_from_slice(&(rate * 4).to_le_bytes());
-        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&(rate * u32::from(channels) * 2).to_le_bytes());
+        wav.extend_from_slice(&(channels * 2).to_le_bytes());
         wav.extend_from_slice(&16u16.to_le_bytes());
         wav.extend_from_slice(b"data");
         wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
@@ -665,7 +670,19 @@ mod library_levels {
     /// went in — the Opus and the 24-bit FLAC beside it.
     #[test]
     fn a_lossless_import_keeps_its_level_in_both_streams() {
-        let source = quiet_wav(44_100, 4);
+        // Every geometry a master arrives in. A path that declares one
+        // sample width in its frame header while feeding the encoder
+        // another decodes quiet or loud by a power of two, and the only
+        // way to see which paths do that is to walk them.
+        for rate in [44_100u32, 48_000, 88_200, 96_000] {
+            for channels in [2u16, 1] {
+                check_level(rate, channels);
+            }
+        }
+    }
+
+    fn check_level(rate: u32, channels: u16) {
+        let source = quiet_wav_geometry(rate, 2, channels);
         // -15.7 dBFS: a sixth of full scale on two tones.
         let expected = {
             let pcm: Vec<i16> = source[44..]
@@ -702,7 +719,8 @@ mod library_levels {
             let level = rms_dbfs(&pcm);
             assert!(
                 (level - expected).abs() < 3.0,
-                "the {name} stream came back at {level:.2} dBFS from a {expected:.2} dBFS source"
+                "{rate} Hz {channels} ch: the {name} stream came back at {level:.2} dBFS \
+                 from a {expected:.2} dBFS source"
             );
         }
     }
