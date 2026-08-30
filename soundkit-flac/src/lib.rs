@@ -254,6 +254,14 @@ impl FlacDecoder {
 }
 
 impl PacketDecoder for FlacDecoder {
+    /// Renders the stream as 16-bit, whatever depth it was written at.
+    ///
+    /// A sample wider than 16 bits is shifted down by the difference, the
+    /// way `decode_f32` divides by the stream's own full scale. Clamping
+    /// instead — which this did — does not narrow a 24-bit sample, it
+    /// saturates it: a quiet track sits around ±1,000,000 at that depth and
+    /// every sample of it came back at ±32,767, a full-scale square wave
+    /// whatever went in.
     fn decode_i16(
         &mut self,
         input: &[u8],
@@ -265,8 +273,10 @@ impl PacketDecoder for FlacDecoder {
             .inner
             .decode_i32(input, &mut self.scratch)
             .map_err(|error| error.to_string())?;
+        let shift = u32::from(self.bits_per_sample().unwrap_or(16).saturating_sub(16));
         for (target, &sample) in output.iter_mut().zip(&self.scratch[..written]) {
-            *target = sample.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+            *target = (sample >> shift)
+                .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
         }
         Ok(written)
     }
@@ -341,5 +351,77 @@ mod tests {
             decoded.extend_from_slice(&block[..written]);
         }
         assert_eq!(decoded, samples);
+    }
+}
+
+#[cfg(test)]
+mod decode_width_tests {
+    use super::*;
+    use crate::frame::{FlacFrameConfig, FlacProfile};
+    use crate::stream::Encoder;
+
+    /// A complete FLAC file — marker, metadata, frames — at one depth.
+    fn encode_file(bits: u8, samples: &[i32]) -> Vec<u8> {
+        let config = FlacFrameConfig::new(48_000, 2, bits, 128, FlacProfile::Balanced).unwrap();
+        let mut encoder = Encoder::new(config).unwrap();
+        let mut packets = Vec::new();
+        for chunk in samples.chunks(config.sample_count().unwrap()) {
+            encoder.encode_i32(chunk, &mut packets).unwrap();
+        }
+        let header = encoder.finish().unwrap().to_vec();
+        let metadata_len = header.len();
+        let mut file = b"fLaC".to_vec();
+        file.extend_from_slice(&header);
+        file.extend_from_slice(&packets[metadata_len..]);
+        file
+    }
+
+    /// Rendering a stream as 16-bit narrows it; it does not saturate it.
+    ///
+    /// A 24-bit stream carries samples far outside `i16`, and reducing them
+    /// by clamping — which this did — returned full scale for every one of
+    /// them: a square wave, the same whatever the audio was.
+    #[test]
+    fn a_wider_stream_renders_as_16_bit_at_its_own_level() {
+        for bits in [16u8, 24] {
+            let full = 1i64 << (bits - 1);
+            // A sixth of full scale, so saturation is unmistakable.
+            let amplitude = (full / 6) as f64;
+            let samples: Vec<i32> = (0..640)
+                .map(|index| ((index as f64 / 30.0).sin() * amplitude) as i32)
+                .collect();
+            let file = encode_file(bits, &samples);
+
+            let mut decoder = FlacDecoder::new();
+            decoder.init().unwrap();
+            let mut out = vec![0i16; 1 << 12];
+            let mut decoded: Vec<i16> = Vec::new();
+            for chunk in file.chunks(64) {
+                let written = decoder.decode_i16(chunk, &mut out, false).unwrap();
+                decoded.extend_from_slice(&out[..written]);
+                loop {
+                    let written = decoder.decode_i16(&[], &mut out, false).unwrap();
+                    if written == 0 {
+                        break;
+                    }
+                    decoded.extend_from_slice(&out[..written]);
+                }
+            }
+
+            let shift = u32::from(bits.saturating_sub(16));
+            let peak = decoded.iter().map(|value| i32::from(*value).abs()).max().unwrap_or(0);
+            let expected = samples.iter().map(|value| (value >> shift).abs()).max().unwrap_or(0);
+            assert_eq!(
+                decoded.len(),
+                samples.len(),
+                "{bits}-bit: got {} samples of {}",
+                decoded.len(),
+                samples.len()
+            );
+            assert!(
+                (peak - expected).abs() <= 1,
+                "{bits}-bit: went in peaking at {expected}, came back at {peak}"
+            );
+        }
     }
 }

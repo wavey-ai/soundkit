@@ -191,39 +191,21 @@ impl SoundKitV2Decoder {
             }
             #[cfg(feature = "flac")]
             (Some(Codec::Flac(decoder)), EncodingFlag::FLAC) => {
-                // Decoded at the stream's own depth, then brought down to
-                // 16 by the frame's declared width. The library writes the
-                // lossless copy as 24-bit, and `decode_i16` reduces a wider
-                // sample by clamping it — which turns every sample of a
-                // quiet track into full scale and hands back a square wave.
-                let mut out = vec![0i32; 1 << 16];
+                // The library writes the lossless copy 24-bit, so this is
+                // not a stream that is already 16. `decode_i16` renders it
+                // at the depth its STREAMINFO declares, which is the one
+                // derived from this frame's own header.
+                let mut out = vec![0i16; 1 << 16];
                 let written = decoder
-                    .decode_i32(payload, &mut out, false)
+                    .decode_i16(payload, &mut out, false)
                     .map_err(|error| error.to_string())?;
-                Ok(i32s_to_i16_le_bytes(&out[..written], bits))
+                Ok(i16s_to_le_bytes(&out[..written]))
             }
             _ => Err(format!(
                 "no decoder is standing for {encoding:?} with {channels} channels"
             )),
         }
     }
-}
-
-/// Interleaved samples at `bits` wide, as 16-bit little-endian bytes.
-///
-/// A sample wider than 16 bits is shifted down, not clipped: the low bits
-/// are what a 16-bit rendering has to lose, and taking the value's range
-/// away instead loses the audio.
-#[cfg(feature = "flac")]
-fn i32s_to_i16_le_bytes(samples: &[i32], bits: u8) -> Vec<u8> {
-    let shift = u32::from(bits.saturating_sub(16));
-    let mut bytes = Vec::with_capacity(samples.len() * 2);
-    for sample in samples {
-        let scaled = sample >> shift;
-        let value = scaled.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes
 }
 
 fn i16s_to_le_bytes(samples: &[i16]) -> Vec<u8> {
