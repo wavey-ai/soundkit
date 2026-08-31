@@ -299,6 +299,15 @@ export class WasmLibraryImport {
      */
     readonly drained: boolean;
     /**
+     * How far through the source this is, from zero to one.
+     *
+     * The encoder only knows a frame count once it has decoded far enough
+     * to have one, and an indexed source knows its position from the
+     * start — so the honest number comes from here rather than from the
+     * caller guessing at bytes it did not choose to read.
+     */
+    readonly progress: number;
+    /**
      * What the source turned out to be: `sequential` or `mp4`.
      */
     readonly shape: string;
@@ -746,6 +755,7 @@ export interface InitOutput {
     readonly wasmlibraryimport_drained: (a: number) => number;
     readonly wasmlibraryimport_new: (a: any, b: number, c: number) => [number, number, number];
     readonly wasmlibraryimport_process: (a: number, b: number) => [number, number, number];
+    readonly wasmlibraryimport_progress: (a: number) => number;
     readonly wasmlibraryimport_shape: (a: number) => [number, number];
     readonly wasmmp4mediademuxer_flush: (a: number) => [number, number, number];
     readonly wasmmp4mediademuxer_new: () => number;

@@ -7190,6 +7190,8 @@ pub struct WasmLibraryImport {
     size: u64,
     encoder: WasmStreamingLibraryEncoder,
     source: LibraryImportSource,
+    done: usize,
+    total: usize,
 }
 
 #[cfg(all(
@@ -7235,6 +7237,8 @@ impl WasmLibraryImport {
             size,
             encoder: WasmStreamingLibraryEncoder::new(preserve_lossless)?,
             source: LibraryImportSource::Sequential { at: 0 },
+            done: 0,
+            total: 0,
         };
         import.resolve_source(preserve_lossless)?;
         Ok(import)
@@ -7271,32 +7275,55 @@ impl WasmLibraryImport {
                 track_id,
                 mut at,
             } => {
-                let mut last = JsValue::NULL;
+                // A budget's worth of samples, merged into one batch.
+                // Returning only the last one throws the rest away — the
+                // index still describes the whole programme, so the stream
+                // comes out a fraction of its length with a seek table that
+                // insists otherwise. Returning one sample per call is
+                // correct but costs a boundary crossing each time, and a
+                // three-minute movie is ten thousand of them.
+                let mut batches: Vec<JsValue> = Vec::new();
                 let mut spent = 0usize;
                 while at < index.samples.len() && spent < budget {
                     let sample = &index.samples[at];
-                    if sample.track_id != track_id
-                        || sample.kind != MediaTrackKind::Audio
-                    {
+                    if sample.track_id != track_id || sample.kind != MediaTrackKind::Audio {
                         at += 1;
                         continue;
                     }
                     let bytes = self.read_range(sample.absolute_offset, sample.size as usize)?;
-                    spent += bytes.len();
-                    last = encode_indexed_aac_sample(&index, at, &bytes, &mut self.encoder)?;
+                    spent += bytes.len().max(1);
+                    batches.push(encode_indexed_aac_sample(&index, at, &bytes, &mut self.encoder)?);
                     at += 1;
                 }
+                self.done = at;
+                self.total = index.samples.len();
                 self.source = if at >= index.samples.len() {
                     LibraryImportSource::Done
                 } else {
                     LibraryImportSource::Mp4 { index, track_id, at }
                 };
-                if last.is_null() {
-                    return self.process(budget);
-                }
-                Ok(last)
+                merge_library_batches(batches)
             }
             LibraryImportSource::Done => self.encoder.finish(),
+        }
+    }
+
+    /// How far through the source this is, from zero to one.
+    ///
+    /// The encoder only knows a frame count once it has decoded far enough
+    /// to have one, and an indexed source knows its position from the
+    /// start — so the honest number comes from here rather than from the
+    /// caller guessing at bytes it did not choose to read.
+    #[wasm_bindgen(getter)]
+    pub fn progress(&self) -> f64 {
+        match &self.source {
+            LibraryImportSource::Sequential { at } => {
+                if self.size == 0 { 0.0 } else { *at as f64 / self.size as f64 }
+            }
+            LibraryImportSource::Mp4 { .. } => {
+                if self.total == 0 { 0.0 } else { self.done as f64 / self.total as f64 }
+            }
+            LibraryImportSource::Done => 1.0,
         }
     }
 
@@ -7453,4 +7480,50 @@ fn encode_indexed_aac_sample(
         None => None,
     };
     encoder.encode_partial_audio(decoded)
+}
+
+/// Several encode batches as one.
+///
+/// Each carries its own packets and its own running counts; merged, the
+/// packets run in order and the counts are the last ones seen, which is
+/// what a caller draining a source expects to receive.
+#[cfg(all(feature = "wav", feature = "opus", feature = "flac"))]
+fn merge_library_batches(batches: Vec<JsValue>) -> Result<JsValue, JsValue> {
+    let merged = Object::new();
+    let opus = Array::new();
+    let flac = Array::new();
+    let mut carried = false;
+    for batch in &batches {
+        let opus_packets = Reflect::get(batch, &JsValue::from_str("opusPackets"))?;
+        if let Ok(list) = opus_packets.dyn_into::<Array>() {
+            for packet in list.iter() {
+                opus.push(&packet);
+            }
+        }
+        let flac_packets = Reflect::get(batch, &JsValue::from_str("flacPackets"))?;
+        if let Ok(list) = flac_packets.dyn_into::<Array>() {
+            for packet in list.iter() {
+                flac.push(&packet);
+            }
+        }
+        for key in [
+            "done",
+            "completedFrames",
+            "frameCount",
+            "sampleRate",
+            "channels",
+            "opusIndexBytes",
+            "flacIndexBytes",
+        ] {
+            let value = Reflect::get(batch, &JsValue::from_str(key))?;
+            if !value.is_undefined() {
+                Reflect::set(&merged, &JsValue::from_str(key), &value)?;
+            }
+        }
+        carried = true;
+    }
+    let _ = carried;
+    Reflect::set(&merged, &JsValue::from_str("opusPackets"), &opus)?;
+    Reflect::set(&merged, &JsValue::from_str("flacPackets"), &flac)?;
+    Ok(merged.into())
 }

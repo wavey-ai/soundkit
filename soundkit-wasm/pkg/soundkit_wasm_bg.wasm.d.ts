@@ -115,6 +115,7 @@ export const wasmflacframeencoder_sampleCount: (a: number) => number;
 export const wasmlibraryimport_drained: (a: number) => number;
 export const wasmlibraryimport_new: (a: any, b: number, c: number) => [number, number, number];
 export const wasmlibraryimport_process: (a: number, b: number) => [number, number, number];
+export const wasmlibraryimport_progress: (a: number) => number;
 export const wasmlibraryimport_shape: (a: number) => [number, number];
 export const wasmmp4mediademuxer_flush: (a: number) => [number, number, number];
 export const wasmmp4mediademuxer_new: () => number;

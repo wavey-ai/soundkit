@@ -1196,6 +1196,19 @@ export class WasmLibraryImport {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
+     * How far through the source this is, from zero to one.
+     *
+     * The encoder only knows a frame count once it has decoded far enough
+     * to have one, and an indexed source knows its position from the
+     * start — so the honest number comes from here rather than from the
+     * caller guessing at bytes it did not choose to read.
+     * @returns {number}
+     */
+    get progress() {
+        const ret = wasm.wasmlibraryimport_progress(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * What the source turned out to be: `sequential` or `mp4`.
      * @returns {string}
      */
@@ -2541,8 +2554,8 @@ function __wbg_get_imports() {
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
-        __wbg___wbindgen_is_null_7d13f41e1a2d5140: function(arg0) {
-            const ret = arg0 === null;
+        __wbg___wbindgen_is_undefined_6cff064c44e0d823: function(arg0) {
+            const ret = arg0 === undefined;
             return ret;
         },
         __wbg___wbindgen_memory_5dc2a138835b0f8e: function() {
@@ -2564,11 +2577,27 @@ function __wbg_get_imports() {
             const ret = arg0.call(arg1, arg2, arg3);
             return ret;
         }, arguments); },
+        __wbg_get_971a0c45d172643f: function() { return handleError(function (arg0, arg1) {
+            const ret = Reflect.get(arg0, arg1);
+            return ret;
+        }, arguments); },
+        __wbg_get_unchecked_e20b893aeafc3fca: function(arg0, arg1) {
+            const ret = arg0[arg1 >>> 0];
+            return ret;
+        },
+        __wbg_isArray_6339f732981044bf: function(arg0) {
+            const ret = Array.isArray(arg0);
+            return ret;
+        },
         __wbg_length_1009454859bb3e03: function(arg0) {
             const ret = arg0.length;
             return ret;
         },
         __wbg_length_36bd29c6848c2144: function(arg0) {
+            const ret = arg0.length;
+            return ret;
+        },
+        __wbg_length_ecfa2c63d3d0d82c: function(arg0) {
             const ret = arg0.length;
             return ret;
         },
