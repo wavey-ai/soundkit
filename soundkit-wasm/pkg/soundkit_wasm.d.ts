@@ -271,6 +271,40 @@ export class WasmFlacFrameEncoder {
 }
 
 /**
+ * A library import that reads its source itself.
+ *
+ * Every other way in makes the caller decide how a file should be read,
+ * and that decision is not the caller's to make: whether a source can be
+ * pushed from the front or has to be indexed first is a property of the
+ * container, which is exactly what this crate knows and JavaScript does
+ * not. A QuickTime file keeps its sample table at the end, so streaming it
+ * never reaches the table; feeding the table early moves every offset it
+ * records. Both mistakes are avoidable only from in here.
+ *
+ * So the caller hands over a way to read bytes and nothing else. `read` is
+ * called as `read(offset, length)` and returns those bytes — in a worker,
+ * an OPFS sync access handle answers that directly. Rust detects the
+ * container, seeks where it must, and drives the samples.
+ */
+export class WasmLibraryImport {
+    free(): void;
+    [Symbol.dispose](): void;
+    constructor(read: Function, size: number, preserve_lossless: boolean);
+    /**
+     * Pumps one bounded unit and returns the same batch `push` returns.
+     */
+    process(maximum_bytes: number): any;
+    /**
+     * True once every byte the programme needs has been read.
+     */
+    readonly drained: boolean;
+    /**
+     * What the source turned out to be: `sequential` or `mp4`.
+     */
+    readonly shape: string;
+}
+
+/**
  * Streaming Rust fragmented-MP4/CMAF audio-and-video demuxer.
  */
 export class WasmMp4MediaDemuxer {
@@ -611,6 +645,7 @@ export interface InitOutput {
     readonly __wbg_wasmflacencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmflacframedecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmflacframeencoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmlibraryimport_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediademuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediaindex_free: (a: number, b: number) => void;
     readonly __wbg_wasmmxfmediademuxer_free: (a: number, b: number) => void;
@@ -708,6 +743,10 @@ export interface InitOutput {
     readonly wasmflacframeencoder_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly wasmflacframeencoder_reset: (a: number) => void;
     readonly wasmflacframeencoder_sampleCount: (a: number) => number;
+    readonly wasmlibraryimport_drained: (a: number) => number;
+    readonly wasmlibraryimport_new: (a: any, b: number, c: number) => [number, number, number];
+    readonly wasmlibraryimport_process: (a: number, b: number) => [number, number, number];
+    readonly wasmlibraryimport_shape: (a: number) => [number, number];
     readonly wasmmp4mediademuxer_flush: (a: number) => [number, number, number];
     readonly wasmmp4mediademuxer_new: () => number;
     readonly wasmmp4mediademuxer_pcmTrim: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
@@ -813,11 +852,11 @@ export interface InitOutput {
     readonly dav1d_version: () => number;
     readonly dav1d_version_api: () => number;
     readonly dav1d_set_cpu_flags_mask: (a: number) => void;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_start: () => void;

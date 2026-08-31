@@ -20,6 +20,9 @@ bench-ablate-synth = []
 
 [dev-dependencies]
 rusty_aac = { version = "0.5.0", default-features = false }
+# Only to read a real container in the local-fixture test; the decoder
+# itself does not demux.
+soundkit-audio-demux = { path = "../soundkit-audio-demux", default-features = false, features = ["mp4"] }
 
 [target.'cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))'.dependencies]
 rustfft = "6.4.1"

@@ -1135,6 +1135,86 @@ export class WasmFlacFrameEncoder {
 if (Symbol.dispose) WasmFlacFrameEncoder.prototype[Symbol.dispose] = WasmFlacFrameEncoder.prototype.free;
 
 /**
+ * A library import that reads its source itself.
+ *
+ * Every other way in makes the caller decide how a file should be read,
+ * and that decision is not the caller's to make: whether a source can be
+ * pushed from the front or has to be indexed first is a property of the
+ * container, which is exactly what this crate knows and JavaScript does
+ * not. A QuickTime file keeps its sample table at the end, so streaming it
+ * never reaches the table; feeding the table early moves every offset it
+ * records. Both mistakes are avoidable only from in here.
+ *
+ * So the caller hands over a way to read bytes and nothing else. `read` is
+ * called as `read(offset, length)` and returns those bytes — in a worker,
+ * an OPFS sync access handle answers that directly. Rust detects the
+ * container, seeks where it must, and drives the samples.
+ */
+export class WasmLibraryImport {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmLibraryImportFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmlibraryimport_free(ptr, 0);
+    }
+    /**
+     * True once every byte the programme needs has been read.
+     * @returns {boolean}
+     */
+    get drained() {
+        const ret = wasm.wasmlibraryimport_drained(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * @param {Function} read
+     * @param {number} size
+     * @param {boolean} preserve_lossless
+     */
+    constructor(read, size, preserve_lossless) {
+        const ret = wasm.wasmlibraryimport_new(read, size, preserve_lossless);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmLibraryImportFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Pumps one bounded unit and returns the same batch `push` returns.
+     * @param {number} maximum_bytes
+     * @returns {any}
+     */
+    process(maximum_bytes) {
+        const ret = wasm.wasmlibraryimport_process(this.__wbg_ptr, maximum_bytes);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * What the source turned out to be: `sequential` or `mp4`.
+     * @returns {string}
+     */
+    get shape() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmlibraryimport_shape(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+}
+if (Symbol.dispose) WasmLibraryImport.prototype[Symbol.dispose] = WasmLibraryImport.prototype.free;
+
+/**
  * Streaming Rust fragmented-MP4/CMAF audio-and-video demuxer.
  */
 export class WasmMp4MediaDemuxer {
@@ -2454,6 +2534,17 @@ export function wasmMemoryBytes() {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg___wbindgen_debug_string_a57024b9c6e4a48b: function(arg0, arg1) {
+            const ret = debugString(arg1);
+            const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+        },
+        __wbg___wbindgen_is_null_7d13f41e1a2d5140: function(arg0) {
+            const ret = arg0 === null;
+            return ret;
+        },
         __wbg___wbindgen_memory_5dc2a138835b0f8e: function() {
             const ret = wasm.memory;
             return ret;
@@ -2469,7 +2560,15 @@ function __wbg_get_imports() {
             const ret = arg0.byteLength;
             return ret;
         },
+        __wbg_call_0f2a9af232c18fd2: function() { return handleError(function (arg0, arg1, arg2, arg3) {
+            const ret = arg0.call(arg1, arg2, arg3);
+            return ret;
+        }, arguments); },
         __wbg_length_1009454859bb3e03: function(arg0) {
+            const ret = arg0.length;
+            return ret;
+        },
+        __wbg_length_36bd29c6848c2144: function(arg0) {
             const ret = arg0.length;
             return ret;
         },
@@ -2504,6 +2603,9 @@ function __wbg_get_imports() {
         __wbg_new_with_length_3ffc1c56427c525c: function(arg0) {
             const ret = new Uint8Array(arg0 >>> 0);
             return ret;
+        },
+        __wbg_prototypesetcall_de8e0d9553586985: function(arg0, arg1, arg2) {
+            Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), arg2);
         },
         __wbg_push_adb0107829f02d75: function(arg0, arg1) {
             const ret = arg0.push(arg1);
@@ -2595,6 +2697,9 @@ const WasmFlacFrameDecoderFinalization = (typeof FinalizationRegistry === 'undef
 const WasmFlacFrameEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmflacframeencoder_free(ptr, 1));
+const WasmLibraryImportFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmlibraryimport_free(ptr, 1));
 const WasmMp4MediaDemuxerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmmp4mediademuxer_free(ptr, 1));
@@ -2653,6 +2758,71 @@ function _assertClass(instance, klass) {
     }
 }
 
+function debugString(val) {
+    // primitive types
+    const type = typeof val;
+    if (type == 'number' || type == 'boolean' || val == null) {
+        return  `${val}`;
+    }
+    if (type == 'string') {
+        return `"${val}"`;
+    }
+    if (type == 'symbol') {
+        const description = val.description;
+        if (description == null) {
+            return 'Symbol';
+        } else {
+            return `Symbol(${description})`;
+        }
+    }
+    if (type == 'function') {
+        const name = val.name;
+        if (typeof name == 'string' && name.length > 0) {
+            return `Function(${name})`;
+        } else {
+            return 'Function';
+        }
+    }
+    // objects
+    if (Array.isArray(val)) {
+        const length = val.length;
+        let debug = '[';
+        if (length > 0) {
+            debug += debugString(val[0]);
+        }
+        for(let i = 1; i < length; i++) {
+            debug += ', ' + debugString(val[i]);
+        }
+        debug += ']';
+        return debug;
+    }
+    // Test for built-in
+    const builtInMatches = /\[object ([^\]]+)\]/.exec(toString.call(val));
+    let className;
+    if (builtInMatches && builtInMatches.length > 1) {
+        className = builtInMatches[1];
+    } else {
+        // Failed to match the standard '[object ClassName]'
+        return toString.call(val);
+    }
+    if (className == 'Object') {
+        // we're a user defined class or Object
+        // JSON.stringify avoids problems with cycles, and is generally much
+        // easier than looping through ownProperties of `val`.
+        try {
+            return 'Object(' + JSON.stringify(val) + ')';
+        } catch (_) {
+            return 'Object';
+        }
+    }
+    // errors
+    if (val instanceof Error) {
+        return `${val.name}: ${val.message}\n${val.stack}`;
+    }
+    // TODO we could test for more things here, like `Set`s and `Map`s.
+    return className;
+}
+
 function getArrayF32FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
@@ -2671,6 +2841,14 @@ function getArrayI32FromWasm0(ptr, len) {
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
+
+let cachedDataViewMemory0 = null;
+function getDataViewMemory0() {
+    if (cachedDataViewMemory0 === null || cachedDataViewMemory0.buffer.detached === true || (cachedDataViewMemory0.buffer.detached === undefined && cachedDataViewMemory0.buffer !== wasm.memory.buffer)) {
+        cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
+    }
+    return cachedDataViewMemory0;
 }
 
 let cachedFloat32ArrayMemory0 = null;
@@ -2839,6 +3017,7 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedDataViewMemory0 = null;
     cachedFloat32ArrayMemory0 = null;
     cachedInt16ArrayMemory0 = null;
     cachedInt32ArrayMemory0 = null;

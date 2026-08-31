@@ -7160,3 +7160,297 @@ impl Default for WasmSoundKitV2Decoder {
         Self::new()
     }
 }
+
+/// A library import that reads its source itself.
+///
+/// Every other way in makes the caller decide how a file should be read,
+/// and that decision is not the caller's to make: whether a source can be
+/// pushed from the front or has to be indexed first is a property of the
+/// container, which is exactly what this crate knows and JavaScript does
+/// not. A QuickTime file keeps its sample table at the end, so streaming it
+/// never reaches the table; feeding the table early moves every offset it
+/// records. Both mistakes are avoidable only from in here.
+///
+/// So the caller hands over a way to read bytes and nothing else. `read` is
+/// called as `read(offset, length)` and returns those bytes — in a worker,
+/// an OPFS sync access handle answers that directly. Rust detects the
+/// container, seeks where it must, and drives the samples.
+#[cfg(all(
+    feature = "detect",
+    feature = "audio-demux",
+    feature = "aac",
+    feature = "alac",
+    feature = "wav",
+    feature = "opus",
+    feature = "flac"
+))]
+#[wasm_bindgen]
+pub struct WasmLibraryImport {
+    read: js_sys::Function,
+    size: u64,
+    encoder: WasmStreamingLibraryEncoder,
+    source: LibraryImportSource,
+}
+
+#[cfg(all(
+    feature = "detect",
+    feature = "audio-demux",
+    feature = "aac",
+    feature = "alac",
+    feature = "wav",
+    feature = "opus",
+    feature = "flac"
+))]
+enum LibraryImportSource {
+    /// Pushed from the front; the codec works out what it is.
+    Sequential { at: u64 },
+    /// Indexed first, then read sample by sample wherever they live.
+    Mp4 { index: Mp4MediaIndex, track_id: u64, at: usize },
+    Done,
+}
+
+#[cfg(all(
+    feature = "detect",
+    feature = "audio-demux",
+    feature = "aac",
+    feature = "alac",
+    feature = "wav",
+    feature = "opus",
+    feature = "flac"
+))]
+#[wasm_bindgen]
+impl WasmLibraryImport {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        read: js_sys::Function,
+        size: f64,
+        preserve_lossless: bool,
+    ) -> Result<WasmLibraryImport, JsValue> {
+        let size = size.max(0.0) as u64;
+        if size == 0 {
+            return Err(js_error("the source is empty".to_owned()));
+        }
+        let mut import = WasmLibraryImport {
+            read,
+            size,
+            encoder: WasmStreamingLibraryEncoder::new(preserve_lossless)?,
+            source: LibraryImportSource::Sequential { at: 0 },
+        };
+        import.resolve_source(preserve_lossless)?;
+        Ok(import)
+    }
+
+    /// What the source turned out to be: `sequential` or `mp4`.
+    #[wasm_bindgen(getter)]
+    pub fn shape(&self) -> String {
+        match self.source {
+            LibraryImportSource::Sequential { .. } => "sequential".to_owned(),
+            LibraryImportSource::Mp4 { .. } => "mp4".to_owned(),
+            LibraryImportSource::Done => "done".to_owned(),
+        }
+    }
+
+    /// Pumps one bounded unit and returns the same batch `push` returns.
+    pub fn process(&mut self, maximum_bytes: usize) -> Result<JsValue, JsValue> {
+        let budget = maximum_bytes.clamp(64 * 1024, 4 * 1024 * 1024);
+        match std::mem::replace(&mut self.source, LibraryImportSource::Done) {
+            LibraryImportSource::Sequential { at } => {
+                let take = budget.min((self.size - at) as usize);
+                let bytes = self.read_range(at, take)?;
+                let batch = self.encoder.push(&bytes)?;
+                let next = at + take as u64;
+                self.source = if next >= self.size {
+                    LibraryImportSource::Done
+                } else {
+                    LibraryImportSource::Sequential { at: next }
+                };
+                Ok(batch)
+            }
+            LibraryImportSource::Mp4 {
+                index,
+                track_id,
+                mut at,
+            } => {
+                let mut last = JsValue::NULL;
+                let mut spent = 0usize;
+                while at < index.samples.len() && spent < budget {
+                    let sample = &index.samples[at];
+                    if sample.track_id != track_id
+                        || sample.kind != MediaTrackKind::Audio
+                    {
+                        at += 1;
+                        continue;
+                    }
+                    let bytes = self.read_range(sample.absolute_offset, sample.size as usize)?;
+                    spent += bytes.len();
+                    last = encode_indexed_aac_sample(&index, at, &bytes, &mut self.encoder)?;
+                    at += 1;
+                }
+                self.source = if at >= index.samples.len() {
+                    LibraryImportSource::Done
+                } else {
+                    LibraryImportSource::Mp4 { index, track_id, at }
+                };
+                if last.is_null() {
+                    return self.process(budget);
+                }
+                Ok(last)
+            }
+            LibraryImportSource::Done => self.encoder.finish(),
+        }
+    }
+
+    /// True once every byte the programme needs has been read.
+    #[wasm_bindgen(getter)]
+    pub fn drained(&self) -> bool {
+        matches!(self.source, LibraryImportSource::Done)
+    }
+}
+
+#[cfg(all(
+    feature = "detect",
+    feature = "audio-demux",
+    feature = "aac",
+    feature = "alac",
+    feature = "wav",
+    feature = "opus",
+    feature = "flac"
+))]
+impl WasmLibraryImport {
+    /// Bytes from the caller's reader, checked against what was asked for.
+    fn read_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, JsValue> {
+        if length == 0 {
+            return Ok(Vec::new());
+        }
+        let end = offset
+            .checked_add(length as u64)
+            .ok_or_else(|| js_error("source range overflows".to_owned()))?;
+        if end > self.size {
+            return Err(js_error(format!(
+                "source range {offset}..{end} runs past the {} byte source",
+                self.size
+            )));
+        }
+        let bytes = self
+            .read
+            .call2(
+                &JsValue::NULL,
+                &JsValue::from_f64(offset as f64),
+                &JsValue::from_f64(length as f64),
+            )
+            .map_err(|error| {
+                js_error(format!("the source reader failed: {error:?}"))
+            })?;
+        let array = Uint8Array::new(&bytes);
+        if array.length() as usize != length {
+            return Err(js_error(format!(
+                "the source reader returned {} bytes for a {length} byte range",
+                array.length()
+            )));
+        }
+        Ok(array.to_vec())
+    }
+
+    /// Decides how this source has to be read, by looking at it.
+    ///
+    /// A MOV/MP4 is indexed: its sample table has to be in hand before any
+    /// sample can be located, and it may sit anywhere in the file. Anything
+    /// else is pushed from the front and the codec detects itself.
+    fn resolve_source(&mut self, preserve_lossless: bool) -> Result<(), JsValue> {
+        let probe = self.read_range(0, 16.min(self.size as usize))?;
+        if !looks_like_mp4_source(&probe) {
+            self.source = LibraryImportSource::Sequential { at: 0 };
+            return Ok(());
+        }
+
+        // Walk the top-level boxes for `moov`, reading only their headers.
+        let mut offset = 0u64;
+        let mut moov: Option<(u64, u64)> = None;
+        while offset < self.size {
+            let header = self.read_range(offset, 32.min((self.size - offset) as usize))?;
+            if header.len() < 8 {
+                break;
+            }
+            let Ok(box_range) = inspect_mp4_top_level_box(&header, offset, self.size) else {
+                break;
+            };
+            if box_range.box_type == *b"moov" {
+                moov = Some((box_range.payload_offset, box_range.payload_size));
+                break;
+            }
+            if box_range.end <= offset {
+                break;
+            }
+            offset = box_range.end;
+        }
+
+        let Some((from, length)) = moov else {
+            // A movie with no index is not something to guess at.
+            self.source = LibraryImportSource::Sequential { at: 0 };
+            return Ok(());
+        };
+
+        let payload = self.read_range(from, length as usize)?;
+        let index = Mp4MediaIndex::from_moov_payload(&payload).map_err(js_error)?;
+        let track = index
+            .tracks
+            .iter()
+            .find(|track| track.kind == MediaTrackKind::Audio && track.codec == "aac")
+            .ok_or_else(|| js_error("this MP4 has no AAC audio track".to_owned()))?;
+        let cookie = track.codec_private.clone();
+        let track_id = track.track_id;
+        self.encoder = WasmStreamingLibraryEncoder::new_aac_lc(&cookie, preserve_lossless)?;
+        self.source = LibraryImportSource::Mp4 {
+            index,
+            track_id,
+            at: 0,
+        };
+        Ok(())
+    }
+}
+
+/// Whether the first bytes look like a MOV/MP4 top-level box.
+#[cfg(feature = "audio-demux")]
+fn looks_like_mp4_source(bytes: &[u8]) -> bool {
+    if bytes.len() < 8 {
+        return false;
+    }
+    matches!(
+        &bytes[4..8],
+        b"ftyp" | b"moov" | b"mdat" | b"wide" | b"free" | b"skip" | b"pnot"
+    )
+}
+
+/// One indexed AAC sample, decoded, trimmed by the edit list, and encoded.
+///
+/// The same work `WasmMp4MediaIndex::encodeAacLcSample` does, reached from
+/// inside rather than across the boundary — nothing but this sample's bytes
+/// ever moves.
+#[cfg(all(feature = "audio-demux", feature = "aac", feature = "opus", feature = "flac"))]
+fn encode_indexed_aac_sample(
+    index: &Mp4MediaIndex,
+    at: usize,
+    source_bytes: &[u8],
+    encoder: &mut WasmStreamingLibraryEncoder,
+) -> Result<JsValue, JsValue> {
+    let packet = index
+        .packet_from_sample_bytes(at, source_bytes)
+        .map_err(js_error)?;
+    if packet.kind != MediaTrackKind::Audio || packet.codec != "aac" {
+        return Err(js_error(format!("MP4 sample {at} is not AAC audio")));
+    }
+    let decoded = encoder
+        .decode_aac_lc_packet(&packet.data)
+        .map_err(js_error)?;
+    let bytes_per_frame = usize::from(decoded.bits_per_sample().div_ceil(8))
+        .checked_mul(usize::from(decoded.channel_count()))
+        .ok_or_else(|| js_error("AAC-LC PCM frame size overflow".to_owned()))?;
+    let decoded_frames = u32::try_from(decoded.data().len() / bytes_per_frame)
+        .map_err(|_| js_error("AAC-LC packet frame count exceeds u32".to_owned()))?;
+    let decoded = match index.pcm_packet_trim(at, decoded_frames).map_err(js_error)? {
+        Some(trim) => trim_interleaved_audio(decoded, trim.source_frame_start, trim.frame_count)
+            .map_err(js_error)?,
+        None => None,
+    };
+    encoder.encode_partial_audio(decoded)
+}
