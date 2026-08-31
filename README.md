@@ -144,6 +144,12 @@ Automatic detection retains at most 64 KiB. Browser push calls accept at most 4 
 The current artist-delivery matrix covers H.264, HEVC, VP9, AV1, ProRes, DNxHD, and DNxHR.
 See [`docs/media-pipeline.md`](docs/media-pipeline.md) for exact container, profile, audio, and conformance coverage.
 
+With the `soundkit-audio-demux` `decode-video` feature, MOV and MP4 sources
+produce a sealed keyframe timeline. The timeline lists every sync sample with
+its presentation time. Callers decode a capped subset to keep the work light.
+`decode_mp4_keyframes_from_file` reads only the `moov` box and the selected
+sample ranges, so multi-gigabyte sources do not enter memory whole.
+
 ## Decode Pipeline APIs
 
 | Need | API |

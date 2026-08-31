@@ -12,6 +12,15 @@ mp4 = ["dep:soundkit-video"]
 webm = ["dep:soundkit-webm"]
 mpeg-ts = ["dep:access-unit"]
 mxf = ["dep:soundkit-video"]
+decode-video = [
+  "mp4",
+  "soundkit-video/h264",
+  "soundkit-video/hevc",
+  "soundkit-video/vp9",
+  "soundkit-video/av1",
+  "soundkit-video/prores",
+  "soundkit-video/dnx",
+]
 
 [dependencies]
 access-unit = { git = "https://github.com/wavey-ai/access-unit.git", branch = "main", optional = true }
@@ -28,6 +37,10 @@ required-features = ["mp4"]
 [[example]]
 name = "extract-mp4-track"
 required-features = ["mp4"]
+
+[[example]]
+name = "decode-mp4-keyframes"
+required-features = ["decode-video"]
 
 [[example]]
 name = "inspect-mxf-media"

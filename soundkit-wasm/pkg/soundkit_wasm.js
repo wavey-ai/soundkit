@@ -1228,6 +1228,136 @@ export class WasmLibraryImport {
 if (Symbol.dispose) WasmLibraryImport.prototype[Symbol.dispose] = WasmLibraryImport.prototype.free;
 
 /**
+ * A MOV/MP4 video keyframe timeline, decoded from a seekable source reader.
+ *
+ * Constructing the index reads only the `moov` box; listing the timeline is
+ * the sync-sample map, which carries no pixels. `frame()` decodes one
+ * keyframe at a time, so a browser builds a filmstrip by walking the
+ * timeline without ever holding the whole film in WASM memory.
+ */
+export class WasmMp4Keyframes {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmMp4KeyframesFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmmp4keyframes_free(ptr, 0);
+    }
+    /**
+     * @returns {string}
+     */
+    get codec() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmmp4keyframes_codec(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    get codecId() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmmp4keyframes_codecId(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Decode one keyframe into pixel planes, oldest and newest decoders
+     * unpacked the same way `WasmVideoDecoder::decode` does.
+     * @param {number} position
+     * @returns {Array<any>}
+     */
+    frame(position) {
+        const ret = wasm.wasmmp4keyframes_frame(this.__wbg_ptr, position);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @returns {number}
+     */
+    get height() {
+        const ret = wasm.wasmmp4keyframes_height(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * One entry of the timeline: where the keyframe sits in the film.
+     * @param {number} index
+     * @returns {object}
+     */
+    keyframe(index) {
+        const ret = wasm.wasmmp4keyframes_keyframe(this.__wbg_ptr, index);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * How many timeline entries this track has (its keyframe count).
+     * @returns {number}
+     */
+    get keyframeCount() {
+        const ret = wasm.wasmmp4keyframes_keyframeCount(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {Function} read
+     * @param {number} size
+     */
+    constructor(read, size) {
+        const ret = wasm.wasmmp4keyframes_new(read, size);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmMp4KeyframesFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {number}
+     */
+    get timescale() {
+        const ret = wasm.wasmmp4keyframes_timescale(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * The first video track's id, once one is found.
+     * @returns {any}
+     */
+    get trackId() {
+        const ret = wasm.wasmmp4keyframes_trackId(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * @returns {number}
+     */
+    get width() {
+        const ret = wasm.wasmmp4keyframes_width(this.__wbg_ptr);
+        return ret;
+    }
+}
+if (Symbol.dispose) WasmMp4Keyframes.prototype[Symbol.dispose] = WasmMp4Keyframes.prototype.free;
+
+/**
  * Streaming Rust fragmented-MP4/CMAF audio-and-video demuxer.
  */
 export class WasmMp4MediaDemuxer {
@@ -2729,6 +2859,9 @@ const WasmFlacFrameEncoderFinalization = (typeof FinalizationRegistry === 'undef
 const WasmLibraryImportFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmlibraryimport_free(ptr, 1));
+const WasmMp4KeyframesFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmmp4keyframes_free(ptr, 1));
 const WasmMp4MediaDemuxerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmmp4mediademuxer_free(ptr, 1));

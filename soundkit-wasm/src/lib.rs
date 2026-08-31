@@ -53,6 +53,10 @@ use soundkit_audio_demux::{
     Mp4MediaDemuxEvent, Mp4MediaDemuxer, Mp4MediaIndex, MxfMediaDemuxEvent, MxfMediaDemuxer,
     PcmEndianness,
 };
+#[cfg(feature = "video-keyframes")]
+use soundkit_audio_demux::{
+    decode_mp4_keyframe_at, mp4_keyframes_from_index, Mp4KeyframeOptions, Mp4KeyframeTimeline,
+};
 #[cfg(feature = "flac")]
 use soundkit_flac::{
     stream::Encoder as FlacStreamEncoder, FlacDecoder, FlacFrameConfig, FlacFrameDecoder,
@@ -1813,6 +1817,217 @@ impl WasmMp4MediaIndex {
             return Ok(JsValue::NULL);
         };
         pcm_packet_trim_to_js(trim.source_frame_start, trim.frame_count)
+    }
+}
+
+/// Bytes from a JavaScript reader for a checked source range.
+///
+/// The reader is the same synchronous `(offset, length) -> Uint8Array`
+/// contract `WasmLibraryImport` keeps, so a source a library import already
+/// opens can feed the keyframe lookup without a second copy of the file.
+#[cfg(feature = "video-keyframes")]
+fn read_range(
+    read: &js_sys::Function,
+    size: u64,
+    offset: u64,
+    length: usize,
+) -> Result<Vec<u8>, String> {
+    if length == 0 {
+        return Ok(Vec::new());
+    }
+    let end = offset
+        .checked_add(length as u64)
+        .ok_or_else(|| "source range overflows".to_owned())?;
+    if end > size {
+        return Err(format!(
+            "source range {offset}..{end} runs past the {size} byte source"
+        ));
+    }
+    let result = read
+        .call2(
+            &JsValue::NULL,
+            &JsValue::from_f64(offset as f64),
+            &JsValue::from_f64(length as f64),
+        )
+        .map_err(|error| format!("the source reader failed: {error:?}"))?;
+    let array = Uint8Array::new(&result);
+    if array.length() as usize != length {
+        return Err(format!(
+            "the source reader returned {} bytes for a {length} byte range",
+            array.length()
+        ));
+    }
+    Ok(array.to_vec())
+}
+
+#[cfg(feature = "video-keyframes")]
+fn moov_payload(read: &js_sys::Function, size: u64) -> Result<Vec<u8>, String> {
+    let mut offset = 0u64;
+    loop {
+        let remaining = (size - offset).min(16);
+        if remaining < 8 {
+            return Err("MOV/MP4 source has no moov box".to_string());
+        }
+        let header = read_range(read, size, offset, remaining as usize)?;
+        let top_level = inspect_mp4_top_level_box(&header, offset, size)
+            .map_err(|error| format!("MOV/MP4 box at byte {offset}: {error}"))?;
+        if top_level.box_type == *b"moov" {
+            return read_range(read, size, top_level.payload_offset, top_level.payload_size as usize);
+        }
+        if top_level.end <= offset {
+            return Err("MOV/MP4 box range does not advance".to_string());
+        }
+        offset = top_level.end;
+    }
+}
+
+/// A MOV/MP4 video keyframe timeline, decoded from a seekable source reader.
+///
+/// Constructing the index reads only the `moov` box; listing the timeline is
+/// the sync-sample map, which carries no pixels. `frame()` decodes one
+/// keyframe at a time, so a browser builds a filmstrip by walking the
+/// timeline without ever holding the whole film in WASM memory.
+#[cfg(feature = "video-keyframes")]
+#[wasm_bindgen]
+pub struct WasmMp4Keyframes {
+    read: js_sys::Function,
+    size: u64,
+    index: Mp4MediaIndex,
+    timeline: Mp4KeyframeTimeline,
+}
+
+#[cfg(feature = "video-keyframes")]
+#[wasm_bindgen]
+impl WasmMp4Keyframes {
+    #[wasm_bindgen(constructor)]
+    pub fn new(read: js_sys::Function, size: f64) -> Result<WasmMp4Keyframes, JsValue> {
+        let size = size.max(0.0) as u64;
+        if size == 0 {
+            return Err(js_error("the source is empty".to_owned()));
+        }
+        let probe = read_range(&read, size, 0, 16.min(size as usize))
+            .map_err(js_error)?;
+        if !looks_like_mp4_source(&probe) {
+            return Err(js_error(
+                "the source is not a MOV or MP4 file".to_owned(),
+            ));
+        }
+        let payload = moov_payload(&read, size).map_err(js_error)?;
+        let index = Mp4MediaIndex::from_moov_payload(&payload).map_err(js_error)?;
+        let options = Mp4KeyframeOptions {
+            track_id: None,
+            stride: 1,
+            max_keyframes: 0,
+        };
+        let timeline = mp4_keyframes_from_index(
+            index.clone(),
+            |offset, length| read_range(&read, size, offset, length),
+            &options,
+        )
+        .map_err(js_error)?;
+        Ok(WasmMp4Keyframes {
+            read,
+            size,
+            index,
+            timeline,
+        })
+    }
+
+    /// The first video track's id, once one is found.
+    #[wasm_bindgen(getter, js_name = trackId)]
+    pub fn track_id(&self) -> Result<JsValue, JsValue> {
+        js_safe_u64(self.timeline.track_id, "trackId")
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn codec(&self) -> String {
+        self.timeline.codec.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = codecId)]
+    pub fn codec_id(&self) -> String {
+        self.timeline.codec_id.clone()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn timescale(&self) -> f64 {
+        self.timeline.timescale as f64
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn width(&self) -> f64 {
+        self.timeline.width as f64
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn height(&self) -> f64 {
+        self.timeline.height as f64
+    }
+
+    /// How many timeline entries this track has (its keyframe count).
+    #[wasm_bindgen(getter, js_name = keyframeCount)]
+    pub fn keyframe_count(&self) -> usize {
+        self.timeline.keyframes.len()
+    }
+
+    /// One entry of the timeline: where the keyframe sits in the film.
+    #[wasm_bindgen(js_name = keyframe)]
+    pub fn keyframe(&self, index: usize) -> Result<Object, JsValue> {
+        let entry = self.timeline.keyframes.get(index).ok_or_else(|| {
+            js_error(format!("keyframe index {index} is out of range"))
+        })?;
+        let object = Object::new();
+        Reflect::set(
+            &object,
+            &"sampleId".into(),
+            &JsValue::from_f64(f64::from(entry.sample_id)),
+        )?;
+        Reflect::set(
+            &object,
+            &"decodeTime".into(),
+            &js_safe_u64(entry.decode_time, "decodeTime")?,
+        )?;
+        Reflect::set(
+            &object,
+            &"presentationTime".into(),
+            &js_safe_i64(entry.presentation_time, "presentationTime")?,
+        )?;
+        Reflect::set(
+            &object,
+            &"duration".into(),
+            &JsValue::from_f64(f64::from(entry.duration)),
+        )?;
+        Reflect::set(
+            &object,
+            &"seconds".into(),
+            &JsValue::from_f64(entry.presentation_seconds),
+        )?;
+        Reflect::set(
+            &object,
+            &"offset".into(),
+            &js_safe_u64(entry.byte_offset, "offset")?,
+        )?;
+        Reflect::set(
+            &object,
+            &"size".into(),
+            &JsValue::from_f64(f64::from(entry.byte_size)),
+        )?;
+        Ok(object)
+    }
+
+    /// Decode one keyframe into pixel planes, oldest and newest decoders
+    /// unpacked the same way `WasmVideoDecoder::decode` does.
+    #[wasm_bindgen(js_name = frame)]
+    pub fn frame(&self, position: usize) -> Result<Array, JsValue> {
+        let frames = decode_mp4_keyframe_at(
+            &self.index,
+            &self.timeline,
+            position,
+            |offset, length| read_range(&self.read, self.size, offset, length),
+        )
+        .map_err(js_error)?;
+        let pitched = frames.into_iter().collect::<Vec<_>>();
+        export_video_frames(pitched)
     }
 }
 

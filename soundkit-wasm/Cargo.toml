@@ -34,6 +34,10 @@ browser-audio = [
 detect = ["dep:access-unit"]
 audio-demux = ["dep:soundkit-audio-demux"]
 video = ["dep:soundkit-video"]
+# Decoded MOV/MP4 keyframe timelines: the sync-sample map plus per-keyframe
+# pixel decode. Reached from a source reader (offset, length) so the browser
+# can index a large movie without holding it in WASM memory.
+video-keyframes = ["audio-demux", "video", "soundkit-audio-demux/decode-video"]
 raw-pcm = []
 wav = []
 mp3 = ["dep:soundkit-mp3"]

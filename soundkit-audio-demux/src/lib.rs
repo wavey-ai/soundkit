@@ -16,6 +16,13 @@ pub use mxf::{
 };
 mod caf;
 pub use caf::{inspect_caf_chunk, validate_caf_file_header, CafAudioIndex, CafChunkRange};
+#[cfg(feature = "decode-video")]
+mod mp4_keyframes;
+#[cfg(feature = "decode-video")]
+pub use mp4_keyframes::{
+    decode_mp4_keyframe_at, decode_mp4_keyframes, decode_mp4_keyframes_from_file,
+    mp4_keyframes_from_index, Mp4Keyframe, Mp4KeyframeOptions, Mp4KeyframeTimeline,
+};
 
 const MIN_DETECTION_BYTES: usize = 8192;
 const MAX_GENERIC_DETECTION_BYTES: usize = 65_536;

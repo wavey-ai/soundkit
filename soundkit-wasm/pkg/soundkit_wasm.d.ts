@@ -314,6 +314,42 @@ export class WasmLibraryImport {
 }
 
 /**
+ * A MOV/MP4 video keyframe timeline, decoded from a seekable source reader.
+ *
+ * Constructing the index reads only the `moov` box; listing the timeline is
+ * the sync-sample map, which carries no pixels. `frame()` decodes one
+ * keyframe at a time, so a browser builds a filmstrip by walking the
+ * timeline without ever holding the whole film in WASM memory.
+ */
+export class WasmMp4Keyframes {
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Decode one keyframe into pixel planes, oldest and newest decoders
+     * unpacked the same way `WasmVideoDecoder::decode` does.
+     */
+    frame(position: number): Array<any>;
+    /**
+     * One entry of the timeline: where the keyframe sits in the film.
+     */
+    keyframe(index: number): object;
+    constructor(read: Function, size: number);
+    readonly codec: string;
+    readonly codecId: string;
+    readonly height: number;
+    /**
+     * How many timeline entries this track has (its keyframe count).
+     */
+    readonly keyframeCount: number;
+    readonly timescale: number;
+    /**
+     * The first video track's id, once one is found.
+     */
+    readonly trackId: any;
+    readonly width: number;
+}
+
+/**
  * Streaming Rust fragmented-MP4/CMAF audio-and-video demuxer.
  */
 export class WasmMp4MediaDemuxer {
@@ -655,6 +691,7 @@ export interface InitOutput {
     readonly __wbg_wasmflacframedecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmflacframeencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmlibraryimport_free: (a: number, b: number) => void;
+    readonly __wbg_wasmmp4keyframes_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediademuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediaindex_free: (a: number, b: number) => void;
     readonly __wbg_wasmmxfmediademuxer_free: (a: number, b: number) => void;
@@ -757,6 +794,16 @@ export interface InitOutput {
     readonly wasmlibraryimport_process: (a: number, b: number) => [number, number, number];
     readonly wasmlibraryimport_progress: (a: number) => number;
     readonly wasmlibraryimport_shape: (a: number) => [number, number];
+    readonly wasmmp4keyframes_codec: (a: number) => [number, number];
+    readonly wasmmp4keyframes_codecId: (a: number) => [number, number];
+    readonly wasmmp4keyframes_frame: (a: number, b: number) => [number, number, number];
+    readonly wasmmp4keyframes_height: (a: number) => number;
+    readonly wasmmp4keyframes_keyframe: (a: number, b: number) => [number, number, number];
+    readonly wasmmp4keyframes_keyframeCount: (a: number) => number;
+    readonly wasmmp4keyframes_new: (a: any, b: number) => [number, number, number];
+    readonly wasmmp4keyframes_timescale: (a: number) => number;
+    readonly wasmmp4keyframes_trackId: (a: number) => [number, number, number];
+    readonly wasmmp4keyframes_width: (a: number) => number;
     readonly wasmmp4mediademuxer_flush: (a: number) => [number, number, number];
     readonly wasmmp4mediademuxer_new: () => number;
     readonly wasmmp4mediademuxer_pcmTrim: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
