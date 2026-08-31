@@ -261,10 +261,12 @@ impl AudioSpecificConfig {
             return Err(AacLcError::UnsupportedFeature("960-sample AAC frames"));
         }
         match self.channel_config {
-            ChannelConfig::Mono | ChannelConfig::Stereo => Ok(()),
-            ChannelConfig::ProgramConfigElement => Err(AacLcError::UnsupportedFeature(
-                "program config element channels",
-            )),
+            // Zero does not mean "no channels" — it means the layout is
+            // declared by a program config element in the bitstream. The
+            // decoder reads it there and sizes the frame to it.
+            ChannelConfig::Mono | ChannelConfig::Stereo | ChannelConfig::ProgramConfigElement => {
+                Ok(())
+            }
             ChannelConfig::Unsupported(value) => Err(AacLcError::UnsupportedChannelConfig(value)),
         }
     }
@@ -488,15 +490,16 @@ mod tests {
         );
     }
 
+    /// A channel_configuration of zero is not a refusal — it says the
+    /// layout is declared by a program config element in the bitstream, and
+    /// the decoder reads it there.
     #[test]
-    fn rejects_program_config_element_for_initial_decoder_scope() {
+    fn defers_a_program_config_element_layout_to_the_bitstream() {
         let config = AudioSpecificConfig::parse(&[0x12, 0x00]).unwrap();
 
         assert_eq!(config.channel_config, ChannelConfig::ProgramConfigElement);
-        assert_eq!(
-            config.validate_aac_lc_packet_path().unwrap_err(),
-            AacLcError::UnsupportedFeature("program config element channels")
-        );
+        assert_eq!(config.channels(), None);
+        assert!(config.validate_aac_lc_packet_path().is_ok());
     }
 
     fn build_config_bits(fields: &[(u32, u8)]) -> Vec<u8> {

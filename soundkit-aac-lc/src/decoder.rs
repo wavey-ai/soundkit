@@ -56,9 +56,11 @@ impl AacLcDecoder {
     pub fn new(config: AudioSpecificConfig) -> Result<Self> {
         config.validate_aac_lc_packet_path()?;
         warm_standard_spectral_tables();
-        let channels = config
-            .channels()
-            .ok_or(AacLcError::InvalidConfig("AAC-LC channel count is unknown"))?;
+        // A stream whose channel_configuration is zero says "read the
+        // layout from the program config element", which lives in the
+        // bitstream rather than the config. Nothing can be sized yet; the
+        // first PCE says how wide the frame is.
+        let channels = config.channels().unwrap_or(0);
         let pcm = vec![vec![0.0; config.frame_length]; channels];
         let coefficients = (0..channels)
             .map(|_| SpectralCoefficients::new(config.frame_length))
@@ -137,11 +139,10 @@ impl AacLcDecoder {
                 ElementId::LowFrequency => {
                     return Err(AacLcError::UnsupportedFeature("low frequency element"));
                 }
-                ElementId::DataStream => {
-                    return Err(AacLcError::UnsupportedFeature("data stream element"));
-                }
+                ElementId::DataStream => skip_data_stream_element(&mut reader)?,
                 ElementId::ProgramConfig => {
-                    return Err(AacLcError::UnsupportedFeature("program config element"));
+                    let layout = read_program_config_element(&mut reader)?;
+                    self.adopt_channels(layout)?;
                 }
                 ElementId::Fill => skip_fill_element(&mut reader)?,
                 ElementId::End => break,
@@ -392,12 +393,129 @@ impl AacLcDecoder {
         }
     }
 
+    /// Sizes the frame to a layout the bitstream declared.
+    ///
+    /// Only ever called for a stream that had no channel count in its
+    /// config. Growing is the whole of it: a program config element that
+    /// disagreed with an already-decoded frame would be a different
+    /// program, and this decoder takes one.
+    fn adopt_channels(&mut self, channels: usize) -> Result<()> {
+        // A config that names its own layout is the authority; a program
+        // config element may still appear beside it, and then it is
+        // description rather than instruction. Only a stream that declared
+        // nothing takes its width from here.
+        if self.config.channels().is_some() || channels == self.dsp_channels.len() {
+            return Ok(());
+        }
+        if channels == 0 || channels > 2 {
+            return Err(AacLcError::UnsupportedChannelConfig(channels.min(255) as u8));
+        }
+        self.pcm = vec![vec![0.0; self.config.frame_length]; channels];
+        self.coefficients = (0..channels)
+            .map(|_| SpectralCoefficients::new(self.config.frame_length))
+            .collect();
+        self.dsp_channels = (0..channels)
+            .map(|_| DspChannel::new(self.config.frame_length))
+            .collect();
+        Ok(())
+    }
+
     fn output_view(&self) -> PlanarF32<'_> {
         PlanarF32 {
             channels: &self.pcm,
             frames: self.config.frame_length,
         }
     }
+}
+
+/// A data stream element carries ancillary bytes — timestamps, tool names,
+/// whatever an encoder wanted to attach — and no audio at all. Refusing it
+/// fails a file for carrying metadata beside its sound.
+fn skip_data_stream_element(reader: &mut BitReader<'_>) -> Result<()> {
+    let _element_instance_tag = reader.read_u8(4)?;
+    let byte_aligned = reader.read_bool()?;
+    let mut count = reader.read_u8(8)? as usize;
+    if count == 255 {
+        count += reader.read_u8(8)? as usize;
+    }
+    if byte_aligned {
+        reader.align_to_byte();
+    }
+    if reader.remaining_bits() < count * 8 {
+        return Err(AacLcError::UnexpectedEof {
+            requested_bits: (count * 8).min(u8::MAX as usize) as u8,
+            remaining_bits: reader.remaining_bits(),
+        });
+    }
+    reader.skip_bits(count * 8)
+}
+
+/// The program config element: how many channels the program has, and in
+/// what arrangement.
+///
+/// A stream may describe its layout here instead of in its config, and one
+/// that does is not exotic — it is what an encoder writes when it wants to
+/// name the arrangement rather than pick a standard number for it. Returns
+/// the channel count the program declares.
+fn read_program_config_element(reader: &mut BitReader<'_>) -> Result<usize> {
+    let _element_instance_tag = reader.read_u8(4)?;
+    let _object_type = reader.read_u8(2)?;
+    let _sampling_frequency_index = reader.read_u8(4)?;
+    let front = reader.read_u8(4)? as usize;
+    let side = reader.read_u8(4)? as usize;
+    let back = reader.read_u8(4)? as usize;
+    let lfe = reader.read_u8(2)? as usize;
+    let assoc_data = reader.read_u8(3)? as usize;
+    let valid_cc = reader.read_u8(4)? as usize;
+
+    if reader.read_bool()? {
+        let _mono_mixdown_element_number = reader.read_u8(4)?;
+    }
+    if reader.read_bool()? {
+        let _stereo_mixdown_element_number = reader.read_u8(4)?;
+    }
+    if reader.read_bool()? {
+        let _matrix_mixdown_idx = reader.read_u8(2)?;
+        let _pseudo_surround_enable = reader.read_bool()?;
+    }
+
+    // Each front, side and back element is either one channel or a pair.
+    let mut channels = 0usize;
+    for _ in 0..(front + side + back) {
+        let is_pair = reader.read_bool()?;
+        let _tag_select = reader.read_u8(4)?;
+        channels += if is_pair { 2 } else { 1 };
+    }
+    for _ in 0..lfe {
+        let _lfe_tag_select = reader.read_u8(4)?;
+    }
+    for _ in 0..assoc_data {
+        let _assoc_tag_select = reader.read_u8(4)?;
+    }
+    for _ in 0..valid_cc {
+        let _is_ind_sw = reader.read_bool()?;
+        let _cc_tag_select = reader.read_u8(4)?;
+    }
+
+    // The comment is byte-aligned and counted, and skipping it wrongly puts
+    // every element after this one at the wrong bit.
+    reader.align_to_byte();
+    let comment_bytes = reader.read_u8(8)? as usize;
+    if reader.remaining_bits() < comment_bytes * 8 {
+        return Err(AacLcError::UnexpectedEof {
+            requested_bits: (comment_bytes * 8).min(u8::MAX as usize) as u8,
+            remaining_bits: reader.remaining_bits(),
+        });
+    }
+    reader.skip_bits(comment_bytes * 8)?;
+
+    // The count is a description of the program, not a promise about this
+    // frame: an element only costs anything when it actually appears in the
+    // block, and one that does is refused where it appears. Refusing here
+    // instead turns a stereo file into an unsupported one for describing a
+    // channel it never sends.
+    let _ = lfe;
+    Ok(channels)
 }
 
 fn skip_fill_element(reader: &mut BitReader<'_>) -> Result<()> {
