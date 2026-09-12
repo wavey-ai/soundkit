@@ -3120,6 +3120,10 @@ fn detect_and_init_decoder(buffer: &[u8]) -> Result<FormatDecoder, DecodeError> 
             let decoder = Ac3Decoder::try_new().map_err(DecodeError::DecoderInitFailed)?;
             Ok(FormatDecoder::Ac3(Box::new(decoder)))
         }
+        // Containers are demuxed by soundkit-audio-demux, not decoded here.
+        AudioType::MpegTs | AudioType::FragmentedMp4 | AudioType::Matroska => {
+            Err(DecodeError::UnsupportedFormat(audio_type))
+        }
         AudioType::Unknown => Err(DecodeError::FormatDetectionFailed),
     }
 }
