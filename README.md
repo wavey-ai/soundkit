@@ -17,6 +17,7 @@ resampling, authored codec implementations, and browser-safe streaming.
 | Media demux | `soundkit-audio-demux`, `soundkit-webm` | Rust-owned MOV, MP4, fragmented MP4, WebM, Matroska, MPEG-TS, and MXF parsing. |
 | Video decode | `soundkit-video`, `soundkit-dnx` | Pure-Rust H.264, HEVC, VP9, AV1, ProRes, DNxHD, and DNxHR decoding. |
 | WASM | `soundkit-wasm` | Seekable browser media adapters and deterministic Rust audio/video decode. |
+| Stored streams | `soundkit-stream`, `soundkit-stream-wasm` | SoundKit v2 frame-stream encoding (Opus and FLAC) and the sidecar byte-offset index a player range-seeks with. |
 
 ## Platform Integration Policy
 

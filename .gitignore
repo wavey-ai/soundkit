@@ -2,6 +2,11 @@
 /target
 **/target/
 /build/
+node_modules/
+**/node_modules/
+soundkit-stream-wasm/pkg/
+packages/*/pkg/
+workers/*/build/
 **/*.rs.bk
 Cargo.lock
 test/out.wav

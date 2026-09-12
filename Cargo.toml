@@ -30,6 +30,9 @@ members = [
   "soundkit-codec-fate",
   "lori-asha-premix-bench",
   "aac-wasm-bench",
+  "soundkit-stream",
+  "soundkit-stream-wasm",
+  "workers/soundkit-store",
 ]
 exclude = ["vendor/rusty_av1d", "vendor/rusty_h264-decoder"]
 

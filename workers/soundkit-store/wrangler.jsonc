@@ -1,0 +1,32 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "soundkit-store",
+  "main": "build/worker/shim.mjs",
+  "compatibility_date": "2026-06-05",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "DEFAULT_TARGET_CHUNK_BYTES": "262144",
+    "DEFAULT_MAX_CHUNK_BYTES": "524288",
+    "MAX_RANGE_RESPONSE_BYTES": "4194304",
+    "FINAL_STREAM_CACHE_CONTROL": "public, max-age=31536000, immutable"
+  },
+  "r2_buckets": [
+    {
+      "binding": "SOUNDKIT_BUCKET",
+      "bucket_name": "soundkit-audio"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "SOUNDKIT_DB",
+      "database_name": "soundkit-store",
+      "database_id": "replace-with-d1-database-id"
+    }
+  ],
+  "build": {
+    "command": "worker-build --release"
+  }
+}

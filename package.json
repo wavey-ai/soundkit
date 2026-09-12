@@ -1,0 +1,15 @@
+{
+  "name": "@wavey/soundkit-stream-workspace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:wasm": "wasm-pack build soundkit-stream-wasm --target web --out-dir ../packages/soundkit-stream-js/pkg",
+    "test:js": "node --test packages/soundkit-stream-js/test/*.test.js",
+    "test:rust": "cargo test -p soundkit-stream -p soundkit-stream-wasm",
+    "test": "npm run test:js && npm run test:rust"
+  },
+  "workspaces": [
+    "packages/soundkit-stream-js",
+    "workers/*"
+  ]
+}

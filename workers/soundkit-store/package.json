@@ -1,0 +1,15 @@
+{
+  "name": "@wavey/soundkit-store-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "cargo check -p soundkit-store-worker --target wasm32-unknown-unknown",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:dry": "wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "wrangler": "^4.53.0"
+  }
+}
+

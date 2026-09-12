@@ -1,0 +1,14 @@
+[package]
+name = "soundkit-stream-wasm"
+version = "0.13.2"
+edition = "2021"
+license = "MIT"
+description = "wasm-bindgen bindings for SoundKit v2 frame-stream encoding."
+repository = "https://github.com/wavey-ai/soundkit"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soundkit-stream = { version = "0.13.2", path = "../soundkit-stream" }
+wasm-bindgen = "0.2"

@@ -1,0 +1,29 @@
+{
+  "name": "@wavey/soundkit-stream",
+  "version": "0.13.2",
+  "description": "JavaScript parser and index utilities for SoundKit v2 frame streams.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wavey-ai/soundkit.git",
+    "directory": "packages/soundkit-stream-js"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./frame-header": "./src/frame-header.js",
+    "./stream": "./src/stream.js",
+    "./sidecar-index": "./src/sidecar-index.js",
+    "./transcode": "./src/transcode.js",
+    "./wasm": "./src/wasm.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

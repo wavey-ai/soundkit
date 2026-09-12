@@ -70,6 +70,11 @@ use soundkit_ogg_opus::OggOpusDecoder;
 use soundkit_ogg_opus::{OggOpusDemuxEvent, OggOpusDemuxer};
 #[cfg(feature = "opus")]
 use soundkit_opus::{OpusDecoder, OpusEncoder, OpusStreamDecoder};
+#[cfg(feature = "opus")]
+use soundkit_stream::{
+    encode_soundkit_index, PcmOpusStreamOptions, SoundKitIndex, StreamCodec, StreamEncoder,
+    StreamPacket,
+};
 #[cfg(feature = "video")]
 use soundkit_video::{VideoDecoder, VideoFrame};
 #[cfg(feature = "vorbis")]
@@ -500,19 +505,9 @@ pub struct WasmPcm16WaveLibraryEncoder {
     source_digest: Sha256,
     total_frames: u64,
     source_frames: u64,
-    opus_frames: u64,
-    opus_stream_bytes: u64,
     opus_digest: Sha256,
-    opus_index_entries: Vec<(u64, u64)>,
-    opus_encoder: Option<OpusEncoder>,
-    opus_frame: Vec<i16>,
-    flac_encoder: Option<FlacFrameEncoder>,
-    flac_frame_size: usize,
-    flac_frame: Vec<i32>,
-    flac_frames: u64,
-    flac_stream_bytes: u64,
     flac_digest: Sha256,
-    flac_index_entries: Vec<(u64, u64)>,
+    stream: Option<StreamEncoder>,
 }
 
 /// Bounded, format-detecting library import pipeline.
@@ -539,21 +534,9 @@ pub struct WasmStreamingLibraryEncoder {
     preserve_lossless: bool,
     finished: bool,
     source_digest: Sha256,
-    opus_frames: u64,
-    opus_stream_bytes: u64,
     opus_digest: Sha256,
-    opus_index_entries: Vec<(u64, u64)>,
-    opus_encoder: OpusEncoder,
-    opus_frame: Vec<i16>,
-    flac_encoder: Option<FlacFrameEncoder>,
-    flac_frame_size: usize,
-    flac_frame: Vec<i32>,
-    flac_sample_rate: u32,
-    flac_channels: u8,
-    flac_frames: u64,
-    flac_stream_bytes: u64,
     flac_digest: Sha256,
-    flac_index_entries: Vec<(u64, u64)>,
+    stream: StreamEncoder,
 }
 
 #[cfg(all(feature = "wav", feature = "opus", feature = "flac"))]
@@ -2992,19 +2975,9 @@ impl WasmPcm16WaveLibraryEncoder {
             source_digest: Sha256::new(),
             total_frames: 0,
             source_frames: 0,
-            opus_frames: 0,
-            opus_stream_bytes: 0,
             opus_digest: Sha256::new(),
-            opus_index_entries: Vec::new(),
-            opus_encoder: None,
-            opus_frame: Vec::with_capacity(960 * 2),
-            flac_encoder: None,
-            flac_frame_size: 0,
-            flac_frame: Vec::new(),
-            flac_frames: 0,
-            flac_stream_bytes: 0,
             flac_digest: Sha256::new(),
-            flac_index_entries: Vec::new(),
+            stream: None,
         }
     }
 
@@ -3064,37 +3037,48 @@ impl WasmPcm16WaveLibraryEncoder {
                 self.total_frames, self.source_frames
             )));
         }
-        if !self.opus_frame.is_empty() {
-            self.emit_opus_packet(&mut opus_packets, true)
-                .map_err(js_error)?;
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| js_error("WAV library encoder was never opened".to_owned()))?;
+        let opus_tail = stream.finish_opus().map_err(js_error)?;
+        for packet in opus_tail {
+            self.opus_digest.update(&packet.bytes);
+            opus_packets.push(WaveLibraryPacket {
+                bytes: packet.bytes,
+                start_frame: packet.start_frame,
+                frame_count: packet.frame_count,
+            });
         }
         if self.preserve_lossless {
-            if !self.flac_frame.is_empty() {
-                self.emit_flac_packet(&mut flac_packets, true)
-                    .map_err(js_error)?;
+            let flac_tail = stream.finish_flac().map_err(js_error)?;
+            for packet in flac_tail {
+                self.flac_digest.update(&packet.bytes);
+                flac_packets.push(WaveLibraryPacket {
+                    bytes: packet.bytes,
+                    start_frame: packet.start_frame,
+                    frame_count: packet.frame_count,
+                });
             }
         }
-        self.opus_encoder = None;
-        self.flac_encoder = None;
-        let opus_index = soundkit_frame_index(
-            48_000,
-            self.total_frames,
-            self.opus_stream_bytes,
-            &self.opus_index_entries,
-        )
+        let opus_index = encode_soundkit_index(&SoundKitIndex {
+            timescale: 48_000,
+            duration_frames: self.total_frames,
+            entries: stream.opus_entries().to_vec(),
+        })
         .map_err(js_error)?;
         let flac_index = self
             .preserve_lossless
             .then(|| {
-                soundkit_frame_index(
-                    48_000,
-                    self.total_frames,
-                    self.flac_stream_bytes,
-                    &self.flac_index_entries,
-                )
+                encode_soundkit_index(&SoundKitIndex {
+                    timescale: 48_000,
+                    duration_frames: self.total_frames,
+                    entries: stream.flac_entries().to_vec(),
+                })
             })
             .transpose()
             .map_err(js_error)?;
+        self.stream = None;
         let source_identity = format!("sha256:{:x}", self.source_digest.clone().finalize());
         let opus_identity = format!("sha256:{:x}", self.opus_digest.clone().finalize());
         let flac_identity = self
@@ -3153,27 +3137,23 @@ impl WasmPcm16WaveLibraryEncoder {
             return Err("WAV data chunk contains no PCM frames".to_owned());
         }
 
-        let mut opus = OpusEncoder::new(48_000, 16, 2, 960, 192_000);
-        opus.init()?;
-        self.opus_encoder = Some(opus);
-
+        let options = PcmOpusStreamOptions {
+            sample_rate: 48_000,
+            channels: 2,
+            frame_size: 960,
+            bitrate: 192_000,
+            start_pts: 0,
+            include_packet_crc32: true,
+        };
+        let mut stream = StreamEncoder::new(self.preserve_lossless, &options)?;
         if self.preserve_lossless {
-            self.flac_frame_size = wave_library_flac_frame_size(
+            let frame_size = wave_library_flac_frame_size(
                 self.total_frames,
                 low_latency_flac_frame_size(48_000),
             )?;
-            self.flac_frame = Vec::with_capacity(self.flac_frame_size * 2);
-            let config = FlacFrameConfig::new(
-                48_000,
-                2,
-                24,
-                self.flac_frame_size as u32,
-                FlacProfile::Balanced,
-            )
-            .map_err(|error| error.to_string())?;
-            self.flac_encoder =
-                Some(FlacFrameEncoder::new(config).map_err(|error| error.to_string())?);
+            stream.ensure_flac_geometry(48_000, 2, Some(frame_size))?;
         }
+        self.stream = Some(stream);
         Ok(())
     }
 
@@ -3193,132 +3173,47 @@ impl WasmPcm16WaveLibraryEncoder {
         if !audio.data().len().is_multiple_of(4) {
             return Err("WAV PCM16 stereo block is not frame-aligned".to_owned());
         }
+        let samples = audio.data().len() / 2;
+        let mut opus_samples = Vec::with_capacity(samples);
+        let mut flac_samples = self.preserve_lossless.then(|| Vec::with_capacity(samples));
         for frame in audio.data().chunks_exact(4) {
             let left = i16::from_le_bytes([frame[0], frame[1]]);
             let right = i16::from_le_bytes([frame[2], frame[3]]);
-            self.opus_frame.push(wave_library_opus_sample(left));
-            self.opus_frame.push(wave_library_opus_sample(right));
-            if self.opus_frame.len() == 960 * 2 {
-                self.emit_opus_packet(opus_packets, false)?;
-            }
-            if self.preserve_lossless {
+            opus_samples.push(wave_library_opus_sample(left));
+            opus_samples.push(wave_library_opus_sample(right));
+            if let Some(flac_samples) = flac_samples.as_mut() {
                 // This is byte-for-byte the old Float32 -> 24-bit mapping for
                 // PCM16, without materializing the intermediate Float32 planes.
-                self.flac_frame.push(wave_library_flac_sample(left));
-                self.flac_frame.push(wave_library_flac_sample(right));
-                if self.flac_frame.len() == self.flac_frame_size * 2 {
-                    self.emit_flac_packet(flac_packets, false)?;
-                }
+                flac_samples.push(wave_library_flac_sample(left));
+                flac_samples.push(wave_library_flac_sample(right));
             }
             self.source_frames += 1;
         }
         if self.source_frames > self.total_frames {
             return Err("WAV emitted more PCM frames than its data chunk declares".to_owned());
         }
-        Ok(())
-    }
-
-    fn emit_opus_packet(
-        &mut self,
-        packets: &mut Vec<WaveLibraryPacket>,
-        final_packet: bool,
-    ) -> Result<(), String> {
-        let frame_count = (self.opus_frame.len() / 2) as u32;
-        if frame_count == 0 {
-            return Ok(());
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| "WAV library encoder is unavailable".to_owned())?;
+        for packet in stream.push_opus_i16(&opus_samples)? {
+            self.opus_digest.update(&packet.bytes);
+            opus_packets.push(WaveLibraryPacket {
+                bytes: packet.bytes,
+                start_frame: packet.start_frame,
+                frame_count: packet.frame_count,
+            });
         }
-        if frame_count < 960 {
-            if !final_packet {
-                return Err("short Opus WAV block appeared before EOF".to_owned());
+        if let Some(flac_samples) = flac_samples {
+            for packet in stream.push_flac_i32(&flac_samples)? {
+                self.flac_digest.update(&packet.bytes);
+                flac_packets.push(WaveLibraryPacket {
+                    bytes: packet.bytes,
+                    start_frame: packet.start_frame,
+                    frame_count: packet.frame_count,
+                });
             }
-            self.opus_frame.resize(960 * 2, 0);
         }
-        let encoder = self
-            .opus_encoder
-            .as_mut()
-            .ok_or_else(|| "WAV Opus encoder is unavailable".to_owned())?;
-        let mut output = vec![0u8; 4096];
-        let written = encoder.encode_i16(&self.opus_frame, &mut output)?;
-        if written == 0 {
-            return Err("Opus emitted an empty WAV packet".to_owned());
-        }
-        output.truncate(written);
-        let start_frame = self.opus_frames;
-        let sequence = self.opus_index_entries.len() as u64;
-        output = frame_library_packet(
-            frame_header::EncodingFlag::Opus,
-            output,
-            frame_count,
-            48_000,
-            2,
-            16,
-            sequence,
-            start_frame,
-        )?;
-        self.opus_index_entries
-            .push((self.opus_stream_bytes, start_frame));
-        self.opus_digest.update(&output);
-        self.opus_stream_bytes = self
-            .opus_stream_bytes
-            .checked_add(output.len() as u64)
-            .ok_or_else(|| "WAV Opus stream length overflowed".to_owned())?;
-        packets.push(WaveLibraryPacket {
-            bytes: output,
-            start_frame,
-            frame_count,
-        });
-        self.opus_frames += u64::from(frame_count);
-        self.opus_frame.clear();
-        Ok(())
-    }
-
-    fn emit_flac_packet(
-        &mut self,
-        packets: &mut Vec<WaveLibraryPacket>,
-        _final_packet: bool,
-    ) -> Result<(), String> {
-        let frame_count = (self.flac_frame.len() / 2) as u32;
-        if frame_count == 0 {
-            return Ok(());
-        }
-        let encoder = self
-            .flac_encoder
-            .as_mut()
-            .ok_or_else(|| "WAV FLAC encoder is unavailable".to_owned())?;
-        let mut output =
-            Vec::with_capacity(self.flac_frame.len().saturating_mul(4).saturating_add(64));
-        encoder
-            .encode_i32_block_into(&self.flac_frame, &mut output)
-            .map_err(|error| error.to_string())?;
-        if output.is_empty() {
-            return Err("FLAC emitted an empty WAV packet".to_owned());
-        }
-        let start_frame = self.flac_frames;
-        let sequence = self.flac_index_entries.len() as u64;
-        output = frame_library_packet(
-            frame_header::EncodingFlag::FLAC,
-            output,
-            frame_count,
-            48_000,
-            2,
-            24,
-            sequence,
-            start_frame,
-        )?;
-        self.flac_index_entries
-            .push((self.flac_stream_bytes, start_frame));
-        self.flac_digest.update(&output);
-        self.flac_stream_bytes = self
-            .flac_stream_bytes
-            .checked_add(output.len() as u64)
-            .ok_or_else(|| "WAV FLAC stream length overflowed".to_owned())?;
-        packets.push(WaveLibraryPacket {
-            bytes: output,
-            start_frame,
-            frame_count,
-        });
-        self.flac_frames += u64::from(frame_count);
-        self.flac_frame.clear();
         Ok(())
     }
 }
@@ -3418,8 +3313,14 @@ impl WasmStreamingLibraryEncoder {
 ))]
 impl WasmStreamingLibraryEncoder {
     pub fn new_rust(preserve_lossless: bool) -> Result<Self, String> {
-        let mut opus_encoder = OpusEncoder::new(48_000, 16, 2, 960, 192_000);
-        opus_encoder.init()?;
+        let options = PcmOpusStreamOptions {
+            sample_rate: 48_000,
+            channels: 2,
+            frame_size: 960,
+            bitrate: 192_000,
+            start_pts: 0,
+            include_packet_crc32: true,
+        };
         Ok(Self {
             decoder: LibrarySourceDecoder::new(),
             alac_decoder: None,
@@ -3428,21 +3329,9 @@ impl WasmStreamingLibraryEncoder {
             preserve_lossless,
             finished: false,
             source_digest: Sha256::new(),
-            opus_frames: 0,
-            opus_stream_bytes: 0,
             opus_digest: Sha256::new(),
-            opus_index_entries: Vec::new(),
-            opus_encoder,
-            opus_frame: Vec::with_capacity(960 * 2),
-            flac_encoder: None,
-            flac_frame_size: 0,
-            flac_frame: Vec::new(),
-            flac_sample_rate: 0,
-            flac_channels: 0,
-            flac_frames: 0,
-            flac_stream_bytes: 0,
             flac_digest: Sha256::new(),
-            flac_index_entries: Vec::new(),
+            stream: StreamEncoder::new(preserve_lossless, &options)?,
         })
     }
 
@@ -3678,27 +3567,25 @@ impl WasmStreamingLibraryEncoder {
         if total_frames == 0 {
             return Err("source contained no decoded PCM".to_owned());
         }
-        if !self.opus_frame.is_empty() {
-            self.emit_opus_packet(&mut opus_packets, true)?;
-        }
+        let opus_tail = self.stream.finish_opus()?;
+        self.absorb_packets(&mut opus_packets, opus_tail, StreamCodec::Opus);
         if self.preserve_lossless {
-            self.finish_flac_packets(&mut flac_packets)?;
+            let flac_tail = self.stream.finish_flac()?;
+            self.absorb_packets(&mut flac_packets, flac_tail, StreamCodec::Flac);
         }
-        let opus_index = soundkit_frame_index(
-            48_000,
-            total_frames,
-            self.opus_stream_bytes,
-            &self.opus_index_entries,
-        )?;
+        let opus_index = encode_soundkit_index(&SoundKitIndex {
+            timescale: 48_000,
+            duration_frames: total_frames,
+            entries: self.stream.opus_entries().to_vec(),
+        })?;
         let flac_index = self
             .preserve_lossless
             .then(|| {
-                soundkit_frame_index(
-                    self.flac_sample_rate,
-                    self.flac_frames,
-                    self.flac_stream_bytes,
-                    &self.flac_index_entries,
-                )
+                encode_soundkit_index(&SoundKitIndex {
+                    timescale: self.stream.flac_sample_rate(),
+                    duration_frames: self.stream.flac_frames(),
+                    entries: self.stream.flac_entries().to_vec(),
+                })
             })
             .transpose()?;
         let source_identity = format!("sha256:{:x}", self.source_digest.clone().finalize());
@@ -3718,6 +3605,26 @@ impl WasmStreamingLibraryEncoder {
             Some(opus_identity),
             flac_identity,
         ))
+    }
+
+    /// Move the encoder's emitted packets into a batch, into the codec digest.
+    fn absorb_packets(
+        &mut self,
+        out: &mut Vec<WaveLibraryPacket>,
+        packets: Vec<StreamPacket>,
+        codec: StreamCodec,
+    ) {
+        for packet in packets {
+            match codec {
+                StreamCodec::Opus => self.opus_digest.update(&packet.bytes),
+                StreamCodec::Flac => self.flac_digest.update(&packet.bytes),
+            }
+            out.push(WaveLibraryPacket {
+                bytes: packet.bytes,
+                start_frame: packet.start_frame,
+                frame_count: packet.frame_count,
+            });
+        }
     }
 }
 
@@ -3825,13 +3732,13 @@ impl WasmStreamingLibraryEncoder {
         if left.is_empty() || left.len() != right.len() {
             return Err("streaming normalizer returned invalid stereo PCM".to_owned());
         }
+        let mut interleaved = Vec::with_capacity(left.len() * 2);
         for (left, right) in left.into_iter().zip(right) {
-            self.opus_frame.push(library_float_to_i16(left));
-            self.opus_frame.push(library_float_to_i16(right));
-            if self.opus_frame.len() == 960 * 2 {
-                self.emit_opus_packet(opus_packets, false)?;
-            }
+            interleaved.push(library_float_to_i16(left));
+            interleaved.push(library_float_to_i16(right));
         }
+        let packets = self.stream.push_opus_i16(&interleaved)?;
+        self.absorb_packets(opus_packets, packets, StreamCodec::Opus);
         Ok(())
     }
 
@@ -3847,28 +3754,7 @@ impl WasmStreamingLibraryEncoder {
                 "lossless preservation has unsupported PCM geometry {sample_rate} Hz/{channels} ch"
             ));
         }
-        if self.flac_sample_rate == 0 {
-            self.flac_frame_size = low_latency_flac_frame_size(sample_rate);
-            let config = FlacFrameConfig::new(
-                sample_rate,
-                u16::from(channels),
-                24,
-                self.flac_frame_size as u32,
-                FlacProfile::Balanced,
-            )
-            .map_err(|error| error.to_string())?;
-            self.flac_encoder =
-                Some(FlacFrameEncoder::new(config).map_err(|error| error.to_string())?);
-            self.flac_sample_rate = sample_rate;
-            self.flac_channels = channels;
-            self.flac_frame =
-                Vec::with_capacity((self.flac_frame_size + 31).saturating_mul(channels as usize));
-        } else if self.flac_sample_rate != sample_rate || self.flac_channels != channels {
-            return Err(format!(
-                "decoded PCM geometry changed from {} Hz/{} ch to {sample_rate} Hz/{channels} ch",
-                self.flac_sample_rate, self.flac_channels
-            ));
-        }
+        self.stream.ensure_flac_geometry(sample_rate, channels, None)?;
 
         let planar = audio_to_f32_channels(audio)?;
         let frames = planar
@@ -3881,147 +3767,14 @@ impl WasmStreamingLibraryEncoder {
         if planar.iter().any(|channel| channel.len() != frames) {
             return Err("decoded audio channels have mismatched frame counts".to_owned());
         }
+        let mut interleaved = Vec::with_capacity(frames * channels as usize);
         for frame in 0..frames {
             for channel in &planar {
-                self.flac_frame.push(library_float_to_s24(channel[frame]));
+                interleaved.push(library_float_to_s24(channel[frame]));
             }
         }
-        while self.flac_frame.len() / channels as usize >= self.flac_frame_size + 32 {
-            self.emit_flac_packet(packets, self.flac_frame_size)?;
-        }
-        Ok(())
-    }
-
-    fn emit_opus_packet(
-        &mut self,
-        packets: &mut Vec<WaveLibraryPacket>,
-        final_packet: bool,
-    ) -> Result<(), String> {
-        let frame_count = (self.opus_frame.len() / 2) as u32;
-        if frame_count == 0 {
-            return Ok(());
-        }
-        if frame_count < 960 {
-            if !final_packet {
-                return Err("short Opus block appeared before EOF".to_owned());
-            }
-            self.opus_frame.resize(960 * 2, 0);
-        }
-        let mut output = vec![0u8; 4096];
-        let written = self
-            .opus_encoder
-            .encode_i16(&self.opus_frame, &mut output)?;
-        if written == 0 {
-            return Err("Opus emitted an empty streaming packet".to_owned());
-        }
-        output.truncate(written);
-        let start_frame = self.opus_frames;
-        output = frame_library_packet(
-            frame_header::EncodingFlag::Opus,
-            output,
-            frame_count,
-            48_000,
-            2,
-            16,
-            self.opus_index_entries.len() as u64,
-            start_frame,
-        )?;
-        self.opus_index_entries
-            .push((self.opus_stream_bytes, start_frame));
-        self.opus_digest.update(&output);
-        self.opus_stream_bytes = self
-            .opus_stream_bytes
-            .checked_add(output.len() as u64)
-            .ok_or_else(|| "streaming Opus length overflowed".to_owned())?;
-        packets.push(WaveLibraryPacket {
-            bytes: output,
-            start_frame,
-            frame_count,
-        });
-        self.opus_frames += u64::from(frame_count);
-        self.opus_frame.clear();
-        Ok(())
-    }
-
-    fn finish_flac_packets(&mut self, packets: &mut Vec<WaveLibraryPacket>) -> Result<(), String> {
-        let channels = self.flac_channels as usize;
-        if channels == 0 {
-            return Err("streaming FLAC encoder received no PCM geometry".to_owned());
-        }
-        let mut remaining = self.flac_frame.len() / channels;
-        if remaining == 0 {
-            return Ok(());
-        }
-        if self.flac_frames == 0 && remaining < 32 {
-            return Err("streaming FLAC requires at least 32 PCM frames".to_owned());
-        }
-        while remaining > self.flac_frame_size {
-            let after_full_block = remaining - self.flac_frame_size;
-            let count = if after_full_block < 32 {
-                remaining - 32
-            } else {
-                self.flac_frame_size
-            };
-            self.emit_flac_packet(packets, count)?;
-            remaining = self.flac_frame.len() / channels;
-        }
-        if remaining > 0 {
-            self.emit_flac_packet(packets, remaining)?;
-        }
-        Ok(())
-    }
-
-    fn emit_flac_packet(
-        &mut self,
-        packets: &mut Vec<WaveLibraryPacket>,
-        frame_count: usize,
-    ) -> Result<(), String> {
-        if !(32..=self.flac_frame_size).contains(&frame_count) {
-            return Err(format!(
-                "streaming FLAC block has {frame_count} frames; expected 32..={}",
-                self.flac_frame_size
-            ));
-        }
-        let sample_count = frame_count.saturating_mul(self.flac_channels as usize);
-        if self.flac_frame.len() < sample_count {
-            return Err("streaming FLAC block is incomplete".to_owned());
-        }
-        let mut output = Vec::with_capacity(sample_count.saturating_mul(4).saturating_add(64));
-        self.flac_encoder
-            .as_mut()
-            .ok_or_else(|| "streaming FLAC encoder is unavailable".to_owned())?
-            .encode_i32_block_into(&self.flac_frame[..sample_count], &mut output)
-            .map_err(|error| error.to_string())?;
-        if output.is_empty() {
-            return Err("FLAC emitted an empty streaming packet".to_owned());
-        }
-        let start_frame = self.flac_frames;
-        output = frame_library_packet(
-            frame_header::EncodingFlag::FLAC,
-            output,
-            frame_count as u32,
-            self.flac_sample_rate,
-            self.flac_channels,
-            24,
-            self.flac_index_entries.len() as u64,
-            start_frame,
-        )?;
-        self.flac_index_entries
-            .push((self.flac_stream_bytes, start_frame));
-        self.flac_digest.update(&output);
-        self.flac_stream_bytes = self
-            .flac_stream_bytes
-            .checked_add(output.len() as u64)
-            .ok_or_else(|| "streaming FLAC length overflowed".to_owned())?;
-        packets.push(WaveLibraryPacket {
-            bytes: output,
-            start_frame,
-            frame_count: frame_count as u32,
-        });
-        self.flac_frames += frame_count as u64;
-        self.flac_frame.copy_within(sample_count.., 0);
-        self.flac_frame
-            .truncate(self.flac_frame.len() - sample_count);
+        let emitted = self.stream.push_flac_i32(&interleaved)?;
+        self.absorb_packets(packets, emitted, StreamCodec::Flac);
         Ok(())
     }
 }
@@ -4065,81 +3818,6 @@ fn wave_library_opus_sample(sample: i16) -> i16 {
 #[cfg(all(feature = "wav", feature = "opus", feature = "flac"))]
 fn wave_library_flac_sample(sample: i16) -> i32 {
     (f64::from(sample) * 8_388_607.0 / 32_768.0).round() as i32
-}
-
-#[cfg(all(feature = "wav", feature = "opus", feature = "flac"))]
-fn frame_library_packet(
-    encoding: frame_header::EncodingFlag,
-    payload: Vec<u8>,
-    frame_count: u32,
-    sample_rate: u32,
-    channels: u8,
-    bits_per_sample: u8,
-    packet_sequence: u64,
-    pts: u64,
-) -> Result<Vec<u8>, String> {
-    if payload.is_empty() || frame_count == 0 {
-        return Err("A SoundKit library packet is empty".to_owned());
-    }
-    let header = frame_header::FrameHeaderV2::new(
-        encoding,
-        payload.len() as u32,
-        frame_count,
-        sample_rate,
-        channels,
-        bits_per_sample,
-        frame_header::Endianness::LittleEndian,
-        Some(packet_sequence),
-        Some(pts),
-        None,
-    )
-    .map_err(|error| error.to_string())?
-    .with_packet_crc32(&payload)
-    .map_err(|error| error.to_string())?;
-    let mut framed = Vec::with_capacity(header.size() + payload.len());
-    header
-        .encode(&mut framed)
-        .map_err(|error| error.to_string())?;
-    framed.extend_from_slice(&payload);
-    Ok(framed)
-}
-
-#[cfg(all(feature = "wav", feature = "opus", feature = "flac"))]
-fn soundkit_frame_index(
-    sample_rate: u32,
-    duration_frames: u64,
-    stream_byte_length: u64,
-    entries: &[(u64, u64)],
-) -> Result<Vec<u8>, String> {
-    if sample_rate == 0 || duration_frames == 0 || stream_byte_length == 0 || entries.is_empty() {
-        return Err("A SoundKit frame index cannot describe an empty stream".to_owned());
-    }
-    if entries[0] != (0, 0) {
-        return Err("A SoundKit frame index must start at byte and frame zero".to_owned());
-    }
-    let mut previous = entries[0];
-    for entry in entries.iter().copied().skip(1) {
-        if entry.0 <= previous.0
-            || entry.0 >= stream_byte_length
-            || entry.1 <= previous.1
-            || entry.1 >= duration_frames
-        {
-            return Err("SoundKit frame index entries are not ordered".to_owned());
-        }
-        previous = entry;
-    }
-    let mut index = Vec::with_capacity(32 + entries.len() * 16);
-    index.extend_from_slice(b"SKIDX2\0\0");
-    index.extend_from_slice(&1u16.to_le_bytes());
-    index.extend_from_slice(&16u16.to_le_bytes());
-    index.extend_from_slice(&sample_rate.to_le_bytes());
-    index.extend_from_slice(&(entries.len() as u64).to_le_bytes());
-    index.extend_from_slice(&duration_frames.to_le_bytes());
-    for (byte_offset, start_frame) in entries {
-        index.extend_from_slice(&byte_offset.to_le_bytes());
-        index.extend_from_slice(&start_frame.to_le_bytes());
-    }
-    Ok(index)
 }
 
 #[cfg(all(feature = "wav", feature = "opus", feature = "flac"))]

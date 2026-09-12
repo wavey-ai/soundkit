@@ -54,7 +54,7 @@ aac-lc = ["aac"]
 aac-lc-bench = ["aac"]
 alac = ["dep:soundkit-alac"]
 aiff = ["dep:soundkit-aiff"]
-opus = ["dep:soundkit-opus"]
+opus = ["dep:soundkit-opus", "dep:soundkit-stream"]
 ogg-opus = ["opus", "dep:soundkit-ogg-opus", "soundkit-ogg-opus/decode"]
 opus-debox = ["dep:soundkit-ogg-opus", "dep:soundkit-webm"]
 webm = ["dep:soundkit-webm", "soundkit-webm/vorbis"]
@@ -78,6 +78,9 @@ soundkit-alac = { path = "../soundkit-alac", version = "0.13.2", optional = true
 soundkit-flac = { path = "../soundkit-flac", version = "0.13.2", default-features = false, optional = true }
 soundkit-mp3 = { path = "../soundkit-mp3", version = "0.13.2", default-features = false, optional = true }
 soundkit-ogg-opus = { path = "../soundkit-ogg-opus", version = "0.13.2", default-features = false, optional = true }
+# The SoundKit v2 frame-stream encoder the library import path writes with.
+# Optional: it carries both codecs, so it rides the `opus` feature.
+soundkit-stream = { path = "../soundkit-stream", version = "0.13.2", optional = true }
 soundkit-opus = { path = "../soundkit-opus", version = "0.13.2", optional = true }
 soundkit-vorbis = { path = "../soundkit-vorbis", version = "0.13.2", optional = true }
 soundkit-webm = { path = "../soundkit-webm", version = "0.13.2", default-features = false, optional = true }
