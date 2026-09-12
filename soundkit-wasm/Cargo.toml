@@ -63,7 +63,7 @@ ac3 = ["dep:soundkit-ac3"]
 
 [dependencies]
 soundkit = { path = "../soundkit" }
-access-unit = { version = "0.1.4", optional = true }
+access-unit = { version = "0.1.5", optional = true }
 frame-header = "0.2.2"
 js-sys = "0.3"
 sha2 = "0.10"

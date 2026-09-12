@@ -5401,6 +5401,45 @@ mod tests {
         .unwrap()
     }
 
+    /// The detector reads whole containers, not just their signatures: every
+    /// class a demuxer is chosen for is checked against a checked-in file.
+    #[cfg(all(feature = "mp4", feature = "webm", feature = "mpeg-ts"))]
+    #[test]
+    fn container_fixtures_detect_as_their_own_kind() {
+        let cases = [
+            ("mpeg-ts/aac-stereo-48k.ts", access_unit::AudioType::MpegTs),
+            ("mpeg-ts/aac-stereo-48k.m2ts", access_unit::AudioType::MpegTs),
+            ("mpeg-ts/lpcm-stereo-48k.m2ts", access_unit::AudioType::MpegTs),
+            ("mpeg-ts/dts-stereo-48k.m2ts", access_unit::AudioType::MpegTs),
+            (
+                "video-compat/never-final/matroska-h264-aac.mkv",
+                access_unit::AudioType::Matroska,
+            ),
+            (
+                "video-compat/never-final/h264-aac-cmaf.mp4",
+                access_unit::AudioType::FragmentedMp4,
+            ),
+            (
+                "video-compat/never-final/h264-aac-fragmented.mp4",
+                access_unit::AudioType::FragmentedMp4,
+            ),
+            (
+                "video-compat/never-final/av1-main-opus.webm",
+                access_unit::AudioType::WebM,
+            ),
+        ];
+        for (path, expected) in cases {
+            let data = fixture(path);
+            assert_eq!(access_unit::detect_audio(&data), expected, "{path}");
+        }
+        // A whole-file MP4 is not a fragmented one.
+        let whole = fixture("video-compat/never-final/h264-high-aac.mp4");
+        assert_eq!(
+            access_unit::detect_audio(&whole),
+            access_unit::AudioType::M4A
+        );
+    }
+
     #[cfg(feature = "mp4")]
     #[test]
     fn mp4_tables_reject_hostile_counts_before_allocation() {

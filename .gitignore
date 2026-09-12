@@ -111,6 +111,7 @@ testdata/opus/*
 !testdata/ogg_opus/
 testdata/ogg_opus/*
 !testdata/ogg_opus/A_Tusk_is_used_to_make_costly_gifts.ogg
+!testdata/ogg_opus/A_Tusk_is_used_to_make_costly_gifts_48khz.ogg
 !testdata/linear16_8/
 testdata/linear16_8/*
 !testdata/linear16_8/A_Tusk_is_used_to_make_costly_gifts.s16le
