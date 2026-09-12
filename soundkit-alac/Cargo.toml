@@ -9,8 +9,8 @@ readme = "README.md"
 
 [dependencies]
 frame-header = "0.2.1"
-soundkit = { path = "../soundkit" }
-soundkit-audio-demux = { path = "../soundkit-audio-demux", default-features = false }
+soundkit = { path = "../soundkit", version = "0.13.1" }
+soundkit-audio-demux = { path = "../soundkit-audio-demux", version = "0.13.1", default-features = false }
 
 [dev-dependencies]
-soundkit-audio-demux = { path = "../soundkit-audio-demux", default-features = false, features = ["mp4"] }
+soundkit-audio-demux = { path = "../soundkit-audio-demux", version = "0.13.1", default-features = false, features = ["mp4"] }

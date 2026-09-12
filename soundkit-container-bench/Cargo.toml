@@ -5,5 +5,5 @@ edition = "2021"
 publish = false
 
 [dependencies]
-soundkit-audio-demux = { path = "../soundkit-audio-demux" }
-soundkit-ogg-opus = { path = "../soundkit-ogg-opus", default-features = false }
+soundkit-audio-demux = { path = "../soundkit-audio-demux", version = "0.13.1" }
+soundkit-ogg-opus = { path = "../soundkit-ogg-opus", version = "0.13.1", default-features = false }

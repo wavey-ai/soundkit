@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 frame-header = "0.2.2"
 sha2 = "0.10"
-soundkit = { path = "../soundkit" }
-soundkit-aac-lc = { path = "../soundkit-aac-lc" }
-soundkit-decoder = { path = "../soundkit-decoder" }
-soundkit-video = { path = "../soundkit-video" }
+soundkit = { path = "../soundkit", version = "0.13.1" }
+soundkit-aac-lc = { path = "../soundkit-aac-lc", version = "0.13.1" }
+soundkit-decoder = { path = "../soundkit-decoder", version = "0.13.1" }
+soundkit-video = { path = "../soundkit-video", version = "0.13.1" }

@@ -24,8 +24,8 @@ decode-video = [
 
 [dependencies]
 access-unit = { version = "0.1.5", optional = true }
-soundkit-video = { path = "../soundkit-video", default-features = false, optional = true }
-soundkit-webm = { path = "../soundkit-webm", default-features = false, features = ["vorbis"], optional = true }
+soundkit-video = { path = "../soundkit-video", version = "0.13.1", default-features = false, optional = true }
+soundkit-webm = { path = "../soundkit-webm", version = "0.13.1", default-features = false, features = ["vorbis"], optional = true }
 
 [dev-dependencies]
 sha2 = "0.10"

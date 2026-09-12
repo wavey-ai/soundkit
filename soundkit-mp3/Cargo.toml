@@ -11,7 +11,7 @@ encode = ["dep:mp3lame-encoder", "dep:mp3lame-sys"]
 [dependencies]
 mp3lame-encoder = { version = "0.2.1", optional = true }
 mp3lame-sys = { version = "0.1.9", optional = true }
-soundkit = { path = "../soundkit" }
+soundkit = { path = "../soundkit", version = "0.13.1" }
 tracing = "0.1.40"
 
 [dev-dependencies]

@@ -7,4 +7,4 @@ description = "Pure Rust G.726-32 ADPCM codec for soundkit."
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-soundkit = { path = "../soundkit" }
+soundkit = { path = "../soundkit", version = "0.13.1" }

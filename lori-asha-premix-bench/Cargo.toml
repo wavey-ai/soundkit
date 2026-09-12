@@ -10,6 +10,6 @@ description = "Benchmark comparing the SoundKit Opus adapter, codec core, and li
 bytes = "1"
 libc = "0.2.158"
 soundkit = { path = "../soundkit", version = "0.13.1" }
-soundkit-decoder = { path = "../soundkit-decoder" }
-soundkit-opus = { path = "../soundkit-opus" }
-opus-sys = { package = "opus-sys", git = "https://github.com/wavey-ai/opus-rs", branch = "main" }
+soundkit-decoder = { path = "../soundkit-decoder", version = "0.13.1" }
+soundkit-opus = { path = "../soundkit-opus", version = "0.13.1" }
+opus-sys = { package = "opus-sys", git = "https://github.com/wavey-ai/opus-rs", version = "0.1.0", branch = "main" }

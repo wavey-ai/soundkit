@@ -7,4 +7,4 @@ description = "SoundKit-authored allocation-free G.722 codec."
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-soundkit = { path = "../soundkit" }
+soundkit = { path = "../soundkit", version = "0.13.1" }

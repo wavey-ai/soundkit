@@ -9,5 +9,5 @@ repository = "https://github.com/wavey-ai/soundkit"
 [dependencies]
 frame-header = "0.2.1"
 oxideav-core = "0.1"
-oxideav-speex = { git = "https://github.com/OxideAV/oxideav-speex.git" }
-soundkit = { path = "../soundkit" }
+oxideav-speex = { git = "https://github.com/OxideAV/oxideav-speex.git", version = "0.0.9" }
+soundkit = { path = "../soundkit", version = "0.13.1" }

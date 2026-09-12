@@ -16,8 +16,8 @@ soundkit = { path = "../soundkit", version = "0.13.1" }
 [dev-dependencies]
 criterion = "0.5"
 hound = "3.5"
-soundkit-flac = { path = "../soundkit-flac", default-features = false }
-soundkit-opus = { path = "../soundkit-opus" }
+soundkit-flac = { path = "../soundkit-flac", version = "0.13.1", default-features = false }
+soundkit-opus = { path = "../soundkit-opus", version = "0.13.1" }
 
 [[bench]]
 name = "rebox"

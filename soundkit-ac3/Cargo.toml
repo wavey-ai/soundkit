@@ -10,4 +10,4 @@ repository = "https://github.com/wavey-ai/soundkit"
 frame-header = "0.2.1"
 oxideav-ac3 = "0.0.6"
 oxideav-core = "0.1"
-soundkit = { path = "../soundkit" }
+soundkit = { path = "../soundkit", version = "0.13.1" }

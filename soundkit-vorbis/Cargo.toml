@@ -9,4 +9,4 @@ repository = "https://github.com/wavey-ai/soundkit"
 [dependencies]
 frame-header = "0.2.1"
 memchr = "2"
-soundkit = { path = "../soundkit" }
+soundkit = { path = "../soundkit", version = "0.13.1" }

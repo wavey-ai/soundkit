@@ -8,7 +8,7 @@ description = "Pure-Rust FLAC encoding and decoding for SoundKit"
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-soundkit = { path = "../soundkit" }
+soundkit = { path = "../soundkit", version = "0.13.1" }
 heapless = "0.8.0"
 md-5 = "0.10.6"
 num-traits = "0.2"

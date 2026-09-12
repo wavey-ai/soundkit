@@ -9,11 +9,11 @@ repository = "https://github.com/wavey-ai/soundkit"
 # Its own crate. 0.1.5 carries the bluray, dts and container-detection
 # modules this needs, so it is taken from the registry like the rest.
 access-unit = "0.1.5"
-fdk-aac = { git = "https://github.com/wavey-ai/fdk-aac-rs.git", branch = "main", optional = true }
-soundkit-audio-demux = { path = "../soundkit-audio-demux", default-features = false, features = ["mp4"], optional = true }
-soundkit-aac-lc = { path = "../soundkit-aac-lc", optional = true }
+fdk-aac = { git = "https://github.com/wavey-ai/fdk-aac-rs.git", version = "0.7.0", branch = "main", optional = true }
+soundkit-audio-demux = { path = "../soundkit-audio-demux", version = "0.13.1", default-features = false, features = ["mp4"], optional = true }
+soundkit-aac-lc = { path = "../soundkit-aac-lc", version = "0.13.1", optional = true }
 
-soundkit = { path = "../soundkit" }
+soundkit = { path = "../soundkit", version = "0.13.1" }
 tracing = "0.1.40"
 
 [features]

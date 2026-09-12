@@ -8,4 +8,4 @@ repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
 g729-sys = "0.1.2"
-soundkit = { path = "../soundkit" }
+soundkit = { path = "../soundkit", version = "0.13.1" }

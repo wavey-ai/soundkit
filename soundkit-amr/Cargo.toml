@@ -7,7 +7,7 @@ description = "OpenCORE AMR-NB codec wrapper for soundkit."
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-soundkit = { path = "../soundkit" }
+soundkit = { path = "../soundkit", version = "0.13.1" }
 
 [build-dependencies]
 pkg-config = "0.3"

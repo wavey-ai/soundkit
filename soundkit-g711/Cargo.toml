@@ -7,4 +7,4 @@ description = "Native Rust G.711 u-law and A-law codecs for soundkit."
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-soundkit = { path = "../soundkit" }
+soundkit = { path = "../soundkit", version = "0.13.1" }
