@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-opus"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 license = "MIT AND BSD-3-Clause"
 description = "SoundKit-authored native Opus codec with packet and streaming APIs"

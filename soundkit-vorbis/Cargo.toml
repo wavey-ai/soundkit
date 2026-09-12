@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-vorbis"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Streaming Ogg Vorbis decoder with an in-tree Rust codec core."
@@ -9,4 +9,4 @@ repository = "https://github.com/wavey-ai/soundkit"
 [dependencies]
 frame-header = "0.2.1"
 memchr = "2"
-soundkit = { path = "../soundkit", version = "0.13.1" }
+soundkit = { path = "../soundkit", version = "0.13.2" }

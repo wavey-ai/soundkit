@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-g729"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 license = "MIT"
 description = "Native Rust G.729 codec wrapper for soundkit."
@@ -8,4 +8,4 @@ repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
 g729-sys = "0.1.2"
-soundkit = { path = "../soundkit", version = "0.13.1" }
+soundkit = { path = "../soundkit", version = "0.13.2" }

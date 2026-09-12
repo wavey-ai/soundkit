@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-aiff"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 license = "MIT"
 description = "Pure Rust AIFF/AIFF-C decoder wrapper for soundkit."
@@ -10,4 +10,4 @@ repository = "https://github.com/wavey-ai/soundkit"
 aifc = "0.7.0"
 audio-codec-algorithms = "0.8.0"
 frame-header = "0.2.1"
-soundkit = { path = "../soundkit", version = "0.13.1" }
+soundkit = { path = "../soundkit", version = "0.13.2" }

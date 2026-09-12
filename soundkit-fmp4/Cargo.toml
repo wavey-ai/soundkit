@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-fmp4"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 license = "MIT"
 description = "Zero-transcode Soundkit v2 audio to fragmented MP4 reboxing"
@@ -11,13 +11,13 @@ access-unit = "0.1.5"
 boxer = { package = "wavey-boxer", version = "0.1.1" }
 bytes = "1"
 frame-header = "0.2.2"
-soundkit = { path = "../soundkit", version = "0.13.1" }
+soundkit = { path = "../soundkit", version = "0.13.2" }
 
 [dev-dependencies]
 criterion = "0.5"
 hound = "3.5"
-soundkit-flac = { path = "../soundkit-flac", version = "0.13.1", default-features = false }
-soundkit-opus = { path = "../soundkit-opus", version = "0.13.1" }
+soundkit-flac = { path = "../soundkit-flac", version = "0.13.2", default-features = false }
+soundkit-opus = { path = "../soundkit-opus", version = "0.13.2" }
 
 [[bench]]
 name = "rebox"

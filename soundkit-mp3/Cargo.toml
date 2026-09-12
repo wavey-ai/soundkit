@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-mp3"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
@@ -11,7 +11,7 @@ encode = ["dep:mp3lame-encoder", "dep:mp3lame-sys"]
 [dependencies]
 mp3lame-encoder = { version = "0.2.1", optional = true }
 mp3lame-sys = { version = "0.1.9", optional = true }
-soundkit = { path = "../soundkit", version = "0.13.1" }
+soundkit = { path = "../soundkit", version = "0.13.2" }
 tracing = "0.1.40"
 
 [dev-dependencies]

@@ -1,13 +1,13 @@
 [package]
 name = "soundkit-codec-fate"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 publish = false
 
 [dependencies]
 frame-header = "0.2.2"
 sha2 = "0.10"
-soundkit = { path = "../soundkit", version = "0.13.1" }
-soundkit-aac-lc = { path = "../soundkit-aac-lc", version = "0.13.1" }
-soundkit-decoder = { path = "../soundkit-decoder", version = "0.13.1" }
-soundkit-video = { path = "../soundkit-video", version = "0.13.1" }
+soundkit = { path = "../soundkit", version = "0.13.2" }
+soundkit-aac-lc = { path = "../soundkit-aac-lc", version = "0.13.2" }
+soundkit-decoder = { path = "../soundkit-decoder", version = "0.13.2" }
+soundkit-video = { path = "../soundkit-video", version = "0.13.2" }

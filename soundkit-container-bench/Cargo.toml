@@ -1,9 +1,9 @@
 [package]
 name = "soundkit-container-bench"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 publish = false
 
 [dependencies]
-soundkit-audio-demux = { path = "../soundkit-audio-demux", version = "0.13.1" }
-soundkit-ogg-opus = { path = "../soundkit-ogg-opus", version = "0.13.1", default-features = false }
+soundkit-audio-demux = { path = "../soundkit-audio-demux", version = "0.13.2" }
+soundkit-ogg-opus = { path = "../soundkit-ogg-opus", version = "0.13.2", default-features = false }
