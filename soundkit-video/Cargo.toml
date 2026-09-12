@@ -7,7 +7,9 @@ description = "Pure-Rust video decoders and canonical frame surfaces for SoundKi
 repository = "https://github.com/wavey-ai/soundkit"
 
 [features]
-default = ["h264", "hevc", "vp9", "av1", "prores", "dnx"]
+# AV1 is the one native decoder (rusty_av1d, C asm), so it is off by default:
+# the crate and its crates.io release are pure Rust. Enable `av1` to opt in.
+default = ["h264", "hevc", "vp9", "prores", "dnx"]
 h264 = ["dep:rusty_h264-common", "dep:rusty_h264-decoder"]
 hevc = ["dep:rust_h265"]
 vp9 = ["dep:vp9dec"]

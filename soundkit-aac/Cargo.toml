@@ -17,7 +17,10 @@ soundkit = { path = "../soundkit", version = "0.13.1" }
 tracing = "0.1.40"
 
 [features]
-default = ["fdk", "owned-lc"]
+# The owned, pure-Rust AAC-LC decoder is the default. `fdk` opts into the
+# native fdk-aac fallback for profiles the owned decoder does not cover; the
+# crates.io release is pure Rust.
+default = ["owned-lc"]
 fdk = ["dep:fdk-aac"]
 owned-lc = ["dep:soundkit-aac-lc"]
 mp4-demux = ["dep:soundkit-audio-demux"]
