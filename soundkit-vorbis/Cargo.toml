@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-vorbis"
-version = "0.12.3"
+version = "0.13.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Streaming Ogg Vorbis decoder with an in-tree Rust codec core."

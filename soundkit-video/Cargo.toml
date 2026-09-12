@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-video"
-version = "0.12.3"
+version = "0.13.1"
 edition = "2021"
 license = "MIT"
 description = "Pure-Rust video decoders and canonical frame surfaces for SoundKit."
