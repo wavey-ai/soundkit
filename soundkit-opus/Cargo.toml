@@ -21,7 +21,7 @@ default = []
 wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
-soundkit = { version = "0.12.3", path = "../soundkit" }
+soundkit = { version = "0.13.1", path = "../soundkit" }
 frame-header = "0.2.2"
 tracing = "0.1.40"
 wasm-bindgen = { version = "0.2", optional = true }
