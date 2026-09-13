@@ -1,6 +1,6 @@
 [package]
 name = "aac-wasm-bench"
-version = "0.13.2"
+version = "0.13.3"
 edition = "2021"
 publish = false
 license = "MIT"
@@ -25,8 +25,8 @@ wasm-bindgen-api = ["dep:wasm-bindgen", "dep:js-sys"]
 [dependencies]
 fdk-aac = { git = "https://github.com/wavey-ai/fdk-aac-rs.git", version = "0.7.0", branch = "main", optional = true }
 oxideav-aac = { git = "https://github.com/OxideAV/oxideav-aac.git", version = "0.1.7", optional = true }
-soundkit = { path = "../soundkit", version = "0.13.2" }
-soundkit-aac-lc = { path = "../soundkit-aac-lc", version = "0.13.2", optional = true }
+soundkit = { path = "../soundkit", version = "0.13.3" }
+soundkit-aac-lc = { path = "../soundkit-aac-lc", version = "0.13.3", optional = true }
 symphonia-codec-aac = { version = "0.6.0", optional = true }
 symphonia-core = { version = "0.6.0", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }

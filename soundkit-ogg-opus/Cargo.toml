@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-ogg-opus"
-version = "0.13.2"
+version = "0.13.3"
 edition = "2021"
 license = "MIT"
 description = "Streaming Ogg Opus decoder built on soundkit and ogg"

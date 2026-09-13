@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-stream"
-version = "0.13.2"
+version = "0.13.3"
 edition = "2021"
 license = "MIT"
 description = "SoundKit v2 frame-stream encoding (Opus and FLAC) and sidecar index utilities."
@@ -9,5 +9,5 @@ readme = "README.md"
 
 [dependencies]
 frame-header = "0.2.2"
-soundkit-flac = { path = "../soundkit-flac", version = "0.13.2", default-features = false }
-soundkit-opus = { path = "../soundkit-opus", version = "0.13.2" }
+soundkit-flac = { path = "../soundkit-flac", version = "0.13.3", default-features = false }
+soundkit-opus = { path = "../soundkit-opus", version = "0.13.3" }

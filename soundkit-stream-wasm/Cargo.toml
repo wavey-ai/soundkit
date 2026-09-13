@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-stream-wasm"
-version = "0.13.2"
+version = "0.13.3"
 edition = "2021"
 license = "MIT"
 description = "wasm-bindgen bindings for SoundKit v2 frame-stream encoding."

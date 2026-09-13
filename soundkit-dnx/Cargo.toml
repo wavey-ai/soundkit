@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-dnx"
-version = "0.13.2"
+version = "0.13.3"
 edition = "2021"
 license = "LGPL-2.1-or-later"
 description = "Memory-safe Rust VC-3, DNxHD, and DNxHR decoder for SoundKit."

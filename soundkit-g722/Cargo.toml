@@ -1,10 +1,10 @@
 [package]
 name = "soundkit-g722"
-version = "0.13.2"
+version = "0.13.3"
 edition = "2021"
 license = "MIT"
 description = "SoundKit-authored allocation-free G.722 codec."
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-soundkit = { path = "../soundkit", version = "0.13.2" }
+soundkit = { path = "../soundkit", version = "0.13.3" }

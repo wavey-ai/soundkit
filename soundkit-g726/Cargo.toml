@@ -1,10 +1,10 @@
 [package]
 name = "soundkit-g726"
-version = "0.13.2"
+version = "0.13.3"
 edition = "2021"
 license = "MIT"
 description = "Pure Rust G.726-32 ADPCM codec for soundkit."
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-soundkit = { path = "../soundkit", version = "0.13.2" }
+soundkit = { path = "../soundkit", version = "0.13.3" }

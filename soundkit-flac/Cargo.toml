@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-flac"
-version = "0.13.2"
+version = "0.13.3"
 
 edition = "2021"
 license = "Apache-2.0"
@@ -8,7 +8,7 @@ description = "Pure-Rust FLAC encoding and decoding for SoundKit"
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-soundkit = { path = "../soundkit", version = "0.13.2" }
+soundkit = { path = "../soundkit", version = "0.13.3" }
 heapless = "0.8.0"
 md-5 = "0.10.6"
 num-traits = "0.2"

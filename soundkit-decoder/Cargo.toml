@@ -1,36 +1,36 @@
 [package]
 name = "soundkit-decoder"
-version = "0.13.2"
+version = "0.13.3"
 edition = "2021"
 license = "MIT"
 description = "Streaming audio decoder pipeline with automatic format detection"
 repository = "https://github.com/wavey-ai/soundkit"
 
 [dependencies]
-soundkit = { path = "../soundkit", version = "0.13.2", features = ["sinc-resampler"] }
+soundkit = { path = "../soundkit", version = "0.13.3", features = ["sinc-resampler"] }
 access-unit = "0.1.5"
-soundkit-amr = { path = "../soundkit-amr", version = "0.13.2" }
-soundkit-g711 = { path = "../soundkit-g711", version = "0.13.2" }
-soundkit-g722 = { path = "../soundkit-g722", version = "0.13.2" }
-soundkit-g726 = { path = "../soundkit-g726", version = "0.13.2" }
-soundkit-g729 = { path = "../soundkit-g729", version = "0.13.2" }
-soundkit-gsm = { path = "../soundkit-gsm", version = "0.13.2" }
-soundkit-speex = { path = "../soundkit-speex", version = "0.13.2" }
-soundkit-vorbis = { path = "../soundkit-vorbis", version = "0.13.2" }
-soundkit-alac = { path = "../soundkit-alac", version = "0.13.2" }
-soundkit-aiff = { path = "../soundkit-aiff", version = "0.13.2" }
-soundkit-ac3 = { path = "../soundkit-ac3", version = "0.13.2" }
-soundkit-mp3 = { path = "../soundkit-mp3", version = "0.13.2", default-features = false }
-soundkit-aac = { path = "../soundkit-aac", version = "0.13.2", features = ["mp4-decoder"] }
-soundkit-aac-lc = { path = "../soundkit-aac-lc", version = "0.13.2" }
+soundkit-amr = { path = "../soundkit-amr", version = "0.13.3" }
+soundkit-g711 = { path = "../soundkit-g711", version = "0.13.3" }
+soundkit-g722 = { path = "../soundkit-g722", version = "0.13.3" }
+soundkit-g726 = { path = "../soundkit-g726", version = "0.13.3" }
+soundkit-g729 = { path = "../soundkit-g729", version = "0.13.3" }
+soundkit-gsm = { path = "../soundkit-gsm", version = "0.13.3" }
+soundkit-speex = { path = "../soundkit-speex", version = "0.13.3" }
+soundkit-vorbis = { path = "../soundkit-vorbis", version = "0.13.3" }
+soundkit-alac = { path = "../soundkit-alac", version = "0.13.3" }
+soundkit-aiff = { path = "../soundkit-aiff", version = "0.13.3" }
+soundkit-ac3 = { path = "../soundkit-ac3", version = "0.13.3" }
+soundkit-mp3 = { path = "../soundkit-mp3", version = "0.13.3", default-features = false }
+soundkit-aac = { path = "../soundkit-aac", version = "0.13.3", features = ["mp4-decoder"] }
+soundkit-aac-lc = { path = "../soundkit-aac-lc", version = "0.13.3" }
 symphonia-codec-aac = { git = "https://github.com/wavey-ai/Symphonia.git", version = "0.6.0-alpha.1", branch = "main" }
 symphonia-bundle-mp3 = { git = "https://github.com/wavey-ai/Symphonia.git", version = "0.6.0-alpha.1", branch = "main", default-features = false, features = ["mp2"] }
 symphonia-core = { git = "https://github.com/wavey-ai/Symphonia.git", version = "0.6.0-alpha.1", branch = "main" }
-soundkit-audio-demux = { path = "../soundkit-audio-demux", version = "0.13.2", default-features = false, features = ["mp4", "mpeg-ts", "mxf"] }
-soundkit-flac = { path = "../soundkit-flac", version = "0.13.2" }
-soundkit-opus = { path = "../soundkit-opus", version = "0.13.2" }
-soundkit-ogg-opus = { path = "../soundkit-ogg-opus", version = "0.13.2" }
-soundkit-webm = { path = "../soundkit-webm", version = "0.13.2" }
+soundkit-audio-demux = { path = "../soundkit-audio-demux", version = "0.13.3", default-features = false, features = ["mp4", "mpeg-ts", "mxf"] }
+soundkit-flac = { path = "../soundkit-flac", version = "0.13.3" }
+soundkit-opus = { path = "../soundkit-opus", version = "0.13.3" }
+soundkit-ogg-opus = { path = "../soundkit-ogg-opus", version = "0.13.3" }
+soundkit-webm = { path = "../soundkit-webm", version = "0.13.3" }
 frame-header = "0.2.1"
 bytes = "1"
 rubato = "0.14.1"

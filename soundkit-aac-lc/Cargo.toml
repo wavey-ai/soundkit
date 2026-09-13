@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-aac-lc"
-version = "0.13.2"
+version = "0.13.3"
 edition = "2021"
 license = "MIT"
 description = "SoundKit-owned pure Rust AAC-LC decoder core for wasm and worker targets."
@@ -22,7 +22,7 @@ bench-ablate-synth = []
 rusty_aac = { version = "0.5.0", default-features = false }
 # Only to read a real container in the local-fixture test; the decoder
 # itself does not demux.
-soundkit-audio-demux = { path = "../soundkit-audio-demux", version = "0.13.2", default-features = false, features = ["mp4"] }
+soundkit-audio-demux = { path = "../soundkit-audio-demux", version = "0.13.3", default-features = false, features = ["mp4"] }
 
 [target.'cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))'.dependencies]
 rustfft = "6.4.1"

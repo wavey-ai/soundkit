@@ -1,6 +1,6 @@
 [package]
 name = "soundkit-store-worker"
-version = "0.1.0"
+version = "0.13.3"
 edition = "2021"
 description = "Cloudflare Worker storage API for SoundKit v2 frame streams."
 repository = "https://github.com/wavey-ai/soundkit"
