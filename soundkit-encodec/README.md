@@ -1,6 +1,6 @@
 # soundkit-encodec
 
-A SoundKit handler around `encodec-rs`, not another EnCodec implementation.
+A SoundKit handler around `encodec-rs`.
 
 - `decode_to_sink(codec, lm, ecdc, emit)` decodes an extracted ECDC object into
   final, bounded SoundKit `AudioData` blocks. The caller owns the inference
