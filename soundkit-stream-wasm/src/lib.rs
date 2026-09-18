@@ -45,6 +45,7 @@ pub struct WasmEncodedSoundKitStreams {
     flac_stream: Vec<u8>,
     flac_index: Vec<u8>,
     flac_packet_count: u64,
+    visuals: Vec<u8>,
     metadata_json: String,
 }
 
@@ -78,6 +79,12 @@ impl WasmEncodedSoundKitStreams {
     #[wasm_bindgen(getter, js_name = flacPacketCount)]
     pub fn flac_packet_count(&self) -> String {
         self.flac_packet_count.to_string()
+    }
+
+    /// The stereo, three-band waveform sidecar, from the same PCM pass.
+    #[wasm_bindgen(getter, js_name = visuals)]
+    pub fn visuals(&self) -> Vec<u8> {
+        self.visuals.clone()
     }
 
     #[wasm_bindgen(js_name = metadataJson)]
@@ -124,7 +131,8 @@ pub fn encode_pcm_i16_to_soundkit_streams(
             "\"opusStreamBytes\":{},",
             "\"opusIndexBytes\":{},",
             "\"flacStreamBytes\":{},",
-            "\"flacIndexBytes\":{}",
+            "\"flacIndexBytes\":{},",
+            "\"visualsBytes\":{}",
             "}}"
         ),
         encoded.opus.index.timescale,
@@ -137,7 +145,8 @@ pub fn encode_pcm_i16_to_soundkit_streams(
         encoded.opus.stream.len(),
         opus_index.len(),
         encoded.flac.stream.len(),
-        flac_index.len()
+        flac_index.len(),
+        encoded.visuals.len()
     );
 
     Ok(WasmEncodedSoundKitStreams {
@@ -147,6 +156,7 @@ pub fn encode_pcm_i16_to_soundkit_streams(
         flac_stream: encoded.flac.stream,
         flac_index,
         flac_packet_count: encoded.flac.packet_count,
+        visuals: encoded.visuals,
         metadata_json,
     })
 }

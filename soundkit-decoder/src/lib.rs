@@ -149,6 +149,41 @@ pub struct DecodeOptions {
     pub output_channels: Option<u8>,
 }
 
+/// Decode an extracted EnCodec object with an explicitly supplied model
+/// backend, then use the same PCM output conversion as every other codec.
+/// The callback provides backpressure and cancellation without collecting a
+/// whole decoded programme. Model discovery/downloads are intentionally not
+/// part of automatic file-format detection.
+#[cfg(feature = "encodec")]
+pub fn decode_encodec_to_sink(
+    codec: &mut dyn soundkit_encodec::FrameCodec,
+    lm: &mut dyn soundkit_encodec::LmCodec,
+    payload: &[u8],
+    options: DecodeOptions,
+    mut emit: impl FnMut(AudioData) -> Result<(), DecodeError>,
+) -> Result<(), DecodeError> {
+    let mut resampler = None;
+    let mut output_error = None;
+    let result = soundkit_encodec::decode_to_sink(codec, lm, payload, |audio| {
+        let result = apply_output_options(audio, &options, &mut resampler)
+            .and_then(|frames| {
+                for frame in frames { emit(frame)?; }
+                Ok(())
+            });
+        if let Err(error) = result {
+            output_error = Some(error);
+            return Err(std::io::Error::other("PCM output stopped").into());
+        }
+        Ok(())
+    });
+    if let Some(error) = output_error { return Err(error); }
+    result.map_err(|error| DecodeError::DecodingFailed(error.to_string()))?;
+    if let Some(resampler) = resampler {
+        for frame in flush_resampler_frames(resampler)? { emit(frame)?; }
+    }
+    Ok(())
+}
+
 /// PCM and descriptive metadata extracted from one complete media file.
 ///
 /// `selected_track` is populated for seekable containers such as MOV/MP4.

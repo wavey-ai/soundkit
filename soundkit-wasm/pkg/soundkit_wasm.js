@@ -834,6 +834,191 @@ export class WasmCanonicalPcmDecoder {
 }
 if (Symbol.dispose) WasmCanonicalPcmDecoder.prototype[Symbol.dispose] = WasmCanonicalPcmDecoder.prototype.free;
 
+export class WasmEncodecCodes {
+    static __wrap(ptr) {
+        const obj = Object.create(WasmEncodecCodes.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmEncodecCodesFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmEncodecCodesFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmencodeccodes_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    scale() {
+        const ret = wasm.wasmencodeccodes_scale(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Uint16Array}
+     */
+    takeCodes() {
+        const ret = wasm.wasmencodeccodes_takeCodes(this.__wbg_ptr);
+        var v1 = getArrayU16FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 2, 2);
+        return v1;
+    }
+}
+if (Symbol.dispose) WasmEncodecCodes.prototype[Symbol.dispose] = WasmEncodecCodes.prototype.free;
+
+export class WasmEncodecDecoder {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmEncodecDecoderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmencodecdecoder_free(ptr, 0);
+    }
+    /**
+     * @param {number} start
+     * @param {number} end
+     * @param {Int16Array} pcm
+     * @returns {boolean}
+     */
+    addCachedRange(start, end, pcm) {
+        const ptr0 = passArray16ToWasm0(pcm, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmencodecdecoder_addCachedRange(this.__wbg_ptr, start, end, ptr0, len0);
+        return ret !== 0;
+    }
+    /**
+     * @param {number} index
+     * @param {Float32Array} window
+     */
+    addDecodedFrame(index, window) {
+        const ptr0 = passArrayF32ToWasm0(window, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmencodecdecoder_addDecodedFrame(this.__wbg_ptr, index, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * @param {number} index
+     */
+    addSilentFrame(index) {
+        const ret = wasm.wasmencodecdecoder_addSilentFrame(this.__wbg_ptr, index);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * @param {Uint8Array} payload
+     * @param {number} frame_length
+     * @returns {WasmEncodecCodes}
+     */
+    decodeChunk(payload, frame_length) {
+        const ptr0 = passArray8ToWasm0(payload, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmencodecdecoder_decodeChunk(this.__wbg_ptr, ptr0, len0, frame_length);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmEncodecCodes.__wrap(ret[0]);
+    }
+    /**
+     * @param {number} next_index
+     * @returns {WasmEncodecPcmBatch}
+     */
+    emitAfterBatch(next_index) {
+        const ret = wasm.wasmencodecdecoder_emitAfterBatch(this.__wbg_ptr, next_index);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return WasmEncodecPcmBatch.__wrap(ret[0]);
+    }
+    /**
+     * @returns {WasmEncodecPcmBatch}
+     */
+    flush() {
+        const ret = wasm.wasmencodecdecoder_flush(this.__wbg_ptr);
+        return WasmEncodecPcmBatch.__wrap(ret);
+    }
+    /**
+     * @param {string} bundle_json
+     * @param {Uint8Array} weights
+     * @param {string} expected_hash
+     * @param {number} audio_length
+     * @param {number} frame_count
+     * @param {boolean} retain_full
+     */
+    constructor(bundle_json, weights, expected_hash, audio_length, frame_count, retain_full) {
+        const ptr0 = passStringToWasm0(bundle_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(weights, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(expected_hash, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmencodecdecoder_new(ptr0, len0, ptr1, len1, ptr2, len2, audio_length, frame_count, retain_full);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        WasmEncodecDecoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {Int16Array}
+     */
+    resultPcm() {
+        const ret = wasm.wasmencodecdecoder_resultPcm(this.__wbg_ptr);
+        var v1 = getArrayI16FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 2, 2);
+        return v1;
+    }
+}
+if (Symbol.dispose) WasmEncodecDecoder.prototype[Symbol.dispose] = WasmEncodecDecoder.prototype.free;
+
+export class WasmEncodecPcmBatch {
+    static __wrap(ptr) {
+        const obj = Object.create(WasmEncodecPcmBatch.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmEncodecPcmBatchFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        WasmEncodecPcmBatchFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_wasmencodecpcmbatch_free(ptr, 0);
+    }
+    /**
+     * @returns {Int16Array}
+     */
+    takePcm() {
+        const ret = wasm.wasmencodecpcmbatch_takePcm(this.__wbg_ptr);
+        var v1 = getArrayI16FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 2, 2);
+        return v1;
+    }
+    /**
+     * @returns {Uint32Array}
+     */
+    takeSegments() {
+        const ret = wasm.wasmencodecpcmbatch_takeSegments(this.__wbg_ptr);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+}
+if (Symbol.dispose) WasmEncodecPcmBatch.prototype[Symbol.dispose] = WasmEncodecPcmBatch.prototype.free;
+
 export class WasmFlacEncoder {
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
@@ -2616,6 +2801,37 @@ export function buildSoundKitFrameV2(encoding, payload, sample_size, sample_rate
 }
 
 /**
+ * @param {string} bundle_json
+ * @param {Uint8Array} payload
+ * @returns {any}
+ */
+export function encodecDecodeChunks(bundle_json, payload) {
+    const ptr0 = passStringToWasm0(bundle_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(payload, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.encodecDecodeChunks(ptr0, len0, ptr1, len1);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * @param {Uint8Array} payload
+ * @returns {any}
+ */
+export function encodecMetadata(payload) {
+    const ptr0 = passArray8ToWasm0(payload, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.encodecMetadata(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * Inspect one CAF chunk header without reading its payload.
  * @param {Uint8Array} header
  * @param {number} absolute_offset
@@ -2677,12 +2893,27 @@ export function wasmMemoryBytes() {
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
+        __wbg_Error_408e67f47ca7b58b: function(arg0, arg1) {
+            const ret = Error(getStringFromWasm0(arg0, arg1));
+            return ret;
+        },
+        __wbg_String_8564e559799eccda: function(arg0, arg1) {
+            const ret = String(arg1);
+            const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+        },
         __wbg___wbindgen_debug_string_a57024b9c6e4a48b: function(arg0, arg1) {
             const ret = debugString(arg1);
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len1 = WASM_VECTOR_LEN;
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+        },
+        __wbg___wbindgen_is_string_e6f02f0ea5f20a32: function(arg0) {
+            const ret = typeof(arg0) === 'string';
+            return ret;
         },
         __wbg___wbindgen_is_undefined_6cff064c44e0d823: function(arg0) {
             const ret = arg0 === undefined;
@@ -2739,6 +2970,10 @@ function __wbg_get_imports() {
             const ret = new Uint8Array(arg0);
             return ret;
         },
+        __wbg_new_cdf041679ded4c5f: function() {
+            const ret = new Map();
+            return ret;
+        },
         __wbg_new_ebe3e0f6837f0879: function() {
             const ret = new Object();
             return ret;
@@ -2770,13 +3005,23 @@ function __wbg_get_imports() {
             const ret = arg0.push(arg1);
             return ret;
         },
+        __wbg_set_014226dfeca53178: function(arg0, arg1, arg2) {
+            const ret = arg0.set(arg1, arg2);
+            return ret;
+        },
         __wbg_set_577f5f7485b6744e: function(arg0, arg1, arg2) {
             arg0.set(getArrayF32FromWasm0(arg1, arg2));
+        },
+        __wbg_set_6be42768c690e380: function(arg0, arg1, arg2) {
+            arg0[arg1] = arg2;
         },
         __wbg_set_8155bb79a948541b: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = Reflect.set(arg0, arg1, arg2);
             return ret;
         }, arguments); },
+        __wbg_set_a80955eb93b145c6: function(arg0, arg1, arg2) {
+            arg0[arg1 >>> 0] = arg2;
+        },
         __wbg_subarray_095365bb46f94afd: function(arg0, arg1, arg2) {
             const ret = arg0.subarray(arg1 >>> 0, arg2 >>> 0);
             return ret;
@@ -2786,19 +3031,29 @@ function __wbg_get_imports() {
             const ret = arg0;
             return ret;
         },
-        __wbindgen_cast_0000000000000002: function(arg0, arg1) {
+        __wbindgen_cast_0000000000000002: function(arg0) {
+            // Cast intrinsic for `I64 -> Externref`.
+            const ret = arg0;
+            return ret;
+        },
+        __wbindgen_cast_0000000000000003: function(arg0, arg1) {
             // Cast intrinsic for `Ref(Slice(I32)) -> NamedExternref("Int32Array")`.
             const ret = getArrayI32FromWasm0(arg0, arg1);
             return ret;
         },
-        __wbindgen_cast_0000000000000003: function(arg0, arg1) {
+        __wbindgen_cast_0000000000000004: function(arg0, arg1) {
             // Cast intrinsic for `Ref(Slice(U8)) -> NamedExternref("Uint8Array")`.
             const ret = getArrayU8FromWasm0(arg0, arg1);
             return ret;
         },
-        __wbindgen_cast_0000000000000004: function(arg0, arg1) {
+        __wbindgen_cast_0000000000000005: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
+            return ret;
+        },
+        __wbindgen_cast_0000000000000006: function(arg0) {
+            // Cast intrinsic for `U64 -> Externref`.
+            const ret = BigInt.asUintN(64, arg0);
             return ret;
         },
         __wbindgen_init_externref_table: function() {
@@ -2847,6 +3102,15 @@ const WasmCafAudioIndexFinalization = (typeof FinalizationRegistry === 'undefine
 const WasmCanonicalPcmDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmcanonicalpcmdecoder_free(ptr, 1));
+const WasmEncodecCodesFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmencodeccodes_free(ptr, 1));
+const WasmEncodecDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmencodecdecoder_free(ptr, 1));
+const WasmEncodecPcmBatchFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_wasmencodecpcmbatch_free(ptr, 1));
 const WasmFlacEncoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmflacencoder_free(ptr, 1));
@@ -2998,6 +3262,16 @@ function getArrayI16FromWasm0(ptr, len) {
 function getArrayI32FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getInt32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
+function getArrayU16FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint16ArrayMemory0().subarray(ptr / 2, ptr / 2 + len);
+}
+
+function getArrayU32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
 }
 
 function getArrayU8FromWasm0(ptr, len) {

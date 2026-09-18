@@ -32,6 +32,7 @@ browser-audio = [
   "ac3",
 ]
 detect = ["dep:access-unit"]
+encodec = ["dep:soundkit-encodec", "soundkit-encodec/browser", "dep:serde", "dep:serde-wasm-bindgen"]
 audio-demux = ["dep:soundkit-audio-demux"]
 video = ["dep:soundkit-video"]
 # Decoded MOV/MP4 keyframe timelines: the sync-sample map plus per-keyframe
@@ -54,7 +55,7 @@ aac-lc = ["aac"]
 aac-lc-bench = ["aac"]
 alac = ["dep:soundkit-alac"]
 aiff = ["dep:soundkit-aiff"]
-opus = ["dep:soundkit-opus", "dep:soundkit-stream"]
+opus = ["dep:soundkit-opus", "dep:soundkit-stream", "dep:soundkit-visuals"]
 ogg-opus = ["opus", "dep:soundkit-ogg-opus", "soundkit-ogg-opus/decode"]
 opus-debox = ["dep:soundkit-ogg-opus", "dep:soundkit-webm"]
 webm = ["dep:soundkit-webm", "soundkit-webm/vorbis"]
@@ -63,6 +64,9 @@ ac3 = ["dep:soundkit-ac3"]
 
 [dependencies]
 soundkit = { path = "../soundkit", version = "0.13.3" }
+soundkit-encodec = { path = "../soundkit-encodec", optional = true }
+serde = { version = "1", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
 access-unit = { version = "0.1.5", optional = true }
 frame-header = "0.2.2"
 js-sys = "0.3"
@@ -81,6 +85,9 @@ soundkit-ogg-opus = { path = "../soundkit-ogg-opus", version = "0.13.3", default
 # The SoundKit v2 frame-stream encoder the library import path writes with.
 # Optional: it carries both codecs, so it rides the `opus` feature.
 soundkit-stream = { path = "../soundkit-stream", version = "0.13.3", optional = true }
+# The stereo, banded waveform the library import writes beside the streams,
+# so a player draws the side without reading the audio again.
+soundkit-visuals = { path = "../soundkit-visuals", version = "0.1.0", optional = true }
 soundkit-opus = { path = "../soundkit-opus", version = "0.13.3", optional = true }
 soundkit-vorbis = { path = "../soundkit-vorbis", version = "0.13.3", optional = true }
 soundkit-webm = { path = "../soundkit-webm", version = "0.13.3", default-features = false, optional = true }

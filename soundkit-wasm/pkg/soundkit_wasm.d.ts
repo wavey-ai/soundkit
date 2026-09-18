@@ -167,6 +167,35 @@ export class WasmCanonicalPcmDecoder {
     push(bytes: Uint8Array): any;
 }
 
+export class WasmEncodecCodes {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    scale(): number;
+    takeCodes(): Uint16Array;
+}
+
+export class WasmEncodecDecoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    addCachedRange(start: number, end: number, pcm: Int16Array): boolean;
+    addDecodedFrame(index: number, window: Float32Array): void;
+    addSilentFrame(index: number): void;
+    decodeChunk(payload: Uint8Array, frame_length: number): WasmEncodecCodes;
+    emitAfterBatch(next_index: number): WasmEncodecPcmBatch;
+    flush(): WasmEncodecPcmBatch;
+    constructor(bundle_json: string, weights: Uint8Array, expected_hash: string, audio_length: number, frame_count: number, retain_full: boolean);
+    resultPcm(): Int16Array;
+}
+
+export class WasmEncodecPcmBatch {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    takePcm(): Int16Array;
+    takeSegments(): Uint32Array;
+}
+
 export class WasmFlacEncoder {
     free(): void;
     [Symbol.dispose](): void;
@@ -650,6 +679,10 @@ export function buildSoundKitFrameHeaderV2(encoding: number, payload_size: numbe
 
 export function buildSoundKitFrameV2(encoding: number, payload: Uint8Array, sample_size: number, sample_rate: number, channels: number, bits_per_sample: number, pts: number): Uint8Array;
 
+export function encodecDecodeChunks(bundle_json: string, payload: Uint8Array): any;
+
+export function encodecMetadata(payload: Uint8Array): any;
+
 /**
  * Inspect one CAF chunk header without reading its payload.
  */
@@ -687,6 +720,9 @@ export interface InitOutput {
     readonly __wbg_wasmcafalacindex_free: (a: number, b: number) => void;
     readonly __wbg_wasmcafaudioindex_free: (a: number, b: number) => void;
     readonly __wbg_wasmcanonicalpcmdecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmencodeccodes_free: (a: number, b: number) => void;
+    readonly __wbg_wasmencodecdecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmencodecpcmbatch_free: (a: number, b: number) => void;
     readonly __wbg_wasmflacencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmflacframedecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmflacframeencoder_free: (a: number, b: number) => void;
@@ -697,7 +733,6 @@ export interface InitOutput {
     readonly __wbg_wasmmxfmediademuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdeboxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdecoder_free: (a: number, b: number) => void;
-    readonly __wbg_wasmopusdecoderesult_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmpcm16wavelibraryencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmsha256_free: (a: number, b: number) => void;
@@ -716,6 +751,8 @@ export interface InitOutput {
     readonly decoder_newRawLinear32: (a: number, b: number) => [number, number, number];
     readonly decoder_newWithFormat: (a: number, b: number) => [number, number, number];
     readonly decoder_push: (a: number, b: number, c: number) => [number, number, number];
+    readonly encodecDecodeChunks: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly encodecMetadata: (a: number, b: number) => [number, number, number];
     readonly inspectCafChunk: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly inspectMp4TopLevelBox: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly validateCafFileHeader: (a: number, b: number, c: number) => [number, number];
@@ -767,6 +804,18 @@ export interface InitOutput {
     readonly wasmcanonicalpcmdecoder_newRawLinear16: (a: number, b: number) => [number, number, number];
     readonly wasmcanonicalpcmdecoder_newWithFormat: (a: number, b: number) => [number, number, number];
     readonly wasmcanonicalpcmdecoder_push: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmencodeccodes_scale: (a: number) => number;
+    readonly wasmencodeccodes_takeCodes: (a: number) => [number, number];
+    readonly wasmencodecdecoder_addCachedRange: (a: number, b: number, c: number, d: number, e: number) => number;
+    readonly wasmencodecdecoder_addDecodedFrame: (a: number, b: number, c: number, d: number) => [number, number];
+    readonly wasmencodecdecoder_addSilentFrame: (a: number, b: number) => [number, number];
+    readonly wasmencodecdecoder_decodeChunk: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmencodecdecoder_emitAfterBatch: (a: number, b: number) => [number, number, number];
+    readonly wasmencodecdecoder_flush: (a: number) => number;
+    readonly wasmencodecdecoder_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
+    readonly wasmencodecdecoder_resultPcm: (a: number) => [number, number];
+    readonly wasmencodecpcmbatch_takePcm: (a: number) => [number, number];
+    readonly wasmencodecpcmbatch_takeSegments: (a: number) => [number, number];
     readonly wasmflacencoder_encodePlanarF32: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly wasmflacencoder_finish: (a: number) => [number, number, number];
     readonly wasmflacencoder_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
@@ -889,6 +938,7 @@ export interface InitOutput {
     readonly decoder_newAuto: () => number;
     readonly wasmsoundkitframedecoder_newUnencrypted: () => number;
     readonly wasmcanonicalpcmdecoder_newAuto: () => number;
+    readonly __wbg_wasmopusdecoderesult_free: (a: number, b: number) => void;
     readonly dav1d_apply_grain: (a: number, b: number, c: number) => number;
     readonly dav1d_close: (a: number) => void;
     readonly dav1d_data_create: (a: number, b: number) => number;

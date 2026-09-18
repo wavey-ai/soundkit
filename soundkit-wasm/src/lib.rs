@@ -1,4 +1,6 @@
 pub mod v2;
+#[cfg(feature = "encodec")]
+pub mod encodec;
 
 use frame_header::{EncodingFlag, Endianness};
 #[cfg(feature = "aac")]
@@ -537,6 +539,8 @@ pub struct WasmStreamingLibraryEncoder {
     opus_digest: Sha256,
     flac_digest: Sha256,
     stream: StreamEncoder,
+    /// The stereo, banded waveform, summed as the normalized PCM goes past.
+    visuals: soundkit_visuals::WaveformAccumulator,
 }
 
 #[cfg(all(feature = "wav", feature = "opus", feature = "flac"))]
@@ -565,6 +569,8 @@ pub struct LibraryEncodeBatch {
     pub channels: u8,
     pub opus_index: Option<Vec<u8>>,
     pub flac_index: Option<Vec<u8>>,
+    /// The stereo, banded waveform sidecar, on the final batch.
+    pub visuals_bytes: Option<Vec<u8>>,
     pub source_identity: Option<String>,
     pub opus_identity: Option<String>,
     pub flac_identity: Option<String>,
@@ -3332,6 +3338,8 @@ impl WasmStreamingLibraryEncoder {
             opus_digest: Sha256::new(),
             flac_digest: Sha256::new(),
             stream: StreamEncoder::new(preserve_lossless, &options)?,
+            visuals: soundkit_visuals::WaveformAccumulator::stereo(48_000)
+                .map_err(|error| error.to_string())?,
         })
     }
 
@@ -3593,7 +3601,7 @@ impl WasmStreamingLibraryEncoder {
         let flac_identity = self
             .preserve_lossless
             .then(|| format!("sha256:{:x}", self.flac_digest.clone().finalize()));
-        Ok(wave_library_batch(
+        let mut batch = wave_library_batch(
             opus_packets,
             flac_packets,
             true,
@@ -3604,7 +3612,11 @@ impl WasmStreamingLibraryEncoder {
             Some(source_identity),
             Some(opus_identity),
             flac_identity,
-        ))
+        );
+        if !self.visuals.is_empty() {
+            batch.visuals_bytes = Some(self.visuals.finish().encode());
+        }
+        Ok(batch)
     }
 
     /// Move the encoder's emitted packets into a batch, into the codec digest.
@@ -3737,6 +3749,9 @@ impl WasmStreamingLibraryEncoder {
             interleaved.push(library_float_to_i16(left));
             interleaved.push(library_float_to_i16(right));
         }
+        // The waveform is summed from the same 48 kHz stereo PCM the streams
+        // are cut from, so it is the side, not an approximation of it.
+        self.visuals.push_interleaved(&interleaved);
         let packets = self.stream.push_opus_i16(&interleaved)?;
         self.absorb_packets(opus_packets, packets, StreamCodec::Opus);
         Ok(())
@@ -3926,6 +3941,7 @@ fn wave_library_batch(
         channels: 2,
         opus_index,
         flac_index,
+        visuals_bytes: None,
         source_identity,
         opus_identity,
         flac_identity,
@@ -3976,6 +3992,13 @@ fn wave_library_batch_to_js(batch: LibraryEncodeBatch) -> Result<JsValue, JsValu
             &object,
             &JsValue::from_str("flacIndexBytes"),
             &Uint8Array::from(index.as_slice()),
+        )?;
+    }
+    if let Some(visuals) = batch.visuals_bytes {
+        Reflect::set(
+            &object,
+            &JsValue::from_str("visualsBytes"),
+            &Uint8Array::from(visuals.as_slice()),
         )?;
     }
     if let Some(identity) = batch.source_identity {
@@ -7407,6 +7430,7 @@ fn merge_library_batches(batches: Vec<JsValue>) -> Result<JsValue, JsValue> {
             "channels",
             "opusIndexBytes",
             "flacIndexBytes",
+            "visualsBytes",
         ] {
             let value = Reflect::get(batch, &JsValue::from_str(key))?;
             if !value.is_undefined() {

@@ -1,0 +1,19 @@
+[package]
+name = "soundkit-encodec"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "SoundKit handler for the existing encodec-rs decoder and model backends"
+repository = "https://github.com/wavey-ai/soundkit"
+
+[features]
+default = []
+browser = []
+
+[dependencies]
+anyhow = "1"
+encodec-rs = { git = "https://github.com/wavey-ai/encodec-rs.git", rev = "f5b74ddb7dd0e61e13fe190a62a22629caa1efe5", features = ["ecdc", "seam"] }
+frame-header = "0.2.2"
+ndarray = "0.17.2"
+serde_json = "1"
+soundkit = { path = "../soundkit", version = "0.13.3" }

@@ -105,6 +105,10 @@ impl EncodedSoundKitStream {
 pub struct EncodedSoundKitStreams {
     pub opus: EncodedSoundKitStream,
     pub flac: EncodedSoundKitStream,
+    /// The stereo, three-band waveform sidecar — `soundkit_visuals`'s bytes —
+    /// summed from the same PCM pass, so a player draws the side without
+    /// reading the audio again. Empty when the PCM was one channel.
+    pub visuals: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -523,7 +527,15 @@ pub fn encode_interleaved_i16_to_soundkit_streams(
         },
     )?;
     let flac = encode_interleaved_i16_to_flac_soundkit_stream(pcm, &options)?;
-    Ok(EncodedSoundKitStreams { opus, flac })
+    let visuals = soundkit_visuals::compute_waveform(
+        pcm,
+        options.sample_rate,
+        options.channels,
+        &soundkit_visuals::WaveformOptions::default(),
+    )
+    .map(|waveform| waveform.encode())
+    .unwrap_or_default();
+    Ok(EncodedSoundKitStreams { opus, flac, visuals })
 }
 
 /// Encodes interleaved i16 PCM into a SoundKit v2 Opus stream.

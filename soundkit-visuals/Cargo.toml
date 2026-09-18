@@ -1,0 +1,12 @@
+[package]
+name = "soundkit-visuals"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Stereo, frequency-banded waveform summaries for SoundKit streams, computed at encode time."
+repository = "https://github.com/wavey-ai/soundkit"
+readme = "README.md"
+
+[dependencies]
+
+[dev-dependencies]

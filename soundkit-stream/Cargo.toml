@@ -11,3 +11,4 @@ readme = "README.md"
 frame-header = "0.2.2"
 soundkit-flac = { path = "../soundkit-flac", version = "0.13.3", default-features = false }
 soundkit-opus = { path = "../soundkit-opus", version = "0.13.3" }
+soundkit-visuals = { path = "../soundkit-visuals", version = "0.1.0" }

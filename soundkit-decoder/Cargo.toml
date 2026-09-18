@@ -6,8 +6,12 @@ license = "MIT"
 description = "Streaming audio decoder pipeline with automatic format detection"
 repository = "https://github.com/wavey-ai/soundkit"
 
+[features]
+encodec = ["dep:soundkit-encodec"]
+
 [dependencies]
 soundkit = { path = "../soundkit", version = "0.13.3", features = ["sinc-resampler"] }
+soundkit-encodec = { path = "../soundkit-encodec", optional = true }
 access-unit = "0.1.5"
 soundkit-amr = { path = "../soundkit-amr", version = "0.13.3" }
 soundkit-g711 = { path = "../soundkit-g711", version = "0.13.3" }
@@ -34,3 +38,9 @@ soundkit-webm = { path = "../soundkit-webm", version = "0.13.3" }
 frame-header = "0.2.1"
 bytes = "1"
 rubato = "0.14.1"
+
+[dev-dependencies]
+anyhow = "1"
+encodec-rs = { git = "https://github.com/wavey-ai/encodec-rs.git", rev = "f5b74ddb7dd0e61e13fe190a62a22629caa1efe5", features = ["ecdc", "seam"] }
+ndarray = "0.17.2"
+serde_json = "1"

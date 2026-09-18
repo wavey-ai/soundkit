@@ -25,6 +25,7 @@ members = [
   "soundkit-video",
   "soundkit-wasm",
   "soundkit-decoder",
+  "soundkit-encodec",
   "soundkit-fmp4",
   "soundkit-container-bench",
   "soundkit-codec-fate",
@@ -32,6 +33,7 @@ members = [
   "aac-wasm-bench",
   "soundkit-stream",
   "soundkit-stream-wasm",
+  "soundkit-visuals",
   "workers/soundkit-store",
 ]
 exclude = ["vendor/rusty_av1d", "vendor/rusty_h264-decoder"]
