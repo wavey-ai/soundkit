@@ -1,0 +1,29 @@
+name: Image codecs
+
+on:
+  push:
+    branches: [main]
+    paths: ['soundkit-raw/**', 'soundkit-avif/**', 'package.json', 'package-lock.json', '.github/workflows/image-codecs.yml']
+  pull_request:
+    paths: ['soundkit-raw/**', 'soundkit-avif/**', 'package.json', 'package-lock.json', '.github/workflows/image-codecs.yml']
+
+jobs:
+  image-codecs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Install Emscripten 6.0.0
+        run: |
+          git clone --depth 1 --branch 6.0.0 https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          "$RUNNER_TEMP/emsdk/emsdk" install 6.0.0
+          "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.0
+      - name: Build and test image codecs
+        run: |
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          npm run build:images
+          npm run test:images

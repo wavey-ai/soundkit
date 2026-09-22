@@ -1,0 +1,40 @@
+{
+  "name": "@wavey-ai/soundkit-avif",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "AVIF encoding and decoding with WebAssembly, including 10-bit sRGB output.",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wavey-ai/soundkit.git",
+    "directory": "soundkit-avif"
+  },
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./encode": "./dist/encode.js",
+    "./decode": "./dist/decode.js",
+    "./srgb": "./dist/srgb.mjs",
+    "./target": "./dist/target/index.mjs"
+  },
+  "files": [
+    "dist",
+    "src",
+    "scripts",
+    "README.md",
+    "LICENSE",
+    "libavif"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs && node scripts/build-target.mjs",
+    "prepare": "npm run build",
+    "test": "node --test test/*.test.mjs",
+    "build:target": "node scripts/build-target.mjs",
+    "test:target": "node --test test/target.test.mjs"
+  },
+  "dependencies": {
+    "@jsquash/avif": "2.1.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

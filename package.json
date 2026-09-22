@@ -6,10 +6,16 @@
     "build:wasm": "wasm-pack build soundkit-stream-wasm --target web --out-dir ../packages/soundkit-stream-js/pkg",
     "test:js": "node --test packages/soundkit-stream-js/test/*.test.js",
     "test:rust": "cargo test -p soundkit-stream -p soundkit-stream-wasm",
-    "test": "npm run test:js && npm run test:rust"
+    "test": "npm run test:js && npm run test:rust",
+    "build:raw": "npm run build --workspace @wavey-ai/soundkit-raw",
+    "build:avif": "npm run build --workspace @wavey-ai/soundkit-avif",
+    "build:images": "npm run build:raw && npm run build:avif",
+    "test:images": "npm test --workspace @wavey-ai/soundkit-raw --workspace @wavey-ai/soundkit-avif"
   },
   "workspaces": [
     "packages/soundkit-stream-js",
-    "workers/*"
+    "workers/*",
+    "soundkit-raw",
+    "soundkit-avif"
   ]
 }

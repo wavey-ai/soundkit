@@ -1,0 +1,24 @@
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, cpSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const source = join(root, 'libavif'), build = join(root, 'build/target'), dist = join(root, 'dist/target');
+const ref = 'v1.2.1';
+const env = { ...process.env, EM_NODE_JS: process.execPath };
+const run = (cmd, args) => execFileSync(cmd, args, { cwd: root, env, stdio: 'inherit' });
+mkdirSync(dist, { recursive: true });
+run('emcmake', ['cmake', '-S', source, '-B', build, '-DCMAKE_BUILD_TYPE=Release', `-DSOUNDKIT_LIBAVIF_REF=${ref}`]);
+run('cmake', ['--build', build, '--config', 'Release', '--parallel', '6']);
+for (const name of ['soundkit_avif.js', 'soundkit_avif.wasm']) cpSync(join(build, name), join(dist, name));
+cpSync(join(source, 'src/index.mjs'), join(dist, 'index.mjs'));
+cpSync(join(source, 'LICENSE'), join(dist, 'LICENSE'));
+cpSync(join(build, '_deps/libavif-src/LICENSE'), join(dist, 'LICENSE.libavif'));
+cpSync(join(build, '_deps/libaom-src/LICENSE'), join(dist, 'LICENSE.aom'));
+const libavifCommit = execFileSync('git', ['-C', join(build, '_deps/libavif-src'), 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+const aomVersion = readFileSync(join(build, '_deps/libavif-src/cmake/Modules/LocalAom.cmake'), 'utf8').match(/set\(AVIF_AOM_GIT_TAG ([^)]+)\)/)?.[1];
+const sha256 = createHash('sha256').update(readFileSync(join(dist, 'soundkit_avif.wasm'))).digest('hex');
+writeFileSync(join(dist, 'provenance.json'), JSON.stringify({ backend: 'libavif/libaom', libavif: ref, libavifCommit, libaom: aomVersion, sha256 }, null, 2) + '\n');
+console.log(`SoundKit AVIF target encoder: libavif ${ref}`);

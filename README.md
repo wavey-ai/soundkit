@@ -2,8 +2,8 @@
 
 [![CI](https://github.com/wavey-ai/soundkit/actions/workflows/ci.yml/badge.svg)](https://github.com/wavey-ai/soundkit/actions/workflows/ci.yml)
 
-Rust media tooling for deterministic audio extraction, video decoding, PCM conversion,
-resampling, authored codec implementations, and browser-safe streaming.
+Media tooling for deterministic audio extraction, video and camera RAW decoding,
+AVIF encoding, PCM conversion, resampling, and browser-safe streaming.
 
 ## At A Glance
 
@@ -16,8 +16,28 @@ resampling, authored codec implementations, and browser-safe streaming.
 | Decode pipeline | `soundkit-decoder` | Ring-buffered worker thread, `access-unit` autodetection, explicit telephony paths, optional output conversion. |
 | Media demux | `soundkit-audio-demux`, `soundkit-webm` | Rust-owned MOV, MP4, fragmented MP4, WebM, Matroska, MPEG-TS, and MXF parsing. |
 | Video decode | `soundkit-video`, `soundkit-dnx` | Pure-Rust H.264, HEVC, VP9, AV1, ProRes, DNxHD, and DNxHR decoding. |
+| Camera RAW | [`soundkit-raw`](soundkit-raw/README.md) | LibRaw WASM decoder, 16-bit camera RGB, metadata, linear colour processing and proportional crop/resize. |
+| AVIF | [`soundkit-avif`](soundkit-avif/README.md) | WASM encode/decode, 8/10/12-bit samples and checked 10-bit sRGB colour metadata. |
 | WASM | `soundkit-wasm` | Seekable browser media adapters and deterministic Rust audio/video decode. |
 | Stored streams | `soundkit-stream`, `soundkit-stream-wasm` | SoundKit v2 frame-stream encoding (Opus and FLAC) and the sidecar byte-offset index a player range-seeks with. |
+
+## Image codecs
+
+`soundkit-raw` and `soundkit-avif` are optional JavaScript packages in this
+repository, with separate WASM distributions. RAW uses LibRaw; AVIF uses
+jSquash. They load independently of the Rust audio/video WASM module.
+
+```sh
+npm install --ignore-scripts
+npm run build:images
+npm run test:images
+```
+
+Builds require Node.js and Emscripten; AVIF also uses CMake for its libavif
+quantizer encoder and installs jSquash from npm. Serve each package's entire
+`dist/` directory. Applications own
+storage, editing interfaces and export presets; the codecs accept bytes
+and pixel buffers.
 
 ## Platform Integration Policy
 

@@ -58,6 +58,30 @@ import { initSync } from "./soundkit-wasm/pkg/soundkit_wasm.js";
 initSync({ module: wasmBytes });
 ```
 
+## Image codecs
+
+Camera RAW and AVIF use independent modules built with `npm run build:images`:
+
+```js
+import { createRawDecoder, develop } from './soundkit-raw/dist/index.mjs';
+import { encodeSRGB } from './soundkit-avif/dist/index.mjs';
+
+const decoder = await createRawDecoder();
+let pixels;
+try {
+  decoder.open(rawBytes);
+  pixels = develop(decoder.decode(), { exposure: 0.5 }, { bitDepth: 10 });
+} finally {
+  decoder.close();
+}
+const avif = await encodeSRGB(pixels, { quality: 90, speed: 8 });
+```
+
+These are whole-image worker APIs. RAW decoding and AVIF encoding accept up
+to 80 megapixels. They use their own WASM heaps and are loaded only by image consumers. See the
+[RAW API](soundkit-raw/README.md) and [AVIF API](soundkit-avif/README.md) for
+colour, precision, initialization and buffer contracts.
+
 ## General Streaming Contract
 
 `push(bytes)` accepts a `Uint8Array` of at most 4 MiB. Split larger reads before

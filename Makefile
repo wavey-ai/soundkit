@@ -5,6 +5,19 @@ test:
 	cargo test --workspace
 
 .PHONY: wasm
+.PHONY: raw avif image-codecs test-image-codecs
+raw:
+	npm run build:raw
+
+avif:
+	npm run build:avif
+
+image-codecs:
+	npm run build:images
+
+test-image-codecs: image-codecs
+	npm run test:images
+
 wasm:
 	wasm-pack build soundkit-wasm \
 		--target web \

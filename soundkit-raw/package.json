@@ -1,0 +1,33 @@
+{
+  "name": "@wavey-ai/soundkit-raw",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Camera RAW decoding and linear image processing with LibRaw WebAssembly.",
+  "license": "MIT AND CDDL-1.0",
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./develop": "./src/develop.mjs",
+    "./fixtures/dng": "./test/dng.mjs"
+  },
+  "files": [
+    "dist",
+    "src",
+    "scripts",
+    "README.md",
+    "LICENSE",
+    "test/dng.mjs"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "prepare": "node scripts/build.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wavey-ai/soundkit.git",
+    "directory": "soundkit-raw"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
