@@ -7049,6 +7049,24 @@ impl WasmSoundKitV2Decoder {
         Ok(js_sys::Int16Array::from(pcm.as_slice()))
     }
 
+    /// Decode interleaved float32 PCM without an intermediate PCM16 conversion.
+    #[wasm_bindgen(js_name = pushFloat)]
+    pub fn push_float(&mut self, bytes: &[u8]) -> Result<Float32Array, JsValue> {
+        let batch = self.inner.push_float(bytes).map_err(js_error)?;
+        let mut samples = Vec::new();
+        for frame in batch.frames {
+            samples.extend(soundkit::audio_pipeline::f32s_from_le_bytes(frame.data()).map_err(js_error)?);
+        }
+        Ok(Float32Array::from(samples.as_slice()))
+    }
+
+    pub fn finish(&self) -> Result<(), JsValue> {
+        if self.inner.buffered_bytes() != 0 {
+            return Err(js_error("Truncated SoundKit stream".into()));
+        }
+        Ok(())
+    }
+
     /// The rate and channel count the last frame declared.
     #[wasm_bindgen(getter, js_name = sampleRate)]
     pub fn sample_rate(&self) -> u32 {

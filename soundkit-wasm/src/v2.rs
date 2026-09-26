@@ -105,6 +105,15 @@ impl SoundKitV2Decoder {
     /// The stream may be cut anywhere: a frame split across two calls is
     /// held until the rest of it arrives.
     pub fn push(&mut self, bytes: &[u8]) -> Result<SoundKitV2Batch, String> {
+        self.push_precision(bytes, false)
+    }
+
+    /// Preserve PCM24 precision and floating-point headroom for audio processing.
+    pub fn push_float(&mut self, bytes: &[u8]) -> Result<SoundKitV2Batch, String> {
+        self.push_precision(bytes, true)
+    }
+
+    fn push_precision(&mut self, bytes: &[u8], float: bool) -> Result<SoundKitV2Batch, String> {
         let read = self.frames.push(bytes)?;
         let mut batch = SoundKitV2Batch::default();
         for frame in read {
@@ -119,20 +128,60 @@ impl SoundKitV2Decoder {
                 self.codec = Some(Self::build(encoding, rate, channels, bits, &frame)?);
                 self.encoding = Some(encoding);
             }
-            let pcm = self.decode(&frame.payload, encoding, channels, bits)?;
+            let pcm = if float {
+                self.decode_float(&frame.payload, encoding, channels, bits, rate)?
+            } else {
+                self.decode(&frame.payload, encoding, channels, bits)?
+            };
             if pcm.is_empty() {
                 continue;
             }
             batch.frames.push(AudioData::new(
-                16,
+                if float { 32 } else { 16 },
                 channels,
                 rate,
                 pcm,
-                EncodingFlag::PCMSigned,
+                if float { EncodingFlag::PCMFloat } else { EncodingFlag::PCMSigned },
                 Endianness::LittleEndian,
             ));
         }
         Ok(batch)
+    }
+
+    fn decode_float(&mut self, payload: &[u8], encoding: EncodingFlag, channels: u8, bits: u8, rate: u32) -> Result<Vec<u8>, String> {
+        use soundkit::audio_pipeline::{audio_to_f32_channels, f32s_to_le_bytes};
+        match (&mut self.codec, encoding) {
+            (Some(Codec::Pcm), EncodingFlag::PCMFloat | EncodingFlag::PCMSigned) => {
+                let audio = AudioData::new(bits, channels, rate, payload.to_vec(), encoding, Endianness::LittleEndian);
+                let planes = audio_to_f32_channels(&audio)?;
+                let mut samples = Vec::with_capacity(planes[0].len() * channels as usize);
+                for i in 0..planes[0].len() {
+                    for plane in &planes { samples.push(plane[i]); }
+                }
+                Ok(f32s_to_le_bytes(&samples))
+            }
+            #[cfg(feature = "opus")]
+            (Some(Codec::Opus(decoder)), EncodingFlag::Opus) => {
+                Ok(f32s_to_le_bytes(&decoder.decode_f32_vec(payload, false).map_err(|e| e.to_string())?))
+            }
+            #[cfg(feature = "flac")]
+            (Some(Codec::Flac(decoder)), EncodingFlag::FLAC) => {
+                let mut scratch = vec![0i32; 1 << 16];
+                let mut result = Vec::new();
+                let mut bytes = payload;
+                let scale = 2.0f64.powi(i32::from(bits) - 1);
+                loop {
+                    let count = decoder.decode_i32(bytes, &mut scratch, false).map_err(|e| e.to_string())?;
+                    for &sample in &scratch[..count] {
+                        result.extend_from_slice(&((sample as f64 / scale) as f32).to_le_bytes());
+                    }
+                    if count < scratch.len() { break; }
+                    bytes = &[];
+                }
+                Ok(result)
+            }
+            _ => Err(format!("No float decoder for {encoding:?}")),
+        }
     }
 
     fn build(
@@ -286,6 +335,48 @@ pub fn derived_flac_stream_info(sample_rate: u32, channels: u8, bits_per_sample:
 mod tests {
     use super::*;
     use frame_header::FrameHeaderV2;
+
+    #[test]
+    fn float_pcm_preserves_quiet_pcm24_samples_and_headroom() {
+        let values = [-8_388_608i32, -1, 0, 1, 8_388_607, 137];
+        let payload: Vec<_> = values.iter().flat_map(|x| x.to_le_bytes()[..3].to_vec()).collect();
+        let encoded = frame(EncodingFlag::PCMSigned, &payload, 3, 48000, 2, 24);
+        let mut decoder = SoundKitV2Decoder::new();
+        let mut actual = Vec::new();
+        for block in encoded.chunks(7) {
+            for audio in decoder.push_float(block).unwrap().frames {
+                actual.extend(soundkit::audio_pipeline::f32s_from_le_bytes(audio.data()).unwrap());
+            }
+        }
+        assert_eq!(actual, values.map(|x| x as f32 / 8_388_608.0));
+        assert_eq!(decoder.buffered_bytes(), 0);
+        let values = [-1.5f32, -0.0, f32::from_bits(1), 1.75];
+        let payload = soundkit::audio_pipeline::f32s_to_le_bytes(&values);
+        let encoded = frame(EncodingFlag::PCMFloat, &payload, 2, 48000, 2, 32);
+        let batch = SoundKitV2Decoder::new().push_float(&encoded).unwrap();
+        assert_eq!(batch.frames[0].data(), &payload);
+    }
+
+    #[test]
+    #[cfg(feature = "flac")]
+    fn float_flac_preserves_every_pcm24_bit() {
+        use soundkit::audio_packet::Encoder as PacketEncoder;
+        use soundkit_flac::FlacEncoder;
+        let pcm: Vec<_> = (0..2048).map(|i| i * 7919 - 8_000_003).collect();
+        let mut encoder = <FlacEncoder as PacketEncoder>::new(48000, 24, 2, 1024, 3);
+        encoder.init().unwrap();
+        let mut packet = vec![0; 65536];
+        let count = encoder.encode_i32(&pcm, &mut packet).unwrap();
+        let encoded = frame(EncodingFlag::FLAC, &packet[..count], 1024, 48000, 2, 24);
+        let mut decoder = SoundKitV2Decoder::new();
+        let mut actual = Vec::new();
+        for block in encoded.chunks(53) {
+            for audio in decoder.push_float(block).unwrap().frames {
+                actual.extend(soundkit::audio_pipeline::f32s_from_le_bytes(audio.data()).unwrap());
+            }
+        }
+        assert_eq!(actual, pcm.iter().map(|&x| x as f32 / 8_388_608.0).collect::<Vec<_>>());
+    }
 
     /// One v2 frame: the header the stream states, then the packet.
     fn frame(
