@@ -3,7 +3,7 @@ pub mod v2;
 pub mod encodec;
 
 use frame_header::{EncodingFlag, Endianness};
-#[cfg(feature = "aac")]
+#[cfg(any(feature = "aac", feature = "flac", feature = "opus"))]
 use js_sys::Float32Array;
 #[cfg(feature = "flac")]
 use js_sys::Int32Array;
