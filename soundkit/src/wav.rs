@@ -13,6 +13,7 @@ enum StreamWavState {
     ReadingData {
         remaining: u64,
     },
+    DataPadding,
     Finished,
 }
 
@@ -27,10 +28,13 @@ pub struct WavStreamProcessor {
     sampling_rate: usize,
     audio_format: EncodingFlag,
     endianness: Endianness, // New field to track endianness
-    data_chunk_size: usize,
+    data_chunk_size: u64,
     data_chunk_collected: u64,
     rf64: bool,
     rf64_data_size: Option<u64>,
+    received: u64,
+    riff_end: Option<u64>,
+    data_seen: bool,
 }
 
 impl Default for WavStreamProcessor {
@@ -53,6 +57,9 @@ impl WavStreamProcessor {
             data_chunk_collected: 0,
             rf64: false,
             rf64_data_size: None,
+            received: 0,
+            riff_end: None,
+            data_seen: false,
         }
     }
 
@@ -86,10 +93,10 @@ impl WavStreamProcessor {
     pub fn total_frames(&self) -> Option<u64> {
         let bytes_per_sample = self.bits_per_sample.checked_div(8)?;
         let bytes_per_frame = bytes_per_sample.checked_mul(self.channel_count)?;
-        if bytes_per_frame == 0 || self.data_chunk_size == 0 {
+        if bytes_per_frame == 0 || !self.data_seen {
             return None;
         }
-        Some((self.data_chunk_size as u64) / (bytes_per_frame as u64))
+        Some(self.data_chunk_size / (bytes_per_frame as u64))
     }
 
     pub fn add(&mut self, chunk: &[u8]) -> Result<Option<AudioData>, String> {
@@ -98,7 +105,11 @@ impl WavStreamProcessor {
                 "WAV input chunk exceeds the {MAX_WAV_INPUT_CHUNK_BYTES} byte streaming budget"
             ));
         }
-        self.buffer.extend(chunk);
+        let count = self.riff_end.map_or(chunk.len(), |end| {
+            chunk.len().min(end.saturating_sub(self.received) as usize)
+        });
+        self.buffer.extend_from_slice(&chunk[..count]);
+        self.received += count as u64;
 
         loop {
             let state = std::mem::replace(&mut self.state, StreamWavState::Finished);
@@ -116,10 +127,28 @@ impl WavStreamProcessor {
                         return Err("Not a WAV file".to_string());
                     }
 
+                    if !self.rf64 {
+                        let size = u32::from_le_bytes(self.buffer[4..8].try_into().unwrap());
+                        if size < 4 {
+                            return Err("Invalid RIFF length".to_string());
+                        }
+                        self.set_riff_end(u64::from(size) + 8)?;
+                    }
                     self.buffer.drain(..12);
                     self.state = StreamWavState::ChunkHeader;
                 }
                 StreamWavState::ChunkHeader => {
+                    let offset = self.received - self.buffer.len() as u64;
+                    if self.riff_end == Some(offset) {
+                        self.state = StreamWavState::Finished;
+                        return Ok(None);
+                    }
+                    if self
+                        .riff_end
+                        .is_some_and(|end| end.saturating_sub(offset) < 8)
+                    {
+                        return Err("Truncated WAV chunk header".to_string());
+                    }
                     if self.buffer.len() < 8 {
                         self.state = StreamWavState::ChunkHeader;
                         return Ok(None);
@@ -133,7 +162,23 @@ impl WavStreamProcessor {
                             .map_err(|_| "WAV chunk size is truncated".to_string())?,
                     ) as usize;
                     self.buffer.drain(..8);
+                    let payload_size = if self.rf64 && &kind == b"data" && size == u32::MAX as usize
+                    {
+                        self.rf64_data_size.ok_or("RF64 data requires ds64")?
+                    } else {
+                        size as u64
+                    };
+                    if self
+                        .riff_end
+                        .is_some_and(|end| payload_size > end.saturating_sub(offset + 8))
+                    {
+                        return Err("WAV chunk exceeds RIFF length".to_string());
+                    }
                     if &kind == b"data" {
+                        if self.data_seen {
+                            return Err("Multiple WAV data chunks are unsupported".to_string());
+                        }
+                        self.data_seen = true;
                         if self.bits_per_sample == 0
                             || self.channel_count == 0
                             || self.sampling_rate == 0
@@ -147,10 +192,14 @@ impl WavStreamProcessor {
                         } else {
                             size as u64
                         };
-                        self.data_chunk_size = usize::try_from(data_size).unwrap_or(usize::MAX);
+                        let frame_bytes = self.channel_count * (self.bits_per_sample / 8);
+                        if data_size % frame_bytes as u64 != 0 {
+                            return Err("WAV data chunk is not frame-aligned".to_string());
+                        }
+                        self.data_chunk_size = data_size;
                         self.data_chunk_collected = 0;
                         self.state = if data_size == 0 {
-                            StreamWavState::Finished
+                            StreamWavState::ChunkHeader
                         } else {
                             StreamWavState::ReadingData {
                                 remaining: data_size,
@@ -236,7 +285,11 @@ impl WavStreamProcessor {
                     remaining -= len as u64;
                     self.data_chunk_collected += len as u64;
                     self.state = if remaining == 0 {
-                        StreamWavState::Finished
+                        if self.data_chunk_size % 2 == 1 {
+                            StreamWavState::DataPadding
+                        } else {
+                            StreamWavState::ChunkHeader
+                        }
                     } else {
                         StreamWavState::ReadingData { remaining }
                     };
@@ -253,6 +306,14 @@ impl WavStreamProcessor {
                     return Ok(Some(result));
                 }
 
+                StreamWavState::DataPadding => {
+                    if self.buffer.is_empty() {
+                        self.state = StreamWavState::DataPadding;
+                        return Ok(None);
+                    }
+                    self.buffer.drain(..1);
+                    self.state = StreamWavState::ChunkHeader;
+                }
                 StreamWavState::Finished => {
                     self.state = StreamWavState::Finished;
                     // Gracefully return None when finished - no more data available
@@ -262,14 +323,51 @@ impl WavStreamProcessor {
         }
     }
 
+    /// Complete a stream after the caller has consumed every returned audio block.
+    pub fn finish(&mut self) -> Result<(), String> {
+        if self.add(&[])?.is_some() {
+            return Err("WAV stream contains undrained audio".to_string());
+        }
+        if !self.data_seen
+            || self.riff_end != Some(self.received)
+            || !matches!(self.state, StreamWavState::Finished)
+        {
+            return Err("Truncated or incomplete WAV stream".to_string());
+        }
+        Ok(())
+    }
+
+    fn set_riff_end(&mut self, end: u64) -> Result<(), String> {
+        let consumed = self.received - self.buffer.len() as u64;
+        if end < consumed {
+            return Err("Invalid RIFF length".to_string());
+        }
+        if self.received > end {
+            self.buffer.truncate((end - consumed) as usize);
+            self.received = end;
+        }
+        self.riff_end = Some(end);
+        Ok(())
+    }
+
     fn install_fmt(&mut self, payload: &[u8]) -> Result<(), String> {
+        if self.bits_per_sample != 0 {
+            return Err("Multiple WAV fmt chunks are unsupported".to_string());
+        }
         if payload.len() < 16 {
             return Err("WAV fmt chunk must contain at least 16 bytes".to_string());
         }
         let mut format = u16::from_le_bytes([payload[0], payload[1]]);
         if format == 0xfffe {
-            if payload.len() < 40 {
+            if payload.len() < 40 || u16::from_le_bytes([payload[16], payload[17]]) < 22 {
                 return Err("WAVE_FORMAT_EXTENSIBLE fmt chunk is truncated".to_string());
+            }
+            if payload[26..40] != [0, 0, 0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113] {
+                return Err("Unsupported WAV subformat GUID".to_string());
+            }
+            let valid_bits = u16::from_le_bytes([payload[18], payload[19]]);
+            if valid_bits != 0 && valid_bits != u16::from_le_bytes([payload[14], payload[15]]) {
+                return Err("Packed extensible valid-bit formats are unsupported".to_string());
             }
             format = u16::from_le_bytes([payload[24], payload[25]]);
         }
@@ -277,6 +375,12 @@ impl WavStreamProcessor {
         self.sampling_rate =
             u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
         self.bits_per_sample = u16::from_le_bytes([payload[14], payload[15]]) as usize;
+        if !matches!(
+            (format, self.bits_per_sample),
+            (1, 8 | 16 | 24 | 32) | (3, 32 | 64)
+        ) {
+            return Err("Unsupported WAV sample representation".to_string());
+        }
         self.audio_format = match format {
             1 => EncodingFlag::PCMSigned,
             3 => EncodingFlag::PCMFloat,
@@ -287,6 +391,15 @@ impl WavStreamProcessor {
         }
         if !self.bits_per_sample.is_multiple_of(8) {
             return Err("WAV sample width must be byte-aligned".to_string());
+        }
+        let block_align = u16::from_le_bytes([payload[12], payload[13]]) as usize;
+        let byte_rate = u32::from_le_bytes(payload[8..12].try_into().unwrap()) as u64;
+        if self.channel_count > u8::MAX as usize
+            || self.bits_per_sample > u8::MAX as usize
+            || block_align != self.channel_count * (self.bits_per_sample / 8)
+            || byte_rate != self.sampling_rate as u64 * block_align as u64
+        {
+            return Err("Invalid WAV frame geometry".to_string());
         }
         self.endianness = Endianness::LittleEndian;
         Ok(())
@@ -319,6 +432,8 @@ impl WavStreamProcessor {
         if payload.len() < required {
             return Err("RF64 ds64 table is truncated".to_string());
         }
+        let riff_size = u64::from_le_bytes(payload[..8].try_into().unwrap());
+        self.set_riff_end(riff_size.checked_add(8).ok_or("RF64 size overflows")?)?;
         self.rf64_data_size = Some(data_size);
         Ok(())
     }
@@ -327,6 +442,7 @@ impl WavStreamProcessor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WavSampleFormat {
     I16,
+    I24,
     I32,
     F32,
 }
@@ -335,13 +451,14 @@ impl WavSampleFormat {
     fn bits_per_sample(self) -> u16 {
         match self {
             Self::I16 => 16,
+            Self::I24 => 24,
             Self::I32 | Self::F32 => 32,
         }
     }
 
     fn format_tag(self) -> u16 {
         match self {
-            Self::I16 | Self::I32 => 1,
+            Self::I16 | Self::I24 | Self::I32 => 1,
             Self::F32 => 3,
         }
     }
@@ -456,6 +573,38 @@ impl WavStreamEncoder {
             }
         }
         self.frames_written += frames_per_channel as u64;
+        Ok(output)
+    }
+
+    /// Encode signed 24-bit values held in i32 containers without scaling or dither.
+    pub fn push_planar_i24(
+        &mut self,
+        planar: &[i32],
+        frames_per_channel: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.require_format(WavSampleFormat::I24)?;
+        self.reserve_chunk(planar.len(), frames_per_channel)?;
+        if planar
+            .iter()
+            .any(|&x| !(-8_388_608..=8_388_607).contains(&x))
+        {
+            return Err("PCM24 sample exceeds signed 24-bit range".to_string());
+        }
+        let mut output = Vec::with_capacity(planar.len() * 3);
+        for frame in 0..frames_per_channel {
+            for channel in 0..self.channel_count {
+                output.extend_from_slice(
+                    &planar[channel * frames_per_channel + frame].to_le_bytes()[..3],
+                );
+            }
+        }
+        self.frames_written += frames_per_channel as u64;
+        if frames_per_channel > 0
+            && self.frames_written == self.total_frames
+            && self.data_bytes % 2 == 1
+        {
+            output.push(0);
+        }
         Ok(output)
     }
 
@@ -616,14 +765,25 @@ fn wav_header(
     block_align: u16,
     byte_rate: u32,
 ) -> Result<Vec<u8>, String> {
-    let classic_riff_size = 36u64
+    let fact_bytes = if format == WavSampleFormat::F32 {
+        12
+    } else {
+        0
+    };
+    let classic_riff_size = (36u64 + fact_bytes)
         .checked_add(data_bytes)
+        .and_then(|n| n.checked_add(data_bytes % 2))
         .ok_or_else(|| "WAV RIFF size overflows".to_string())?;
     let use_rf64 = classic_riff_size > u32::MAX as u64;
-    let mut output = Vec::with_capacity(if use_rf64 { 80 } else { 44 });
+    let mut output = Vec::with_capacity(if use_rf64 {
+        80 + fact_bytes as usize
+    } else {
+        44 + fact_bytes as usize
+    });
     if use_rf64 {
-        let riff_size = 72u64
+        let riff_size = (72u64 + fact_bytes)
             .checked_add(data_bytes)
+            .and_then(|n| n.checked_add(data_bytes % 2))
             .ok_or_else(|| "RF64 RIFF size overflows".to_string())?;
         output.extend_from_slice(b"RF64");
         output.extend_from_slice(&u32::MAX.to_le_bytes());
@@ -647,6 +807,11 @@ fn wav_header(
     output.extend_from_slice(&byte_rate.to_le_bytes());
     output.extend_from_slice(&block_align.to_le_bytes());
     output.extend_from_slice(&format.bits_per_sample().to_le_bytes());
+    if fact_bytes != 0 {
+        output.extend_from_slice(b"fact");
+        output.extend_from_slice(&4u32.to_le_bytes());
+        output.extend_from_slice(&(total_frames.min(u32::MAX as u64) as u32).to_le_bytes());
+    }
     output.extend_from_slice(b"data");
     output.extend_from_slice(
         &if use_rf64 {
@@ -824,7 +989,7 @@ mod tests {
         let encoder = WavStreamEncoder::new(WavSampleFormat::F32, 48_000, 2, frames).unwrap();
         let header = encoder.header();
         assert_eq!(&header[..4], b"RF64");
-        assert_eq!(header.len(), 80);
+        assert_eq!(header.len(), 92);
         assert_eq!(
             u32::from_le_bytes(header[4..8].try_into().unwrap()),
             u32::MAX
@@ -837,9 +1002,9 @@ mod tests {
             u64::from_le_bytes(header[36..44].try_into().unwrap()),
             frames
         );
-        assert_eq!(&header[72..76], b"data");
+        assert_eq!(&header[84..88], b"data");
         assert_eq!(
-            u32::from_le_bytes(header[76..80].try_into().unwrap()),
+            u32::from_le_bytes(header[88..92].try_into().unwrap()),
             u32::MAX
         );
     }
@@ -893,5 +1058,108 @@ mod tests {
         encoder.push_planar_i16(&[1, 2, 3, 4], 2).unwrap();
         encoder.finish().unwrap();
         assert!(encoder.push_planar_i16(&[], 0).is_err());
+    }
+    #[test]
+    fn pcm24_stream_preserves_signed_values_and_rejects_overflow() {
+        let samples = [-8_388_608, -1, 0, 1, 8_388_607, 123456];
+        let mut encoder = WavStreamEncoder::new(WavSampleFormat::I24, 48_000, 2, 3).unwrap();
+        assert!(encoder.push_planar_i24(&[8_388_608, 0], 1).is_err());
+        let mut bytes = encoder.header().to_vec();
+        bytes.extend(encoder.push_planar_i24(&samples, 3).unwrap());
+        encoder.finish().unwrap();
+        let expected: Vec<_> = [
+            samples[0], samples[3], samples[1], samples[4], samples[2], samples[5],
+        ]
+        .into_iter()
+        .flat_map(|x| x.to_le_bytes()[..3].to_vec())
+        .collect();
+        for chunk_size in [1, 2, 7, 44, 1000] {
+            let mut decoder = WavStreamProcessor::new();
+            let mut pcm = Vec::new();
+            for chunk in bytes.chunks(chunk_size) {
+                if let Some(block) = decoder.add(chunk).unwrap() {
+                    pcm.extend_from_slice(block.data());
+                }
+            }
+            decoder.finish().unwrap();
+            assert_eq!(pcm, expected);
+            assert_eq!(decoder.total_frames(), Some(3));
+        }
+    }
+
+    fn complete(bytes: &[u8]) -> Result<(), String> {
+        let mut decoder = WavStreamProcessor::new();
+        for chunk in bytes.chunks(7) {
+            decoder.add(chunk)?;
+        }
+        decoder.finish()
+    }
+
+    #[test]
+    fn stream_finish_checks_riff_length_frames_and_trailing_chunks() {
+        let bytes =
+            generate_wav_buffer(&PcmData::F32(vec![vec![0.0, 0.5], vec![0.0, -0.5]]), 48_000)
+                .unwrap();
+        assert_eq!(&bytes[36..40], b"fact");
+        assert_eq!(bytes.len(), 56 + 16);
+        complete(&bytes).unwrap();
+        for length in 0..bytes.len() {
+            assert!(complete(&bytes[..length]).is_err(), "length={length}");
+        }
+        let mut trailing = bytes.clone();
+        trailing.extend_from_slice(b"LIST\x02\0\0\0hi");
+        let size = (trailing.len() - 8) as u32;
+        trailing[4..8].copy_from_slice(&size.to_le_bytes());
+        complete(&trailing).unwrap();
+        assert!(complete(&trailing[..trailing.len() - 1]).is_err());
+        let mut duplicate = bytes.clone();
+        duplicate.extend_from_slice(b"data\0\0\0\0");
+        let size = (duplicate.len() - 8) as u32;
+        duplicate[4..8].copy_from_slice(&size.to_le_bytes());
+        assert!(complete(&duplicate).is_err());
+        let mut invalid = bytes.clone();
+        invalid[32] = 4;
+        assert!(complete(&invalid).is_err());
+        let mut outside = bytes.clone();
+        outside.extend_from_slice(&[0; 10_000]);
+        complete(&outside).unwrap();
+    }
+
+    #[test]
+    fn extensible_subformat_and_valid_bits_require_exact_pcm_geometry() {
+        let plain = generate_wav_buffer(&PcmData::I16(vec![vec![1, 2]]), 48_000).unwrap();
+        let mut bytes = plain[..36].to_vec();
+        bytes[16..20].copy_from_slice(&40u32.to_le_bytes());
+        bytes[20..22].copy_from_slice(&0xfffeu16.to_le_bytes());
+        bytes.extend_from_slice(&22u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 0, 0, 0, 0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113]);
+        bytes.extend_from_slice(&plain[36..]);
+        let size = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&size.to_le_bytes());
+        complete(&bytes).unwrap();
+        let mut invalid = bytes.clone();
+        invalid[38] = 12;
+        assert!(complete(&invalid).is_err());
+        let mut invalid = bytes;
+        invalid[59] = 0;
+        assert!(complete(&invalid).is_err());
+    }
+    #[test]
+    fn mono_pcm24_final_chunk_contains_riff_padding() {
+        let mut encoder = WavStreamEncoder::new(WavSampleFormat::I24, 48_000, 1, 3).unwrap();
+        let mut bytes = encoder.header().to_vec();
+        assert_eq!(encoder.push_planar_i24(&[1], 1).unwrap(), [1, 0, 0]);
+        bytes.extend_from_slice(&[1, 0, 0]);
+        let tail = encoder.push_planar_i24(&[2, 3], 2).unwrap();
+        assert_eq!(tail, [2, 0, 0, 3, 0, 0, 0]);
+        bytes.extend(tail);
+        encoder.finish().unwrap();
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize,
+            bytes.len() - 8
+        );
+        complete(&bytes).unwrap();
     }
 }

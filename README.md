@@ -225,6 +225,18 @@ codec work or canonical SoundKit storage.
 | G.711 / G.722 / G.726 / G.729 / GSM | Codec crates | Yes | Frame or sample streaming, depending on codec. |
 | Vorbis / Speex / ALAC / AIFF / AC-3 / WebM | Decode-only | No | No encoder is planned for these import formats. AAC writing and fMP4 LL-HLS boxing are tracked separately. |
 
+### WAV streaming API
+
+`WavStreamProcessor::add` accepts bounded byte chunks and returns complete PCM frames.
+Call `finish` after the last chunk to validate the complete RIFF or RF64 stream.
+The decoder checks chunk lengths, frame alignment, extensible subformats, and duplicate data chunks.
+
+`WavStreamEncoder` supports PCM16, PCM24, PCM32, and float32 output in Rust.
+Use `push_planar_i24` for signed 24-bit values held in `i32` containers.
+The encoder preserves integer values. The caller controls quantization and dither.
+Float output includes a `fact` chunk. The final odd PCM24 block includes RIFF padding.
+Supply the exact frame count and call `finish` to verify completion.
+
 ## Test Fixture Rule
 
 | Requirement | Current pattern |
