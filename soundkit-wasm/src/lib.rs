@@ -7122,6 +7122,7 @@ impl Default for WasmSoundKitV2Decoder {
 pub struct WasmLibraryImport {
     read: js_sys::Function,
     size: u64,
+    source_lossless: bool,
     encoder: WasmStreamingLibraryEncoder,
     source: LibraryImportSource,
     done: usize,
@@ -7169,6 +7170,7 @@ impl WasmLibraryImport {
         let mut import = WasmLibraryImport {
             read,
             size,
+            source_lossless: false,
             encoder: WasmStreamingLibraryEncoder::new(preserve_lossless)?,
             source: LibraryImportSource::Sequential { at: 0 },
             done: 0,
@@ -7186,6 +7188,13 @@ impl WasmLibraryImport {
             LibraryImportSource::Mp4 { .. } => "mp4".to_owned(),
             LibraryImportSource::Done => "done".to_owned(),
         }
+    }
+
+    /// Whether the supplied audio codec is lossless, independently of the
+    /// FLAC preservation copy requested by the caller.
+    #[wasm_bindgen(getter, js_name = sourceLossless)]
+    pub fn source_lossless(&self) -> bool {
+        self.source_lossless
     }
 
     /// Pumps one bounded unit and returns the same batch `push` returns.
@@ -7319,6 +7328,10 @@ impl WasmLibraryImport {
     /// else is pushed from the front and the codec detects itself.
     fn resolve_source(&mut self, preserve_lossless: bool) -> Result<(), JsValue> {
         let probe = self.read_range(0, 16.min(self.size as usize))?;
+        self.source_lossless = matches!(
+            detect_audio(&probe),
+            AudioType::Wav | AudioType::FLAC | AudioType::AIFF | AudioType::ALAC
+        );
         if !looks_like_mp4_source(&probe) {
             self.source = LibraryImportSource::Sequential { at: 0 };
             return Ok(());
