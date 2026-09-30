@@ -1,0 +1,18 @@
+[package]
+name = "soundkit-develop"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Photographic development for SoundKit: white balance, tone, colour in OKLab, detail and effects, for WebAssembly and native."
+repository = "https://github.com/wavey-ai/soundkit"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+wasm = ["dep:wasm-bindgen"]
+
+[dependencies]
+serde_json = "1"
+wasm-bindgen = { version = "0.2", optional = true }

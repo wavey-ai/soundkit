@@ -24,6 +24,7 @@ members = [
   "soundkit-dnx",
   "soundkit-video",
   "soundkit-wasm",
+  "soundkit-develop",
   "soundkit-decoder",
   "soundkit-encodec",
   "soundkit-fmp4",
