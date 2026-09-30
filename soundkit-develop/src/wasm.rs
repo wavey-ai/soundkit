@@ -60,6 +60,9 @@ impl Engine {
             before: o.get("before").and_then(Value::as_bool).unwrap_or(false),
             clipping: o.get("clipping").and_then(Value::as_bool).unwrap_or(false),
             measure: false,
+            // x, y, width, height within the full output, for a 100% view.
+            region: o.get("region").and_then(Value::as_array).filter(|r| r.len() == 4)
+                .map(|r| std::array::from_fn(|i| r[i].as_f64().unwrap_or(0.0).max(0.0) as usize)),
         };
         Developed { inner: develop::develop(&self.frame, &Recipe::from_json(recipe), &options) }
     }

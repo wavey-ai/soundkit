@@ -7,19 +7,27 @@ use std::rc::Rc;
 use crate::recipe::{Profile, Recipe, WhiteBalance};
 use std::sync::OnceLock;
 
-/// The sensor or photograph samples a frame holds: RAW stays 16-bit, a
-/// photograph is linear float.
-pub enum Samples { F32(Vec<f32>), U16(Vec<u16>) }
+/// The samples a frame holds: a RAW stays 16-bit sensor data, a photograph
+/// stays 8-bit sRGB and is made linear as it is read, and a working proxy is
+/// linear float. An 8-bit photograph takes a quarter of the memory of float.
+pub enum Samples { F32(Vec<f32>), U16(Vec<u16>), Srgb8(Vec<u8>) }
+
+/// 8-bit sRGB to linear light.
+fn srgb8() -> &'static [f32; 256] {
+    static T: OnceLock<[f32; 256]> = OnceLock::new();
+    T.get_or_init(|| std::array::from_fn(|i| to_linear(i as f32 / 255.0)))
+}
 
 impl Samples {
     #[inline(always)]
-    fn at(&self, i: usize) -> f32 { match self { Samples::F32(v) => v[i], Samples::U16(v) => v[i] as f32 } }
+    fn at(&self, i: usize) -> f32 { match self { Samples::F32(v) => v[i], Samples::U16(v) => v[i] as f32, Samples::Srgb8(v) => srgb8()[v[i] as usize] } }
 }
 
-/// A stored sample, read as a float.
-pub trait Texel: Copy { fn value(self) -> f32; }
-impl Texel for f32 { #[inline(always)] fn value(self) -> f32 { self } }
-impl Texel for u16 { #[inline(always)] fn value(self) -> f32 { self as f32 } }
+/// A stored sample, read as linear light.
+pub trait Texel: Copy { fn value(self, srgb: &[f32; 256]) -> f32; }
+impl Texel for f32 { #[inline(always)] fn value(self, _: &[f32; 256]) -> f32 { self } }
+impl Texel for u16 { #[inline(always)] fn value(self, _: &[f32; 256]) -> f32 { self as f32 } }
+impl Texel for u8 { #[inline(always)] fn value(self, srgb: &[f32; 256]) -> f32 { srgb[self as usize] } }
 
 /// The camera a frame came from. A proxy has its camera's white balance
 /// baked in and keeps these facts to change it later.
@@ -73,17 +81,18 @@ fn tables() -> &'static Tables {
 #[inline(always)]
 fn lookup(table: &[f32], p: f32) -> f32 { let k = (p as usize).min(TABLE - 1); table[k] + (table[k + 1] - table[k]) * (p - k as f32) }
 
-/// Linear frame from 8-bit sRGB RGBA.
+/// A frame from 8-bit sRGB RGBA, kept as 8-bit. Opacity is kept only when
+/// some pixel is not opaque.
 pub fn from_rgba(width: usize, height: usize, rgba: &[u8]) -> Frame {
-    let ramp: Vec<f32> = (0..256).map(|i| to_linear(i as f32 / 255.0)).collect();
     let pixels = width * height;
     let mut data = Vec::with_capacity(pixels * 3);
-    let mut alpha = Vec::with_capacity(pixels);
+    let mut opaque = true;
     for i in 0..pixels {
-        data.push(ramp[rgba[i * 4] as usize]); data.push(ramp[rgba[i * 4 + 1] as usize]); data.push(ramp[rgba[i * 4 + 2] as usize]);
-        alpha.push(rgba[i * 4 + 3]);
+        data.extend_from_slice(&rgba[i * 4..i * 4 + 3]);
+        opaque &= rgba[i * 4 + 3] == 255;
     }
-    Frame { width, height, data: Samples::F32(data), alpha: Some(alpha), scale: 1.0, wb: [1.0; 3], matrix: IDENTITY,
+    let alpha = if opaque { None } else { Some((0..pixels).map(|i| rgba[i * 4 + 3]).collect()) };
+    Frame { width, height, data: Samples::Srgb8(data), alpha, scale: 1.0, wb: [1.0; 3], matrix: IDENTITY,
         camera: Camera { matrix: IDENTITY, wb: [1.0; 3], daylight: None }, source_width: width }
 }
 
@@ -136,12 +145,12 @@ fn nonzero(v: f64) -> f64 { if v == 0.0 { 1.0 } else { v } }
 /// and exposure, with its opacity. Generic over the stored sample, so the
 /// read compiles into the loop.
 struct Sampler<'a, T: Texel> {
-    data: &'a [T], alpha: Option<&'a [u8]>, fw: usize, fh: usize,
+    data: &'a [T], alpha: Option<&'a [u8]>, fw: usize, fh: usize, srgb: &'static [f32; 256],
     m: [f32; 9], n: [f32; 9], balanced: bool, k: f32, s: [f32; 3], xs: f32, ys: f32, exact: bool,
 }
 impl<'a, T: Texel> Sampler<'a, T> {
     fn new(frame: &'a Frame, data: &'a [T], width: usize, height: usize, balance: Option<Matrix>, exposure: f32) -> Self {
-        Sampler { data, alpha: frame.alpha.as_deref(), fw: frame.width, fh: frame.height,
+        Sampler { data, alpha: frame.alpha.as_deref(), fw: frame.width, fh: frame.height, srgb: srgb8(),
             m: frame.matrix.map(|v| v as f32), n: balance.unwrap_or(IDENTITY).map(|v| v as f32), balanced: balance.is_some(), k: exposure,
             s: [frame.scale * frame.wb[0], frame.scale * frame.wb[1], frame.scale * frame.wb[2]],
             xs: frame.width as f32 / width as f32, ys: frame.height as f32 / height as f32,
@@ -151,10 +160,11 @@ impl<'a, T: Texel> Sampler<'a, T> {
     #[inline(always)]
     fn sample(&self, x: usize, y: usize) -> [f32; 4] {
         let (fw, fh, d) = (self.fw, self.fh, self.data);
+        let _ = self.srgb;
         let (cr, cg, cb, alpha);
         if self.exact {
             let p = y * fw + x;
-            cr = d[p * 3].value(); cg = d[p * 3 + 1].value(); cb = d[p * 3 + 2].value();
+            cr = d[p * 3].value(self.srgb); cg = d[p * 3 + 1].value(self.srgb); cb = d[p * 3 + 2].value(self.srgb);
             alpha = match self.alpha { Some(a) => a[p] as f32 / 255.0, None => 1.0 };
         } else {
             let sx = ((x as f32 + 0.5) * self.xs - 0.5).clamp(0.0, (fw - 1) as f32);
@@ -164,9 +174,9 @@ impl<'a, T: Texel> Sampler<'a, T> {
             let (dx, dy) = (sx - x0 as f32, sy - y0 as f32);
             let (p00, p10, p01, p11) = ((y0 * fw + x0) * 3, (y0 * fw + x1) * 3, (y1 * fw + x0) * 3, (y1 * fw + x1) * 3);
             let (w00, w10, w01, w11) = ((1.0 - dx) * (1.0 - dy), dx * (1.0 - dy), (1.0 - dx) * dy, dx * dy);
-            cr = d[p00].value() * w00 + d[p10].value() * w10 + d[p01].value() * w01 + d[p11].value() * w11;
-            cg = d[p00 + 1].value() * w00 + d[p10 + 1].value() * w10 + d[p01 + 1].value() * w01 + d[p11 + 1].value() * w11;
-            cb = d[p00 + 2].value() * w00 + d[p10 + 2].value() * w10 + d[p01 + 2].value() * w01 + d[p11 + 2].value() * w11;
+            cr = d[p00].value(self.srgb) * w00 + d[p10].value(self.srgb) * w10 + d[p01].value(self.srgb) * w01 + d[p11].value(self.srgb) * w11;
+            cg = d[p00 + 1].value(self.srgb) * w00 + d[p10 + 1].value(self.srgb) * w10 + d[p01 + 1].value(self.srgb) * w01 + d[p11 + 1].value(self.srgb) * w11;
+            cb = d[p00 + 2].value(self.srgb) * w00 + d[p10 + 2].value(self.srgb) * w10 + d[p01 + 2].value(self.srgb) * w01 + d[p11 + 2].value(self.srgb) * w11;
             alpha = match self.alpha {
                 Some(a) => (a[p00 / 3] as f32 * w00 + a[p10 / 3] as f32 * w10 + a[p01 / 3] as f32 * w01 + a[p11 / 3] as f32 * w11) / 255.0,
                 None => 1.0,
@@ -267,8 +277,10 @@ fn grain_at(x: usize, y: usize, cell: f32) -> f32 {
     top * (1.0 - sy) + bottom * sy
 }
 
-pub struct Options { pub edge: usize, pub bit_depth: u8, pub before: bool, pub clipping: bool, pub measure: bool }
-impl Default for Options { fn default() -> Self { Options { edge: 0, bit_depth: 8, before: false, clipping: false, measure: false } } }
+/// `region` is x, y, width and height within the full output: only that
+/// part is developed, as for a 100% view.
+pub struct Options { pub edge: usize, pub bit_depth: u8, pub before: bool, pub clipping: bool, pub measure: bool, pub region: Option<[usize; 4]> }
+impl Default for Options { fn default() -> Self { Options { edge: 0, bit_depth: 8, before: false, clipping: false, measure: false, region: None } } }
 
 pub enum Pixels { U8(Vec<u8>), U16(Vec<u16>) }
 pub struct Developed {
@@ -281,6 +293,7 @@ pub fn develop(frame: &Frame, recipe: &Recipe, options: &Options) -> Developed {
     match &frame.data {
         Samples::F32(data) => develop_on(frame, data.as_slice(), recipe, options),
         Samples::U16(data) => develop_on(frame, data.as_slice(), recipe, options),
+        Samples::Srgb8(data) => develop_on(frame, data.as_slice(), recipe, options),
     }
 }
 
@@ -319,7 +332,12 @@ fn develop_on<T: Texel>(frame: &Frame, data: &[T], recipe: &Recipe, options: &Op
     let factor = if options.edge > 0 { (options.edge as f64 / frame.width.max(frame.height) as f64).min(1.0) } else { 1.0 };
     let width = ((frame.width as f64 * factor).round() as usize).max(1);
     let height = ((frame.height as f64 * factor).round() as usize).max(1);
-    let pixels = width * height;
+    // The part of the output developed: the whole of it, or a region.
+    let [rx, ry, rw, rh] = match options.region {
+        Some([x, y, w, h]) => { let x = x.min(width - 1); let y = y.min(height - 1); [x, y, w.clamp(1, width - x), h.clamp(1, height - y)] }
+        None => [0, 0, width, height],
+    };
+    let pixels = rw * rh;
     let bit_depth = if [8, 10, 12].contains(&options.bit_depth) { options.bit_depth } else { 8 };
     let max = ((1u32 << bit_depth) - 1) as f32;
     let mut out8 = if bit_depth == 8 { vec![0u8; pixels * 4] } else { Vec::new() };
@@ -425,23 +443,31 @@ fn develop_on<T: Texel>(frame: &Frame, data: &[T], recipe: &Recipe, options: &Op
         if clarity != 0.0 { clarity_grid = Some(blur(&small, g.gw, g.gh, 2.0)); }
     }
     let (mut texture_blur, mut fine_blur, mut sharp_blur, mut chroma) = (None, None, None, None);
+    // The per-pixel blurs cover this window of the output: x0, y0, x1, y1.
+    let mut window = [0, 0, width, height];
     if texture != 0.0 || nr_luminance != 0.0 || sharpen != 0.0 || nr_colour != 0.0 {
-        let mut lum = vec![0.0f32; pixels];
-        let (mut cr, mut cb) = if nr_colour != 0.0 { (vec![0.0f32; pixels], vec![0.0f32; pixels]) } else { (Vec::new(), Vec::new()) };
-        for y in 0..height { for x in 0..width {
+        // Blurs reach this far, so the region is developed with this margin.
+        let reach = [(long_edge * 0.004).max(1.0), (1.5 * detail_scale).max(1.0), (s.sharpen_radius * detail_scale).max(1.0), (4.0 * detail_scale * (0.5 + nr_colour)).max(1.0)]
+            .iter().fold(0.0f32, |a, b| a.max(*b));
+        let pad = (reach * 3.0).ceil() as usize + 2;
+        window = [rx.saturating_sub(pad), ry.saturating_sub(pad), (rx + rw + pad).min(width), (ry + rh + pad).min(height)];
+        let (ww, wh) = (window[2] - window[0], window[3] - window[1]);
+        let mut lum = vec![0.0f32; ww * wh];
+        let (mut cr, mut cb) = if nr_colour != 0.0 { (vec![0.0f32; ww * wh], vec![0.0f32; ww * wh]) } else { (Vec::new(), Vec::new()) };
+        for y in window[1]..window[3] { for x in window[0]..window[2] {
             let mut rgb = sampler.sample(x, y);
             apply_haze(&mut rgb, x, y);
-            let i = y * width + x;
+            let i = (y - window[1]) * ww + (x - window[0]);
             let l = luma(rgb[0], rgb[1], rgb[2]);
             lum[i] = fast::log2(l + 1e-4);
             if nr_colour != 0.0 { cr[i] = rgb[0] / (l + 1e-4); cb[i] = rgb[2] / (l + 1e-4); }
         } }
-        if texture != 0.0 { texture_blur = Some(blur(&lum, width, height, (long_edge * 0.004).max(1.0))); }
-        if nr_luminance != 0.0 { fine_blur = Some(blur(&lum, width, height, (1.5 * detail_scale).max(1.0))); }
-        if sharpen != 0.0 { sharp_blur = Some(blur(&lum, width, height, (s.sharpen_radius * detail_scale).max(1.0))); }
+        if texture != 0.0 { texture_blur = Some(blur(&lum, ww, wh, (long_edge * 0.004).max(1.0))); }
+        if nr_luminance != 0.0 { fine_blur = Some(blur(&lum, ww, wh, (1.5 * detail_scale).max(1.0))); }
+        if sharpen != 0.0 { sharp_blur = Some(blur(&lum, ww, wh, (s.sharpen_radius * detail_scale).max(1.0))); }
         if nr_colour != 0.0 {
             let radius = (4.0 * detail_scale * (0.5 + nr_colour)).max(1.0);
-            chroma = Some((blur(&cr, width, height, radius), blur(&cb, width, height, radius)));
+            chroma = Some((blur(&cr, ww, wh, radius), blur(&cb, ww, wh, radius)));
         }
     }
 
@@ -485,8 +511,11 @@ fn develop_on<T: Texel>(frame: &Frame, data: &[T], recipe: &Recipe, options: &Op
     let mut luminance = if options.measure { Some(vec![0.0f32; pixels]) } else { None };
     let mut weights = [0.0f32; 8];
 
-    for y in 0..height { for x in 0..width {
-        let i = y * width + x;
+    let ww = window[2] - window[0];
+    for y in ry..ry + rh { for x in rx..rx + rw {
+        // `i` is the output pixel; `w` the same pixel in the blur window.
+        let i = (y - ry) * rw + (x - rx);
+        let w = (y - window[1]) * ww + (x - window[0]);
         let mut rgb = sampler.sample(x, y);
         apply_haze(&mut rgb, x, y);
         let mut l = luma(rgb[0], rgb[1], rgb[2]);
@@ -497,16 +526,16 @@ fn develop_on<T: Texel>(frame: &Frame, data: &[T], recipe: &Recipe, options: &Op
             let base = if needs_base { fast::log2(l + 1e-4) } else { 0.0 };
             let mut edited = base;
             if let Some(fb) = &fine_blur {
-                let edge_weight = fast::exp(-((base - fb[i]).powi(2)) / (0.02 + nr_luminance * 0.3));
-                edited += (fb[i] - base) * nr_luminance * edge_weight;
+                let edge_weight = fast::exp(-((base - fb[w]).powi(2)) / (0.02 + nr_luminance * 0.3));
+                edited += (fb[w] - base) * nr_luminance * edge_weight;
             }
-            if let Some(tb) = &texture_blur { edited += (edited - tb[i]) * texture * 0.6; }
+            if let Some(tb) = &texture_blur { edited += (edited - tb[w]) * texture * 0.6; }
             if let Some(cg) = &clarity_grid {
                 let mid = fast::exp(-((base + 2.5).powi(2)) / 4.0);
                 edited += (edited - g.at(cg, x, y)) * clarity * 0.5 * mid;
             }
             if let Some(sb) = &sharp_blur {
-                let detail = base - sb[i];
+                let detail = base - sb[w];
                 let mask = if s.sharpen_masking != 0.0 { smooth(0.0, s.sharpen_masking / 100.0 * 0.15, detail.abs()) } else { 1.0 };
                 edited += detail * sharpen * mask;
             }
@@ -515,7 +544,7 @@ fn develop_on<T: Texel>(frame: &Frame, data: &[T], recipe: &Recipe, options: &Op
                 rgb[0] *= gain; rgb[1] *= gain; rgb[2] *= gain; l *= gain;
             }
             if let Some((cr, cb)) = &chroma {
-                let (r1, b1) = (cr[i] * l, cb[i] * l);
+                let (r1, b1) = (cr[w] * l, cb[w] * l);
                 rgb[0] += (r1 - rgb[0]) * nr_colour; rgb[2] += (b1 - rgb[2]) * nr_colour;
                 rgb[1] = ((l - 0.2126 * rgb[0] - 0.0722 * rgb[2]) / 0.7152).max(0.0);
             }
@@ -618,7 +647,7 @@ fn develop_on<T: Texel>(frame: &Frame, data: &[T], recipe: &Recipe, options: &Op
         if bit_depth == 8 { out8[d] = px[0] as u8; out8[d + 1] = px[1] as u8; out8[d + 2] = px[2] as u8; out8[d + 3] = alpha as u8; }
         else { out16[d] = px[0] as u16; out16[d + 1] = px[1] as u16; out16[d + 2] = px[2] as u16; out16[d + 3] = alpha as u16; }
     } }
-    Developed { width, height, bit_depth, data: if bit_depth == 8 { Pixels::U8(out8) } else { Pixels::U16(out16) },
+    Developed { width: rw, height: rh, bit_depth, data: if bit_depth == 8 { Pixels::U8(out8) } else { Pixels::U16(out16) },
         histogram, histogram_rgb, clipped_high, clipped_low, luminance }
 }
 
@@ -656,4 +685,34 @@ pub fn auto_tone(frame: &Frame, recipe: &Recipe) -> [f32; 6] {
     let range = (at(0.95).max(1e-4) / at(0.05).max(1e-4)).log2();
     let contrast = ((6.0 - range) * 6.0).clamp(-15.0, 25.0);
     [(exposure * 20.0).round() / 20.0, contrast.round(), highlights.round(), shadows.round(), whites.round(), blacks.round()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn card(w: usize, h: usize) -> Vec<u8> {
+        let mut rgba = vec![0u8; w * h * 4];
+        for y in 0..h { for x in 0..w {
+            let i = (y * w + x) * 4;
+            rgba[i] = (x * 255 / w) as u8; rgba[i + 1] = (y * 255 / h) as u8; rgba[i + 2] = ((x + y) * 127 / (w + h)) as u8; rgba[i + 3] = 255;
+        } }
+        rgba
+    }
+    #[test]
+    fn a_region_matches_the_same_pixels_of_the_whole() {
+        let frame = from_rgba(240, 160, &card(240, 160));
+        let recipe = Recipe::from_json(r#"{"highlights":-40,"shadows":30,"texture":40,"clarity":30,"sharpening":{"amount":80},"noise":{"luminance":40,"colour":40},"vibrance":20,"vignette":{"amount":-30}}"#);
+        let whole = develop(&frame, &recipe, &Options::default());
+        let part = develop(&frame, &recipe, &Options { region: Some([100, 50, 60, 40]), ..Options::default() });
+        let (Pixels::U8(a), Pixels::U8(b)) = (&whole.data, &part.data) else { panic!() };
+        assert_eq!((part.width, part.height), (60, 40));
+        for y in 0..40 { for x in 0..60 { for c in 0..4 {
+            assert_eq!(a[((50 + y) * 240 + 100 + x) * 4 + c], b[(y * 60 + x) * 4 + c], "pixel {x},{y}");
+        } } }
+    }
+    #[test]
+    fn an_opaque_photograph_is_kept_as_eight_bit() {
+        let frame = from_rgba(4, 4, &card(4, 4));
+        assert!(matches!(frame.data, Samples::Srgb8(_)) && frame.alpha.is_none());
+    }
 }
