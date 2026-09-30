@@ -1409,6 +1409,15 @@ export class WasmLibraryImport {
             wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
         }
     }
+    /**
+     * Whether the supplied audio codec is lossless, independently of the
+     * FLAC preservation copy requested by the caller.
+     * @returns {boolean}
+     */
+    get sourceLossless() {
+        const ret = wasm.wasmlibraryimport_sourceLossless(this.__wbg_ptr);
+        return ret !== 0;
+    }
 }
 if (Symbol.dispose) WasmLibraryImport.prototype[Symbol.dispose] = WasmLibraryImport.prototype.free;
 
@@ -2316,6 +2325,12 @@ export class WasmSoundKitV2Decoder {
         const ret = wasm.wasmsoundkitv2decoder_channels(this.__wbg_ptr);
         return ret;
     }
+    finish() {
+        const ret = wasm.wasmsoundkitv2decoder_finish(this.__wbg_ptr);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
     constructor() {
         const ret = wasm.wasmsoundkitv2decoder_new();
         this.__wbg_ptr = ret;
@@ -2335,6 +2350,20 @@ export class WasmSoundKitV2Decoder {
         const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.wasmsoundkitv2decoder_push(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Decode interleaved float32 PCM without an intermediate PCM16 conversion.
+     * @param {Uint8Array} bytes
+     * @returns {Float32Array}
+     */
+    pushFloat(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsoundkitv2decoder_pushFloat(this.__wbg_ptr, ptr0, len0);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }

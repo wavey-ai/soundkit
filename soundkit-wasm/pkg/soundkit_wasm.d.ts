@@ -340,6 +340,11 @@ export class WasmLibraryImport {
      * What the source turned out to be: `sequential` or `mp4`.
      */
     readonly shape: string;
+    /**
+     * Whether the supplied audio codec is lossless, independently of the
+     * FLAC preservation copy requested by the caller.
+     */
+    readonly sourceLossless: boolean;
 }
 
 /**
@@ -560,6 +565,7 @@ export class WasmSoundKitV2Decoder {
     free(): void;
     [Symbol.dispose](): void;
     bufferedBytes(): number;
+    finish(): void;
     constructor();
     /**
      * Feeds the next slice of the stream and takes whatever it completes.
@@ -569,6 +575,10 @@ export class WasmSoundKitV2Decoder {
      * empty when the slice completed no frame.
      */
     push(bytes: Uint8Array): Int16Array;
+    /**
+     * Decode interleaved float32 PCM without an intermediate PCM16 conversion.
+     */
+    pushFloat(bytes: Uint8Array): Float32Array;
     reset(): void;
     readonly channels: number;
     /**
@@ -843,6 +853,7 @@ export interface InitOutput {
     readonly wasmlibraryimport_process: (a: number, b: number) => [number, number, number];
     readonly wasmlibraryimport_progress: (a: number) => number;
     readonly wasmlibraryimport_shape: (a: number) => [number, number];
+    readonly wasmlibraryimport_sourceLossless: (a: number) => number;
     readonly wasmmp4keyframes_codec: (a: number) => [number, number];
     readonly wasmmp4keyframes_codecId: (a: number) => [number, number];
     readonly wasmmp4keyframes_frame: (a: number, b: number) => [number, number, number];
@@ -904,8 +915,10 @@ export interface InitOutput {
     readonly wasmsoundkitframedecoder_setKeyBytes: (a: number, b: number, c: number) => [number, number];
     readonly wasmsoundkitv2decoder_bufferedBytes: (a: number) => number;
     readonly wasmsoundkitv2decoder_channels: (a: number) => number;
+    readonly wasmsoundkitv2decoder_finish: (a: number) => [number, number];
     readonly wasmsoundkitv2decoder_new: () => number;
     readonly wasmsoundkitv2decoder_push: (a: number, b: number, c: number) => [number, number, number];
+    readonly wasmsoundkitv2decoder_pushFloat: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmsoundkitv2decoder_reset: (a: number) => void;
     readonly wasmsoundkitv2decoder_sampleRate: (a: number) => number;
     readonly wasmstreaminglibraryencoder_finish: (a: number) => [number, number, number];
