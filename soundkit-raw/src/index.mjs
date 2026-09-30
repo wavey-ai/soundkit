@@ -1,5 +1,6 @@
 import createModule from './raw.mjs';
-export { defaultRecipe, normalizeRecipe, develop, linearPreview, fromRGBA } from './develop.mjs';
+export { defaultRecipe, normalizeRecipe, develop, linearPreview, fromRGBA, autoTone, hasDaylightReference,
+    COLOUR_BANDS, WHITE_BALANCES, RAW_WHITE_BALANCES, PROFILES } from './develop.mjs';
 
 // One decoder per worker. The input stays alive until LibRaw releases its buffer stream.
 export async function createRawDecoder(options = {}) {
@@ -27,8 +28,12 @@ export async function createRawDecoder(options = {}) {
             const pointer = module._raw_pixels();
             const data = module.HEAPU16.slice(pointer / 2, (pointer + module._raw_size()) / 2);
             const green = meta.wb[1] || 1;
+            const daylightGreen = meta.daylight?.[1] || 0;
             return { width: module._raw_width(), height: module._raw_height(), data,
                 scale: 1 / Math.max(1, meta.maximum), wb: meta.wb.slice(0, 3).map(value => (value || green) / green),
+                // Only a RAW carries a daylight reference; the white balance
+                // presets are offered when it is present.
+                daylight: daylightGreen > 0 ? meta.daylight.slice(0, 3).map(value => (value || daylightGreen) / daylightGreen) : null,
                 matrix: meta.matrix, metadata: meta, linear: true };
         },
         close,

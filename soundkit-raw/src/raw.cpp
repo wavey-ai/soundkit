@@ -43,6 +43,10 @@ const char *raw_metadata() {
         << ",\"aperture\":" << d.other.aperture << ",\"shutter\":" << d.other.shutter
         << ",\"maximum\":" << d.color.maximum << ",\"wb\":[";
     for (int c = 0; c < 4; c++) { if (c) out << ','; out << (d.color.cam_mul[c] > 0 ? d.color.cam_mul[c] : d.color.pre_mul[c]); }
+    // The camera's daylight multipliers: the reference the white balance
+    // presets are measured from.
+    out << "],\"daylight\":[";
+    for (int c = 0; c < 4; c++) { if (c) out << ','; out << d.color.pre_mul[c]; }
     out << "],\"matrix\":[";
     for (int row = 0; row < 3; row++) for (int c = 0; c < 3; c++) { if (row || c) out << ','; out << d.color.rgb_cam[row][c]; }
     out << "]}"; metadata = out.str(); return metadata.c_str();
