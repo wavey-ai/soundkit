@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createRawDecoder, develop, linearPreview, cropGeometry, defaultRecipe, fromRGBA } from '../dist/index.mjs';
+import { createRawDecoder, develop, linearPreview, defaultRecipe, fromRGBA } from '../dist/index.mjs';
 import { makeDNG } from './dng.mjs';
 
 test('real LibRaw demosaics 12-bit DNG and preserves editable sensor precision', async () => {
@@ -33,13 +33,14 @@ test('orientation is applied by the decoder and corrupt input reports a recovera
         assert.equal(frame.width, 240); assert.equal(frame.height, 320);
     } finally { decoder.close(); }
 });
-test('crop and rotation change geometry without stretching; before retains the crop', () => {
+test('development keeps source geometry and scales previews proportionally', () => {
     const frame = fromRGBA({ width: 300, height: 200, data: new Uint8ClampedArray(300 * 200 * 4).fill(180) });
-    assert.deepEqual([cropGeometry(frame).width, cropGeometry(frame).height], [300, 200]);
-    const square = develop(frame, { exposure: 3, crop: { ratio: 1 } }, { before: true });
-    assert.equal(square.width, 200); assert.equal(square.height, 200); assert.equal(square.data[0], 180);
-    const rotated = cropGeometry(frame, { rotation: 90 }); assert.equal(rotated.width, 200); assert.equal(rotated.height, 300);
-    const straightened = cropGeometry(frame, { straighten: 10 });
-    assert.ok(straightened.width < 300); assert.ok(Math.abs(straightened.width / straightened.height - 1.5) < .01);
+    const adjusted = develop(frame, { exposure: 3 });
+    const before = develop(frame, { exposure: 3 }, { before: true });
+    assert.deepEqual([adjusted.width, adjusted.height], [300, 200]);
+    assert.equal(before.data[0], 180);
+    const preview = develop(frame, {}, { edge: 150 });
+    assert.deepEqual([preview.width, preview.height], [150, 100]);
     const defaults = defaultRecipe(); assert.equal(develop(frame, defaults).data[0], 180);
+    assert.equal('crop' in defaults, false);
 });

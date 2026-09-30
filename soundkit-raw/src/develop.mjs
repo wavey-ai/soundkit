@@ -2,16 +2,11 @@ const IDENTITY = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 const finite = (x, fallback = 0) => Number.isFinite(Number(x)) ? Number(x) : fallback;
 export const defaultRecipe = () => ({ version: 1, exposure: 0, temperature: 0, tint: 0, highlights: 0,
-    shadows: 0, whites: 0, blacks: 0, contrast: 0, rotation: 0, straighten: 0,
-    crop: { ratio: 0, zoom: 1, x: 0, y: 0 } });
+    shadows: 0, whites: 0, blacks: 0, contrast: 0 });
 export function normalizeRecipe(value = {}) {
     const r = defaultRecipe();
     r.exposure = clamp(finite(value.exposure), -5, 5);
     for (const key of ['temperature', 'tint', 'highlights', 'shadows', 'whites', 'blacks', 'contrast']) r[key] = clamp(finite(value[key]), -100, 100);
-    r.rotation = ((Math.round(finite(value.rotation) / 90) % 4) + 4) % 4 * 90;
-    r.straighten = clamp(finite(value.straighten), -15, 15);
-    r.crop = { ratio: clamp(finite(value.crop?.ratio), 0, 4), zoom: clamp(finite(value.crop?.zoom, 1), 1, 4),
-        x: clamp(finite(value.crop?.x), -1, 1), y: clamp(finite(value.crop?.y), -1, 1) };
     return r;
 }
 const toLinear = value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
@@ -55,28 +50,14 @@ export function linearPreview(frame, edge = 1400) {
     }
     return { width, height, data, alpha, scale: 1, matrix: IDENTITY, wb: [1, 1, 1], linear: true };
 }
-export function cropGeometry(frame, recipe = {}, edge = 0) {
-    const r = normalizeRecipe(recipe), swapped = r.rotation % 180 !== 0;
-    const sourceWidth = swapped ? frame.height : frame.width, sourceHeight = swapped ? frame.width : frame.height;
-    const aspect = r.crop.ratio || sourceWidth / sourceHeight;
-    const radians = r.straighten * Math.PI / 180, cos = Math.cos(radians), sin = Math.sin(radians);
-    // An inscribed rectangle: straightening never introduces empty corners or stretches pixels.
-    const safe = 1 / (Math.abs(cos) + Math.abs(sin) * Math.max(sourceWidth / sourceHeight, sourceHeight / sourceWidth));
-    let cropWidth = sourceWidth * safe, cropHeight = sourceHeight * safe;
-    if (cropWidth / cropHeight > aspect) cropWidth = cropHeight * aspect;
-    else cropHeight = cropWidth / aspect;
-    cropWidth /= r.crop.zoom; cropHeight /= r.crop.zoom;
-    const cx = sourceWidth / 2 + r.crop.x * (sourceWidth * safe - cropWidth) / 2;
-    const cy = sourceHeight / 2 + r.crop.y * (sourceHeight * safe - cropHeight) / 2;
-    const scale = edge > 0 ? Math.min(1, edge / Math.max(cropWidth, cropHeight)) : 1;
-    return { width: Math.max(1, Math.round(cropWidth * scale)), height: Math.max(1, Math.round(cropHeight * scale)),
-        cropWidth, cropHeight, cx, cy, sourceWidth, sourceHeight, cos, sin, rotation: r.rotation };
-}
 export function develop(frame, recipe = {}, { edge = 0, bitDepth = 8, before = false, clipping = false } = {}) {
     if (![8, 10, 12].includes(bitDepth)) throw new Error('Output must be 8, 10 or 12 bit.');
-    const r = normalizeRecipe(recipe), g = cropGeometry(frame, r, edge);
+    const r = normalizeRecipe(recipe);
     const settings = before ? defaultRecipe() : r;
-    const { width, height } = g, max = (1 << bitDepth) - 1;
+    const factor = edge > 0 ? Math.min(1, edge / Math.max(frame.width, frame.height)) : 1;
+    const width = Math.max(1, Math.round(frame.width * factor));
+    const height = Math.max(1, Math.round(frame.height * factor));
+    const max = (1 << bitDepth) - 1;
     const data = bitDepth === 8 ? new Uint8ClampedArray(width * height * 4) : new Uint16Array(width * height * 4);
     const histogram = new Uint32Array(256);
     const exposure = 2 ** settings.exposure;
@@ -102,16 +83,8 @@ export function develop(frame, recipe = {}, { edge = 0, bitDepth = 8, before = f
     const rr = scale * wb[0], gg = scale * wb[1], bb = scale * wb[2];
     const sensor = frame.data;
     for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
-        const ox = g.cx + ((x + .5) / width - .5) * g.cropWidth - g.sourceWidth / 2;
-        const oy = g.cy + ((y + .5) / height - .5) * g.cropHeight - g.sourceHeight / 2;
-        const rx = ox * g.cos - oy * g.sin + g.sourceWidth / 2 - .5;
-        const ry = ox * g.sin + oy * g.cos + g.sourceHeight / 2 - .5;
-        let sx, sy;
-        if (g.rotation === 90) { sx = ry; sy = frame.height - 1 - rx; }
-        else if (g.rotation === 180) { sx = frame.width - 1 - rx; sy = frame.height - 1 - ry; }
-        else if (g.rotation === 270) { sx = frame.width - 1 - ry; sy = rx; }
-        else { sx = rx; sy = ry; }
-        sx = clamp(sx, 0, frame.width - 1); sy = clamp(sy, 0, frame.height - 1);
+        const sx = clamp((x + .5) * frame.width / width - .5, 0, frame.width - 1);
+        const sy = clamp((y + .5) * frame.height / height - .5, 0, frame.height - 1);
         const x0 = Math.floor(sx), y0 = Math.floor(sy), x1 = Math.min(x0 + 1, frame.width - 1), y1 = Math.min(y0 + 1, frame.height - 1);
         const dx = sx - x0, dy = sy - y0;
         const p00 = y0 * frame.width + x0, p10 = y0 * frame.width + x1;

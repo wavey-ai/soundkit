@@ -1,5 +1,5 @@
 import createModule from './raw.mjs';
-export { defaultRecipe, normalizeRecipe, develop, linearPreview, fromRGBA, cropGeometry } from './develop.mjs';
+export { defaultRecipe, normalizeRecipe, develop, linearPreview, fromRGBA } from './develop.mjs';
 
 // One decoder per worker. The input stays alive until LibRaw releases its buffer stream.
 export async function createRawDecoder(options = {}) {
