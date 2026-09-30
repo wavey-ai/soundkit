@@ -1,6 +1,6 @@
 import createModule from './raw.mjs';
 export { defaultRecipe, normalizeRecipe, develop, linearPreview, fromRGBA, autoTone, hasDaylightReference,
-    COLOUR_BANDS, WHITE_BALANCES, RAW_WHITE_BALANCES, PROFILES } from './develop.mjs';
+    COLOUR_BANDS, COLOUR_BAND_HUES, WHITE_BALANCES, RAW_WHITE_BALANCES, PROFILES, whiteOf } from './develop.mjs';
 
 // One decoder per worker. The input stays alive until LibRaw releases its buffer stream.
 export async function createRawDecoder(options = {}) {

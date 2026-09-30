@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createRawDecoder, develop, linearPreview, defaultRecipe, normalizeRecipe, fromRGBA, autoTone, hasDaylightReference } from '../dist/index.mjs';
+import { createRawDecoder, develop, linearPreview, defaultRecipe, normalizeRecipe, fromRGBA, autoTone, hasDaylightReference, whiteOf, COLOUR_BAND_HUES } from '../dist/index.mjs';
 import { makeDNG } from './dng.mjs';
 
 test('real LibRaw demosaics 12-bit DNG and preserves editable sensor precision', async () => {
@@ -126,4 +126,52 @@ test('clipping counts only what the edit pushed to pure white or pure black', ()
     assert.ok(develop(frame, { exposure: 2 }).clippedHigh > 0);
     assert.ok(develop(frame, { exposure: -4, blacks: -100 }).clippedLow > 0);
     assert.equal(develop(frame, { exposure: 2 }, { before: true }).clippedHigh, 0);
+});
+
+// OKLab of an 8-bit sRGB pixel, for checking what the colour controls keep.
+const lin = v => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; };
+function oklab(r, g, b) {
+    [r, g, b] = [lin(r), lin(g), lin(b)];
+    const l = Math.cbrt(.4122214708 * r + .5363325363 * g + .0514459929 * b), m = Math.cbrt(.2119034982 * r + .6806995451 * g + .1073969566 * b), s = Math.cbrt(.0883024619 * r + .2817188376 * g + .6299787005 * b);
+    const L = .2104542553 * l + .7936177850 * m - .0040720468 * s, a = 1.9779984951 * l - 2.4285922050 * m + .4505937099 * s, bb = .0259040371 * l + .7827717662 * m - .8086757660 * s;
+    return { L, C: Math.hypot(a, bb), h: (Math.atan2(bb, a) * 180 / Math.PI + 360) % 360 };
+}
+const swatch = (r, g, b) => fromRGBA({ width: 1, height: 1, data: new Uint8ClampedArray([r, g, b, 255]) });
+const pixel = result => [...result.data.slice(0, 3)];
+const hueGap = (a, b) => Math.abs(((a - b + 540) % 360) - 180);
+test('the white point maths lands on D65 and every band hue is measured in OKLCh', () => {
+    const [X, , Z] = whiteOf(6504, .0032), x = X / (X + 1 + Z), y = 1 / (X + 1 + Z);
+    assert.ok(Math.abs(x - .3127) < .002 && Math.abs(y - .3290) < .002, `D65 at ${x.toFixed(4)}, ${y.toFixed(4)}`);
+    assert.equal(COLOUR_BAND_HUES.length, 8);
+    for (let i = 1; i < 8; i++) assert.ok(COLOUR_BAND_HUES[i] > COLOUR_BAND_HUES[i - 1], 'Band hues run round the circle in order');
+});
+test('temperature and tint adapt the light: greys warm, cool and turn magenta', () => {
+    const grey = swatch(128, 128, 128);
+    const [wr, , wb] = pixel(develop(grey, { temperature: 50 })), [cr, , cb] = pixel(develop(grey, { temperature: -50 }));
+    assert.ok(wr > wb + 8, `warmer ${wr}/${wb}`); assert.ok(cb > cr + 8, `cooler ${cr}/${cb}`);
+    const [mr, mg, mb] = pixel(develop(grey, { tint: 60 }));
+    assert.ok(mg < mr - 4 && mg < mb - 4, `magenta ${mr}/${mg}/${mb}`);
+    assert.deepEqual(pixel(develop(grey, { temperature: 0, tint: 0 })), [128, 128, 128]);
+});
+test('a band hue shift turns the colour and keeps its lightness', () => {
+    const source = oklab(40, 90, 200);
+    const shifted = oklab(...pixel(develop(swatch(40, 90, 200), { mixer: { blue: { hue: 80 } } })));
+    assert.ok(hueGap(shifted.h, source.h) > 6, `hue ${source.h.toFixed(1)} -> ${shifted.h.toFixed(1)}`);
+    assert.ok(Math.abs(shifted.L - source.L) < .01, `lightness ${source.L.toFixed(3)} -> ${shifted.L.toFixed(3)}`);
+});
+test('saturation at -100 leaves a grey of the same lightness', () => {
+    const source = oklab(200, 120, 60), [r, g, b] = pixel(develop(swatch(200, 120, 60), { saturation: -100 }));
+    assert.ok(Math.max(r, g, b) - Math.min(r, g, b) <= 1, `${r}/${g}/${b}`);
+    assert.ok(Math.abs(oklab(r, g, b).L - source.L) < .01);
+});
+test('a colour pushed past the screen keeps its hue', () => {
+    for (const colour of [[30, 60, 230], [230, 40, 60], [40, 200, 90]]) {
+        const source = oklab(...colour), result = oklab(...pixel(develop(swatch(...colour), { saturation: 100, vibrance: 100 })));
+        assert.ok(hueGap(result.h, source.h) < 3, `${colour}: hue ${source.h.toFixed(1)} -> ${result.h.toFixed(1)}`);
+        assert.ok(result.C >= source.C - .005, 'and is no less vivid');
+    }
+});
+test('a highlight pushed past white keeps its hue on the way to white', () => {
+    const source = oklab(230, 140, 60), result = oklab(...pixel(develop(swatch(230, 140, 60), { exposure: 1.2 })));
+    assert.ok(hueGap(result.h, source.h) < 10, `hue ${source.h.toFixed(1)} -> ${result.h.toFixed(1)}`);
 });

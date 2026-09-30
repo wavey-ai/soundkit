@@ -6,14 +6,14 @@ const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a || 1e-6), 0, 1); 
 /// The eight colour bands of the colour mixer, by hue in degrees. Skin sits
 /// between red and orange, mostly in orange.
 export const COLOUR_BANDS = Object.freeze(['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta']);
-const BAND_HUES = [0, 30, 60, 120, 180, 240, 280, 320];
 /// White balance choices. `shot` and `auto` apply to every image; the others
 /// are measured from a RAW file's daylight reference.
 export const WHITE_BALANCES = Object.freeze(['shot', 'auto', 'daylight', 'cloudy', 'shade', 'tungsten', 'fluorescent', 'flash']);
 export const RAW_WHITE_BALANCES = Object.freeze(['daylight', 'cloudy', 'shade', 'tungsten', 'fluorescent', 'flash']);
 export const PROFILES = Object.freeze(['standard', 'vivid', 'neutral', 'monochrome']);
-// Illuminant temperature and green correction for each preset.
-const WB_LIGHT = { daylight: [5500, 1], cloudy: [6500, 1], shade: [7500, 1], tungsten: [3200, 1], fluorescent: [4000, .93], flash: [5600, 1] };
+// Each preset's light: correlated colour temperature in kelvin and its
+// distance from the black-body locus (Duv, positive towards green).
+const WB_LIGHT = { daylight: [5500, 0], cloudy: [6500, 0], shade: [7500, 0], tungsten: [3200, 0], fluorescent: [4000, .006], flash: [5600, 0] };
 const GRADING_ZONES = ['shadows', 'midtones', 'highlights', 'global'];
 
 const zone = () => ({ hue: 0, saturation: 0, luminance: 0 });
@@ -54,6 +54,18 @@ export function normalizeRecipe(value = {}) {
 }
 const toLinear = value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
 const toSRGB = value => value <= 0.0031308 ? value * 12.92 : 1.055 * value ** (1 / 2.4) - 0.055;
+// Interpolated tables for the colour stage's two transfers. Encoding is
+// indexed by the square root of linear light, so the shadows keep their
+// precision.
+const TABLE = 4096;
+// Luminance to the 0.3 power, for the local tone map, over 0-8 and indexed
+// by the square root so dark values keep their precision.
+const SOFT_POWER = Float32Array.from({ length: TABLE + 1 }, (_, i) => ((i / TABLE) ** 2 * 8 + 1e-4) ** .3);
+const softPower = value => { const p = Math.sqrt(clamp(value, 0, 8) / 8) * TABLE, k = Math.min(TABLE - 1, p | 0); return SOFT_POWER[k] + (SOFT_POWER[k + 1] - SOFT_POWER[k]) * (p - k); };
+const DISPLAY_TO_LINEAR = Float32Array.from({ length: TABLE + 1 }, (_, i) => toLinear(i / TABLE));
+const ROOT_TO_DISPLAY = Float32Array.from({ length: TABLE + 1 }, (_, i) => toSRGB((i / TABLE) ** 2));
+const decode = value => { const p = clamp(value, 0, 1) * TABLE, k = Math.min(TABLE - 1, p | 0); return DISPLAY_TO_LINEAR[k] + (DISPLAY_TO_LINEAR[k + 1] - DISPLAY_TO_LINEAR[k]) * (p - k); };
+const encode = value => { const p = Math.sqrt(clamp(value, 0, 1)) * TABLE, k = Math.min(TABLE - 1, p | 0); return ROOT_TO_DISPLAY[k] + (ROOT_TO_DISPLAY[k + 1] - ROOT_TO_DISPLAY[k]) * (p - k); };
 export function fromRGBA({ width, height, data }) {
     const pixels = width * height, out = new Float32Array(pixels * 3), alpha = new Uint8Array(pixels);
     const ramp = Float32Array.from({ length: 256 }, (_, i) => toLinear(i / 255));
@@ -114,18 +126,91 @@ function invert(m) {
         C / det, -(a * h - b * g) / det, (a * e - b * d) / det];
 }
 const diagonal = ([r, g, b]) => [r, 0, 0, 0, g, 0, 0, 0, b];
-/// Linear sRGB of a black body at `kelvin`, green normalised to one.
-function blackBody(kelvin) {
-    const t = clamp(kelvin, 1667, 25000);
-    const x = t <= 4000 ? -0.2661239e9 / t ** 3 - 0.2343589e6 / t ** 2 + 0.8776956e3 / t + 0.179910
-        : -3.0258469e9 / t ** 3 + 2.1070379e6 / t ** 2 + 0.2226347e3 / t + 0.240390;
-    const y = t <= 2222 ? -1.1063814 * x ** 3 - 1.34811020 * x ** 2 + 2.18555832 * x - 0.20219683
-        : t <= 4000 ? -0.9549476 * x ** 3 - 1.37418593 * x ** 2 + 2.09137015 * x - 0.16748867
-            : 3.0817580 * x ** 3 - 5.87338670 * x ** 2 + 3.75112997 * x - 0.37001483;
-    const X = x / y, Z = (1 - x - y) / y;
-    const rgb = [3.2406 * X - 1.5372 - 0.4986 * Z, -0.9689 * X + 1.8758 + 0.0415 * Z, 0.0557 * X - 0.2040 + 1.0570 * Z];
-    return rgb.map(value => Math.max(1e-4, value) / Math.max(1e-4, rgb[1]));
+const apply = (m, [x, y, z]) => [m[0] * x + m[1] * y + m[2] * z, m[3] * x + m[4] * y + m[5] * z, m[6] * x + m[7] * y + m[8] * z];
+// Linear sRGB (D65) and CIE XYZ.
+const RGB_TO_XYZ = [0.4124564, 0.3575761, 0.1804375, 0.2126729, 0.7151522, 0.0721750, 0.0193339, 0.1191920, 0.9503041];
+const XYZ_TO_RGB = invert(RGB_TO_XYZ);
+// Bradford cone response, for chromatic adaptation.
+const BRADFORD = [0.8951, 0.2664, -0.1614, -0.7502, 1.7135, 0.0367, 0.0389, -0.0685, 1.0296];
+const BRADFORD_INVERSE = invert(BRADFORD);
+/// The linear-sRGB transform that adapts colours seen under `from` (a
+/// white in XYZ) to how they look under `to`.
+function adaptation(from, to) {
+    const source = apply(BRADFORD, from), target = apply(BRADFORD, to);
+    const cone = multiply(BRADFORD_INVERSE, multiply(diagonal(target.map((value, i) => value / source[i])), BRADFORD));
+    return multiply(XYZ_TO_RGB, multiply(cone, RGB_TO_XYZ));
 }
+/// CIE 1960 uv of the black body at `kelvin` (Krystek's approximation).
+function planckian(kelvin) {
+    const t = clamp(kelvin, 1000, 25000);
+    return [(0.860117757 + 1.54118254e-4 * t + 1.28641212e-7 * t * t) / (1 + 8.42420235e-4 * t + 7.08145163e-7 * t * t),
+        (0.317398726 + 4.22806245e-5 * t + 4.20481691e-8 * t * t) / (1 - 2.89741816e-5 * t + 1.61456053e-7 * t * t)];
+}
+/// The white of a light at `kelvin`, moved `duv` off the black-body locus
+/// (positive towards green), as XYZ with Y of one.
+export function whiteOf(kelvin, duv = 0) {
+    const [u, v] = planckian(kelvin), [u2, v2] = planckian(kelvin + 1);
+    let nu = -(v2 - v), nv = u2 - u;
+    const length = Math.hypot(nu, nv) || 1; nu /= length; nv /= length;
+    if (nv < 0) { nu = -nu; nv = -nv; }
+    const uu = u + nu * duv, vv = v + nv * duv;
+    const d = 2 * uu - 8 * vv + 4, x = 3 * uu / d, y = 2 * vv / d;
+    return [x / y, 1, (1 - x - y) / y];
+}
+const NEUTRAL_KELVIN = 6504;
+/// Temperature and Tint as an adaptation: the picture is corrected as if it
+/// had been lit by a light that far from neutral. Positive temperature
+/// warms the picture and positive tint moves it towards magenta.
+function temperatureTint(temperature, tint) {
+    if (!temperature && !tint) return null;
+    const mired = 1e6 / NEUTRAL_KELVIN * 2 ** (-temperature / 100);
+    return adaptation(whiteOf(1e6 / mired, tint / 100 * .02), whiteOf(NEUTRAL_KELVIN, 0));
+}
+
+// OKLab: a perceptual space in which lightness, chroma and hue are
+// independent, so moving one leaves the others where they were.
+function toOklab(r, g, b, out) {
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+    const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    out[0] = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s;
+    out[1] = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s;
+    out[2] = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
+    return out;
+}
+function fromOklab(L, a, b, out) {
+    const l0 = L + 0.3963377774 * a + 0.2158037573 * b, m0 = L - 0.1055613458 * a - 0.0638541728 * b, s0 = L - 0.0894841775 * a - 1.2914855480 * b;
+    const l = l0 * l0 * l0, m = m0 * m0 * m0, s = s0 * s0 * s0;
+    out[0] = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+    out[1] = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+    out[2] = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
+    return out;
+}
+const inGamut = rgb => rgb[0] >= -1e-6 && rgb[1] >= -1e-6 && rgb[2] >= -1e-6 && rgb[0] <= 1 + 1e-6 && rgb[1] <= 1 + 1e-6 && rgb[2] <= 1 + 1e-6;
+/// Brings an OKLab colour into linear sRGB by lowering its chroma, keeping
+/// its lightness and hue: a colour too vivid for the screen stays the same
+/// colour, a little less vivid, instead of changing hue at a clipped channel.
+function fitGamut(L, a, b, out) {
+    L = clamp(L, 0, 1);
+    fromOklab(L, a, b, out);
+    if (inGamut(out)) return out;
+    // Eight halvings place the chroma within half a percent.
+    let lo = 0, hi = 1;
+    for (let i = 0; i < 8; i++) {
+        const k = (lo + hi) / 2;
+        fromOklab(L, a * k, b * k, out);
+        if (inGamut(out)) lo = k; else hi = k;
+    }
+    fromOklab(L, a * lo, b * lo, out);
+    for (let c = 0; c < 3; c++) out[c] = clamp(out[c], 0, 1);
+    return out;
+}
+const hueOfLab = (a, b) => (Math.atan2(b, a) * 180 / Math.PI + 360) % 360;
+/// The OKLCh hue of each colour band, measured from the sRGB colour the
+/// band is named after.
+const BAND_HUES = [[1, 0, 0], [1, .216, 0], [1, 1, 0], [0, 1, 0], [0, 1, 1], [0, 0, 1], [.216, 0, 1], [1, 0, 1]]
+    .map(([r, g, b]) => { const lab = toOklab(r, g, b, [0, 0, 0]); return hueOfLab(lab[1], lab[2]); });
+export const COLOUR_BAND_HUES = Object.freeze([...BAND_HUES]);
 /// Whether a frame can take the RAW white balance presets.
 export const hasDaylightReference = frame => Boolean(cameraOf(frame).daylight);
 /// The working-space transform that changes the frame's as-shot white
@@ -137,9 +222,10 @@ function whiteBalanceTransform(frame, choice) {
     const inverse = invert(camera.matrix);
     if (!inverse) return null;
     const toDaylight = camera.daylight.map((value, c) => value / (camera.wb[c] || 1));
-    const reference = blackBody(5500), lamp = blackBody(light[0]);
-    const correction = [reference[0] / lamp[0], light[1], reference[2] / lamp[2]];
-    return multiply(diagonal(correction), multiply(camera.matrix, multiply(diagonal(toDaylight), inverse)));
+    // The camera's own daylight balance, then an adaptation from the lamp
+    // to daylight.
+    const correction = adaptation(whiteOf(light[0], light[1]), whiteOf(5500, 0));
+    return multiply(correction, multiply(camera.matrix, multiply(diagonal(toDaylight), inverse)));
 }
 
 // ------------------------------------------------------------- local contrast
@@ -204,25 +290,21 @@ function grainAt(x, y, cell) {
     return top * (1 - sy) + bottom * sy;
 }
 const luma = (r, g, b) => .2126 * r + .7152 * g + .0722 * b;
-function hueOf(r, g, b) {
-    const max = Math.max(r, g, b), min = Math.min(r, g, b), chroma = max - min;
-    if (chroma <= 1e-6) return 0;
-    const h = max === r ? ((g - b) / chroma) % 6 : max === g ? (b - r) / chroma + 2 : (r - g) / chroma + 4;
-    return (h * 60 + 360) % 360;
-}
-/// The two neighbouring bands of a hue and how much of each it takes.
+/// The two neighbouring bands of an OKLCh hue and how much of each it takes.
 function bandsOf(hue, weights) {
     weights.fill(0);
-    for (let i = 0; i < BAND_HUES.length; i++) {
-        const from = BAND_HUES[i], to = i + 1 < BAND_HUES.length ? BAND_HUES[i + 1] : 360;
-        if (hue >= from && hue < to) { const t = (hue - from) / (to - from); weights[i] = 1 - t; weights[(i + 1) % BAND_HUES.length] = t; return; }
+    const n = BAND_HUES.length, h = hue < BAND_HUES[0] ? hue + 360 : hue;
+    for (let i = 0; i < n; i++) {
+        const from = BAND_HUES[i], to = i + 1 < n ? BAND_HUES[i + 1] : BAND_HUES[0] + 360;
+        if (h >= from && h < to) { const t = (h - from) / (to - from); weights[i] = 1 - t; weights[(i + 1) % n] = t; return; }
     }
 }
-const BAND_GAP = BAND_HUES.map((hue, i) => ((BAND_HUES[(i + 1) % BAND_HUES.length] - hue + 360) % 360 + (hue - BAND_HUES[(i + BAND_HUES.length - 1) % BAND_HUES.length] + 360) % 360) / 2);
-const hueColour = hue => {
-    const k = n => (n + hue / 60) % 6, f = n => 1 - Math.max(0, Math.min(k(n), 4 - k(n), 1));
-    return [f(5), f(3), f(1)];
-};
+/// Half the distance to each neighbouring band: how far a band's hue slider
+/// can turn it.
+const BAND_GAP = BAND_HUES.map((hue, i) => {
+    const n = BAND_HUES.length, next = (BAND_HUES[(i + 1) % n] - hue + 360) % 360, previous = (hue - BAND_HUES[(i + n - 1) % n] + 360) % 360;
+    return Math.min(next, previous) / 2;
+});
 
 /// Auto tone: exposure, contrast and the four tone sliders from the
 /// picture's own luminance, with its white balance and look left alone.
@@ -297,8 +379,7 @@ export function develop(frame, recipe = {}, { edge = 0, bitDepth = 8, before = f
     const detailScale = width / (frame.sourceWidth ?? frame.width);
     const longEdge = Math.max(width, height);
     const exposure = 2 ** settings.exposure;
-    const warm = 2 ** (settings.temperature / 200), tint = 2 ** (settings.tint / 300);
-    const gains = [warm * tint, 1 / tint, tint / warm];
+    const gains = [1, 1, 1];
     const contrast = 2 ** (settings.contrast / 150);
     const black = settings.blacks / 1000, white = 2 ** (settings.whites / 200);
     // All expensive curves are sampled once per edit, not once per channel.
@@ -322,8 +403,15 @@ export function develop(frame, recipe = {}, { edge = 0, bitDepth = 8, before = f
             if (l < .02 || l > .9) continue;
             sum[0] += px[0]; sum[1] += px[1]; sum[2] += px[2];
         }
-        if (sum[0] > 0 && sum[1] > 0 && sum[2] > 0) balance = diagonal([sum[1] / sum[0], 1, sum[1] / sum[2]]);
+        // The mid-tones' average colour is taken as the light and adapted
+        // to neutral.
+        if (sum[0] > 0 && sum[1] > 0 && sum[2] > 0) {
+            const light = apply(RGB_TO_XYZ, sum);
+            balance = adaptation(light.map(value => value / light[1]), apply(RGB_TO_XYZ, [1, 1, 1]));
+        }
     }
+    const shift = temperatureTint(settings.temperature, settings.tint);
+    if (shift) balance = balance ? multiply(shift, balance) : shift;
     const sample = sampler(frame, width, height, balance, gains, exposure);
     // Clipping is reported for what the edit did: a pixel already pure
     // white or pure black in the untouched picture is not counted.
@@ -426,9 +514,17 @@ export function develop(frame, recipe = {}, { edge = 0, bitDepth = 8, before = f
     const grading = settings.grading;
     const zones = GRADING_ZONES.map(name => grading[name]);
     const gradingActive = zones.some(z => z.saturation || z.luminance);
-    const gradingTint = zones.map(z => { const c = hueColour(z.hue), l = luma(c[0], c[1], c[2]); return c.map(v => (v - l) * z.saturation / 100 * .3); });
+    // Grading hues are OKLCh hues: a zone's colour is pushed along its own
+    // hue at constant lightness.
+    const gradingTint = zones.map(z => [Math.cos(z.hue * Math.PI / 180) * z.saturation / 100 * .09, Math.sin(z.hue * Math.PI / 180) * z.saturation / 100 * .09]);
     const exponent = 1 + (100 - grading.blending) / 100 * 3;
+    // Zone weights by lightness, tabled once per edit.
+    const ZONE_STEPS = 1024, shadowWeight = new Float32Array(ZONE_STEPS + 1), highlightWeight = new Float32Array(ZONE_STEPS + 1);
+    for (let i = 0; i <= ZONE_STEPS; i++) { shadowWeight[i] = (1 - i / ZONE_STEPS) ** exponent; highlightWeight[i] = (i / ZONE_STEPS) ** exponent; }
+    const [gs, gm, gh, gg] = gradingTint, lift = zones.map(z => z.luminance / 100 * .12);
     const colourActive = mono || mixerActive || vibrance || saturation || gradingActive;
+    const lab = [0, 0, 0], linear = [0, 0, 0], rolloff = [0, 0, 0];
+    const needsHue = mixerActive || mono || Boolean(vibrance);
     const vignette = settings.vignette, vignetteAmount = vignette.amount / 100;
     const vignetteMid = .25 + vignette.midpoint / 100 * .9, vignetteFeather = .05 + vignette.feather / 100 * .75;
     const grainAmount = settings.grain.amount / 100 * .12;
@@ -474,67 +570,75 @@ export function develop(frame, recipe = {}, { edge = 0, bitDepth = 8, before = f
                 rgb[0] += (cr - rgb[0]) * nrColour; rgb[2] += (cb - rgb[2]) * nrColour;
                 rgb[1] = Math.max(0, (l - .2126 * rgb[0] - .0722 * rgb[2]) / .7152);
             }
-            const toneLuminance = toneGrid ? g.at(toneGrid, x, y) * Math.pow(l + 1e-4, .3) : l;
+            const toneLuminance = toneGrid ? g.at(toneGrid, x, y) * softPower(l) : l;
             tone = tones[Math.min(16384, Math.round(toneLuminance * 2048))];
         } else tone = tones[Math.min(16384, Math.round(l * 2048))];
         let hi = false, lo = true;
-        for (let c = 0; c < 3; c++) {
-            const value = Math.max(0, (rgb[c] * tone + black) * white);
-            hi ||= value > clipAt; lo &&= value <= 0;
-            out[c] = display[Math.min(65535, Math.round(value * displayScale))];
+        let v0 = Math.max(0, (rgb[0] * tone + black) * white), v1 = Math.max(0, (rgb[1] * tone + black) * white), v2 = Math.max(0, (rgb[2] * tone + black) * white);
+        const peak = Math.max(v0, v1, v2);
+        hi = peak > clipAt; lo = v0 <= 0 && v1 <= 0 && v2 <= 0;
+        if (hi) {
+            // Past white a colour keeps its hue and runs to white, as film
+            // does, instead of each channel clipping on its own.
+            // The run to white is made in OKLab, so the hue holds exactly.
+            const k = clamp((peak - clipAt) / peak, 0, 1);
+            toOklab(v0 / peak, v1 / peak, v2 / peak, rolloff);
+            fitGamut(rolloff[0] + (1 - rolloff[0]) * k, rolloff[1] * (1 - k), rolloff[2] * (1 - k), rolloff);
+            v0 = rolloff[0] * clipAt; v1 = rolloff[1] * clipAt; v2 = rolloff[2] * clipAt;
         }
+        out[0] = display[Math.min(65535, Math.round(v0 * displayScale))];
+        out[1] = display[Math.min(65535, Math.round(v1 * displayScale))];
+        out[2] = display[Math.min(65535, Math.round(v2 * displayScale))];
         if (curveLut) for (let c = 0; c < 3; c++) { const p = out[c] * 4096, k = Math.min(4095, Math.floor(p)); out[c] = curveLut[k] + (curveLut[k + 1] - curveLut[k]) * (p - k); }
         if (colourActive) {
-            let lm = luma(out[0], out[1], out[2]);
-            const high = Math.max(out[0], out[1], out[2]), low = Math.min(out[0], out[1], out[2]);
-            const sat = high > 1e-4 ? (high - low) / high : 0;
-            const hue = hueOf(out[0], out[1], out[2]);
-            bandsOf(hue, weights);
+            toOklab(decode(out[0]), decode(out[1]), decode(out[2]), lab);
+            let L = lab[0], a = lab[1], b = lab[2];
+            const chroma = Math.sqrt(a * a + b * b);
+            // The hue angle is only worked out when a control needs it.
+            const hue = needsHue ? hueOfLab(a, b) : 0;
+            // Colour edits reach a colour in proportion to how coloured it
+            // is: greys stay grey.
+            const colourful = smooth(0, .06, chroma);
+            let hueShift = 0, satShift = 0, lumShift = 0;
+            if (mixerActive || mono) bandsOf(hue, weights);
+            if (mixerActive || mono) for (let i = 0; i < weights.length; i++) {
+                if (!weights[i]) continue;
+                hueShift += weights[i] * mixer[i].hue / 100 * BAND_GAP[i];
+                satShift += weights[i] * mixer[i].saturation / 100;
+                lumShift += weights[i] * mixer[i].luminance / 100;
+            }
             if (mono) {
-                let shift = 0;
-                for (let b = 0; b < weights.length; b++) shift += weights[b] * mixer[b].luminance;
-                lm = clamp(lm * 2 ** (shift / 100 * sat * 1.2), 0, 1);
-                out[0] = out[1] = out[2] = lm;
+                // The B&W mix lightens or darkens each colour's grey.
+                L = L * 2 ** (lumShift * colourful * .8);
+                a = b = 0;
             } else {
-                let factor = 1 + saturation;
-                if (mixerActive) {
-                    let hueShift = 0, satShift = 0, lumShift = 0;
-                    for (let b = 0; b < weights.length; b++) {
-                        if (!weights[b]) continue;
-                        hueShift += weights[b] * mixer[b].hue / 100 * BAND_GAP[b] / 2;
-                        satShift += weights[b] * mixer[b].saturation / 100;
-                        lumShift += weights[b] * mixer[b].luminance / 100;
-                    }
-                    if (hueShift && sat > 0) {
-                        const target = hueColour((hue + hueShift + 360) % 360), tl = luma(target[0], target[1], target[2]);
-                        const chroma = high - low;
-                        for (let c = 0; c < 3; c++) out[c] = lm + (target[c] - tl) * chroma;
-                    }
-                    factor *= Math.max(0, 1 + satShift);
-                    if (lumShift) { const k = 2 ** (lumShift * sat * .9); out[0] *= k; out[1] *= k; out[2] *= k; lm *= k; }
-                }
+                let factor = Math.max(0, 1 + saturation) * Math.max(0, 1 + satShift);
                 if (vibrance) {
-                    // Skin sits between red and orange; vibrance leaves it be.
-                    const skin = smooth(5, 20, hue) * (1 - smooth(40, 55, hue));
-                    factor *= vibrance > 0 ? 1 + vibrance * (1 - sat) * (1 - .75 * skin) : 1 + vibrance;
+                    // Vibrance lifts quiet colours more than vivid ones and
+                    // leaves skin, which sits at OKLCh hue 40-80, mostly be.
+                    const skin = smooth(30, 45, hue) * (1 - smooth(75, 90, hue)) * smooth(.02, .05, chroma) * (1 - smooth(.18, .26, chroma));
+                    factor *= vibrance > 0 ? 1 + vibrance * (1 - smooth(0, .25, chroma)) * (1 - .8 * skin) : 1 + vibrance;
                 }
-                if (factor !== 1) for (let c = 0; c < 3; c++) out[c] = lm + (out[c] - lm) * factor;
+                if (lumShift) L *= 2 ** (lumShift * colourful * .6);
+                if (hueShift) {
+                    const turn = hueShift * colourful * Math.PI / 180, cos = Math.cos(turn), sin = Math.sin(turn);
+                    const turned = a * cos - b * sin; b = a * sin + b * cos; a = turned;
+                }
+                a *= factor; b *= factor;
             }
             if (gradingActive) {
-                const t = clamp(lm - grading.balance / 400, 0, 1);
-                const ws = (1 - t) ** exponent, wh = t ** exponent, wm = Math.max(0, 1 - ws - wh);
-                const w = [ws, wm, wh, 1];
-                for (let z = 0; z < 4; z++) {
-                    if (!w[z]) continue;
-                    const lift = zones[z].luminance / 100 * .15 * w[z];
-                    for (let c = 0; c < 3; c++) out[c] += gradingTint[z][c] * w[z] + lift;
-                }
+                const k = Math.round(clamp(L - grading.balance / 250, 0, 1) * ZONE_STEPS);
+                const ws = shadowWeight[k], wh = highlightWeight[k], wm = Math.max(0, 1 - ws - wh);
+                a += gs[0] * ws + gm[0] * wm + gh[0] * wh + gg[0];
+                b += gs[1] * ws + gm[1] * wm + gh[1] * wh + gg[1];
+                L += lift[0] * ws + lift[1] * wm + lift[2] * wh + lift[3];
             }
-            for (let c = 0; c < 3; c++) out[c] = clamp(out[c], 0, 1);
+            fitGamut(L, a, b, linear);
+            out[0] = encode(linear[0]); out[1] = encode(linear[1]); out[2] = encode(linear[2]);
         }
         if (vignetteAmount) {
             const dx = (x + .5) / width * 2 - 1, dy = (y + .5) / height * 2 - 1;
-            const f = smooth(vignetteMid - vignetteFeather, vignetteMid + vignetteFeather, Math.hypot(dx, dy) / Math.SQRT2 * 1.4);
+            const f = smooth(vignetteMid - vignetteFeather, vignetteMid + vignetteFeather, Math.sqrt(dx * dx + dy * dy) / Math.SQRT2 * 1.4);
             for (let c = 0; c < 3; c++) out[c] = vignetteAmount < 0 ? out[c] * (1 + vignetteAmount * f) : out[c] + (1 - out[c]) * vignetteAmount * f;
         }
         if (grainAmount) {
