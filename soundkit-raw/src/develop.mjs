@@ -325,6 +325,10 @@ export function develop(frame, recipe = {}, { edge = 0, bitDepth = 8, before = f
         if (sum[0] > 0 && sum[1] > 0 && sum[2] > 0) balance = diagonal([sum[1] / sum[0], 1, sum[1] / sum[2]]);
     }
     const sample = sampler(frame, width, height, balance, gains, exposure);
+    // Clipping is reported for what the edit did: a pixel already pure
+    // white or pure black in the untouched picture is not counted.
+    const untouched = before ? null : sampler(frame, width, height, null, [1, 1, 1], 1);
+    const clipAt0 = 1 - 1e-6;
 
     // ------------------------------------------------ what this edit needs
     const tonesActive = settings.highlights !== 0 || settings.shadows !== 0;
@@ -473,10 +477,10 @@ export function develop(frame, recipe = {}, { edge = 0, bitDepth = 8, before = f
             const toneLuminance = toneGrid ? g.at(toneGrid, x, y) * Math.pow(l + 1e-4, .3) : l;
             tone = tones[Math.min(16384, Math.round(toneLuminance * 2048))];
         } else tone = tones[Math.min(16384, Math.round(l * 2048))];
-        let hi = false, lo = false;
+        let hi = false, lo = true;
         for (let c = 0; c < 3; c++) {
             const value = Math.max(0, (rgb[c] * tone + black) * white);
-            hi ||= value > clipAt; lo ||= value <= 0;
+            hi ||= value > clipAt; lo &&= value <= 0;
             out[c] = display[Math.min(65535, Math.round(value * displayScale))];
         }
         if (curveLut) for (let c = 0; c < 3; c++) { const p = out[c] * 4096, k = Math.min(4095, Math.floor(p)); out[c] = curveLut[k] + (curveLut[k + 1] - curveLut[k]) * (p - k); }
@@ -543,6 +547,16 @@ export function develop(frame, recipe = {}, { edge = 0, bitDepth = 8, before = f
         data[dest] = qr; data[dest + 1] = qg; data[dest + 2] = qb;
         histogramRGB[Math.round(qr * toHistogram)]++; histogramRGB[256 + Math.round(qg * toHistogram)]++; histogramRGB[512 + Math.round(qb * toHistogram)]++;
         histogram[Math.min(255, Math.round((.2126 * qr + .7152 * qg + .0722 * qb) * toHistogram))]++;
+        if (hi || lo) {
+            // Untouched, contrast is zero and white clips at one, less the
+            // rounding the edited threshold carries.
+            const o = untouched ? untouched(x, y) : null;
+            if (!o) hi = lo = false;
+            else {
+                if (hi && Math.max(o[0], o[1], o[2]) >= clipAt0) hi = false;
+                if (lo && o[0] <= 0 && o[1] <= 0 && o[2] <= 0) lo = false;
+            }
+        }
         if (hi) clippedHigh++; if (lo) clippedLow++;
         if (clipping && hi) { data[dest] = max; data[dest + 1] = 0; data[dest + 2] = 0; }
         else if (clipping && lo) { data[dest] = 0; data[dest + 1] = 0; data[dest + 2] = max; }

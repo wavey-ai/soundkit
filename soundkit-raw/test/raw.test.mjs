@@ -118,3 +118,12 @@ test('RAW white balance presets move the colour from as shot', async () => {
         assert.ok(Math.abs(full.data[at + 2] - tungsten.data[at + 2]) < 6, 'Proxy and export agree');
     } finally { decoder.close(); }
 });
+test('clipping counts only what the edit pushed to pure white or pure black', () => {
+    const frame = card();
+    const untouched = develop(frame, {}, { clipping: true });
+    assert.equal(untouched.clippedHigh, 0); assert.equal(untouched.clippedLow, 0);
+    assert.equal(differs(untouched, develop(frame)), false, 'Nothing is marked on an untouched picture');
+    assert.ok(develop(frame, { exposure: 2 }).clippedHigh > 0);
+    assert.ok(develop(frame, { exposure: -4, blacks: -100 }).clippedLow > 0);
+    assert.equal(develop(frame, { exposure: 2 }, { before: true }).clippedHigh, 0);
+});
