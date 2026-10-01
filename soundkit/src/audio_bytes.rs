@@ -262,51 +262,43 @@ pub fn interleave_vecs_i16(channels: &[Vec<i16>]) -> Vec<u8> {
 }
 
 pub fn deinterleave_vecs_i16(input: &[u8], channel_count: usize) -> Vec<Vec<i16>> {
-    let sample_count = input.len() / (channel_count * 2);
-    let mut result = vec![Vec::with_capacity(sample_count); channel_count];
-
-    input.chunks_exact(channel_count * 2).for_each(|chunk| {
-        chunk
-            .chunks_exact(2)
-            .enumerate()
-            .for_each(|(channel, bytes)| {
-                result[channel].push(i16::from_le_bytes([bytes[0], bytes[1]]));
-            });
-    });
-
-    result
+    deinterleave_vecs(input, channel_count, i16::from_le_bytes)
 }
 
 pub fn deinterleave_vecs_s24(input: &[u8], channel_count: usize) -> Vec<Vec<i32>> {
-    let sample_count = input.len() / (channel_count * 3);
-    let mut result = vec![Vec::with_capacity(sample_count); channel_count];
-
-    input.chunks_exact(channel_count * 3).for_each(|chunk| {
-        chunk
-            .chunks_exact(3)
-            .enumerate()
-            .for_each(|(channel, bytes)| {
-                result[channel].push(s24le_to_i32_sample([bytes[0], bytes[1], bytes[2]]));
-            });
-    });
-
-    result
+    deinterleave_vecs(input, channel_count, s24le_to_i32_sample)
 }
 
 pub fn deinterleave_vecs_f32(input: &[u8], channel_count: usize) -> Vec<Vec<f32>> {
-    let sample_count = input.len() / (channel_count * 4);
-    let mut result = vec![Vec::with_capacity(sample_count); channel_count];
+    deinterleave_vecs(input, channel_count, f32::from_le_bytes)
+}
 
-    input.chunks_exact(channel_count * 4).for_each(|chunk| {
-        chunk
-            .chunks_exact(4)
-            .enumerate()
-            .for_each(|(channel, bytes)| {
-                result[channel].push(f32::from_le_bytes(bytes.try_into().unwrap()));
-            });
-    });
-
-    result
+/// One vector per channel of the whole interleaved frames in `input`, each
+/// sample `W` bytes. A channel count of zero panics.
+///
+/// Each channel is collected in its own pass over the frames: an exact-size
+/// collect writes the samples without a capacity check per sample.
+fn deinterleave_vecs<T, const W: usize>(
+    input: &[u8],
+    channel_count: usize,
+    sample: impl Fn([u8; W]) -> T,
+) -> Vec<Vec<T>> {
+    let frame_bytes = channel_count * W;
+    // A channel count of zero divides by zero here.
+    let _frames = input.len() / frame_bytes;
+    (0..channel_count)
+        .map(|channel| {
+            let offset = channel * W;
+            input
+                .chunks_exact(frame_bytes)
+                .map(|frame| {
+                    let mut bytes = [0u8; W];
+                    bytes.copy_from_slice(&frame[offset..offset + W]);
+                    sample(bytes)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 pub fn s24le_to_i32_sample(sample_bytes: [u8; 3]) -> i32 {
@@ -465,5 +457,61 @@ mod tests {
         let mut samples = vec![100, -100, 50, 150, -200, 200];
         let mono = stereo_to_mono_inplace_avg(&mut samples);
         assert_eq!(mono, &[0, 100, 0]);
+    }
+
+    /// The deinterleavers as they were: one sample pushed at a time.
+    fn reference_deinterleave<T: Clone, const W: usize>(
+        input: &[u8],
+        channel_count: usize,
+        sample: impl Fn([u8; W]) -> T,
+    ) -> Vec<Vec<T>> {
+        let sample_count = input.len() / (channel_count * W);
+        let mut result = vec![Vec::with_capacity(sample_count); channel_count];
+        input.chunks_exact(channel_count * W).for_each(|chunk| {
+            chunk
+                .chunks_exact(W)
+                .enumerate()
+                .for_each(|(channel, bytes)| {
+                    result[channel].push(sample(bytes.try_into().unwrap()));
+                });
+        });
+        result
+    }
+
+    #[test]
+    fn deinterleavers_match_sample_at_a_time_deinterleavers() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let input: Vec<u8> = (0..4_099)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        for channels in 1..=8 {
+            for length in [0usize, 1, 5, 23, 24, 25, 1_000, 4_099] {
+                let bytes = &input[..length];
+                assert_eq!(
+                    deinterleave_vecs_i16(bytes, channels),
+                    reference_deinterleave(bytes, channels, i16::from_le_bytes)
+                );
+                assert_eq!(
+                    deinterleave_vecs_s24(bytes, channels),
+                    reference_deinterleave(bytes, channels, s24le_to_i32_sample)
+                );
+                let bits = |planes: Vec<Vec<f32>>| -> Vec<Vec<u32>> {
+                    planes
+                        .into_iter()
+                        .map(|plane| plane.into_iter().map(f32::to_bits).collect())
+                        .collect()
+                };
+                assert_eq!(
+                    bits(deinterleave_vecs_f32(bytes, channels)),
+                    bits(reference_deinterleave(bytes, channels, f32::from_le_bytes))
+                );
+            }
+        }
+        assert!(std::panic::catch_unwind(|| deinterleave_vecs_s24(&input, 0)).is_err());
     }
 }

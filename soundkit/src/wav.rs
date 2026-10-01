@@ -565,13 +565,12 @@ impl WavStreamEncoder {
     ) -> Result<Vec<u8>, String> {
         self.require_format(WavSampleFormat::I16)?;
         self.reserve_chunk(planar.len(), frames_per_channel)?;
-        let mut output = Vec::with_capacity(planar.len() * 2);
-        for frame in 0..frames_per_channel {
-            for channel in 0..self.channel_count {
-                output
-                    .extend_from_slice(&planar[channel * frames_per_channel + frame].to_le_bytes());
-            }
-        }
+        let output = interleave_planar(
+            planar,
+            frames_per_channel,
+            self.channel_count,
+            i16::to_le_bytes,
+        );
         self.frames_written += frames_per_channel as u64;
         Ok(output)
     }
@@ -584,20 +583,21 @@ impl WavStreamEncoder {
     ) -> Result<Vec<u8>, String> {
         self.require_format(WavSampleFormat::I24)?;
         self.reserve_chunk(planar.len(), frames_per_channel)?;
-        if planar
-            .iter()
-            .any(|&x| !(-8_388_608..=8_388_607).contains(&x))
-        {
+        // Every sample is tested, without an early exit, so the test runs as
+        // vector instructions.
+        if planar.iter().fold(false, |outside, &x| {
+            outside | !(-8_388_608..=8_388_607).contains(&x)
+        }) {
             return Err("PCM24 sample exceeds signed 24-bit range".to_string());
         }
-        let mut output = Vec::with_capacity(planar.len() * 3);
-        for frame in 0..frames_per_channel {
-            for channel in 0..self.channel_count {
-                output.extend_from_slice(
-                    &planar[channel * frames_per_channel + frame].to_le_bytes()[..3],
-                );
-            }
-        }
+        let mut output = if self.channel_count == 2 {
+            interleave_stereo_i24(planar, frames_per_channel)
+        } else {
+            interleave_planar(planar, frames_per_channel, self.channel_count, |x: i32| {
+                let [a, b, c, _] = x.to_le_bytes();
+                [a, b, c]
+            })
+        };
         self.frames_written += frames_per_channel as u64;
         if frames_per_channel > 0
             && self.frames_written == self.total_frames
@@ -615,13 +615,12 @@ impl WavStreamEncoder {
     ) -> Result<Vec<u8>, String> {
         self.require_format(WavSampleFormat::I32)?;
         self.reserve_chunk(planar.len(), frames_per_channel)?;
-        let mut output = Vec::with_capacity(planar.len() * 4);
-        for frame in 0..frames_per_channel {
-            for channel in 0..self.channel_count {
-                output
-                    .extend_from_slice(&planar[channel * frames_per_channel + frame].to_le_bytes());
-            }
-        }
+        let output = interleave_planar(
+            planar,
+            frames_per_channel,
+            self.channel_count,
+            i32::to_le_bytes,
+        );
         self.frames_written += frames_per_channel as u64;
         Ok(output)
     }
@@ -633,13 +632,12 @@ impl WavStreamEncoder {
     ) -> Result<Vec<u8>, String> {
         self.require_format(WavSampleFormat::F32)?;
         self.reserve_chunk(planar.len(), frames_per_channel)?;
-        let mut output = Vec::with_capacity(planar.len() * 4);
-        for frame in 0..frames_per_channel {
-            for channel in 0..self.channel_count {
-                output
-                    .extend_from_slice(&planar[channel * frames_per_channel + frame].to_le_bytes());
-            }
-        }
+        let output = interleave_planar(
+            planar,
+            frames_per_channel,
+            self.channel_count,
+            f32::to_le_bytes,
+        );
         self.frames_written += frames_per_channel as u64;
         Ok(output)
     }
@@ -737,6 +735,58 @@ impl WavStreamEncoder {
         }
         Ok(())
     }
+}
+
+/// Interleaves `channels` planes of `frames` samples each, `W` bytes per
+/// sample. The caller has checked that `planar` holds exactly that many.
+///
+/// The output is sized once and written by frame. Stereo, the engine's case,
+/// reads both planes in one pass.
+fn interleave_planar<T: Copy, const W: usize>(
+    planar: &[T],
+    frames: usize,
+    channels: usize,
+    bytes: impl Fn(T) -> [u8; W],
+) -> Vec<u8> {
+    let mut output = vec![0u8; planar.len() * W];
+    if planar.is_empty() {
+        return output;
+    }
+    match channels {
+        1 => {
+            for (target, &sample) in output.chunks_exact_mut(W).zip(planar) {
+                target.copy_from_slice(&bytes(sample));
+            }
+        }
+        2 => {
+            let (left, right) = planar.split_at(frames);
+            for ((target, &left), &right) in output.chunks_exact_mut(2 * W).zip(left).zip(right) {
+                target[..W].copy_from_slice(&bytes(left));
+                target[W..].copy_from_slice(&bytes(right));
+            }
+        }
+        _ => {
+            for (channel, plane) in planar.chunks_exact(frames).enumerate() {
+                let offset = channel * W;
+                for (target, &sample) in output.chunks_exact_mut(channels * W).zip(plane) {
+                    target[offset..offset + W].copy_from_slice(&bytes(sample));
+                }
+            }
+        }
+    }
+    output
+}
+
+/// Stereo PCM24 from two planes of `frames` samples: each frame's six bytes
+/// are packed in one 64-bit word and written with one copy.
+fn interleave_stereo_i24(planar: &[i32], frames: usize) -> Vec<u8> {
+    let mut output = vec![0u8; planar.len() * 3];
+    let (left, right) = planar.split_at(frames);
+    for ((target, &left), &right) in output.chunks_exact_mut(6).zip(left).zip(right) {
+        let word = (left as u32 & 0xff_ffff) as u64 | ((right as u32 & 0xff_ffff) as u64) << 24;
+        target.copy_from_slice(&word.to_le_bytes()[..6]);
+    }
+    output
 }
 
 fn validate_planar_channels<T>(
@@ -1161,5 +1211,123 @@ mod tests {
             bytes.len() - 8
         );
         complete(&bytes).unwrap();
+    }
+
+    /// The planar writers as they were: one sample appended at a time.
+    fn reference_interleave<T: Copy, const W: usize>(
+        planar: &[T],
+        frames: usize,
+        channels: usize,
+        width: usize,
+        bytes: impl Fn(T) -> [u8; W],
+    ) -> Vec<u8> {
+        let mut output = Vec::with_capacity(planar.len() * W);
+        for frame in 0..frames {
+            for channel in 0..channels {
+                output.extend_from_slice(&bytes(planar[channel * frames + frame])[..width]);
+            }
+        }
+        output
+    }
+
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    /// The planar writers return the same bytes and errors as the writers
+    /// that appended one sample at a time, for every channel count, odd and
+    /// empty chunks, the PCM24 pad byte, and float bit patterns that include
+    /// NaN payloads and subnormals.
+    #[test]
+    fn planar_writers_match_sample_at_a_time_writers() {
+        let mut rng = Xorshift(0x2545_f491_4f6c_dd1d);
+        for channels in 1..=8usize {
+            for chunks in [vec![0usize, 1, 7, 64], vec![333, 0, 2], vec![8_192]] {
+                let total: usize = chunks.iter().sum();
+                let mut f32_writer =
+                    WavStreamEncoder::new(WavSampleFormat::F32, 48_000, channels, total as u64)
+                        .unwrap();
+                let mut i24_writer =
+                    WavStreamEncoder::new(WavSampleFormat::I24, 48_000, channels, total as u64)
+                        .unwrap();
+                let mut i16_writer =
+                    WavStreamEncoder::new(WavSampleFormat::I16, 48_000, channels, total as u64)
+                        .unwrap();
+                let mut i32_writer =
+                    WavStreamEncoder::new(WavSampleFormat::I32, 48_000, channels, total as u64)
+                        .unwrap();
+                let mut written = 0;
+                for &frames in &chunks {
+                    let count = frames * channels;
+                    let floats: Vec<f32> = (0..count)
+                        .map(|_| f32::from_bits(rng.next() as u32))
+                        .collect();
+                    let ints: Vec<i32> = (0..count).map(|_| rng.next() as i32).collect();
+                    let pcm24: Vec<i32> = ints.iter().map(|x| x >> 8).collect();
+                    let pcm16: Vec<i16> = ints.iter().map(|&x| x as i16).collect();
+                    written += frames;
+                    let pad = usize::from(
+                        frames > 0 && written == total && (total * channels * 3) % 2 == 1,
+                    );
+
+                    let got = f32_writer.push_planar_f32(&floats, frames).unwrap();
+                    assert_eq!(
+                        got,
+                        reference_interleave(&floats, frames, channels, 4, f32::to_le_bytes)
+                    );
+                    let got = i32_writer.push_planar_i32(&ints, frames).unwrap();
+                    assert_eq!(
+                        got,
+                        reference_interleave(&ints, frames, channels, 4, i32::to_le_bytes)
+                    );
+                    let got = i16_writer.push_planar_i16(&pcm16, frames).unwrap();
+                    assert_eq!(
+                        got,
+                        reference_interleave(&pcm16, frames, channels, 2, i16::to_le_bytes)
+                    );
+
+                    if count > 0 {
+                        let mut outside = pcm24.clone();
+                        let at = (rng.next() as usize) % count;
+                        outside[at] = if rng.next().is_multiple_of(2) {
+                            8_388_608
+                        } else {
+                            -8_388_609
+                        };
+                        assert_eq!(
+                            i24_writer.push_planar_i24(&outside, frames).unwrap_err(),
+                            "PCM24 sample exceeds signed 24-bit range"
+                        );
+                    }
+                    let got = i24_writer.push_planar_i24(&pcm24, frames).unwrap();
+                    let mut want =
+                        reference_interleave(&pcm24, frames, channels, 3, i32::to_le_bytes);
+                    want.extend(std::iter::repeat_n(0u8, pad));
+                    assert_eq!(got, want);
+                }
+                f32_writer.finish().unwrap();
+                i24_writer.finish().unwrap();
+                i16_writer.finish().unwrap();
+                i32_writer.finish().unwrap();
+            }
+        }
+        let mut writer = WavStreamEncoder::new(WavSampleFormat::I24, 48_000, 2, 4).unwrap();
+        assert_eq!(
+            writer.push_planar_i24(&[0; 3], 2).unwrap_err(),
+            "WAV planar chunk needs 4 samples, got 3"
+        );
+        assert_eq!(
+            writer.push_planar_f32(&[0.0; 4], 2).unwrap_err(),
+            "WAV encoder expects I24 PCM, not F32"
+        );
     }
 }

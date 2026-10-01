@@ -27,14 +27,8 @@ pub fn vec_f32_to_i16(input: Vec<f32>) -> Vec<i16> {
 }
 
 pub fn vec_i16_to_f32(input: Vec<i16>) -> Vec<f32> {
-    let mut output: Vec<f32> = Vec::with_capacity(input.len());
-
-    for value in input {
-        let scaled_value = value as f32 / 32768.0; // Division by 32768 instead of 32767 for better centering around 0
-        output.push(scaled_value);
-    }
-
-    output
+    // Division by 32768 instead of 32767 for better centering around 0
+    input.iter().map(|&value| value as f32 / 32768.0).collect()
 }
 
 pub fn vec_i32_to_f32(input: Vec<i32>) -> Vec<f32> {
@@ -426,9 +420,9 @@ fn stream_sample(samples: &[f32], previous: f32, start_frame: u64, frame: u64) -
 }
 
 pub fn f32s_to_le_bytes(samples: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(std::mem::size_of_val(samples));
-    for sample in samples {
-        bytes.extend_from_slice(&sample.to_le_bytes());
+    let mut bytes = vec![0u8; std::mem::size_of_val(samples)];
+    for (target, sample) in bytes.chunks_exact_mut(4).zip(samples) {
+        target.copy_from_slice(&sample.to_le_bytes());
     }
     bytes
 }
@@ -833,5 +827,36 @@ mod tests {
         let actual = normalize_blocks(&chunks);
         assert_eq!(actual, expected);
         assert_eq!(actual.0.len(), 109);
+    }
+
+    #[test]
+    fn f32_bytes_and_i16_scaling_match_sample_at_a_time_forms() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let floats: Vec<f32> = (0..10_001)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                f32::from_bits(state as u32)
+            })
+            .collect();
+        for length in [0usize, 1, 3, 4, 17, 10_001] {
+            let samples = &floats[..length];
+            let mut want = Vec::new();
+            for sample in samples {
+                want.extend_from_slice(&sample.to_le_bytes());
+            }
+            assert_eq!(f32s_to_le_bytes(samples), want);
+        }
+        let ints: Vec<i16> = (i16::MIN..=i16::MAX).collect();
+        let got: Vec<u32> = vec_i16_to_f32(ints.clone())
+            .into_iter()
+            .map(f32::to_bits)
+            .collect();
+        let want: Vec<u32> = ints
+            .iter()
+            .map(|&value| (value as f32 / 32768.0).to_bits())
+            .collect();
+        assert_eq!(got, want);
     }
 }
