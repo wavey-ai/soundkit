@@ -97,3 +97,7 @@ aac-wasm-bench = { path = "../aac-wasm-bench", default-features = false, feature
   "soundkit-lc",
 ] }
 wasm-bindgen-test = "0.3"
+
+[[example]]
+name = "v2_decode_bench"
+required-features = ["flac"]

@@ -58,7 +58,17 @@ pub struct SoundKitV2Decoder {
     encoding: Option<EncodingFlag>,
     sample_rate: u32,
     channels: u8,
+    /// Output space for the FLAC decoder, kept between frames. A new zeroed
+    /// buffer for every frame costs more than the decode of a short frame.
+    #[cfg(feature = "flac")]
+    flac_i32: Vec<i32>,
+    #[cfg(feature = "flac")]
+    flac_i16: Vec<i16>,
 }
+
+/// The output space the FLAC decoder is given for one call.
+#[cfg(feature = "flac")]
+const FLAC_OUTPUT_SAMPLES: usize = 1 << 16;
 
 impl Default for SoundKitV2Decoder {
     fn default() -> Self {
@@ -78,6 +88,10 @@ impl SoundKitV2Decoder {
             encoding: None,
             sample_rate: 0,
             channels: 0,
+            #[cfg(feature = "flac")]
+            flac_i32: Vec::new(),
+            #[cfg(feature = "flac")]
+            flac_i16: Vec::new(),
         }
     }
 
@@ -166,14 +180,21 @@ impl SoundKitV2Decoder {
             }
             #[cfg(feature = "flac")]
             (Some(Codec::Flac(decoder)), EncodingFlag::FLAC) => {
-                let mut scratch = vec![0i32; 1 << 16];
+                let scratch = &mut self.flac_i32;
+                scratch.resize(FLAC_OUTPUT_SAMPLES, 0);
                 let mut result = Vec::new();
                 let mut bytes = payload;
+                // `scale` is a power of two from 2^-1 to 2^254, so its
+                // reciprocal is exact and multiplying by it gives the
+                // quotient `sample / scale` bit for bit.
                 let scale = 2.0f64.powi(i32::from(bits) - 1);
+                let reciprocal = 1.0 / scale;
                 loop {
-                    let count = decoder.decode_i32(bytes, &mut scratch, false).map_err(|e| e.to_string())?;
-                    for &sample in &scratch[..count] {
-                        result.extend_from_slice(&((sample as f64 / scale) as f32).to_le_bytes());
+                    let count = decoder.decode_i32(bytes, scratch, false).map_err(|e| e.to_string())?;
+                    let start = result.len();
+                    result.resize(start + count * 4, 0);
+                    for (target, &sample) in result[start..].chunks_exact_mut(4).zip(&scratch[..count]) {
+                        target.copy_from_slice(&((sample as f64 * reciprocal) as f32).to_le_bytes());
                     }
                     if count < scratch.len() { break; }
                     bytes = &[];
@@ -244,9 +265,10 @@ impl SoundKitV2Decoder {
                 // not a stream that is already 16. `decode_i16` renders it
                 // at the depth its STREAMINFO declares, which is the one
                 // derived from this frame's own header.
-                let mut out = vec![0i16; 1 << 16];
+                let out = &mut self.flac_i16;
+                out.resize(FLAC_OUTPUT_SAMPLES, 0);
                 let written = decoder
-                    .decode_i16(payload, &mut out, false)
+                    .decode_i16(payload, out, false)
                     .map_err(|error| error.to_string())?;
                 Ok(i16s_to_le_bytes(&out[..written]))
             }
@@ -412,6 +434,32 @@ mod tests {
             out.extend_from_slice(&sample.to_le_bytes());
         }
         out
+    }
+
+    /// The FLAC float path multiplies by the reciprocal of the depth's full
+    /// scale. For every depth a header can state, that gives the bits of the
+    /// division it replaces.
+    #[test]
+    fn reciprocal_scaling_matches_division() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut samples = vec![i32::MIN, i32::MIN + 1, -8_388_608, -1, 0, 1, 8_388_607, i32::MAX];
+        samples.extend((0..4_096).map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state as i32) >> (state >> 59)
+        }));
+        for bits in 0..=u8::MAX {
+            let scale = 2.0f64.powi(i32::from(bits) - 1);
+            let reciprocal = 1.0 / scale;
+            for &sample in &samples {
+                assert_eq!(
+                    ((sample as f64 * reciprocal) as f32).to_bits(),
+                    ((sample as f64 / scale) as f32).to_bits(),
+                    "{bits} bits, sample {sample}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -814,5 +862,312 @@ mod library_levels {
                  from a {expected:.2} dBFS source"
             );
         }
+    }
+}
+
+/// The decoder against its form before the FLAC output buffers were kept
+/// between frames: every batch, error and buffered byte count must agree.
+#[cfg(all(test, feature = "flac"))]
+mod reference {
+    use super::*;
+    use frame_header::FrameHeaderV2;
+    use soundkit::audio_packet::Encoder as PacketEncoder;
+    use soundkit_flac::FlacEncoder;
+
+    /// `SoundKitV2Decoder` as it was, for PCM and FLAC frames.
+    struct ReferenceDecoder {
+        frames: SoundKitFrameStream,
+        codec: Option<Codec>,
+        encoding: Option<EncodingFlag>,
+    }
+
+    impl ReferenceDecoder {
+        fn push_precision(&mut self, bytes: &[u8], float: bool) -> Result<SoundKitV2Batch, String> {
+            let read = self.frames.push(bytes)?;
+            let mut batch = SoundKitV2Batch::default();
+            for frame in read {
+                let encoding = *frame.header.encoding();
+                let rate = frame.header.sample_rate();
+                let channels = frame.header.channels().max(1);
+                let bits = frame.header.bits_per_sample();
+                if self.encoding != Some(encoding) {
+                    self.codec = Some(SoundKitV2Decoder::build(
+                        encoding, rate, channels, bits, &frame,
+                    )?);
+                    self.encoding = Some(encoding);
+                }
+                let pcm = if float {
+                    self.decode_float(&frame.payload, encoding, channels, bits, rate)?
+                } else {
+                    self.decode(&frame.payload, encoding, channels, bits)?
+                };
+                if pcm.is_empty() {
+                    continue;
+                }
+                batch.frames.push(AudioData::new(
+                    if float { 32 } else { 16 },
+                    channels,
+                    rate,
+                    pcm,
+                    if float {
+                        EncodingFlag::PCMFloat
+                    } else {
+                        EncodingFlag::PCMSigned
+                    },
+                    Endianness::LittleEndian,
+                ));
+            }
+            Ok(batch)
+        }
+
+        fn decode_float(
+            &mut self,
+            payload: &[u8],
+            encoding: EncodingFlag,
+            channels: u8,
+            bits: u8,
+            rate: u32,
+        ) -> Result<Vec<u8>, String> {
+            use soundkit::audio_pipeline::{audio_to_f32_channels, f32s_to_le_bytes};
+            match (&mut self.codec, encoding) {
+                (Some(Codec::Pcm), EncodingFlag::PCMFloat | EncodingFlag::PCMSigned) => {
+                    let audio = AudioData::new(
+                        bits,
+                        channels,
+                        rate,
+                        payload.to_vec(),
+                        encoding,
+                        Endianness::LittleEndian,
+                    );
+                    let planes = audio_to_f32_channels(&audio)?;
+                    let mut samples = Vec::with_capacity(planes[0].len() * channels as usize);
+                    for i in 0..planes[0].len() {
+                        for plane in &planes {
+                            samples.push(plane[i]);
+                        }
+                    }
+                    Ok(f32s_to_le_bytes(&samples))
+                }
+                (Some(Codec::Flac(decoder)), EncodingFlag::FLAC) => {
+                    let mut scratch = vec![0i32; 1 << 16];
+                    let mut result = Vec::new();
+                    let mut bytes = payload;
+                    let scale = 2.0f64.powi(i32::from(bits) - 1);
+                    loop {
+                        let count = decoder
+                            .decode_i32(bytes, &mut scratch, false)
+                            .map_err(|e| e.to_string())?;
+                        for &sample in &scratch[..count] {
+                            result
+                                .extend_from_slice(&((sample as f64 / scale) as f32).to_le_bytes());
+                        }
+                        if count < scratch.len() {
+                            break;
+                        }
+                        bytes = &[];
+                    }
+                    Ok(result)
+                }
+                _ => Err(format!("No float decoder for {encoding:?}")),
+            }
+        }
+
+        fn decode(
+            &mut self,
+            payload: &[u8],
+            encoding: EncodingFlag,
+            channels: u8,
+            bits: u8,
+        ) -> Result<Vec<u8>, String> {
+            match (&mut self.codec, encoding) {
+                (Some(Codec::Pcm), EncodingFlag::PCMSigned) => {
+                    Ok(pcm_signed_to_i16_bytes(payload, bits))
+                }
+                (Some(Codec::Pcm), EncodingFlag::PCMFloat) => Ok(pcm_float_to_i16_bytes(payload)),
+                (Some(Codec::Flac(decoder)), EncodingFlag::FLAC) => {
+                    let mut out = vec![0i16; 1 << 16];
+                    let written = decoder
+                        .decode_i16(payload, &mut out, false)
+                        .map_err(|error| error.to_string())?;
+                    Ok(i16s_to_le_bytes(&out[..written]))
+                }
+                _ => Err(format!(
+                    "no decoder is standing for {encoding:?} with {channels} channels"
+                )),
+            }
+        }
+    }
+
+    type BlockView = (u8, u8, u32, Vec<u8>, EncodingFlag);
+
+    fn view(result: Result<SoundKitV2Batch, String>) -> Result<Vec<BlockView>, String> {
+        result.map(|batch| {
+            batch
+                .frames
+                .iter()
+                .map(|block| {
+                    (
+                        block.bits_per_sample(),
+                        block.channel_count(),
+                        block.sampling_rate(),
+                        block.data().clone(),
+                        block.audio_format(),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next() % bound as u64) as usize
+        }
+    }
+
+    fn v2_frame(
+        encoding: EncodingFlag,
+        payload: &[u8],
+        frames: u32,
+        rate: u32,
+        channels: u8,
+        bits: u8,
+        crc: bool,
+    ) -> Vec<u8> {
+        let mut header = FrameHeaderV2::new(
+            encoding,
+            payload.len() as u32,
+            frames,
+            rate,
+            channels,
+            bits,
+            Endianness::LittleEndian,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        if crc {
+            header = header.with_packet_crc32(payload).unwrap();
+        }
+        let mut out = Vec::new();
+        header.encode(&mut out).unwrap();
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// FLAC frames at 24 and 16 bits with short final blocks. A PCM frame
+    /// follows each FLAC run, so the decoder changes codec three times.
+    fn stream(rng: &mut Xorshift) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (bits, channels, block, blocks) in [
+            (24u8, 2u8, 240usize, 9usize),
+            (16, 1, 1024, 3),
+            (24, 2, 4096, 2),
+        ] {
+            let mut encoder = <FlacEncoder as PacketEncoder>::new(
+                48_000,
+                u32::from(bits),
+                u32::from(channels),
+                block as u32,
+                5,
+            );
+            encoder.init().unwrap();
+            let full = 1i64 << (bits - 1);
+            for index in 0..blocks {
+                let frames = if index + 1 == blocks {
+                    block / 2 + 17
+                } else {
+                    block
+                };
+                let pcm: Vec<i32> = (0..frames * usize::from(channels))
+                    .map(|n| {
+                        let tone = ((n as f64 / 37.0).sin() * full as f64 * 0.4) as i64;
+                        let noise = (rng.next() % 2001) as i64 - 1000;
+                        (tone + noise).clamp(-full, full - 1) as i32
+                    })
+                    .collect();
+                let mut packet = vec![0u8; 1 << 18];
+                let written = encoder.encode_i32(&pcm, &mut packet).unwrap();
+                out.extend(v2_frame(
+                    EncodingFlag::FLAC,
+                    &packet[..written],
+                    frames as u32,
+                    48_000,
+                    channels,
+                    bits,
+                    index % 2 == 0,
+                ));
+            }
+            let pcm: Vec<u8> = (0..480).map(|_| rng.next() as u8).collect();
+            out.extend(v2_frame(
+                EncodingFlag::PCMSigned,
+                &pcm,
+                120,
+                48_000,
+                2,
+                16,
+                true,
+            ));
+        }
+        out
+    }
+
+    fn compare(stream: &[u8], float: bool, chunking: &mut dyn FnMut() -> usize) -> usize {
+        let mut actual = SoundKitV2Decoder::new();
+        let mut reference = ReferenceDecoder {
+            frames: SoundKitFrameStream::new(SoundKitFrameStreamOptions::default()),
+            codec: None,
+            encoding: None,
+        };
+        let mut errors = 0;
+        let mut rest = stream;
+        while !rest.is_empty() {
+            let take = chunking().clamp(1, rest.len());
+            let (chunk, tail) = rest.split_at(take);
+            rest = tail;
+            let got = view(actual.push_precision(chunk, float));
+            let want = view(reference.push_precision(chunk, float));
+            errors += usize::from(want.is_err());
+            assert_eq!(got, want);
+            assert_eq!(actual.buffered_bytes(), reference.frames.buffered_bytes());
+        }
+        errors
+    }
+
+    #[test]
+    fn decoder_matches_reference_for_intact_corrupt_and_truncated_streams() {
+        let mut rng = Xorshift(0x51_7cc1_b727_220a);
+        let intact = stream(&mut rng);
+        let mut streams = vec![intact.clone(), intact[..intact.len() - 1].to_vec()];
+        for _ in 0..10 {
+            let mut corrupt = intact.clone();
+            let at = rng.below(corrupt.len());
+            corrupt[at] ^= 1 << rng.below(8);
+            streams.push(corrupt);
+            let cut = rng.below(intact.len());
+            streams.push(intact[..cut].to_vec());
+        }
+        let mut errors = 0;
+        for stream in &streams {
+            for float in [true, false] {
+                for size in [1usize, 7, 4_096, 256 * 1024] {
+                    errors += compare(stream, float, &mut || size);
+                }
+                let mut sizes = Xorshift(stream.len() as u64 | 1);
+                errors += compare(stream, float, &mut || 1 + sizes.below(9_000));
+            }
+        }
+        assert!(errors > 10, "{errors} errors");
     }
 }
