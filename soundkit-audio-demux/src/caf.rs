@@ -613,6 +613,274 @@ fn resolve_format(
     }
 }
 
+/// The PCM a CAF file holds: big-endian integers, or 32-bit float.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CafPcmFormat {
+    I16,
+    I24,
+    I32,
+    F32,
+}
+
+impl CafPcmFormat {
+    fn bits_per_channel(self) -> u32 {
+        match self {
+            Self::I16 => 16,
+            Self::I24 => 24,
+            Self::I32 | Self::F32 => 32,
+        }
+    }
+
+    fn bytes_per_sample(self) -> u64 {
+        u64::from(self.bits_per_channel() / 8)
+    }
+
+    fn flags(self) -> u32 {
+        match self {
+            Self::F32 => LPCM_IS_FLOAT,
+            _ => 0,
+        }
+    }
+}
+
+const CAF_DATA_LEAD_BYTES: u64 = 4;
+
+/// Incremental Core Audio Format writer for linear PCM. The final frame
+/// count makes the first emitted header exact, so a stream never needs a
+/// complete file in memory. Samples are big-endian, the format CAF reads
+/// with no flags set; float samples carry the float flag.
+pub struct CafPcmEncoder {
+    format: CafPcmFormat,
+    sampling_rate: u32,
+    channel_count: usize,
+    total_frames: u64,
+    frames_written: u64,
+    data_bytes: u64,
+    header: Vec<u8>,
+    finished: bool,
+}
+
+impl CafPcmEncoder {
+    pub fn new(
+        format: CafPcmFormat,
+        sampling_rate: u32,
+        channel_count: usize,
+        total_frames: u64,
+    ) -> Result<Self, String> {
+        if sampling_rate == 0 {
+            return Err("CAF sampling rate must be greater than zero".to_string());
+        }
+        if channel_count == 0 || channel_count > 255 {
+            return Err("CAF channel count is outside 1...255".to_string());
+        }
+        let block_align = format
+            .bytes_per_sample()
+            .checked_mul(channel_count as u64)
+            .ok_or_else(|| "CAF block alignment overflows".to_string())?;
+        let data_bytes = total_frames
+            .checked_mul(block_align)
+            .ok_or_else(|| "CAF data size overflows".to_string())?;
+        if data_bytes + CAF_DATA_LEAD_BYTES > i64::MAX as u64 {
+            return Err("CAF data size exceeds the chunk size range".to_string());
+        }
+        let mut header = Vec::with_capacity(68);
+        header.extend_from_slice(b"caff");
+        header.extend_from_slice(&1u16.to_be_bytes());
+        header.extend_from_slice(&0u16.to_be_bytes());
+        header.extend_from_slice(b"desc");
+        header.extend_from_slice(&(MAX_CAF_DESCRIPTION_BYTES as i64).to_be_bytes());
+        header.extend_from_slice(&f64::from(sampling_rate).to_be_bytes());
+        header.extend_from_slice(b"lpcm");
+        header.extend_from_slice(&format.flags().to_be_bytes());
+        header.extend_from_slice(&(block_align as u32).to_be_bytes());
+        header.extend_from_slice(&1u32.to_be_bytes());
+        header.extend_from_slice(&(channel_count as u32).to_be_bytes());
+        header.extend_from_slice(&format.bits_per_channel().to_be_bytes());
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&((CAF_DATA_LEAD_BYTES + data_bytes) as i64).to_be_bytes());
+        header.extend_from_slice(&0u32.to_be_bytes());
+        Ok(Self {
+            format,
+            sampling_rate,
+            channel_count,
+            total_frames,
+            frames_written: 0,
+            data_bytes,
+            header,
+            finished: false,
+        })
+    }
+
+    pub fn header(&self) -> &[u8] {
+        &self.header
+    }
+
+    pub fn frames_written(&self) -> u64 {
+        self.frames_written
+    }
+
+    pub fn total_frames(&self) -> u64 {
+        self.total_frames
+    }
+
+    pub fn data_bytes(&self) -> u64 {
+        self.data_bytes
+    }
+
+    pub fn sampling_rate(&self) -> u32 {
+        self.sampling_rate
+    }
+
+    pub fn channel_count(&self) -> usize {
+        self.channel_count
+    }
+
+    pub fn push_planar_i16(
+        &mut self,
+        planar: &[i16],
+        frames_per_channel: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.require_format(CafPcmFormat::I16)?;
+        self.reserve_chunk(planar.len(), frames_per_channel)?;
+        let mut output = Vec::with_capacity(planar.len() * 2);
+        for frame in 0..frames_per_channel {
+            for channel in 0..self.channel_count {
+                output
+                    .extend_from_slice(&planar[channel * frames_per_channel + frame].to_be_bytes());
+            }
+        }
+        self.frames_written += frames_per_channel as u64;
+        Ok(output)
+    }
+
+    /// Encode signed 24-bit values held in i32 containers without scaling.
+    pub fn push_planar_i24(
+        &mut self,
+        planar: &[i32],
+        frames_per_channel: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.require_format(CafPcmFormat::I24)?;
+        self.reserve_chunk(planar.len(), frames_per_channel)?;
+        if planar
+            .iter()
+            .any(|&x| !(-8_388_608..=8_388_607).contains(&x))
+        {
+            return Err("PCM24 sample exceeds signed 24-bit range".to_string());
+        }
+        let mut output = Vec::with_capacity(planar.len() * 3);
+        for frame in 0..frames_per_channel {
+            for channel in 0..self.channel_count {
+                output.extend_from_slice(
+                    &planar[channel * frames_per_channel + frame].to_be_bytes()[1..],
+                );
+            }
+        }
+        self.frames_written += frames_per_channel as u64;
+        Ok(output)
+    }
+
+    pub fn push_planar_i32(
+        &mut self,
+        planar: &[i32],
+        frames_per_channel: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.require_format(CafPcmFormat::I32)?;
+        self.reserve_chunk(planar.len(), frames_per_channel)?;
+        let mut output = Vec::with_capacity(planar.len() * 4);
+        for frame in 0..frames_per_channel {
+            for channel in 0..self.channel_count {
+                output
+                    .extend_from_slice(&planar[channel * frames_per_channel + frame].to_be_bytes());
+            }
+        }
+        self.frames_written += frames_per_channel as u64;
+        Ok(output)
+    }
+
+    /// Float samples: written as float for a float file, otherwise rounded
+    /// and clamped to the encoder's integer width.
+    pub fn push_planar_f32(
+        &mut self,
+        planar: &[f32],
+        frames_per_channel: usize,
+    ) -> Result<Vec<u8>, String> {
+        if self.finished {
+            return Err("CAF encoder is already finished".to_string());
+        }
+        self.reserve_chunk(planar.len(), frames_per_channel)?;
+        let width = self.format.bytes_per_sample() as usize;
+        let mut output = Vec::with_capacity(planar.len() * width);
+        for frame in 0..frames_per_channel {
+            for channel in 0..self.channel_count {
+                let value = planar[channel * frames_per_channel + frame];
+                match self.format {
+                    CafPcmFormat::F32 => output.extend_from_slice(&value.to_be_bytes()),
+                    CafPcmFormat::I16 => output.extend_from_slice(
+                        &((f64::from(value).clamp(-1.0, 1.0) * 32_767.0).round() as i16)
+                            .to_be_bytes(),
+                    ),
+                    CafPcmFormat::I24 => output.extend_from_slice(
+                        &((f64::from(value).clamp(-1.0, 1.0) * 8_388_607.0).round() as i32)
+                            .to_be_bytes()[1..],
+                    ),
+                    CafPcmFormat::I32 => output.extend_from_slice(
+                        &((f64::from(value).clamp(-1.0, 1.0) * 2_147_483_647.0).round() as i32)
+                            .to_be_bytes(),
+                    ),
+                }
+            }
+        }
+        self.frames_written += frames_per_channel as u64;
+        Ok(output)
+    }
+
+    pub fn finish(&mut self) -> Result<(), String> {
+        if self.finished {
+            return Err("CAF encoder is already finished".to_string());
+        }
+        if self.frames_written != self.total_frames {
+            return Err(format!(
+                "CAF encoder expected {} frames but received {}",
+                self.total_frames, self.frames_written
+            ));
+        }
+        self.finished = true;
+        Ok(())
+    }
+
+    fn require_format(&self, format: CafPcmFormat) -> Result<(), String> {
+        if self.finished {
+            return Err("CAF encoder is already finished".to_string());
+        }
+        if self.format != format {
+            return Err(format!(
+                "CAF encoder expects {:?} PCM, not {:?}",
+                self.format, format
+            ));
+        }
+        Ok(())
+    }
+
+    fn reserve_chunk(&self, sample_count: usize, frames_per_channel: usize) -> Result<(), String> {
+        let expected = self
+            .channel_count
+            .checked_mul(frames_per_channel)
+            .ok_or_else(|| "CAF chunk sample count overflows".to_string())?;
+        if sample_count != expected {
+            return Err(format!(
+                "CAF chunk holds {sample_count} samples but {expected} were expected for {frames_per_channel} frames"
+            ));
+        }
+        if self.frames_written + frames_per_channel as u64 > self.total_frames {
+            return Err(format!(
+                "CAF encoder would exceed its {} total frames",
+                self.total_frames
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,6 +934,53 @@ mod tests {
         }
         file.extend_from_slice(&channel_layout);
         file
+    }
+
+    #[test]
+    fn a_written_caf_indexes_back_to_its_samples() {
+        let mut encoder = CafPcmEncoder::new(CafPcmFormat::I16, 48_000, 2, 4).unwrap();
+        let mut file = encoder.header().to_vec();
+        assert_eq!(file.len(), 68);
+        file.extend(encoder.push_planar_i16(&[1, 2, -1, -2], 2).unwrap());
+        file.extend(encoder.push_planar_i16(&[3, 4, -3, -4], 2).unwrap());
+        encoder.finish().unwrap();
+        let index = CafAudioIndex::from_file(&file).unwrap();
+        assert_eq!(index.config.codec, AudioCodec::Pcm);
+        assert_eq!(index.config.sample_rate, Some(48_000));
+        assert_eq!(index.config.channels, Some(2));
+        assert_eq!(index.config.bits_per_sample, Some(16));
+        assert_eq!(index.config.pcm_endianness, Some(PcmEndianness::Big));
+        assert_eq!(index.config.pcm_float, Some(false));
+        assert_eq!(index.valid_frames, 4);
+        let first = &index.packets[0];
+        let at = first.absolute_offset as usize;
+        assert_eq!(&file[at..at + 4], &[0, 1, 0xff, 0xff]);
+        let samples: Vec<i16> = file[68..]
+            .chunks_exact(2)
+            .map(|pair| i16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        assert_eq!(samples, vec![1, -1, 2, -2, 3, -3, 4, -4]);
+    }
+
+    #[test]
+    fn a_float_caf_carries_the_float_flag() {
+        let mut encoder = CafPcmEncoder::new(CafPcmFormat::F32, 44_100, 1, 2).unwrap();
+        let mut file = encoder.header().to_vec();
+        file.extend(encoder.push_planar_f32(&[0.5, -0.25], 2).unwrap());
+        encoder.finish().unwrap();
+        let index = CafAudioIndex::from_file(&file).unwrap();
+        assert_eq!(index.config.bits_per_sample, Some(32));
+        assert_eq!(index.config.pcm_float, Some(true));
+        assert_eq!(&file[68..72], &0.5f32.to_be_bytes());
+    }
+
+    #[test]
+    fn a_short_caf_stream_cannot_finish() {
+        let mut encoder = CafPcmEncoder::new(CafPcmFormat::I24, 48_000, 1, 3).unwrap();
+        encoder.push_planar_i24(&[1], 1).unwrap();
+        assert!(encoder.finish().unwrap_err().contains("expected 3 frames"));
+        assert!(encoder.push_planar_i24(&[1 << 23], 1).is_err());
+        assert!(encoder.push_planar_i16(&[0], 1).is_err());
     }
 
     #[test]

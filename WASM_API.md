@@ -358,6 +358,35 @@ writer.finish();
 Each input call is limited to 4 MiB. Outputs beyond RIFF's size range receive
 an exact RF64 `ds64` header before the first PCM chunk.
 
+### Streaming AIFF and CAF output
+
+`WasmAiffEncoder` writes AIFF. `WasmCafEncoder` writes Core Audio Format
+(CAF) linear PCM. Both encoders use the same procedure as `WasmWavEncoder`.
+
+1. Construct the encoder with the sample rate, channel count, sample format, and final frame count.
+2. Write `header()` one time.
+3. Write each result from `encodePlanarI16`, `encodePlanarI24`, `encodePlanarI32`, or `encodePlanarF32`.
+4. Call `finish()` to verify the exact frame count.
+
+```js
+const writer = new WasmCafEncoder(48_000, 2, "i16", totalFrames);
+await sink.write(writer.header());
+for (const { planar, frames } of pcmChunks) {
+  await sink.write(writer.encodePlanarI16(planar, frames));
+}
+writer.finish();
+```
+
+| Encoder | Sample formats | Byte order | Size limit |
+| --- | --- | --- | --- |
+| `WasmAiffEncoder` | `i16`, `i24`, `i32` | Big-endian | 4 GiB |
+| `WasmCafEncoder` | `i16`, `i24`, `i32`, `f32` | Big-endian | 64-bit chunk size |
+
+`encodePlanarI24` takes signed 24-bit values in an `Int32Array`. The encoder
+rejects a value outside the 24-bit range. `encodePlanarF32` takes values from
+-1 to 1. An integer encoder rounds and clamps each value to its sample width.
+Each input call is limited to 4 MiB.
+
 Use the seekable API below for each browser `File` or `Blob`. Do not send a
 complete MOV or MP4 source across the WASM boundary.
 

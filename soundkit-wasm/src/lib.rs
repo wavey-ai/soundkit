@@ -41,7 +41,7 @@ use soundkit_aac::{AacMp4DemuxEvent, AacMp4Demuxer};
 #[cfg(feature = "ac3")]
 use soundkit_ac3::Ac3Decoder;
 #[cfg(feature = "aiff")]
-use soundkit_aiff::AiffDecoder;
+use soundkit_aiff::{AiffDecoder, AiffSampleFormat, AiffStreamEncoder};
 #[cfg(feature = "alac")]
 use soundkit_alac::{
     inspect_caf_chunk, validate_caf_file_header, AlacPacketDecoder, CafAlacPacketIndex,
@@ -51,7 +51,8 @@ use soundkit_alac::{
 use soundkit_audio_demux::{
     inspect_mp4_top_level_box, AudioCodec, AudioDemuxEvent, AudioPacketFormat, AudioTrackConfig,
     AudioTrackDemuxer,
-    CafAudioIndex, MediaSampleIndex, MediaTrackConfig, MediaTrackKind, MediaTrackPacket,
+    CafAudioIndex, CafPcmEncoder, CafPcmFormat, MediaSampleIndex, MediaTrackConfig,
+    MediaTrackKind, MediaTrackPacket,
     Mp4MediaDemuxEvent, Mp4MediaDemuxer, Mp4MediaIndex, MxfMediaDemuxEvent, MxfMediaDemuxer,
     PcmEndianness,
 };
@@ -2593,6 +2594,255 @@ impl WasmWavEncoder {
     pub fn is_rf64(&self) -> bool {
         self.encoder.is_rf64()
     }
+}
+
+/// Incremental AIFF PCM writer. The final frame count makes the first
+/// emitted header exact. AIFF holds integer PCM; float input is rounded to
+/// the chosen width.
+#[cfg(feature = "aiff")]
+#[wasm_bindgen]
+pub struct WasmAiffEncoder {
+    encoder: AiffStreamEncoder,
+}
+
+#[cfg(feature = "aiff")]
+#[wasm_bindgen]
+impl WasmAiffEncoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        sample_rate: u32,
+        channels: u16,
+        sample_format: &str,
+        total_frames: f64,
+    ) -> Result<WasmAiffEncoder, JsValue> {
+        let total_frames = exact_total_frames("AIFF", total_frames)?;
+        let format = match sample_format.trim().to_ascii_lowercase().as_str() {
+            "i16" | "s16" | "pcm16" => AiffSampleFormat::I16,
+            "i24" | "s24" | "pcm24" => AiffSampleFormat::I24,
+            "i32" | "s32" | "pcm32" => AiffSampleFormat::I32,
+            other => {
+                return Err(js_error(format!(
+                    "unsupported AIFF sample format: {other}"
+                )))
+            }
+        };
+        let encoder = AiffStreamEncoder::new(format, sample_rate, channels as usize, total_frames)
+            .map_err(js_error)?;
+        Ok(Self { encoder })
+    }
+
+    pub fn header(&self) -> Uint8Array {
+        Uint8Array::from(self.encoder.header())
+    }
+
+    #[wasm_bindgen(js_name = encodePlanarI16)]
+    pub fn encode_planar_i16(
+        &mut self,
+        planar: &[i16],
+        frames_per_channel: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        validate_pcm_encode_chunk("AIFF", planar.len(), std::mem::size_of::<i16>())?;
+        let output = self
+            .encoder
+            .push_planar_i16(planar, frames_per_channel as usize)
+            .map_err(js_error)?;
+        Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    #[wasm_bindgen(js_name = encodePlanarI24)]
+    pub fn encode_planar_i24(
+        &mut self,
+        planar: &[i32],
+        frames_per_channel: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        validate_pcm_encode_chunk("AIFF", planar.len(), std::mem::size_of::<i32>())?;
+        let output = self
+            .encoder
+            .push_planar_i24(planar, frames_per_channel as usize)
+            .map_err(js_error)?;
+        Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    #[wasm_bindgen(js_name = encodePlanarI32)]
+    pub fn encode_planar_i32(
+        &mut self,
+        planar: &[i32],
+        frames_per_channel: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        validate_pcm_encode_chunk("AIFF", planar.len(), std::mem::size_of::<i32>())?;
+        let output = self
+            .encoder
+            .push_planar_i32(planar, frames_per_channel as usize)
+            .map_err(js_error)?;
+        Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    #[wasm_bindgen(js_name = encodePlanarF32)]
+    pub fn encode_planar_f32(
+        &mut self,
+        planar: &[f32],
+        frames_per_channel: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        validate_pcm_encode_chunk("AIFF", planar.len(), std::mem::size_of::<f32>())?;
+        let output = self
+            .encoder
+            .push_planar_f32(planar, frames_per_channel as usize)
+            .map_err(js_error)?;
+        Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    pub fn finish(&mut self) -> Result<(), JsValue> {
+        self.encoder.finish().map_err(js_error)
+    }
+
+    #[wasm_bindgen(getter, js_name = framesWritten)]
+    pub fn frames_written(&self) -> f64 {
+        self.encoder.frames_written() as f64
+    }
+
+    #[wasm_bindgen(getter, js_name = totalFrames)]
+    pub fn total_frames(&self) -> f64 {
+        self.encoder.total_frames() as f64
+    }
+}
+
+/// Incremental Core Audio Format linear-PCM writer. The final frame count
+/// makes the first emitted header exact.
+#[cfg(feature = "audio-demux")]
+#[wasm_bindgen]
+pub struct WasmCafEncoder {
+    encoder: CafPcmEncoder,
+}
+
+#[cfg(feature = "audio-demux")]
+#[wasm_bindgen]
+impl WasmCafEncoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        sample_rate: u32,
+        channels: u16,
+        sample_format: &str,
+        total_frames: f64,
+    ) -> Result<WasmCafEncoder, JsValue> {
+        let total_frames = exact_total_frames("CAF", total_frames)?;
+        let format = match sample_format.trim().to_ascii_lowercase().as_str() {
+            "i16" | "s16" | "pcm16" => CafPcmFormat::I16,
+            "i24" | "s24" | "pcm24" => CafPcmFormat::I24,
+            "i32" | "s32" | "pcm32" => CafPcmFormat::I32,
+            "f32" | "float32" => CafPcmFormat::F32,
+            other => {
+                return Err(js_error(format!(
+                    "unsupported CAF sample format: {other}"
+                )))
+            }
+        };
+        let encoder = CafPcmEncoder::new(format, sample_rate, channels as usize, total_frames)
+            .map_err(js_error)?;
+        Ok(Self { encoder })
+    }
+
+    pub fn header(&self) -> Uint8Array {
+        Uint8Array::from(self.encoder.header())
+    }
+
+    #[wasm_bindgen(js_name = encodePlanarI16)]
+    pub fn encode_planar_i16(
+        &mut self,
+        planar: &[i16],
+        frames_per_channel: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        validate_pcm_encode_chunk("CAF", planar.len(), std::mem::size_of::<i16>())?;
+        let output = self
+            .encoder
+            .push_planar_i16(planar, frames_per_channel as usize)
+            .map_err(js_error)?;
+        Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    #[wasm_bindgen(js_name = encodePlanarI24)]
+    pub fn encode_planar_i24(
+        &mut self,
+        planar: &[i32],
+        frames_per_channel: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        validate_pcm_encode_chunk("CAF", planar.len(), std::mem::size_of::<i32>())?;
+        let output = self
+            .encoder
+            .push_planar_i24(planar, frames_per_channel as usize)
+            .map_err(js_error)?;
+        Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    #[wasm_bindgen(js_name = encodePlanarI32)]
+    pub fn encode_planar_i32(
+        &mut self,
+        planar: &[i32],
+        frames_per_channel: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        validate_pcm_encode_chunk("CAF", planar.len(), std::mem::size_of::<i32>())?;
+        let output = self
+            .encoder
+            .push_planar_i32(planar, frames_per_channel as usize)
+            .map_err(js_error)?;
+        Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    #[wasm_bindgen(js_name = encodePlanarF32)]
+    pub fn encode_planar_f32(
+        &mut self,
+        planar: &[f32],
+        frames_per_channel: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        validate_pcm_encode_chunk("CAF", planar.len(), std::mem::size_of::<f32>())?;
+        let output = self
+            .encoder
+            .push_planar_f32(planar, frames_per_channel as usize)
+            .map_err(js_error)?;
+        Ok(Uint8Array::from(output.as_slice()))
+    }
+
+    pub fn finish(&mut self) -> Result<(), JsValue> {
+        self.encoder.finish().map_err(js_error)
+    }
+
+    #[wasm_bindgen(getter, js_name = framesWritten)]
+    pub fn frames_written(&self) -> f64 {
+        self.encoder.frames_written() as f64
+    }
+
+    #[wasm_bindgen(getter, js_name = totalFrames)]
+    pub fn total_frames(&self) -> f64 {
+        self.encoder.total_frames() as f64
+    }
+}
+
+fn exact_total_frames(label: &str, total_frames: f64) -> Result<u64, JsValue> {
+    if !total_frames.is_finite()
+        || total_frames < 0.0
+        || total_frames.fract() != 0.0
+        || total_frames > 9_007_199_254_740_991.0
+    {
+        return Err(js_error(format!(
+            "{label} totalFrames must be an exact non-negative JavaScript integer"
+        )));
+    }
+    Ok(total_frames as u64)
+}
+
+fn validate_pcm_encode_chunk(
+    label: &str,
+    samples: usize,
+    bytes_per_sample: usize,
+) -> Result<(), JsValue> {
+    let bytes = samples
+        .checked_mul(bytes_per_sample)
+        .ok_or_else(|| js_error(format!("{label} encode input size overflows")))?;
+    if bytes > MAX_STREAM_INPUT_CHUNK_BYTES {
+        return Err(js_error(format!(
+            "{label} encode input chunk exceeds the {MAX_STREAM_INPUT_CHUNK_BYTES} byte streaming budget"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_wav_encode_chunk(samples: usize, bytes_per_sample: usize) -> Result<(), JsValue> {

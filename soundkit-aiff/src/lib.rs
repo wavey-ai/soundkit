@@ -872,3 +872,374 @@ mod tests {
             .contains("streaming budget"));
     }
 }
+
+/// The integer sample widths an AIFF holds. AIFF carries integer PCM only;
+/// AIFF-C float is a different container and this writer does not make one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiffSampleFormat {
+    I16,
+    I24,
+    I32,
+}
+
+impl AiffSampleFormat {
+    fn bits_per_sample(self) -> u16 {
+        match self {
+            Self::I16 => 16,
+            Self::I24 => 24,
+            Self::I32 => 32,
+        }
+    }
+
+    fn bytes_per_sample(self) -> u64 {
+        u64::from(self.bits_per_sample() / 8)
+    }
+}
+
+/// The 80-bit IEEE extended value AIFF keeps its sample rate in.
+pub fn extended_sample_rate(rate: u32) -> [u8; 10] {
+    let mut bytes = [0u8; 10];
+    if rate == 0 {
+        return bytes;
+    }
+    let exponent = 31 - rate.leading_zeros();
+    let mantissa = u64::from(rate) << (63 - exponent);
+    bytes[..2].copy_from_slice(&(16_383 + exponent as u16).to_be_bytes());
+    bytes[2..].copy_from_slice(&mantissa.to_be_bytes());
+    bytes
+}
+
+/// Incremental AIFF writer. The final frame count makes the first emitted
+/// header exact, so a stream never needs a complete AIFF in memory. Samples
+/// are written big-endian, as AIFF carries them.
+pub struct AiffStreamEncoder {
+    format: AiffSampleFormat,
+    sampling_rate: u32,
+    channel_count: usize,
+    total_frames: u64,
+    frames_written: u64,
+    data_bytes: u64,
+    header: Vec<u8>,
+    finished: bool,
+}
+
+const AIFF_COMM_BYTES: u64 = 18;
+const AIFF_SSND_LEAD_BYTES: u64 = 8;
+
+impl AiffStreamEncoder {
+    pub fn new(
+        format: AiffSampleFormat,
+        sampling_rate: u32,
+        channel_count: usize,
+        total_frames: u64,
+    ) -> Result<Self, String> {
+        if sampling_rate == 0 {
+            return Err("AIFF sampling rate must be greater than zero".to_string());
+        }
+        if channel_count == 0 || channel_count > u16::MAX as usize {
+            return Err("AIFF channel count is outside the COMM field range".to_string());
+        }
+        if total_frames > u64::from(u32::MAX) {
+            return Err("AIFF frame count exceeds the COMM field range".to_string());
+        }
+        let block_align = format
+            .bytes_per_sample()
+            .checked_mul(channel_count as u64)
+            .ok_or_else(|| "AIFF block alignment overflows".to_string())?;
+        let data_bytes = total_frames
+            .checked_mul(block_align)
+            .ok_or_else(|| "AIFF data size overflows".to_string())?;
+        let pad = data_bytes % 2;
+        let form_bytes = 4 + 8 + AIFF_COMM_BYTES + 8 + AIFF_SSND_LEAD_BYTES + data_bytes + pad;
+        if form_bytes > u64::from(u32::MAX) {
+            return Err(
+                "AIFF holds at most 4 GiB; write WAV, which grows to RF64, for more".to_string(),
+            );
+        }
+        let mut header = Vec::with_capacity(54);
+        header.extend_from_slice(b"FORM");
+        header.extend_from_slice(&(form_bytes as u32).to_be_bytes());
+        header.extend_from_slice(b"AIFF");
+        header.extend_from_slice(b"COMM");
+        header.extend_from_slice(&(AIFF_COMM_BYTES as u32).to_be_bytes());
+        header.extend_from_slice(&(channel_count as u16).to_be_bytes());
+        header.extend_from_slice(&(total_frames as u32).to_be_bytes());
+        header.extend_from_slice(&format.bits_per_sample().to_be_bytes());
+        header.extend_from_slice(&extended_sample_rate(sampling_rate));
+        header.extend_from_slice(b"SSND");
+        header.extend_from_slice(&((AIFF_SSND_LEAD_BYTES + data_bytes) as u32).to_be_bytes());
+        header.extend_from_slice(&0u32.to_be_bytes());
+        header.extend_from_slice(&0u32.to_be_bytes());
+        Ok(Self {
+            format,
+            sampling_rate,
+            channel_count,
+            total_frames,
+            frames_written: 0,
+            data_bytes,
+            header,
+            finished: false,
+        })
+    }
+
+    pub fn header(&self) -> &[u8] {
+        &self.header
+    }
+
+    pub fn frames_written(&self) -> u64 {
+        self.frames_written
+    }
+
+    pub fn total_frames(&self) -> u64 {
+        self.total_frames
+    }
+
+    pub fn data_bytes(&self) -> u64 {
+        self.data_bytes
+    }
+
+    pub fn sampling_rate(&self) -> u32 {
+        self.sampling_rate
+    }
+
+    pub fn channel_count(&self) -> usize {
+        self.channel_count
+    }
+
+    pub fn push_planar_i16(
+        &mut self,
+        planar: &[i16],
+        frames_per_channel: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.require_format(AiffSampleFormat::I16)?;
+        self.reserve_chunk(planar.len(), frames_per_channel)?;
+        let mut output = Vec::with_capacity(planar.len() * 2);
+        for frame in 0..frames_per_channel {
+            for channel in 0..self.channel_count {
+                output
+                    .extend_from_slice(&planar[channel * frames_per_channel + frame].to_be_bytes());
+            }
+        }
+        self.frames_written += frames_per_channel as u64;
+        Ok(self.padded(output, frames_per_channel))
+    }
+
+    /// Encode signed 24-bit values held in i32 containers without scaling.
+    pub fn push_planar_i24(
+        &mut self,
+        planar: &[i32],
+        frames_per_channel: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.require_format(AiffSampleFormat::I24)?;
+        self.reserve_chunk(planar.len(), frames_per_channel)?;
+        if planar
+            .iter()
+            .any(|&x| !(-8_388_608..=8_388_607).contains(&x))
+        {
+            return Err("PCM24 sample exceeds signed 24-bit range".to_string());
+        }
+        let mut output = Vec::with_capacity(planar.len() * 3);
+        for frame in 0..frames_per_channel {
+            for channel in 0..self.channel_count {
+                output.extend_from_slice(
+                    &planar[channel * frames_per_channel + frame].to_be_bytes()[1..],
+                );
+            }
+        }
+        self.frames_written += frames_per_channel as u64;
+        Ok(self.padded(output, frames_per_channel))
+    }
+
+    pub fn push_planar_i32(
+        &mut self,
+        planar: &[i32],
+        frames_per_channel: usize,
+    ) -> Result<Vec<u8>, String> {
+        self.require_format(AiffSampleFormat::I32)?;
+        self.reserve_chunk(planar.len(), frames_per_channel)?;
+        let mut output = Vec::with_capacity(planar.len() * 4);
+        for frame in 0..frames_per_channel {
+            for channel in 0..self.channel_count {
+                output
+                    .extend_from_slice(&planar[channel * frames_per_channel + frame].to_be_bytes());
+            }
+        }
+        self.frames_written += frames_per_channel as u64;
+        Ok(self.padded(output, frames_per_channel))
+    }
+
+    /// Float samples in -1..=1, rounded and clamped to the encoder's width.
+    pub fn push_planar_f32(
+        &mut self,
+        planar: &[f32],
+        frames_per_channel: usize,
+    ) -> Result<Vec<u8>, String> {
+        if self.finished {
+            return Err("AIFF encoder is already finished".to_string());
+        }
+        self.reserve_chunk(planar.len(), frames_per_channel)?;
+        let width = self.format.bytes_per_sample() as usize;
+        let mut output = Vec::with_capacity(planar.len() * width);
+        for frame in 0..frames_per_channel {
+            for channel in 0..self.channel_count {
+                let value = planar[channel * frames_per_channel + frame];
+                match self.format {
+                    AiffSampleFormat::I16 => {
+                        output.extend_from_slice(&float_to_i16(value).to_be_bytes())
+                    }
+                    AiffSampleFormat::I24 => {
+                        output.extend_from_slice(&float_to_i24(value).to_be_bytes()[1..])
+                    }
+                    AiffSampleFormat::I32 => {
+                        output.extend_from_slice(&float_to_i32(value).to_be_bytes())
+                    }
+                }
+            }
+        }
+        self.frames_written += frames_per_channel as u64;
+        Ok(self.padded(output, frames_per_channel))
+    }
+
+    pub fn finish(&mut self) -> Result<(), String> {
+        if self.finished {
+            return Err("AIFF encoder is already finished".to_string());
+        }
+        if self.frames_written != self.total_frames {
+            return Err(format!(
+                "AIFF encoder expected {} frames but received {}",
+                self.total_frames, self.frames_written
+            ));
+        }
+        self.finished = true;
+        Ok(())
+    }
+
+    /// An odd sound-data chunk takes one pad byte after its last sample.
+    fn padded(&self, mut output: Vec<u8>, frames_per_channel: usize) -> Vec<u8> {
+        if frames_per_channel > 0
+            && self.frames_written == self.total_frames
+            && self.data_bytes % 2 == 1
+        {
+            output.push(0);
+        }
+        output
+    }
+
+    fn require_format(&self, format: AiffSampleFormat) -> Result<(), String> {
+        if self.finished {
+            return Err("AIFF encoder is already finished".to_string());
+        }
+        if self.format != format {
+            return Err(format!(
+                "AIFF encoder expects {:?} PCM, not {:?}",
+                self.format, format
+            ));
+        }
+        Ok(())
+    }
+
+    fn reserve_chunk(&self, sample_count: usize, frames_per_channel: usize) -> Result<(), String> {
+        let expected = self
+            .channel_count
+            .checked_mul(frames_per_channel)
+            .ok_or_else(|| "AIFF chunk sample count overflows".to_string())?;
+        if sample_count != expected {
+            return Err(format!(
+                "AIFF chunk holds {sample_count} samples but {expected} were expected for {frames_per_channel} frames"
+            ));
+        }
+        if self.frames_written + frames_per_channel as u64 > self.total_frames {
+            return Err(format!(
+                "AIFF encoder would exceed its {} total frames",
+                self.total_frames
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn float_to_i16(value: f32) -> i16 {
+    (f64::from(value).clamp(-1.0, 1.0) * 32_767.0).round() as i16
+}
+
+fn float_to_i24(value: f32) -> i32 {
+    (f64::from(value).clamp(-1.0, 1.0) * 8_388_607.0).round() as i32
+}
+
+fn float_to_i32(value: f32) -> i32 {
+    (f64::from(value).clamp(-1.0, 1.0) * 2_147_483_647.0).round() as i32
+}
+
+#[cfg(test)]
+mod encoder_tests {
+    use super::*;
+
+    #[test]
+    fn extended_sample_rate_round_trips_through_the_parser() {
+        for rate in [8_000u32, 22_050, 44_100, 48_000, 96_000, 192_000] {
+            let bytes = extended_sample_rate(rate);
+            assert_eq!(
+                parse_extended_sample_rate(&bytes).unwrap(),
+                rate,
+                "rate {rate}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_written_aiff_decodes_back_to_its_samples() {
+        let mut encoder = AiffStreamEncoder::new(AiffSampleFormat::I16, 48_000, 2, 4).unwrap();
+        let mut file = encoder.header().to_vec();
+        // Two channels, two frames per call, planar.
+        file.extend(encoder.push_planar_i16(&[1, 2, -1, -2], 2).unwrap());
+        file.extend(encoder.push_planar_i16(&[3, 4, -3, -4], 2).unwrap());
+        encoder.finish().unwrap();
+        assert_eq!(file.len(), 54 + 16);
+        assert_eq!(&file[..4], b"FORM");
+        assert_eq!(
+            u32::from_be_bytes(file[4..8].try_into().unwrap()) as usize,
+            file.len() - 8
+        );
+        let decoded = decode_aiff_container(&file).unwrap();
+        assert_eq!(decoded.channel_count(), 2);
+        assert_eq!(decoded.sampling_rate(), 48_000);
+        assert_eq!(decoded.bits_per_sample(), 16);
+        let samples: Vec<i16> = decoded
+            .data()
+            .chunks_exact(2)
+            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        assert_eq!(samples, vec![1, -1, 2, -2, 3, -3, 4, -4]);
+    }
+
+    #[test]
+    fn an_odd_sound_chunk_takes_a_pad_byte() {
+        let mut encoder = AiffStreamEncoder::new(AiffSampleFormat::I24, 44_100, 1, 3).unwrap();
+        let mut file = encoder.header().to_vec();
+        file.extend(encoder.push_planar_i24(&[1, 2, 3], 3).unwrap());
+        encoder.finish().unwrap();
+        // Nine data bytes, one pad, and the FORM size counts the pad.
+        assert_eq!(file.len(), 54 + 9 + 1);
+        assert_eq!(
+            u32::from_be_bytes(file[4..8].try_into().unwrap()) as usize,
+            file.len() - 8
+        );
+        assert_eq!(u32::from_be_bytes(file[42..46].try_into().unwrap()), 8 + 9);
+    }
+
+    #[test]
+    fn float_samples_land_in_the_encoders_width() {
+        let mut encoder = AiffStreamEncoder::new(AiffSampleFormat::I16, 48_000, 1, 3).unwrap();
+        let out = encoder.push_planar_f32(&[1.0, -1.0, 0.5], 3).unwrap();
+        encoder.finish().unwrap();
+        assert_eq!(out, [0x7f, 0xff, 0x80, 0x01, 0x40, 0x00]);
+    }
+
+    #[test]
+    fn a_short_stream_cannot_finish() {
+        let mut encoder = AiffStreamEncoder::new(AiffSampleFormat::I16, 48_000, 2, 4).unwrap();
+        encoder.push_planar_i16(&[0; 4], 2).unwrap();
+        assert!(encoder.finish().unwrap_err().contains("expected 4 frames"));
+        assert!(encoder.push_planar_i16(&[0; 8], 4).is_err());
+    }
+}

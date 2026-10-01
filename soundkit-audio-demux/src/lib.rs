@@ -15,7 +15,10 @@ pub use mxf::{
     MxfPartitionKind, MxfPcmSourcePacking, MxfTrackSourcePacking,
 };
 mod caf;
-pub use caf::{inspect_caf_chunk, validate_caf_file_header, CafAudioIndex, CafChunkRange};
+pub use caf::{
+    inspect_caf_chunk, validate_caf_file_header, CafAudioIndex, CafChunkRange, CafPcmEncoder,
+    CafPcmFormat,
+};
 #[cfg(feature = "decode-video")]
 mod mp4_keyframes;
 #[cfg(feature = "decode-video")]

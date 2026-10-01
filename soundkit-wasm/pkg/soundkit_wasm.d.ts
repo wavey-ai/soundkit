@@ -54,6 +54,25 @@ export class WasmAacLcDecoder {
 }
 
 /**
+ * Incremental AIFF PCM writer. The final frame count makes the first
+ * emitted header exact. AIFF holds integer PCM; float input is rounded to
+ * the chosen width.
+ */
+export class WasmAiffEncoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    encodePlanarF32(planar: Float32Array, frames_per_channel: number): Uint8Array;
+    encodePlanarI16(planar: Int16Array, frames_per_channel: number): Uint8Array;
+    encodePlanarI24(planar: Int32Array, frames_per_channel: number): Uint8Array;
+    encodePlanarI32(planar: Int32Array, frames_per_channel: number): Uint8Array;
+    finish(): void;
+    header(): Uint8Array;
+    constructor(sample_rate: number, channels: number, sample_format: string, total_frames: number);
+    readonly framesWritten: number;
+    readonly totalFrames: number;
+}
+
+/**
  * Bounded ALAC access-unit decoder for seekable MP4 and CAF adapters.
  */
 export class WasmAlacPacketDecoder {
@@ -148,6 +167,24 @@ export class WasmCafAudioIndex {
 }
 
 /**
+ * Incremental Core Audio Format linear-PCM writer. The final frame count
+ * makes the first emitted header exact.
+ */
+export class WasmCafEncoder {
+    free(): void;
+    [Symbol.dispose](): void;
+    encodePlanarF32(planar: Float32Array, frames_per_channel: number): Uint8Array;
+    encodePlanarI16(planar: Int16Array, frames_per_channel: number): Uint8Array;
+    encodePlanarI24(planar: Int32Array, frames_per_channel: number): Uint8Array;
+    encodePlanarI32(planar: Int32Array, frames_per_channel: number): Uint8Array;
+    finish(): void;
+    header(): Uint8Array;
+    constructor(sample_rate: number, channels: number, sample_format: string, total_frames: number);
+    readonly framesWritten: number;
+    readonly totalFrames: number;
+}
+
+/**
  * Format-detecting decode, normalization, and hashing in one bounded session.
  */
 export class WasmCanonicalPcmDecoder {
@@ -165,35 +202,6 @@ export class WasmCanonicalPcmDecoder {
      * Decode one bounded source byte range.
      */
     push(bytes: Uint8Array): any;
-}
-
-export class WasmEncodecCodes {
-    private constructor();
-    free(): void;
-    [Symbol.dispose](): void;
-    scale(): number;
-    takeCodes(): Uint16Array;
-}
-
-export class WasmEncodecDecoder {
-    free(): void;
-    [Symbol.dispose](): void;
-    addCachedRange(start: number, end: number, pcm: Int16Array): boolean;
-    addDecodedFrame(index: number, window: Float32Array): void;
-    addSilentFrame(index: number): void;
-    decodeChunk(payload: Uint8Array, frame_length: number): WasmEncodecCodes;
-    emitAfterBatch(next_index: number): WasmEncodecPcmBatch;
-    flush(): WasmEncodecPcmBatch;
-    constructor(bundle_json: string, weights: Uint8Array, expected_hash: string, audio_length: number, frame_count: number, retain_full: boolean);
-    resultPcm(): Int16Array;
-}
-
-export class WasmEncodecPcmBatch {
-    private constructor();
-    free(): void;
-    [Symbol.dispose](): void;
-    takePcm(): Int16Array;
-    takeSegments(): Uint32Array;
 }
 
 export class WasmFlacEncoder {
@@ -345,42 +353,6 @@ export class WasmLibraryImport {
      * FLAC preservation copy requested by the caller.
      */
     readonly sourceLossless: boolean;
-}
-
-/**
- * A MOV/MP4 video keyframe timeline, decoded from a seekable source reader.
- *
- * Constructing the index reads only the `moov` box; listing the timeline is
- * the sync-sample map, which carries no pixels. `frame()` decodes one
- * keyframe at a time, so a browser builds a filmstrip by walking the
- * timeline without ever holding the whole film in WASM memory.
- */
-export class WasmMp4Keyframes {
-    free(): void;
-    [Symbol.dispose](): void;
-    /**
-     * Decode one keyframe into pixel planes, oldest and newest decoders
-     * unpacked the same way `WasmVideoDecoder::decode` does.
-     */
-    frame(position: number): Array<any>;
-    /**
-     * One entry of the timeline: where the keyframe sits in the film.
-     */
-    keyframe(index: number): object;
-    constructor(read: Function, size: number);
-    readonly codec: string;
-    readonly codecId: string;
-    readonly height: number;
-    /**
-     * How many timeline entries this track has (its keyframe count).
-     */
-    readonly keyframeCount: number;
-    readonly timescale: number;
-    /**
-     * The first video track's id, once one is found.
-     */
-    readonly trackId: any;
-    readonly width: number;
 }
 
 /**
@@ -689,10 +661,6 @@ export function buildSoundKitFrameHeaderV2(encoding: number, payload_size: numbe
 
 export function buildSoundKitFrameV2(encoding: number, payload: Uint8Array, sample_size: number, sample_rate: number, channels: number, bits_per_sample: number, pts: number): Uint8Array;
 
-export function encodecDecodeChunks(bundle_json: string, payload: Uint8Array): any;
-
-export function encodecMetadata(payload: Uint8Array): any;
-
 /**
  * Inspect one CAF chunk header without reading its payload.
  */
@@ -723,6 +691,7 @@ export interface InitOutput {
     readonly __wbg_decoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmaacdeboxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmaaclcdecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmaiffencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmalacpacketdecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmaudiocontentcipher_free: (a: number, b: number) => void;
     readonly __wbg_wasmaudiocontentkeyunwrapper_free: (a: number, b: number) => void;
@@ -730,19 +699,16 @@ export interface InitOutput {
     readonly __wbg_wasmcafalacindex_free: (a: number, b: number) => void;
     readonly __wbg_wasmcafaudioindex_free: (a: number, b: number) => void;
     readonly __wbg_wasmcanonicalpcmdecoder_free: (a: number, b: number) => void;
-    readonly __wbg_wasmencodeccodes_free: (a: number, b: number) => void;
-    readonly __wbg_wasmencodecdecoder_free: (a: number, b: number) => void;
-    readonly __wbg_wasmencodecpcmbatch_free: (a: number, b: number) => void;
     readonly __wbg_wasmflacencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmflacframedecoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmflacframeencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmlibraryimport_free: (a: number, b: number) => void;
-    readonly __wbg_wasmmp4keyframes_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediademuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmmp4mediaindex_free: (a: number, b: number) => void;
     readonly __wbg_wasmmxfmediademuxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdeboxer_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusdecoder_free: (a: number, b: number) => void;
+    readonly __wbg_wasmopusdecoderesult_free: (a: number, b: number) => void;
     readonly __wbg_wasmopusencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmpcm16wavelibraryencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmsha256_free: (a: number, b: number) => void;
@@ -750,7 +716,6 @@ export interface InitOutput {
     readonly __wbg_wasmsoundkitv2decoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmstreaminglibraryencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmvideodecoder_free: (a: number, b: number) => void;
-    readonly __wbg_wasmwavencoder_free: (a: number, b: number) => void;
     readonly __wbg_wasmwebmmediademuxer_free: (a: number, b: number) => void;
     readonly buildAudioGroupAssociatedData: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number) => [number, number, number];
     readonly buildSoundKitFrameHeaderV2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
@@ -761,8 +726,6 @@ export interface InitOutput {
     readonly decoder_newRawLinear32: (a: number, b: number) => [number, number, number];
     readonly decoder_newWithFormat: (a: number, b: number) => [number, number, number];
     readonly decoder_push: (a: number, b: number, c: number) => [number, number, number];
-    readonly encodecDecodeChunks: (a: number, b: number, c: number, d: number) => [number, number, number];
-    readonly encodecMetadata: (a: number, b: number) => [number, number, number];
     readonly inspectCafChunk: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly inspectMp4TopLevelBox: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly validateCafFileHeader: (a: number, b: number, c: number) => [number, number];
@@ -778,6 +741,15 @@ export interface InitOutput {
     readonly wasmaaclcdecoder_framesPerAccessUnit: (a: number) => number;
     readonly wasmaaclcdecoder_new: (a: number, b: number) => [number, number, number];
     readonly wasmaaclcdecoder_sampleRate: (a: number) => number;
+    readonly wasmaiffencoder_encodePlanarF32: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmaiffencoder_encodePlanarI16: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmaiffencoder_encodePlanarI24: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmaiffencoder_encodePlanarI32: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmaiffencoder_finish: (a: number) => [number, number];
+    readonly wasmaiffencoder_framesWritten: (a: number) => number;
+    readonly wasmaiffencoder_header: (a: number) => any;
+    readonly wasmaiffencoder_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly wasmaiffencoder_totalFrames: (a: number) => number;
     readonly wasmalacpacketdecoder_bitDepth: (a: number) => number;
     readonly wasmalacpacketdecoder_channels: (a: number) => number;
     readonly wasmalacpacketdecoder_decode: (a: number, b: number, c: number) => [number, number, number];
@@ -809,23 +781,17 @@ export interface InitOutput {
     readonly wasmcafaudioindex_packet: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly wasmcafaudioindex_sample: (a: number, b: number) => [number, number, number];
     readonly wasmcafaudioindex_sampleCount: (a: number) => number;
+    readonly wasmcafencoder_encodePlanarF32: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmcafencoder_encodePlanarI16: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmcafencoder_encodePlanarI24: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmcafencoder_encodePlanarI32: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly wasmcafencoder_finish: (a: number) => [number, number];
+    readonly wasmcafencoder_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly wasmcanonicalpcmdecoder_finish: (a: number) => [number, number, number];
     readonly wasmcanonicalpcmdecoder_new: () => number;
     readonly wasmcanonicalpcmdecoder_newRawLinear16: (a: number, b: number) => [number, number, number];
     readonly wasmcanonicalpcmdecoder_newWithFormat: (a: number, b: number) => [number, number, number];
     readonly wasmcanonicalpcmdecoder_push: (a: number, b: number, c: number) => [number, number, number];
-    readonly wasmencodeccodes_scale: (a: number) => number;
-    readonly wasmencodeccodes_takeCodes: (a: number) => [number, number];
-    readonly wasmencodecdecoder_addCachedRange: (a: number, b: number, c: number, d: number, e: number) => number;
-    readonly wasmencodecdecoder_addDecodedFrame: (a: number, b: number, c: number, d: number) => [number, number];
-    readonly wasmencodecdecoder_addSilentFrame: (a: number, b: number) => [number, number];
-    readonly wasmencodecdecoder_decodeChunk: (a: number, b: number, c: number, d: number) => [number, number, number];
-    readonly wasmencodecdecoder_emitAfterBatch: (a: number, b: number) => [number, number, number];
-    readonly wasmencodecdecoder_flush: (a: number) => number;
-    readonly wasmencodecdecoder_new: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
-    readonly wasmencodecdecoder_resultPcm: (a: number) => [number, number];
-    readonly wasmencodecpcmbatch_takePcm: (a: number) => [number, number];
-    readonly wasmencodecpcmbatch_takeSegments: (a: number) => [number, number];
     readonly wasmflacencoder_encodePlanarF32: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly wasmflacencoder_finish: (a: number) => [number, number, number];
     readonly wasmflacencoder_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
@@ -854,16 +820,6 @@ export interface InitOutput {
     readonly wasmlibraryimport_progress: (a: number) => number;
     readonly wasmlibraryimport_shape: (a: number) => [number, number];
     readonly wasmlibraryimport_sourceLossless: (a: number) => number;
-    readonly wasmmp4keyframes_codec: (a: number) => [number, number];
-    readonly wasmmp4keyframes_codecId: (a: number) => [number, number];
-    readonly wasmmp4keyframes_frame: (a: number, b: number) => [number, number, number];
-    readonly wasmmp4keyframes_height: (a: number) => number;
-    readonly wasmmp4keyframes_keyframe: (a: number, b: number) => [number, number, number];
-    readonly wasmmp4keyframes_keyframeCount: (a: number) => number;
-    readonly wasmmp4keyframes_new: (a: any, b: number) => [number, number, number];
-    readonly wasmmp4keyframes_timescale: (a: number) => number;
-    readonly wasmmp4keyframes_trackId: (a: number) => [number, number, number];
-    readonly wasmmp4keyframes_width: (a: number) => number;
     readonly wasmmp4mediademuxer_flush: (a: number) => [number, number, number];
     readonly wasmmp4mediademuxer_new: () => number;
     readonly wasmmp4mediademuxer_pcmTrim: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
@@ -937,41 +893,25 @@ export interface InitOutput {
     readonly wasmwavencoder_encodePlanarI16: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly wasmwavencoder_encodePlanarI32: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly wasmwavencoder_finish: (a: number) => [number, number];
-    readonly wasmwavencoder_framesWritten: (a: number) => number;
-    readonly wasmwavencoder_header: (a: number) => any;
     readonly wasmwavencoder_isRf64: (a: number) => number;
     readonly wasmwavencoder_new: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
-    readonly wasmwavencoder_totalFrames: (a: number) => number;
     readonly wasmwebmmediademuxer_flush: (a: number) => [number, number, number];
     readonly wasmwebmmediademuxer_new: () => number;
     readonly wasmwebmmediademuxer_push: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmaacdeboxer_newAuto: () => number;
     readonly wasmaudiotrackdemuxer_newAuto: () => number;
     readonly wasmopusdeboxer_newAuto: () => number;
+    readonly wasmcafencoder_framesWritten: (a: number) => number;
+    readonly wasmcafencoder_totalFrames: (a: number) => number;
+    readonly wasmwavencoder_framesWritten: (a: number) => number;
+    readonly wasmwavencoder_totalFrames: (a: number) => number;
     readonly decoder_newAuto: () => number;
     readonly wasmsoundkitframedecoder_newUnencrypted: () => number;
     readonly wasmcanonicalpcmdecoder_newAuto: () => number;
-    readonly __wbg_wasmopusdecoderesult_free: (a: number, b: number) => void;
-    readonly dav1d_apply_grain: (a: number, b: number, c: number) => number;
-    readonly dav1d_close: (a: number) => void;
-    readonly dav1d_data_create: (a: number, b: number) => number;
-    readonly dav1d_data_props_unref: (a: number) => void;
-    readonly dav1d_data_unref: (a: number) => void;
-    readonly dav1d_data_wrap: (a: number, b: number, c: number, d: number, e: number) => number;
-    readonly dav1d_data_wrap_user_data: (a: number, b: number, c: number, d: number) => number;
-    readonly dav1d_default_settings: (a: number) => void;
-    readonly dav1d_flush: (a: number) => void;
-    readonly dav1d_get_decode_error_data_props: (a: number, b: number) => number;
-    readonly dav1d_get_event_flags: (a: number, b: number) => number;
-    readonly dav1d_get_frame_delay: (a: number) => number;
-    readonly dav1d_get_picture: (a: number, b: number) => number;
-    readonly dav1d_open: (a: number, b: number) => number;
-    readonly dav1d_parse_sequence_header: (a: number, b: number, c: number) => number;
-    readonly dav1d_picture_unref: (a: number) => void;
-    readonly dav1d_send_data: (a: number, b: number) => number;
-    readonly dav1d_version: () => number;
-    readonly dav1d_version_api: () => number;
-    readonly dav1d_set_cpu_flags_mask: (a: number) => void;
+    readonly wasmcafencoder_header: (a: number) => any;
+    readonly __wbg_wasmcafencoder_free: (a: number, b: number) => void;
+    readonly wasmwavencoder_header: (a: number) => any;
+    readonly __wbg_wasmwavencoder_free: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
