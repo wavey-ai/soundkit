@@ -149,7 +149,12 @@ pub struct StreamEncoder {
     flac_frame_size: usize,
     flac_sample_rate: u32,
     flac_channels: u8,
+    /// Pushed samples not yet encoded start at `flac_start`. Blocks are read
+    /// at that offset and the encoded prefix is removed once per push:
+    /// removing each block from the front moves the rest of a long push for
+    /// every block.
     flac_frame: Vec<i32>,
+    flac_start: usize,
     flac_stream: Vec<u8>,
     flac_entries: Vec<SoundKitIndexEntry>,
     flac_frames: u64,
@@ -183,6 +188,7 @@ impl StreamEncoder {
             flac_sample_rate: 0,
             flac_channels: 0,
             flac_frame: Vec::new(),
+            flac_start: 0,
             flac_stream: Vec::new(),
             flac_entries: Vec::new(),
             flac_frames: 0,
@@ -261,12 +267,19 @@ impl StreamEncoder {
         if pcm.len() % channels != 0 {
             return Err("FLAC PCM sample count must be divisible by channel count".to_string());
         }
+        self.compact_flac();
         self.flac_frame.extend_from_slice(pcm);
         let mut packets = Vec::new();
-        while self.flac_frame.len() / channels >= self.flac_frame_size + FLAC_MIN_BLOCK_SIZE {
-            self.emit_flac(&mut packets, self.flac_frame_size)?;
-        }
-        Ok(packets)
+        let result = loop {
+            if self.flac_pending() / channels < self.flac_frame_size + FLAC_MIN_BLOCK_SIZE {
+                break Ok(());
+            }
+            if let Err(error) = self.emit_flac(&mut packets, self.flac_frame_size) {
+                break Err(error);
+            }
+        };
+        self.compact_flac();
+        result.map(|()| packets)
     }
 
     /// Flush the final partial Opus block, zero-padding the encoder input.
@@ -285,7 +298,7 @@ impl StreamEncoder {
             return Ok(packets);
         }
         let channels = self.flac_channels as usize;
-        let mut remaining = self.flac_frame.len() / channels;
+        let mut remaining = self.flac_pending() / channels;
         if remaining == 0 {
             return Ok(packets);
         }
@@ -301,13 +314,20 @@ impl StreamEncoder {
             } else {
                 self.flac_frame_size
             };
-            self.emit_flac(&mut packets, count)?;
-            remaining = self.flac_frame.len() / channels;
+            let emitted = self.emit_flac(&mut packets, count);
+            if emitted.is_err() {
+                self.compact_flac();
+                return emitted.map(|()| packets);
+            }
+            remaining = self.flac_pending() / channels;
         }
-        if remaining > 0 {
-            self.emit_flac(&mut packets, remaining)?;
-        }
-        Ok(packets)
+        let result = if remaining > 0 {
+            self.emit_flac(&mut packets, remaining)
+        } else {
+            Ok(())
+        };
+        self.compact_flac();
+        result.map(|()| packets)
     }
 
     pub fn opus_stream(&self) -> &[u8] {
@@ -429,14 +449,15 @@ impl StreamEncoder {
             ));
         }
         let sample_count = frame_count * channels;
-        if self.flac_frame.len() < sample_count {
+        if self.flac_pending() < sample_count {
             return Err("FLAC block is incomplete".to_string());
         }
+        let block = &self.flac_frame[self.flac_start..self.flac_start + sample_count];
         let mut output = Vec::with_capacity(sample_count.saturating_mul(4).saturating_add(64));
         self.flac
             .as_mut()
             .ok_or_else(|| "FLAC encoder is unavailable".to_string())?
-            .encode_i32_block_into(&self.flac_frame[..sample_count], &mut output)
+            .encode_i32_block_into(block, &mut output)
             .map_err(|error| error.to_string())?;
         if output.is_empty() {
             return Err("FLAC emitted an empty packet".to_string());
@@ -465,9 +486,20 @@ impl StreamEncoder {
             frame_count: frame_count as u32,
         });
         self.flac_frames += frame_count as u64;
-        self.flac_frame.copy_within(sample_count.., 0);
-        self.flac_frame.truncate(self.flac_frame.len() - sample_count);
+        self.flac_start += sample_count;
         Ok(())
+    }
+
+    /// Samples pushed and not yet encoded.
+    fn flac_pending(&self) -> usize {
+        self.flac_frame.len() - self.flac_start
+    }
+
+    fn compact_flac(&mut self) {
+        if self.flac_start > 0 {
+            self.flac_frame.drain(..self.flac_start);
+            self.flac_start = 0;
+        }
     }
 }
 
@@ -486,7 +518,11 @@ fn frame_soundkit_packet(
     if payload.is_empty() || frame_count == 0 {
         return Err("A SoundKit stream packet is empty".to_string());
     }
-    let mut header = FrameHeaderV2::new(
+    // With a CRC, these are the bytes of `with_packet_crc32`: the header is
+    // encoded with a zero CRC, and the CRC-32 of the header before that field
+    // and the payload replaces it. `crc32fast` computes the same IEEE CRC-32
+    // with the processor's CRC instructions where they exist.
+    let header = FrameHeaderV2::new(
         encoding,
         payload.len() as u32,
         frame_count,
@@ -496,15 +532,19 @@ fn frame_soundkit_packet(
         Endianness::LittleEndian,
         Some(packet_sequence),
         Some(pts),
-        None,
+        include_crc.then_some(0),
     )?;
-    if include_crc {
-        header = header.with_packet_crc32(&payload)?;
-    }
     let mut framed = Vec::with_capacity(header.size() + payload.len());
     header
         .encode(&mut framed)
         .map_err(|error| error.to_string())?;
+    if include_crc {
+        let crc_at = framed.len() - 4;
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&framed[..crc_at]);
+        hasher.update(&payload);
+        framed[crc_at..].copy_from_slice(&hasher.finalize().to_be_bytes());
+    }
     framed.extend_from_slice(&payload);
     Ok(framed)
 }
@@ -903,5 +943,347 @@ mod tests {
             let bytes = stream.index_bytes().unwrap();
             assert_eq!(decode_soundkit_index(&bytes).unwrap(), stream.index);
         }
+    }
+
+    fn test_pcm(frames: usize, channels: usize) -> Vec<i32> {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        (0..frames * channels)
+            .map(|n| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let period = 400 + 37 * (n % channels) as i64;
+                let phase = ((n / channels) as i64) % period;
+                let triangle = (2 * phase - period).abs() * 12_000 - 2_400_000;
+                triangle as i32 + (state % 4_001) as i32 - 2_000
+            })
+            .collect()
+    }
+
+    /// The packet framing before the CRC-32 was computed here: the
+    /// `frame_header` CRC of `with_packet_crc32`.
+    #[allow(clippy::too_many_arguments)]
+    fn reference_packet(
+        encoding: EncodingFlag,
+        payload: Vec<u8>,
+        frame_count: u32,
+        sample_rate: u32,
+        channels: u8,
+        bits_per_sample: u8,
+        packet_sequence: u64,
+        pts: u64,
+        include_crc: bool,
+    ) -> Result<Vec<u8>, String> {
+        if payload.is_empty() || frame_count == 0 {
+            return Err("A SoundKit stream packet is empty".to_string());
+        }
+        let mut header = FrameHeaderV2::new(
+            encoding,
+            payload.len() as u32,
+            frame_count,
+            sample_rate,
+            channels,
+            bits_per_sample,
+            Endianness::LittleEndian,
+            Some(packet_sequence),
+            Some(pts),
+            None,
+        )?;
+        if include_crc {
+            header = header.with_packet_crc32(&payload)?;
+        }
+        let mut framed = Vec::with_capacity(header.size() + payload.len());
+        header
+            .encode(&mut framed)
+            .map_err(|error| error.to_string())?;
+        framed.extend_from_slice(&payload);
+        Ok(framed)
+    }
+
+    /// The FLAC half of `StreamEncoder` before blocks were read at an
+    /// offset: each block is removed from the front of the pending samples.
+    struct ReferenceFlac {
+        encoder: FlacFrameEncoder,
+        frame_size: usize,
+        channels: u8,
+        include_crc: bool,
+        frame: Vec<i32>,
+        stream: Vec<u8>,
+        entries: Vec<SoundKitIndexEntry>,
+        frames: u64,
+    }
+
+    type PacketView = (u8, Vec<u8>, u64, u32);
+
+    impl ReferenceFlac {
+        fn new(channels: u8, frame_size: Option<usize>, include_crc: bool) -> Self {
+            let frame_size = frame_size.unwrap_or_else(|| low_latency_flac_frame_size(48_000));
+            let config = FlacFrameConfig::new(
+                48_000,
+                u16::from(channels),
+                24,
+                frame_size as u32,
+                FlacProfile::Balanced,
+            )
+            .unwrap();
+            Self {
+                encoder: FlacFrameEncoder::new(config).unwrap(),
+                frame_size,
+                channels,
+                include_crc,
+                frame: Vec::new(),
+                stream: Vec::new(),
+                entries: Vec::new(),
+                frames: 0,
+            }
+        }
+
+        fn push(&mut self, pcm: &[i32]) -> Result<Vec<PacketView>, String> {
+            let channels = self.channels as usize;
+            if pcm.len() % channels != 0 {
+                return Err("FLAC PCM sample count must be divisible by channel count".to_string());
+            }
+            self.frame.extend_from_slice(pcm);
+            let mut packets = Vec::new();
+            while self.frame.len() / channels >= self.frame_size + FLAC_MIN_BLOCK_SIZE {
+                self.emit(&mut packets, self.frame_size)?;
+            }
+            Ok(packets)
+        }
+
+        fn finish(&mut self) -> Result<Vec<PacketView>, String> {
+            let mut packets = Vec::new();
+            let channels = self.channels as usize;
+            let mut remaining = self.frame.len() / channels;
+            if remaining == 0 {
+                return Ok(packets);
+            }
+            if self.frames == 0 && remaining < FLAC_MIN_BLOCK_SIZE {
+                return Err(format!(
+                    "FLAC requires at least {FLAC_MIN_BLOCK_SIZE} PCM frames"
+                ));
+            }
+            while remaining > self.frame_size {
+                let after_full = remaining - self.frame_size;
+                let count = if after_full < FLAC_MIN_BLOCK_SIZE {
+                    remaining - FLAC_MIN_BLOCK_SIZE
+                } else {
+                    self.frame_size
+                };
+                self.emit(&mut packets, count)?;
+                remaining = self.frame.len() / channels;
+            }
+            if remaining > 0 {
+                self.emit(&mut packets, remaining)?;
+            }
+            Ok(packets)
+        }
+
+        fn emit(
+            &mut self,
+            packets: &mut Vec<PacketView>,
+            frame_count: usize,
+        ) -> Result<(), String> {
+            let channels = self.channels as usize;
+            if !(FLAC_MIN_BLOCK_SIZE..=self.frame_size).contains(&frame_count) {
+                return Err(format!(
+                    "FLAC block has {frame_count} frames, expected {FLAC_MIN_BLOCK_SIZE}..={}",
+                    self.frame_size
+                ));
+            }
+            let sample_count = frame_count * channels;
+            if self.frame.len() < sample_count {
+                return Err("FLAC block is incomplete".to_string());
+            }
+            let mut output = Vec::with_capacity(sample_count.saturating_mul(4).saturating_add(64));
+            self.encoder
+                .encode_i32_block_into(&self.frame[..sample_count], &mut output)
+                .map_err(|error| error.to_string())?;
+            if output.is_empty() {
+                return Err("FLAC emitted an empty packet".to_string());
+            }
+            let start_frame = self.frames;
+            let bytes = reference_packet(
+                EncodingFlag::FLAC,
+                output,
+                frame_count as u32,
+                48_000,
+                self.channels,
+                24,
+                self.entries.len() as u64,
+                start_frame,
+                self.include_crc,
+            )?;
+            self.entries.push(SoundKitIndexEntry {
+                byte_offset: self.stream.len() as u64,
+                start_frame,
+            });
+            self.stream.extend_from_slice(&bytes);
+            packets.push((
+                StreamCodec::Flac as u8,
+                bytes,
+                start_frame,
+                frame_count as u32,
+            ));
+            self.frames += frame_count as u64;
+            self.frame.copy_within(sample_count.., 0);
+            self.frame.truncate(self.frame.len() - sample_count);
+            Ok(())
+        }
+    }
+
+    fn view(result: Result<Vec<StreamPacket>, String>) -> Result<Vec<PacketView>, String> {
+        result.map(|packets| {
+            packets
+                .into_iter()
+                .map(|packet| {
+                    (
+                        packet.codec as u8,
+                        packet.bytes,
+                        packet.start_frame,
+                        packet.frame_count,
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// Pushes `pcm` in pieces of `piece` frames to both encoders, with a
+    /// sample count that is not a whole frame after `ragged` pieces.
+    fn compare_flac(
+        pcm: &[i32],
+        channels: u8,
+        frame_size: Option<usize>,
+        crc: bool,
+        piece: usize,
+        ragged: Option<usize>,
+    ) {
+        let options = PcmOpusStreamOptions {
+            include_packet_crc32: crc,
+            ..PcmOpusStreamOptions::default()
+        };
+        let mut actual = StreamEncoder::new(true, &options).unwrap();
+        actual
+            .ensure_flac_geometry(48_000, channels, frame_size)
+            .unwrap();
+        let mut reference = ReferenceFlac::new(channels, frame_size, crc);
+        for (index, chunk) in pcm.chunks(piece * usize::from(channels)).enumerate() {
+            if Some(index) == ragged && channels > 1 {
+                let odd = &chunk[..chunk.len() - 1];
+                assert_eq!(view(actual.push_flac_i32(odd)), reference.push(odd));
+            }
+            assert_eq!(view(actual.push_flac_i32(chunk)), reference.push(chunk));
+        }
+        assert_eq!(view(actual.finish_flac()), reference.finish());
+        assert_eq!(view(actual.finish_flac()), reference.finish());
+        assert_eq!(actual.flac_stream(), reference.stream.as_slice());
+        assert_eq!(actual.flac_entries(), reference.entries.as_slice());
+        assert_eq!(actual.flac_frames(), reference.frames);
+    }
+
+    /// The offset encoder returns the same packets, errors and stream as the
+    /// front-removing encoder for one-shot and piecewise pushes.
+    #[test]
+    fn flac_stream_matches_front_removing_encoder() {
+        let cases: [(u8, Option<usize>, bool, usize); 7] = [
+            (2, None, true, 48_000 * 3 + 517),
+            (2, None, false, 48_000 * 3 + 517),
+            (1, Some(4_096), true, 48_000 * 2 + 33),
+            (6, Some(1_000), true, 20_000 + 31),
+            // The final block of five frames is below the minimum: an error.
+            (2, Some(32), true, 4_000 + 5),
+            (2, Some(4_608), true, 4_608 * 4),
+            (2, None, true, 31),
+        ];
+        for (channels, frame_size, crc, frames) in cases {
+            let pcm = test_pcm(frames, usize::from(channels));
+            for piece in [1usize, 7, 241, 48_000, frames / 3 + 1, frames] {
+                compare_flac(&pcm, channels, frame_size, crc, piece, None);
+            }
+            compare_flac(&pcm, channels, frame_size, crc, 1_000, Some(2));
+        }
+    }
+
+    #[test]
+    fn packet_framing_matches_frame_header_crc() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        for length in [0usize, 1, 3, 4, 17, 64, 1_000, 9_999] {
+            for (sequence, pts) in [
+                (0u64, 0u64),
+                (7, 1_680),
+                (u64::from(u32::MAX) + 9, u64::MAX),
+            ] {
+                for crc in [true, false] {
+                    let payload: Vec<u8> = (0..length)
+                        .map(|_| {
+                            state ^= state << 13;
+                            state ^= state >> 7;
+                            state ^= state << 17;
+                            state as u8
+                        })
+                        .collect();
+                    for (encoding, bits) in [(EncodingFlag::FLAC, 24u8), (EncodingFlag::Opus, 0)] {
+                        let args = (encoding, 240u32, 48_000u32, 2u8, bits, sequence, pts, crc);
+                        assert_eq!(
+                            frame_soundkit_packet(
+                                args.0,
+                                payload.clone(),
+                                args.1,
+                                args.2,
+                                args.3,
+                                args.4,
+                                args.5,
+                                args.6,
+                                args.7
+                            ),
+                            reference_packet(
+                                args.0,
+                                payload.clone(),
+                                args.1,
+                                args.2,
+                                args.3,
+                                args.4,
+                                args.5,
+                                args.6,
+                                args.7
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flac_stream_errors_are_unchanged() {
+        let options = PcmOpusStreamOptions::default();
+        let mut encoder = StreamEncoder::new(true, &options).unwrap();
+        assert_eq!(
+            encoder.push_flac_i32(&[0; 4]).unwrap_err(),
+            "FLAC geometry has not been declared"
+        );
+        encoder.ensure_flac_geometry(48_000, 2, Some(64)).unwrap();
+        assert_eq!(
+            encoder.push_flac_i32(&[0; 3]).unwrap_err(),
+            "FLAC PCM sample count must be divisible by channel count"
+        );
+        encoder.push_flac_i32(&[0; 62]).unwrap();
+        assert_eq!(
+            encoder.finish_flac().unwrap_err(),
+            "FLAC requires at least 32 PCM frames"
+        );
+        let counts = |packets: Vec<StreamPacket>| {
+            packets
+                .iter()
+                .map(|packet| packet.frame_count)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            counts(encoder.push_flac_i32(&test_pcm(200, 2)).unwrap()),
+            [64, 64, 64]
+        );
+        assert_eq!(counts(encoder.finish_flac().unwrap()), [39]);
+        assert_eq!(encoder.flac_frames(), 231);
+        assert!(encoder.finish_flac().unwrap().is_empty());
     }
 }
