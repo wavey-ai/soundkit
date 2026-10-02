@@ -1953,13 +1953,22 @@ fn trim_interleaved_audio(
             "PCM trim exceeds decoded packet".to_owned(),
         ));
     }
-    Ok(Some(AudioData::new(
+    // A packet kept whole is returned as it is; a trimmed one keeps its
+    // allocation.
+    if start == 0 && end * bytes_per_frame == audio.data().len() {
+        return Ok(Some(audio));
+    }
+    let (bits, channels, rate) = (
         audio.bits_per_sample(),
         audio.channel_count(),
         audio.sampling_rate(),
-        audio.data()[start * bytes_per_frame..end * bytes_per_frame].to_vec(),
-        audio.audio_format(),
-        audio.endianness(),
+    );
+    let (format, endianness) = (audio.audio_format(), audio.endianness());
+    let mut data = audio.into_data();
+    data.truncate(end * bytes_per_frame);
+    data.drain(..start * bytes_per_frame);
+    Ok(Some(AudioData::new(
+        bits, channels, rate, data, format, endianness,
     )))
 }
 

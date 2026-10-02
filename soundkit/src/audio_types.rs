@@ -51,6 +51,11 @@ impl AudioData {
         &self.data
     }
 
+    /// The sample bytes, without a copy.
+    pub fn into_data(self) -> Vec<u8> {
+        self.data
+    }
+
     pub fn audio_format(&self) -> EncodingFlag {
         self.audio_format
     }
