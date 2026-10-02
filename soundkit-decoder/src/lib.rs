@@ -2860,6 +2860,15 @@ impl DecodePipelineHandle {
                 })
                 .is_err()
         {
+            // A worker that has stopped never drains its queue, so a full
+            // queue would refuse every later send as full.
+            if self
+                .worker
+                .as_ref()
+                .is_none_or(|worker| worker.is_finished())
+            {
+                return Err(DecodeError::PipelineClosed);
+            }
             return Err(DecodeError::InputBufferFull);
         }
 
@@ -3775,6 +3784,30 @@ mod tests {
             .join("testdata")
             .join("golden")
             .join(file)
+    }
+
+    /// A pipeline whose decoder stopped with input still counted as queued
+    /// reports itself closed, not full, so a caller that waits for room
+    /// stops waiting.
+    #[test]
+    fn a_stopped_pipeline_reports_closed_not_full() {
+        let mut pipeline = DecodePipeline::spawn();
+        pipeline.send(Bytes::from(vec![0u8; 1024 * 1024])).unwrap();
+        let first = pipeline.recv().expect("the decoder reports an error");
+        assert!(first.is_err());
+        let start = std::time::Instant::now();
+        while !pipeline.worker.as_ref().unwrap().is_finished() {
+            assert!(start.elapsed().as_secs() < 20, "the decoder did not stop");
+            std::thread::yield_now();
+        }
+        // Chunks sent while the decoder was stopping stay counted as queued.
+        pipeline
+            .queued_input_bytes
+            .store(MAX_QUEUED_INPUT_BYTES, Ordering::Release);
+        assert!(matches!(
+            pipeline.send(Bytes::from_static(b"more")),
+            Err(DecodeError::PipelineClosed)
+        ));
     }
 
     #[test]
