@@ -266,20 +266,41 @@ impl Default for OggPacketParser {
     }
 }
 
-pub fn ogg_page_crc(page: &[u8]) -> u32 {
-    let mut crc = 0u32;
-    for (index, byte) in page.iter().copied().enumerate() {
-        let byte = if (22..26).contains(&index) { 0 } else { byte };
-        crc ^= u32::from(byte) << 24;
-        for _ in 0..8 {
+/// The Ogg CRC-32 (polynomial 0x04C11DB7, no reflection, zero start) for
+/// each byte value, so the checksum reads one byte per step.
+const OGG_CRC_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut index = 0;
+    while index < 256 {
+        let mut crc = (index as u32) << 24;
+        let mut bit = 0;
+        while bit < 8 {
             crc = if crc & 0x8000_0000 != 0 {
                 (crc << 1) ^ 0x04C1_1DB7
             } else {
                 crc << 1
             };
+            bit += 1;
         }
+        table[index] = crc;
+        index += 1;
+    }
+    table
+};
+
+fn ogg_crc_update(mut crc: u32, bytes: &[u8]) -> u32 {
+    for &byte in bytes {
+        crc = (crc << 8) ^ OGG_CRC_TABLE[usize::from((crc >> 24) as u8 ^ byte)];
     }
     crc
+}
+
+/// The CRC of a page with its checksum field, bytes 22 to 25, read as zero.
+pub fn ogg_page_crc(page: &[u8]) -> u32 {
+    let crc = ogg_crc_update(0, &page[..page.len().min(22)]);
+    let zeros = page.len().clamp(22, 26) - 22;
+    let crc = ogg_crc_update(crc, &[0u8; 4][..zeros]);
+    ogg_crc_update(crc, page.get(26..).unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -371,5 +392,42 @@ mod tests {
             .add(&page(0x01, 1, 9, 1, &[1], &[0xbb]))
             .unwrap_err()
             .contains("packet budget"));
+    }
+
+    /// The checksum computed one bit at a time, as it was.
+    fn reference_page_crc(page: &[u8]) -> u32 {
+        let mut crc = 0u32;
+        for (index, byte) in page.iter().copied().enumerate() {
+            let byte = if (22..26).contains(&index) { 0 } else { byte };
+            crc ^= u32::from(byte) << 24;
+            for _ in 0..8 {
+                crc = if crc & 0x8000_0000 != 0 {
+                    (crc << 1) ^ 0x04C1_1DB7
+                } else {
+                    crc << 1
+                };
+            }
+        }
+        crc
+    }
+
+    #[test]
+    fn table_crc_matches_bitwise_crc() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let data: Vec<u8> = (0..70_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        for length in (0..64).chain([255, 4_096, 65_307, 70_000]) {
+            assert_eq!(
+                ogg_page_crc(&data[..length]),
+                reference_page_crc(&data[..length]),
+                "{length}"
+            );
+        }
     }
 }

@@ -281,7 +281,10 @@ impl WavStreamProcessor {
                         self.state = StreamWavState::ReadingData { remaining };
                         return Ok(None); // Wait for more data.
                     }
-                    let data_chunk: Vec<u8> = self.buffer.drain(..len).collect();
+                    // The block keeps the buffer's allocation; only the
+                    // partial frame after it is copied.
+                    let rest = self.buffer.split_off(len);
+                    let data_chunk = std::mem::replace(&mut self.buffer, rest);
                     remaining -= len as u64;
                     self.data_chunk_collected += len as u64;
                     self.state = if remaining == 0 {
