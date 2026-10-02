@@ -818,12 +818,16 @@ impl WasmCanonicalPcmDecoder {
             }
             let frame_count = available.min(CANONICAL_PCM_BLOCK_FRAMES);
             let end = self.pending_start + frame_count;
-            let mut pcm = Vec::with_capacity(frame_count * 2 * std::mem::size_of::<i16>());
-            for sample in &self.pending_left[self.pending_start..end] {
-                pcm.extend_from_slice(&sample.to_le_bytes());
-            }
-            for sample in &self.pending_right[self.pending_start..end] {
-                pcm.extend_from_slice(&sample.to_le_bytes());
+            // The left plane, then the right, as little-endian bytes.
+            let mut pcm = vec![0u8; frame_count * 2 * std::mem::size_of::<i16>()];
+            let (left, right) = pcm.split_at_mut(frame_count * 2);
+            for (plane, samples) in [
+                (left, &self.pending_left[self.pending_start..end]),
+                (right, &self.pending_right[self.pending_start..end]),
+            ] {
+                for (target, sample) in plane.chunks_exact_mut(2).zip(samples) {
+                    target.copy_from_slice(&sample.to_le_bytes());
+                }
             }
             let start_frame = self.emitted_frames;
             self.emitted_frames = self
@@ -4889,16 +4893,11 @@ where
 
 #[cfg(any(feature = "aac", feature = "m4a", feature = "mp3"))]
 fn audio_data_i16(sample_rate: u32, channels: u8, samples: &[i16]) -> AudioData {
-    let mut bytes = Vec::with_capacity(samples.len() * 2);
-    for sample in samples {
-        bytes.extend_from_slice(&sample.to_le_bytes());
-    }
-
     AudioData::new(
         16,
         channels,
         sample_rate,
-        bytes,
+        soundkit::audio_bytes::i16s_to_le_bytes(samples),
         frame_header::EncodingFlag::PCMSigned,
         frame_header::Endianness::LittleEndian,
     )
@@ -4906,33 +4905,7 @@ fn audio_data_i16(sample_rate: u32, channels: u8, samples: &[i16]) -> AudioData 
 
 #[cfg(feature = "flac")]
 fn audio_data_i32(sample_rate: u32, channels: u8, bits: u8, samples: &[i32]) -> AudioData {
-    let bytes_per_sample = bits.div_ceil(8) as usize;
-    let mut bytes = Vec::with_capacity(samples.len() * bytes_per_sample);
-
-    match bits {
-        1..=8 => {
-            for sample in samples {
-                bytes.push((*sample + 128) as u8);
-            }
-        }
-        9..=16 => {
-            for sample in samples {
-                bytes.extend_from_slice(&(*sample as i16).to_le_bytes());
-            }
-        }
-        17..=24 => {
-            for sample in samples {
-                let le = sample.to_le_bytes();
-                bytes.extend_from_slice(&le[..3]);
-            }
-        }
-        _ => {
-            for sample in samples {
-                bytes.extend_from_slice(&sample.to_le_bytes());
-            }
-        }
-    }
-
+    let bytes = soundkit::audio_bytes::i32s_to_pcm_bytes(samples, bits);
     AudioData::new(
         bits,
         channels,

@@ -1521,11 +1521,19 @@ fn symphonia_audio_to_i16(decoded: SymphoniaAudioBufferRef<'_>) -> Result<AudioD
         .map_err(|_| DecodeError::DecodingFailed("decoded channel count exceeds u8".to_owned()))?;
     let mut float_samples = Vec::with_capacity(decoded.samples_interleaved());
     decoded.copy_to_vec_interleaved::<f32>(&mut float_samples);
-    let interleaved = float_samples
-        .into_iter()
-        .map(float_sample_to_i16)
-        .collect::<Vec<_>>();
-    Ok(create_audio_data_i16(sample_rate, channels, &interleaved))
+    // One pass from float samples to 16-bit bytes.
+    let mut bytes = vec![0u8; float_samples.len() * 2];
+    for (target, &sample) in bytes.chunks_exact_mut(2).zip(&float_samples) {
+        target.copy_from_slice(&float_sample_to_i16(sample).to_le_bytes());
+    }
+    Ok(AudioData::new(
+        16,
+        channels,
+        sample_rate,
+        bytes,
+        EncodingFlag::PCMSigned,
+        Endianness::LittleEndian,
+    ))
 }
 
 fn make_aac_audio_decoder(track: &MediaTrackConfig) -> Result<SeekableAudioDecoder, DecodeError> {
@@ -3247,16 +3255,11 @@ fn flush_decoder(
 
 /// Create AudioData from i16 samples
 fn create_audio_data_i16(sample_rate: u32, channels: u8, samples: &[i16]) -> AudioData {
-    let mut bytes = Vec::with_capacity(samples.len() * 2);
-    for &sample in samples {
-        bytes.extend_from_slice(&sample.to_le_bytes());
-    }
-
     AudioData::new(
         16, // bits_per_sample
         channels,
         sample_rate,
-        bytes,
+        soundkit::audio_bytes::i16s_to_le_bytes(samples),
         EncodingFlag::PCMSigned,
         Endianness::LittleEndian,
     )
@@ -3264,49 +3267,19 @@ fn create_audio_data_i16(sample_rate: u32, channels: u8, samples: &[i16]) -> Aud
 
 /// Create AudioData from i32 samples with specified bit depth.
 /// FLAC stores samples as i32 but with values in the original bit depth range.
-/// This function converts to the appropriate byte representation.
+/// This function converts to the appropriate byte representation: unsigned
+/// 0-255 up to 8 bits, then 16-, 24- and 32-bit little-endian.
 fn create_audio_data_i32_with_bits(
     sample_rate: u32,
     channels: u8,
     bits_per_sample: u8,
     samples: &[i32],
 ) -> AudioData {
-    let bytes_per_sample = bits_per_sample.div_ceil(8) as usize;
-    let mut bytes = Vec::with_capacity(samples.len() * bytes_per_sample);
-
-    match bits_per_sample {
-        1..=8 => {
-            // 8-bit: samples are in range -128 to 127, convert to unsigned 0-255
-            for &sample in samples {
-                bytes.push((sample + 128) as u8);
-            }
-        }
-        9..=16 => {
-            // 16-bit: samples are in range -32768 to 32767
-            for &sample in samples {
-                bytes.extend_from_slice(&(sample as i16).to_le_bytes());
-            }
-        }
-        17..=24 => {
-            // 24-bit: write 3 bytes per sample
-            for &sample in samples {
-                let le = sample.to_le_bytes();
-                bytes.extend_from_slice(&le[0..3]);
-            }
-        }
-        _ => {
-            // 32-bit: write full i32
-            for &sample in samples {
-                bytes.extend_from_slice(&sample.to_le_bytes());
-            }
-        }
-    }
-
     AudioData::new(
         bits_per_sample,
         channels,
         sample_rate,
-        bytes,
+        soundkit::audio_bytes::i32s_to_pcm_bytes(samples, bits_per_sample),
         EncodingFlag::PCMSigned,
         Endianness::LittleEndian,
     )

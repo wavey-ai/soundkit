@@ -279,13 +279,7 @@ impl SoundKitV2Decoder {
     }
 }
 
-fn i16s_to_le_bytes(samples: &[i16]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(samples.len() * 2);
-    for sample in samples {
-        bytes.extend_from_slice(&sample.to_le_bytes());
-    }
-    bytes
-}
+use soundkit::audio_bytes::i16s_to_le_bytes;
 
 fn pcm_signed_to_i16_bytes(payload: &[u8], bits: u8) -> Vec<u8> {
     match bits {

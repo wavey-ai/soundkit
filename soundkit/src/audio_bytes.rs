@@ -301,6 +301,36 @@ fn deinterleave_vecs<T, const W: usize>(
         .collect()
 }
 
+/// Little-endian bytes of `samples`, written into a buffer of the final size.
+pub fn i16s_to_le_bytes(samples: &[i16]) -> Vec<u8> {
+    let mut bytes = vec![0u8; samples.len() * 2];
+    for (target, sample) in bytes.chunks_exact_mut(2).zip(samples) {
+        target.copy_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
+/// PCM bytes of samples held in i32 at `bits_per_sample`: unsigned 8-bit up
+/// to 8 bits, then 16-bit, 24-bit and 32-bit little-endian.
+pub fn i32s_to_pcm_bytes(samples: &[i32], bits_per_sample: u8) -> Vec<u8> {
+    fn write<const W: usize>(samples: &[i32], bytes: impl Fn(i32) -> [u8; W]) -> Vec<u8> {
+        let mut out = vec![0u8; samples.len() * W];
+        for (target, &sample) in out.chunks_exact_mut(W).zip(samples) {
+            target.copy_from_slice(&bytes(sample));
+        }
+        out
+    }
+    match bits_per_sample {
+        1..=8 => samples.iter().map(|&sample| (sample + 128) as u8).collect(),
+        9..=16 => write(samples, |sample| (sample as i16).to_le_bytes()),
+        17..=24 => write(samples, |sample| {
+            let [a, b, c, _] = sample.to_le_bytes();
+            [a, b, c]
+        }),
+        _ => write(samples, i32::to_le_bytes),
+    }
+}
+
 pub fn s24le_to_i32_sample(sample_bytes: [u8; 3]) -> i32 {
     let sample = i32::from_le_bytes([sample_bytes[0], sample_bytes[1], sample_bytes[2], 0]);
     (sample << 8) >> 8 // sign extend
@@ -513,5 +543,47 @@ mod tests {
             }
         }
         assert!(std::panic::catch_unwind(|| deinterleave_vecs_s24(&input, 0)).is_err());
+    }
+
+    #[test]
+    fn pcm_byte_writers_match_sample_at_a_time_writers() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let samples: Vec<i32> = (0..3_001)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state as i32) >> (state >> 59)
+            })
+            .collect();
+        let shorts: Vec<i16> = samples.iter().map(|&sample| sample as i16).collect();
+        let mut want = Vec::new();
+        for sample in &shorts {
+            want.extend_from_slice(&sample.to_le_bytes());
+        }
+        assert_eq!(i16s_to_le_bytes(&shorts), want);
+        for bits in [1u8, 8, 9, 16, 17, 24, 25, 32, 0] {
+            let input: Vec<i32> = if bits <= 8 && bits > 0 {
+                samples.iter().map(|&sample| sample >> 24).collect()
+            } else {
+                samples.clone()
+            };
+            let mut want = Vec::new();
+            match bits {
+                1..=8 => input
+                    .iter()
+                    .for_each(|&sample| want.push((sample + 128) as u8)),
+                9..=16 => input
+                    .iter()
+                    .for_each(|&sample| want.extend_from_slice(&(sample as i16).to_le_bytes())),
+                17..=24 => input
+                    .iter()
+                    .for_each(|&sample| want.extend_from_slice(&sample.to_le_bytes()[0..3])),
+                _ => input
+                    .iter()
+                    .for_each(|&sample| want.extend_from_slice(&sample.to_le_bytes())),
+            }
+            assert_eq!(i32s_to_pcm_bytes(&input, bits), want, "{bits} bits");
+        }
     }
 }
