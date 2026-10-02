@@ -499,26 +499,100 @@ pub fn downsample_audio(audio: &AudioData, sampling_rate: usize) -> Result<Vec<V
     Ok(out)
 }
 
+/// Splits interleaved PCM bytes into frames of `frame_size` sample frames.
+///
+/// Bytes after the last whole frame wait for the next push. `finish` returns
+/// them as one last frame, padded with zero bytes to the full frame length.
+#[derive(Debug, Default)]
+pub struct PcmFrameSplitter {
+    frame_bytes: usize,
+    pending: Vec<u8>,
+}
+
+impl PcmFrameSplitter {
+    /// `frame_bytes` is the byte length of one frame of all channels.
+    pub fn new(frame_bytes: usize) -> Self {
+        Self {
+            frame_bytes,
+            pending: Vec::new(),
+        }
+    }
+
+    pub fn pending_bytes(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// The whole frames that `data`, after the bytes held from earlier
+    /// pushes, completes, in order. A frame length of zero is an error.
+    pub fn push(&mut self, data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+        if self.frame_bytes == 0 {
+            return Err("PCM frame length is zero".to_string());
+        }
+        let mut frames = Vec::new();
+        let mut data = data;
+        if !self.pending.is_empty() {
+            let take = (self.frame_bytes - self.pending.len()).min(data.len());
+            self.pending.extend_from_slice(&data[..take]);
+            data = &data[take..];
+            if self.pending.len() < self.frame_bytes {
+                return Ok(frames);
+            }
+            frames.push(std::mem::take(&mut self.pending));
+        }
+        let mut chunks = data.chunks_exact(self.frame_bytes);
+        frames.extend(chunks.by_ref().map(<[u8]>::to_vec));
+        self.pending.extend_from_slice(chunks.remainder());
+        Ok(frames)
+    }
+
+    /// The held bytes as one frame padded with zero bytes, or `None` when no
+    /// bytes are held.
+    pub fn finish(&mut self) -> Option<Vec<u8>> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let mut frame = std::mem::take(&mut self.pending);
+        frame.resize(self.frame_bytes, 0);
+        Some(frame)
+    }
+
+    pub fn reset(&mut self) {
+        self.pending.clear();
+    }
+}
+
+/// Encodes a WAV stream into v1 packets of `frame_size` sample frames.
+///
+/// `flush` encodes the last partial frame padded with silence, returns the
+/// packets with their offset table, and resets the encoder for a new stream.
 pub struct AudioEncoder<E: Encoder> {
     encoder: E,
     encoding_flag: EncodingFlag,
     wav_reader: WavStreamProcessor,
     frame_size: usize,
     packets: Vec<Vec<u8>>,
-    widow: Vec<AudioData>,
+    splitter: Option<(PcmFrameSplitter, AudioFormat)>,
+}
+
+/// The format of the PCM a WAV stream carries.
+#[derive(Clone, Copy, Debug)]
+struct AudioFormat {
+    bits_per_sample: u8,
+    channel_count: u8,
+    sampling_rate: u32,
+    audio_format: EncodingFlag,
+    endianness: Endianness,
 }
 
 impl<E: Encoder> AudioEncoder<E> {
     pub fn new(encoding_flag: EncodingFlag, frame_size: usize, encoder: E) -> Self {
-        let wav_reader = WavStreamProcessor::new();
-
         Self {
             encoder,
             encoding_flag,
-            wav_reader,
+            wav_reader: WavStreamProcessor::new(),
             frame_size,
             packets: Vec::new(),
-            widow: Vec::new(),
+            splitter: None,
         }
     }
 
@@ -530,99 +604,92 @@ impl<E: Encoder> AudioEncoder<E> {
         }
     }
 
-    pub fn flush(&mut self) -> Vec<u8> {
-        if let Some(widow) = self.widow.pop() {
-            let _ = self.encode(widow, true);
-        }
-
-        let mut offset = 0;
-        let mut offsets = Vec::new();
-        let mut encoded_data: Vec<u8> = Vec::new();
-        for chunk in &self.packets {
-            offsets.push(offset);
-            offset += chunk.len();
-            encoded_data.extend(chunk);
-        }
-
-        let mut final_encoded_data = Vec::new();
-        for i in 0..4 {
-            final_encoded_data.push(((offsets.len() >> (i * 8)) & 0xFF) as u8);
-        }
-
-        for offset in offsets {
-            for i in 0..4 {
-                final_encoded_data.push((offset >> (i * 8) & 0xFF) as u8);
-            }
-        }
-
-        final_encoded_data.extend(encoded_data);
-
+    /// Encodes the held partial frame, returns every packet of the stream
+    /// with the offset table, and resets the encoder.
+    pub fn flush(&mut self) -> Result<Vec<u8>, String> {
+        let result = self.finish_pending();
+        let packets = std::mem::take(&mut self.packets);
         self.reset();
+        result?;
 
-        final_encoded_data
+        let mut final_encoded_data =
+            Vec::with_capacity(4 + packets.len() * 4 + packets.iter().map(Vec::len).sum::<usize>());
+        final_encoded_data.extend_from_slice(&(packets.len() as u32).to_le_bytes());
+        let mut offset = 0usize;
+        for packet in &packets {
+            final_encoded_data.extend_from_slice(&(offset as u32).to_le_bytes());
+            offset += packet.len();
+        }
+        for packet in &packets {
+            final_encoded_data.extend_from_slice(packet);
+        }
+        Ok(final_encoded_data)
     }
 
+    /// Encodes every whole frame of `audio_data` after the bytes held from
+    /// earlier calls. With `is_last`, the remaining partial frame is encoded
+    /// padded with silence; otherwise it waits for the next call.
     pub fn encode(&mut self, audio_data: AudioData, is_last: bool) -> Result<(), String> {
-        let chunk_size = self.frame_size
-            * audio_data.channel_count() as usize
-            * audio_data.bits_per_sample() as usize;
-
-        let mut data = audio_data.data().to_owned();
-        if let Some(widow) = self.widow.pop() {
-            data.extend_from_slice(widow.data());
+        let format = AudioFormat {
+            bits_per_sample: audio_data.bits_per_sample(),
+            channel_count: audio_data.channel_count(),
+            sampling_rate: audio_data.sampling_rate(),
+            audio_format: audio_data.audio_format(),
+            endianness: audio_data.endianness(),
+        };
+        let frame_bytes = self.frame_size
+            * usize::from(format.channel_count)
+            * usize::from(format.bits_per_sample / 8);
+        let (splitter, _) = self
+            .splitter
+            .get_or_insert_with(|| (PcmFrameSplitter::new(frame_bytes), format));
+        let frames = splitter.push(audio_data.data())?;
+        for frame in frames {
+            self.encode_frame(format, &frame)?;
         }
+        if is_last {
+            self.finish_pending()?;
+        }
+        Ok(())
+    }
 
-        for chunk in data.chunks(chunk_size) {
-            let flag = if chunk.len() < chunk_size {
-                EncodingFlag::PCMFloat
-            } else {
-                self.encoding_flag
-            };
-
-            if flag == EncodingFlag::PCMFloat || !is_last {
-                let widow = AudioData::new(
-                    audio_data.bits_per_sample(),
-                    audio_data.channel_count(),
-                    audio_data.sampling_rate(),
-                    chunk.to_vec(),
-                    audio_data.audio_format(),
-                    audio_data.endianness(),
-                );
-                self.widow.push(widow);
-                return Ok(());
+    fn finish_pending(&mut self) -> Result<(), String> {
+        if let Some((mut splitter, format)) = self.splitter.take() {
+            if let Some(frame) = splitter.finish() {
+                self.encode_frame(format, &frame)?;
             }
-
-            let header = FrameHeader::new(
-                audio_data.audio_format(),
-                self.frame_size
-                    .try_into()
-                    .map_err(|_| "frame_size out of range".to_string())?,
-                audio_data.sampling_rate(),
-                audio_data.channel_count(),
-                audio_data.bits_per_sample(),
-                audio_data.endianness(),
-                None,
-                None,
-            )?;
-
-            let mut fullbuf = Vec::with_capacity(header.size() + chunk.len());
-            header
-                .encode(&mut fullbuf)
-                .map_err(|e| format!("Failed to encode frame header: {}", e))?;
-            fullbuf.extend_from_slice(chunk);
-
-            let packet = encode_audio_packet(self.encoding_flag, &mut self.encoder, &fullbuf)?;
-
-            self.packets.push(packet.to_vec());
         }
+        Ok(())
+    }
 
+    fn encode_frame(&mut self, format: AudioFormat, frame: &[u8]) -> Result<(), String> {
+        let header = FrameHeader::new(
+            format.audio_format,
+            self.frame_size
+                .try_into()
+                .map_err(|_| "frame_size out of range".to_string())?,
+            format.sampling_rate,
+            format.channel_count,
+            format.bits_per_sample,
+            format.endianness,
+            None,
+            None,
+        )?;
+        let mut fullbuf = Vec::with_capacity(header.size() + frame.len());
+        header
+            .encode(&mut fullbuf)
+            .map_err(|e| format!("Failed to encode frame header: {}", e))?;
+        fullbuf.extend_from_slice(frame);
+        let packet = encode_audio_packet(self.encoding_flag, &mut self.encoder, &fullbuf)?;
+        self.packets.push(packet.to_vec());
         Ok(())
     }
 
     fn reset(&mut self) {
         let _ = self.encoder.reset();
-
         self.wav_reader = WavStreamProcessor::new();
+        self.packets.clear();
+        self.splitter = None;
     }
 }
 
@@ -858,5 +925,101 @@ mod tests {
             .map(|&value| (value as f32 / 32768.0).to_bits())
             .collect();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn frame_splitter_keeps_every_byte_in_order() {
+        let data: Vec<u8> = (0..1_000u32).map(|i| i as u8).collect();
+        for piece in [1usize, 7, 12, 13, 1_000] {
+            let mut splitter = PcmFrameSplitter::new(12);
+            let mut out = Vec::new();
+            for chunk in data.chunks(piece) {
+                for frame in splitter.push(chunk).unwrap() {
+                    assert_eq!(frame.len(), 12);
+                    out.extend(frame);
+                }
+            }
+            let last = splitter.finish().unwrap();
+            assert_eq!(last.len(), 12);
+            out.extend(&last[..1_000 % 12]);
+            assert!(last[1_000 % 12..].iter().all(|&b| b == 0));
+            assert_eq!(out, data, "{piece}-byte pushes");
+            assert!(splitter.finish().is_none());
+        }
+        assert!(PcmFrameSplitter::new(0).push(&[1]).is_err());
+    }
+
+    struct CountingEncoder;
+
+    impl Encoder for CountingEncoder {
+        fn new(_: u32, _: u32, _: u32, _: u32, _: u32) -> Self {
+            CountingEncoder
+        }
+        fn init(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn encode_i16(&mut self, input: &[i16], output: &mut [u8]) -> Result<usize, String> {
+            for (target, sample) in output.chunks_exact_mut(2).zip(input) {
+                target.copy_from_slice(&sample.to_le_bytes());
+            }
+            Ok(input.len() * 2)
+        }
+        fn encode_i32(&mut self, _: &[i32], _: &mut [u8]) -> Result<usize, String> {
+            Err("unused".into())
+        }
+        fn reset(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// Every sample of the WAV is encoded once, in order, in frames of the
+    /// configured length, with the last frame padded; a second stream holds
+    /// only its own packets.
+    #[test]
+    fn audio_encoder_encodes_each_sample_once() {
+        let frames = 1_000usize;
+        let samples: Vec<i16> = (0..frames * 2)
+            .map(|i| (i as i16).wrapping_mul(37))
+            .collect();
+        let pcm: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&48_000u32.to_le_bytes());
+        wav.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&pcm);
+
+        let mut encoder = AudioEncoder::new(EncodingFlag::Opus, 240, CountingEncoder);
+        for round in 0..2 {
+            for chunk in wav.chunks(333 + round) {
+                encoder.add(chunk).unwrap();
+            }
+            let out = encoder.flush().unwrap();
+            let count = u32::from_le_bytes(out[..4].try_into().unwrap()) as usize;
+            assert_eq!(count, frames.div_ceil(240), "round {round}");
+            let mut decoded = Vec::new();
+            let packets = &out[4 + count * 4..];
+            let mut rest = packets;
+            while !rest.is_empty() {
+                let header = FrameHeader::decode(&mut &rest[..]).unwrap();
+                let payload = &rest[header.size()..header.size() + 240 * 4];
+                decoded.extend(
+                    payload
+                        .chunks_exact(2)
+                        .map(|b| i16::from_le_bytes([b[0], b[1]])),
+                );
+                rest = &rest[header.size() + 240 * 4..];
+            }
+            assert_eq!(&decoded[..samples.len()], &samples[..]);
+            assert!(decoded[samples.len()..].iter().all(|&s| s == 0));
+        }
     }
 }

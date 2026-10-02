@@ -1,23 +1,24 @@
-use crate::audio_bytes::{
-    deinterleave_vecs_f32, deinterleave_vecs_i16, deinterleave_vecs_s24, f32be_to_i16,
-    f32le_to_i16, s16be_to_i16, s16le_to_i16, s24be_to_i16, s24le_to_i16, s32be_to_i16,
-    s32le_to_i16,
-};
-use crate::audio_pipeline::{vec_i16_to_f32, vec_i32_to_f32};
+use crate::audio_bytes::{f32le_to_i16, s16le_to_i16, s24le_to_i16, s32le_to_i16};
+use crate::audio_pipeline::{audio_to_f32_channels, PcmFrameSplitter};
 use crate::wav::WavStreamProcessor;
 use frame_header::{EncodingFlag, Endianness, FrameHeader};
-use js_sys::{Array, Float32Array, Int16Array, Object, Reflect};
+use js_sys::{Array, Int16Array, Object, Reflect};
 use wasm_bindgen::prelude::*;
 use web_sys::Worker;
 
+/// Splits a WAV stream into 16-bit frames for a JavaScript encoder and
+/// collects the encoded packets it returns.
+///
+/// Call `into_frames` for each chunk, `finish_frames` for the last partial
+/// frame (padded with silence), `set_frame` for each encoded packet, and
+/// `flush` for the packed stream, which also resets the object.
 #[wasm_bindgen]
 struct WavToPkt {
     wav_reader: WavStreamProcessor,
-    audio_packets: Vec<u8>,
     frame_size: usize,
     packets: Vec<Vec<u8>>,
     bitrate: usize,
-    widow: Vec<u8>,
+    splitter: Option<PcmFrameSplitter>,
     idx: usize,
 }
 
@@ -29,11 +30,10 @@ impl WavToPkt {
 
         Self {
             wav_reader,
-            audio_packets: Vec::new(),
             frame_size,
             packets: Vec::new(),
             bitrate,
-            widow: Vec::new(),
+            splitter: None,
             idx: 0,
         }
     }
@@ -106,12 +106,15 @@ impl WavToPkt {
         self.packets.push(packet_data);
     }
 
+    /// The last partial frame, padded with silence, in the result shape of
+    /// `into_frames`; no frames when none is held.
+    #[wasm_bindgen]
+    pub fn finish_frames(&mut self) -> JsValue {
+        self._into_frames(&[], true)
+    }
+
     #[wasm_bindgen]
     pub fn flush(&mut self) -> Vec<u8> {
-        if self.widow.len() > 0 {
-            let _ = self._into_frames(&self.widow.clone(), true);
-        }
-
         let mut offset = 0;
         let mut offsets = Vec::new();
         let mut encoded_data: Vec<u8> = Vec::new();
@@ -157,25 +160,23 @@ impl WavToPkt {
         Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false)).unwrap();
         Reflect::set(&result, &JsValue::from_str("seq"), &JsValue::from(self.idx)).unwrap();
 
-        let chunk_size = self.frame_size * channel_count * bytes_per_sample as usize;
-
-        let mut owned_data;
-        if self.widow.len() > 0 {
-            owned_data = self.widow.clone();
-            owned_data.extend_from_slice(&data);
-            self.widow.drain(..);
-        } else {
-            owned_data = data.to_owned();
+        let chunk_size = self.frame_size * channel_count * bytes_per_sample;
+        let splitter = self
+            .splitter
+            .get_or_insert_with(|| PcmFrameSplitter::new(chunk_size));
+        let mut frames = match splitter.push(data) {
+            Ok(frames) => frames,
+            Err(error) => {
+                Reflect::set(&result, &JsValue::from_str("msg"), &JsValue::from(error)).unwrap();
+                return result.into();
+            }
+        };
+        if is_last {
+            frames.extend(splitter.finish());
         }
 
-        let mut converted_data: Vec<Vec<i16>> = Vec::new();
-
-        for chunk in owned_data.chunks(chunk_size) {
-            if chunk.len() < chunk_size {
-                self.widow.extend_from_slice(&chunk);
-                break;
-            }
-
+        let mut converted_data: Vec<Vec<i16>> = Vec::with_capacity(frames.len());
+        for chunk in &frames {
             let src = match bits_per_sample {
                 16 => s16le_to_i16(chunk),
                 24 => s24le_to_i16(chunk),
@@ -213,7 +214,7 @@ impl WavToPkt {
             return result.into();
         }
 
-        let mut nested_array = Array::new();
+        let nested_array = Array::new();
         for src in converted_data {
             let frame_array = Int16Array::from(&src[..]);
             nested_array.push(&frame_array.into());
@@ -244,6 +245,9 @@ impl WavToPkt {
 
     fn reset(&mut self) {
         self.wav_reader = WavStreamProcessor::new();
+        self.packets.clear();
+        self.splitter = None;
+        self.idx = 0;
     }
 }
 
@@ -286,17 +290,16 @@ impl WavToPcm {
                 )
                 .unwrap();
 
-                let channels = match audio.bits_per_sample() {
-                    16 => deinterleave_vecs_i16(&data, audio.channel_count() as usize)
-                        .iter()
-                        .map(|a| vec_i16_to_f32(a.clone()))
-                        .collect(),
-                    24 => deinterleave_vecs_s24(&data, audio.channel_count() as usize)
-                        .iter()
-                        .map(|a| vec_i32_to_f32(a.clone()))
-                        .collect(),
-                    32 => deinterleave_vecs_f32(&data, audio.channel_count() as usize),
-                    _ => todo!(),
+                // The samples of the decoded block, scaled by their own depth.
+                let channels = match audio_to_f32_channels(&audio) {
+                    Ok(channels) => channels,
+                    Err(error) => {
+                        Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::from(false))
+                            .unwrap();
+                        Reflect::set(&result, &JsValue::from_str("err"), &JsValue::from(error))
+                            .unwrap();
+                        return JsValue::from(result);
+                    }
                 };
 
                 let js_array = channels
@@ -314,8 +317,7 @@ impl WavToPcm {
                 return JsValue::from(result);
             }
             Err(error) => {
-                // Handle the error
-                println!("Error: {}", error);
+                Reflect::set(&result, &JsValue::from_str("err"), &JsValue::from(error)).unwrap();
             }
         }
 
