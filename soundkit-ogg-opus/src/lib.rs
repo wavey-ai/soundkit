@@ -336,8 +336,10 @@ impl OggOpusDecoder {
                 pcm_samples_written = end.saturating_sub(start),
                 "appending decoded PCM"
             );
+            let gain = opus_gain_factor(info.output_gain);
+            pcm_bytes.reserve((end - start) * 2);
             for sample in &self.scratch_buffer[start..end] {
-                let sample = apply_opus_output_gain(*sample, info.output_gain);
+                let sample = apply_gain_factor(*sample, gain);
                 pcm_bytes.extend_from_slice(&sample.to_le_bytes());
             }
 
@@ -368,12 +370,23 @@ impl OggOpusDecoder {
     }
 }
 
-#[cfg(feature = "decode")]
+#[cfg(all(test, feature = "decode"))]
 fn apply_opus_output_gain(sample: i16, gain_q8_db: i16) -> i16 {
-    if gain_q8_db == 0 {
+    apply_gain_factor(sample, opus_gain_factor(gain_q8_db))
+}
+
+/// The linear factor of an OpusHead output gain in Q7.8 dB, computed once
+/// per packet instead of once per sample. `None` for a gain of zero.
+#[cfg(feature = "decode")]
+fn opus_gain_factor(gain_q8_db: i16) -> Option<f64> {
+    (gain_q8_db != 0).then(|| 10_f64.powf(f64::from(gain_q8_db) / (20.0 * 256.0)))
+}
+
+#[cfg(feature = "decode")]
+fn apply_gain_factor(sample: i16, gain: Option<f64>) -> i16 {
+    let Some(gain) = gain else {
         return sample;
-    }
-    let gain = 10_f64.powf(f64::from(gain_q8_db) / (20.0 * 256.0));
+    };
     (f64::from(sample) * gain)
         .round()
         .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
@@ -900,5 +913,21 @@ mod tests {
             wav_bytes.starts_with(b"RIFF"),
             "decoded WAV output did not start with RIFF header"
         );
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn gain_factor_matches_per_sample_gain() {
+        for gain in [-32_768i16, -2_560, -1, 1, 77, 256, 2_560, 32_767] {
+            let factor = opus_gain_factor(gain);
+            for sample in (i16::MIN..=i16::MAX).step_by(37) {
+                let per_sample = (f64::from(sample) * 10_f64.powf(f64::from(gain) / (20.0 * 256.0)))
+                    .round()
+                    .clamp(f64::from(i16::MIN), f64::from(i16::MAX))
+                    as i16;
+                assert_eq!(apply_gain_factor(sample, factor), per_sample);
+            }
+        }
+        assert_eq!(opus_gain_factor(0), None);
     }
 }

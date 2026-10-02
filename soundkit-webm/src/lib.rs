@@ -210,11 +210,11 @@ fn read_xiph_lace_size(data: &[u8], pos: &mut usize) -> Result<usize, String> {
     }
 }
 
-fn split_laced_frames(
-    payload: &[u8],
+fn split_laced_frames<'a>(
+    payload: &'a [u8],
     data_start: usize,
     sizes: &[usize],
-) -> Result<Vec<Vec<u8>>, String> {
+) -> Result<Vec<&'a [u8]>, String> {
     let mut frames = Vec::with_capacity(sizes.len());
     let mut pos = data_start;
     for size in sizes {
@@ -224,7 +224,7 @@ fn split_laced_frames(
         if end > payload.len() {
             return Err("Laced frame extends past block payload".to_string());
         }
-        frames.push(payload[pos..end].to_vec());
+        frames.push(&payload[pos..end]);
         pos = end;
     }
     if pos != payload.len() {
@@ -233,9 +233,15 @@ fn split_laced_frames(
     Ok(frames)
 }
 
+#[cfg(test)]
 fn parse_block_frames(flags: u8, payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    block_frames(flags, payload).map(|frames| frames.into_iter().map(<[u8]>::to_vec).collect())
+}
+
+/// The frames of a block payload, borrowed from it.
+fn block_frames(flags: u8, payload: &[u8]) -> Result<Vec<&[u8]>, String> {
     match flags & 0x06 {
-        0x00 => Ok(vec![payload.to_vec()]),
+        0x00 => Ok(vec![payload]),
         0x02 => parse_xiph_laced_frames(payload),
         0x04 => parse_fixed_laced_frames(payload),
         0x06 => parse_ebml_laced_frames(payload),
@@ -243,7 +249,7 @@ fn parse_block_frames(flags: u8, payload: &[u8]) -> Result<Vec<Vec<u8>>, String>
     }
 }
 
-fn parse_xiph_laced_frames(payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+fn parse_xiph_laced_frames(payload: &[u8]) -> Result<Vec<&[u8]>, String> {
     let frame_count = payload
         .first()
         .map(|count| *count as usize + 1)
@@ -271,7 +277,7 @@ fn parse_xiph_laced_frames(payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     split_laced_frames(payload, pos, &sizes)
 }
 
-fn parse_fixed_laced_frames(payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+fn parse_fixed_laced_frames(payload: &[u8]) -> Result<Vec<&[u8]>, String> {
     let frame_count = payload
         .first()
         .map(|count| *count as usize + 1)
@@ -286,7 +292,7 @@ fn parse_fixed_laced_frames(payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     split_laced_frames(payload, data_start, &sizes)
 }
 
-fn parse_ebml_laced_frames(payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+fn parse_ebml_laced_frames(payload: &[u8]) -> Result<Vec<&[u8]>, String> {
     let frame_count = payload
         .first()
         .map(|count| *count as usize + 1)
@@ -351,6 +357,7 @@ fn parse_vorbis_codec_private(codec_private: &[u8]) -> Result<Vec<Vec<u8>>, Stri
         .ok_or_else(|| "Vorbis CodecPrivate header sizes exceed payload".to_string())?;
 
     split_laced_frames(codec_private, pos, &[ident_size, comment_size, setup_size])
+        .map(|headers| headers.into_iter().map(<[u8]>::to_vec).collect())
 }
 
 fn parse_opus_head_metadata(codec_private: &[u8]) -> Option<(u16, i16, u8)> {
@@ -670,12 +677,21 @@ impl WebmMediaDemuxer {
     }
 
     fn parse_media_clusters(&mut self) -> Result<usize, String> {
+        // The blocks are read from the buffer in place; it is lent out for
+        // the call and returned on every path.
+        let buffer = std::mem::take(&mut self.buffer);
+        let result = self.parse_media_clusters_in(&buffer);
+        self.buffer = buffer;
+        result
+    }
+
+    fn parse_media_clusters_in(&mut self, buffer: &[u8]) -> Result<usize, String> {
         let mut pos = 0usize;
-        while pos + 2 <= self.buffer.len() {
-            let Some((id, id_len)) = read_element_id(&self.buffer[pos..]) else {
+        while pos + 2 <= buffer.len() {
+            let Some((id, id_len)) = read_element_id(&buffer[pos..]) else {
                 break;
             };
-            let Some((size, size_len)) = read_vint(&self.buffer[pos + id_len..]) else {
+            let Some((size, size_len)) = read_vint(&buffer[pos + id_len..]) else {
                 break;
             };
             let header_len = id_len + size_len;
@@ -691,24 +707,23 @@ impl WebmMediaDemuxer {
             let data_end = data_start
                 .checked_add(size)
                 .ok_or_else(|| "WebM cluster element size overflow".to_string())?;
-            if data_end > self.buffer.len() {
+            if data_end > buffer.len() {
                 break;
             }
             match id {
                 CLUSTER_TIMECODE_ID => {
                     self.cluster_timecode =
-                        i64::try_from(read_uint(&self.buffer[data_start..data_end], size))
+                        i64::try_from(read_uint(&buffer[data_start..data_end], size))
                             .map_err(|_| "WebM cluster timecode exceeds i64".to_string())?;
                     pos = data_end;
                 }
                 SIMPLE_BLOCK_ID | BLOCK_ID => {
-                    let block = self.buffer[data_start..data_end].to_vec();
-                    self.emit_media_block(&block, id == SIMPLE_BLOCK_ID, None, None, None)?;
+                    let block = &buffer[data_start..data_end];
+                    self.emit_media_block(block, id == SIMPLE_BLOCK_ID, None, None, None)?;
                     pos = data_end;
                 }
                 BLOCK_GROUP_ID => {
-                    let group = self.buffer[data_start..data_end].to_vec();
-                    self.parse_media_block_group(&group)?;
+                    self.parse_media_block_group(&buffer[data_start..data_end])?;
                     pos = data_end;
                 }
                 _ => pos = data_end,
@@ -738,7 +753,7 @@ impl WebmMediaDemuxer {
                 return Err("truncated WebM BlockGroup".to_string());
             }
             match id {
-                BLOCK_ID => block = Some(data[start..end].to_vec()),
+                BLOCK_ID => block = Some(&data[start..end]),
                 BLOCK_DURATION_ID => {
                     duration_ticks = Some(read_uint(&data[start..end], size as usize))
                 }
@@ -752,7 +767,7 @@ impl WebmMediaDemuxer {
         }
         if let Some(block) = block {
             self.emit_media_block(
-                &block,
+                block,
                 false,
                 Some(!has_reference),
                 duration_ticks,
@@ -778,12 +793,11 @@ impl WebmMediaDemuxer {
         if data.len() < frame_start {
             return Err("truncated WebM block header".to_string());
         }
-        let track = self
+        let Some(track) = self
             .tracks
             .iter()
             .find(|track| track.track_number == track_number)
-            .cloned();
-        let Some(track) = track else {
+        else {
             return Ok(());
         };
         let relative = i16::from_be_bytes([data[track_len], data[track_len + 1]]) as i64;
@@ -801,7 +815,7 @@ impl WebmMediaDemuxer {
                 )
                 .ok_or_else(|| "WebM CodecDelay timestamp underflow".to_string())?;
         let is_keyframe = keyframe_override.unwrap_or(simple_block && flags & 0x80 != 0);
-        let frames = parse_block_frames(flags, &data[frame_start..])?;
+        let frames = block_frames(flags, &data[frame_start..])?;
         let frame_count = frames.len().max(1) as u64;
         let declared_frame_duration_ns = block_duration_ticks
             .map(|ticks| {
@@ -835,8 +849,10 @@ impl WebmMediaDemuxer {
                     .checked_add(offset)
                     .ok_or_else(|| "WebM laced frame timestamp overflow".to_string())?;
                 let frame_duration_ns = frame_durations[frame_index];
-                let mut encoded_frame = track.header_stripping_prefix.clone();
-                encoded_frame.extend_from_slice(&frame);
+                let mut encoded_frame =
+                    Vec::with_capacity(track.header_stripping_prefix.len() + frame.len());
+                encoded_frame.extend_from_slice(&track.header_stripping_prefix);
+                encoded_frame.extend_from_slice(frame);
                 let data = match track.nal_length_size {
                     Some(length_size) => soundkit_video::length_prefixed_nals_to_annex_b(
                         &encoded_frame,
@@ -3020,8 +3036,10 @@ impl WebmDecoder {
             self.pre_skip_remaining -= pre_skip;
             let start_frame = discard_start + pre_skip;
             let end_frame = samples.saturating_sub(discard_end).max(start_frame);
+            let gain = opus_gain_factor(output_gain);
+            pcm.reserve((end_frame - start_frame) * channels * 2);
             for sample in &self.scratch[start_frame * channels..end_frame * channels] {
-                let sample = apply_opus_gain(*sample, output_gain);
+                let sample = apply_gain_factor(*sample, gain);
                 pcm.extend_from_slice(&sample.to_le_bytes());
             }
         }
@@ -3110,12 +3128,23 @@ fn discard_padding_frames(
     }
 }
 
-#[cfg(feature = "opus")]
+#[cfg(all(test, feature = "opus"))]
 fn apply_opus_gain(sample: i16, gain_q8_db: i16) -> i16 {
-    if gain_q8_db == 0 {
+    apply_gain_factor(sample, opus_gain_factor(gain_q8_db))
+}
+
+/// The linear factor of an OpusHead output gain in Q7.8 dB, computed once
+/// per packet instead of once per sample. `None` for a gain of zero.
+#[cfg(feature = "opus")]
+fn opus_gain_factor(gain_q8_db: i16) -> Option<f64> {
+    (gain_q8_db != 0).then(|| 10_f64.powf(f64::from(gain_q8_db) / (20.0 * 256.0)))
+}
+
+#[cfg(feature = "opus")]
+fn apply_gain_factor(sample: i16, gain: Option<f64>) -> i16 {
+    let Some(gain) = gain else {
         return sample;
-    }
-    let gain = 10_f64.powf(f64::from(gain_q8_db) / (20.0 * 256.0));
+    };
     (f64::from(sample) * gain)
         .round()
         .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
