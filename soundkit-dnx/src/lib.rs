@@ -809,6 +809,23 @@ impl<'a> Decoder<'a> {
 struct Vlc {
     nodes: Vec<VlcNode>,
     max_bits: u8,
+    /// The outcome of the first `lookup_bits` bits of a code, indexed by
+    /// those bits, so most codes take one lookup instead of a step per bit.
+    lookup: Vec<VlcLookup>,
+    lookup_bits: u8,
+}
+
+/// The longest prefix the lookup table covers.
+const VLC_LOOKUP_BITS: u8 = 10;
+
+#[derive(Clone, Copy)]
+enum VlcLookup {
+    /// A code of `bits` bits ends within the prefix.
+    Value { value: u16, bits: u8 },
+    /// The code is invalid once `bits` bits are read.
+    Invalid { bits: u8 },
+    /// The prefix leads to this node; the code continues bit by bit.
+    Node(usize),
 }
 
 #[derive(Clone, Default)]
@@ -862,12 +879,74 @@ impl Vlc {
                 Some(values.map_or(index as u16, |items| items[index] as u16));
             max_bits = max_bits.max(bits);
         }
-        Ok(Self { nodes, max_bits })
+        let lookup_bits = max_bits.min(VLC_LOOKUP_BITS);
+        let lookup = (0..1u32 << lookup_bits)
+            .map(|prefix| Self::walk(&nodes, max_bits, prefix, lookup_bits))
+            .collect();
+        Ok(Self {
+            nodes,
+            max_bits,
+            lookup,
+            lookup_bits,
+        })
     }
 
-    fn decode(&self, bits: &mut BitReader<'_>) -> Result<u16, DnxError> {
+    /// The bit-by-bit walk of `decode` over the `width` bits of `prefix`.
+    fn walk(nodes: &[VlcNode], max_bits: u8, prefix: u32, width: u8) -> VlcLookup {
         let mut node_index = 0usize;
-        for _ in 0..self.max_bits {
+        for step in 0..width {
+            let branch = ((prefix >> (width - 1 - step)) & 1) as usize;
+            let Some(child) = nodes[node_index].children[branch] else {
+                return VlcLookup::Invalid { bits: step + 1 };
+            };
+            node_index = child;
+            if let Some(value) = nodes[node_index].value {
+                return VlcLookup::Value {
+                    value,
+                    bits: step + 1,
+                };
+            }
+        }
+        if width == max_bits {
+            VlcLookup::Invalid { bits: max_bits }
+        } else {
+            VlcLookup::Node(node_index)
+        }
+    }
+
+    /// Reads one code. The answer and the error are those of reading the
+    /// code one bit at a time: a code that needs more bits than remain is
+    /// truncated, whatever the missing bits would be.
+    fn decode(&self, bits: &mut BitReader<'_>) -> Result<u16, DnxError> {
+        let remaining = bits.remaining();
+        let truncated = || DnxError::new("DNx row bitstream is truncated");
+        let mut node_index = match self.lookup[bits.peek(self.lookup_bits) as usize] {
+            VlcLookup::Value {
+                value,
+                bits: length,
+            } => {
+                if usize::from(length) > remaining {
+                    return Err(truncated());
+                }
+                bits.skip(usize::from(length));
+                return Ok(value);
+            }
+            VlcLookup::Invalid { bits: length } => {
+                return Err(if usize::from(length) > remaining {
+                    truncated()
+                } else {
+                    DnxError::new("invalid DNx VLC code")
+                });
+            }
+            VlcLookup::Node(node_index) => {
+                if usize::from(self.lookup_bits) >= remaining {
+                    return Err(truncated());
+                }
+                bits.skip(usize::from(self.lookup_bits));
+                node_index
+            }
+        };
+        for _ in self.lookup_bits..self.max_bits {
             let branch = bits.read(1)? as usize;
             node_index = self.nodes[node_index].children[branch]
                 .ok_or_else(|| DnxError::new("invalid DNx VLC code"))?;
@@ -898,13 +977,38 @@ impl<'a> BitReader<'a> {
         {
             return Err(DnxError::new("DNx row bitstream is truncated"));
         }
-        let mut value = 0u32;
-        for _ in 0..count {
-            let byte = self.data[self.bit / 8];
-            value = (value << 1) | u32::from((byte >> (7 - self.bit % 8)) & 1);
-            self.bit += 1;
+        if count == 0 {
+            return Ok(0);
         }
+        let value = self.peek(count as u8);
+        self.bit += count;
         Ok(value)
+    }
+
+    fn remaining(&self) -> usize {
+        (self.data.len() * 8).saturating_sub(self.bit)
+    }
+
+    fn skip(&mut self, count: usize) {
+        self.bit += count;
+    }
+
+    /// The next `count` bits, 1 to 32, most significant first, with zero
+    /// bits after the end of the data.
+    fn peek(&self, count: u8) -> u32 {
+        let byte = self.bit / 8;
+        let word = match self.data.get(byte..byte + 8) {
+            Some(bytes) => u64::from_be_bytes(bytes.try_into().unwrap()),
+            None => {
+                let mut word = 0u64;
+                for index in 0..8 {
+                    word =
+                        (word << 8) | u64::from(self.data.get(byte + index).copied().unwrap_or(0));
+                }
+                word
+            }
+        };
+        ((word << (self.bit % 8)) >> (64 - u32::from(count))) as u32
     }
 }
 
@@ -1076,6 +1180,127 @@ fn read_u32(data: &[u8], offset: usize) -> Result<u32, DnxError> {
         .get(offset..offset + 4)
         .ok_or_else(|| DnxError::new("truncated DNx header"))?;
     Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+#[cfg(test)]
+mod vlc_tests {
+    use super::*;
+
+    /// The bit reader and code reader as they were: one bit per step.
+    fn reference_read(data: &[u8], bit: &mut usize, count: usize) -> Result<u32, DnxError> {
+        if count > 32
+            || bit
+                .checked_add(count)
+                .is_none_or(|end| end > data.len() * 8)
+        {
+            return Err(DnxError::new("DNx row bitstream is truncated"));
+        }
+        let mut value = 0u32;
+        for _ in 0..count {
+            let byte = data[*bit / 8];
+            value = (value << 1) | u32::from((byte >> (7 - *bit % 8)) & 1);
+            *bit += 1;
+        }
+        Ok(value)
+    }
+
+    fn reference_decode(vlc: &Vlc, data: &[u8], bit: &mut usize) -> Result<u16, DnxError> {
+        let mut node_index = 0usize;
+        for _ in 0..vlc.max_bits {
+            let branch = reference_read(data, bit, 1)? as usize;
+            node_index = vlc.nodes[node_index].children[branch]
+                .ok_or_else(|| DnxError::new("invalid DNx VLC code"))?;
+            if let Some(value) = vlc.nodes[node_index].value {
+                return Ok(value);
+            }
+        }
+        Err(DnxError::new("invalid DNx VLC code"))
+    }
+
+    fn outcome(result: Result<u16, DnxError>) -> Result<u16, String> {
+        result.map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn table_decode_matches_bitwise_decode() {
+        let tables = [
+            Vlc::new(
+                &tables::DNXHD_1235_DC_CODES,
+                &tables::DNXHD_1235_DC_BITS,
+                None,
+            )
+            .unwrap(),
+            Vlc::new(
+                &tables::DNXHD_1237_DC_CODES,
+                &tables::DNXHD_1237_DC_BITS,
+                None,
+            )
+            .unwrap(),
+            Vlc::new(
+                &tables::DNXHD_1235_AC_CODES,
+                &tables::DNXHD_1235_AC_BITS,
+                None,
+            )
+            .unwrap(),
+            Vlc::new(
+                &tables::DNXHD_1237_AC_CODES,
+                &tables::DNXHD_1237_AC_BITS,
+                None,
+            )
+            .unwrap(),
+            Vlc::new(
+                &tables::DNXHD_1238_AC_CODES,
+                &tables::DNXHD_1238_AC_BITS,
+                None,
+            )
+            .unwrap(),
+            Vlc::new(
+                &tables::DNXHD_1235_RUN_CODES,
+                &tables::DNXHD_1235_RUN_BITS,
+                Some(&tables::DNXHD_1235_RUN),
+            )
+            .unwrap(),
+            Vlc::new(
+                &tables::DNXHD_1237_RUN_CODES,
+                &tables::DNXHD_1237_RUN_BITS,
+                Some(&tables::DNXHD_1237_RUN),
+            )
+            .unwrap(),
+            // A sparse table leaves prefixes with no code.
+            Vlc::new(&[0u8, 2, 7], &[2, 3, 3], None).unwrap(),
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for vlc in &tables {
+            for length in 0..40 {
+                let data: Vec<u8> = (0..length).map(|_| next() as u8).collect();
+                let (mut reader, mut bit) = (BitReader::new(&data), 0usize);
+                loop {
+                    let got = outcome(vlc.decode(&mut reader));
+                    let want = outcome(reference_decode(vlc, &data, &mut bit));
+                    assert_eq!(got, want);
+                    if got.is_err() {
+                        break;
+                    }
+                    assert_eq!(reader.bit, bit);
+                    let count = (next() % 34) as usize;
+                    let got = reader.read(count).map_err(|error| error.to_string());
+                    let want =
+                        reference_read(&data, &mut bit, count).map_err(|error| error.to_string());
+                    assert_eq!(got, want);
+                    if got.is_err() {
+                        break;
+                    }
+                    assert_eq!(reader.bit, bit);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
