@@ -233,6 +233,9 @@ pub struct FlacFrameEncoder {
     context: Context,
     packet_encoder: crate::packet::PacketEncoder,
     track_stream_info: bool,
+    /// Whether full-length frames of supported configurations use the
+    /// packet encoder. Tests turn it off to compare with the general encoder.
+    packet_path: bool,
     next_sequence: u32,
 }
 
@@ -271,6 +274,7 @@ impl FlacFrameEncoder {
             ),
             packet_encoder: crate::packet::PacketEncoder::new(config),
             track_stream_info: false,
+            packet_path: true,
             next_sequence: 0,
         })
     }
@@ -463,13 +467,25 @@ impl FlacFrameEncoder {
         frame_length: u32,
         output: &mut Vec<u8>,
     ) -> Result<usize, FlacFrameError> {
-        if !self.track_stream_info
+        // The packet encoder writes the bytes the general encoder writes for
+        // the configurations it supports, so a stream that tracks STREAMINFO
+        // uses it too and records the frame from its output.
+        if self.packet_path
             && frame_length == self.config.frame_length
             && self.packet_encoder.supports()
         {
             self.packet_encoder
                 .encode(&self.converted_samples, self.next_sequence, output);
             self.validate_packet_size(output, self.converted_samples.len())?;
+            if self.track_stream_info {
+                let frame_bytes = u32::try_from(output.len())
+                    .map_err(|_| FlacFrameError::Overflow("FLAC frame size"))?;
+                self.stream_info
+                    .update_frame_size(frame_length as u16, frame_bytes);
+                self.context
+                    .fill_interleaved(&self.converted_samples)
+                    .map_err(|error| FlacFrameError::Encode(error.to_string()))?;
+            }
             self.next_sequence = (self.next_sequence + 1) & 0x7fff_ffff;
             return Ok(output.len());
         }
@@ -1506,5 +1522,94 @@ mod tests {
             .unwrap()
             .decode(&encoded.payload)
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod stream_packet_path_tests {
+    use super::*;
+    use crate::stream::Decoder;
+
+    fn decode_all(file: &[u8]) -> Vec<i32> {
+        let mut decoder = Decoder::new();
+        let mut out = vec![0i32; 1 << 16];
+        let mut samples = Vec::new();
+        let mut input = file;
+        loop {
+            let written = decoder.decode_i32(input, &mut out).unwrap();
+            samples.extend_from_slice(&out[..written]);
+            if written == 0 {
+                break;
+            }
+            input = &[];
+        }
+        decoder.finish().unwrap();
+        samples
+    }
+
+    /// A stream that tracks STREAMINFO and encodes through the packet encoder
+    /// decodes to the same samples as one that uses the general encoder, and
+    /// its STREAMINFO states the same block sizes, sample count and MD5 and
+    /// the frame sizes it wrote, for in-range and clipped samples and a short
+    /// final block.
+    #[test]
+    fn tracked_packet_path_writes_a_lossless_stream_with_its_streaminfo() {
+        for (rate, len) in [(48_000u32, 240u32), (96_000, 480)] {
+            for profile in [FlacProfile::Realtime, FlacProfile::Balanced] {
+                for bits in [16u8, 24] {
+                    let config = FlacFrameConfig::new(rate, 2, bits, len, profile).unwrap();
+                    let mut fast = FlacFrameEncoder::new(config).unwrap();
+                    fast.enable_stream_info_tracking();
+                    let mut slow = FlacFrameEncoder::new(config).unwrap();
+                    slow.enable_stream_info_tracking();
+                    slow.packet_path = false;
+                    let full = 1i64 << (bits - 1);
+                    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+                    let (mut fast_frames, mut slow_frames) = (Vec::new(), Vec::new());
+                    let (mut smallest, mut largest) = (usize::MAX, 0usize);
+                    let mut expected = Vec::new();
+                    for block in 0..120usize {
+                        let frames = if block == 119 { 100 } else { len as usize };
+                        let pcm: Vec<i32> = (0..frames * 2)
+                            .map(|i| {
+                                state ^= state << 13;
+                                state ^= state >> 7;
+                                state ^= state << 17;
+                                let phase = (((i / 2) + block * len as usize) % 500) as i64;
+                                let tone = (phase - 250) * full / 200;
+                                (tone + (state % 2001) as i64 - 1000) as i32
+                            })
+                            .collect();
+                        let (minimum, maximum) = sample_limits(bits);
+                        expected.extend(pcm.iter().map(|s| s.clamp(&minimum, &maximum)));
+                        let (mut a, mut b) = (Vec::new(), Vec::new());
+                        fast.encode_i32_block_into(&pcm, &mut a).unwrap();
+                        slow.encode_i32_block_into(&pcm, &mut b).unwrap();
+                        smallest = smallest.min(a.len());
+                        largest = largest.max(a.len());
+                        fast_frames.extend(a);
+                        slow_frames.extend(b);
+                    }
+                    let file = |header: Vec<u8>, frames: &[u8]| {
+                        let mut file = b"fLaC".to_vec();
+                        file.extend(header);
+                        file.extend_from_slice(frames);
+                        file
+                    };
+                    let fast_file = file(fast.stream_header().unwrap(), &fast_frames);
+                    let slow_file = file(slow.stream_header().unwrap(), &slow_frames);
+                    assert_eq!(decode_all(&fast_file), expected);
+                    assert_eq!(decode_all(&slow_file), expected);
+                    let (a, b) = (&fast.stream_info, &slow.stream_info);
+                    assert_eq!(a.md5_digest(), b.md5_digest());
+                    assert_eq!(a.total_samples(), b.total_samples());
+                    assert_eq!(a.min_block_size(), b.min_block_size());
+                    assert_eq!(
+                        (a.min_frame_size(), a.max_frame_size()),
+                        (smallest, largest)
+                    );
+                }
+            }
+        }
     }
 }

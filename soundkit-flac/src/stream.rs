@@ -9,7 +9,7 @@
 use crate::decode::frame::FrameReader;
 use crate::decode::metadata::{self, MetadataBlock, StreamInfo};
 use crate::decode::{Block, Error as DecodeError};
-use crate::frame::{EncodedFlacFrame, FlacFrameConfig, FlacFrameEncoder, FlacFrameError};
+use crate::frame::{FlacFrameConfig, FlacFrameEncoder, FlacFrameError};
 use std::io::{self, Cursor};
 
 const FLAC_MARKER: &[u8; 4] = b"fLaC";
@@ -21,6 +21,8 @@ pub struct Encoder {
     inner: FlacFrameEncoder,
     stream_header: Vec<u8>,
     emitted_stream_header: bool,
+    /// Packet storage reused for every frame.
+    frame: Vec<u8>,
 }
 
 impl Encoder {
@@ -33,6 +35,7 @@ impl Encoder {
             inner,
             stream_header,
             emitted_stream_header: false,
+            frame: Vec::new(),
         })
     }
 
@@ -52,8 +55,11 @@ impl Encoder {
         interleaved: &[i32],
         output: &mut Vec<u8>,
     ) -> Result<usize, FlacFrameError> {
-        let frame = self.inner.encode_i32_block(interleaved)?;
-        self.append_frame(frame, output)
+        let mut frame = std::mem::take(&mut self.frame);
+        let encoded = self.inner.encode_i32_block_into(interleaved, &mut frame);
+        let result = encoded.and_then(|_| self.append_frame(&frame, output));
+        self.frame = frame;
+        result
     }
 
     /// Encodes one interleaved signed 16-bit sample block.
@@ -62,13 +68,16 @@ impl Encoder {
         interleaved: &[i16],
         output: &mut Vec<u8>,
     ) -> Result<usize, FlacFrameError> {
-        let frame = self.inner.encode_i16(interleaved)?;
-        self.append_frame(frame, output)
+        let mut frame = std::mem::take(&mut self.frame);
+        let encoded = self.inner.encode_i16_into(interleaved, &mut frame);
+        let result = encoded.and_then(|_| self.append_frame(&frame, output));
+        self.frame = frame;
+        result
     }
 
     fn append_frame(
         &mut self,
-        frame: EncodedFlacFrame,
+        frame: &[u8],
         output: &mut Vec<u8>,
     ) -> Result<usize, FlacFrameError> {
         self.stream_header = self.inner.stream_header()?;
@@ -77,7 +86,7 @@ impl Encoder {
             output.extend_from_slice(&self.stream_header);
             self.emitted_stream_header = true;
         }
-        output.extend_from_slice(&frame.payload);
+        output.extend_from_slice(frame);
         Ok(output.len() - start)
     }
 

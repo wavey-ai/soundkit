@@ -511,10 +511,14 @@ impl StreamInfo {
     /// assert_eq!(info.total_samples(), 31234);
     /// ```
     pub fn update_frame_info(&mut self, frame: &Frame) {
-        let block_size = frame.block_size() as u16;
+        self.update_frame_size(frame.block_size() as u16, (frame.count_bits() / 8) as u32);
+    }
+
+    /// Records one frame of `block_size` samples per channel and
+    /// `frame_size_in_bytes` bytes.
+    pub fn update_frame_size(&mut self, block_size: u16, frame_size_in_bytes: u32) {
         self.min_block_size = min(block_size, self.min_block_size);
         self.max_block_size = max(block_size, self.max_block_size);
-        let frame_size_in_bytes = (frame.count_bits() / 8) as u32;
         self.min_frame_size = min(frame_size_in_bytes, self.min_frame_size);
         self.max_frame_size = max(frame_size_in_bytes, self.max_frame_size);
 
