@@ -867,7 +867,7 @@ impl MxfMediaDemuxer {
         };
         let active = &mut self.active_tracks[active_index];
         let duration = packet_duration(active, &value)?;
-        let data = match active.pcm_source_packing {
+        let mut data = match active.pcm_source_packing {
             Some(MxfPcmSourcePacking::Aes3 {
                 bits_per_sample,
                 channels,
@@ -935,10 +935,16 @@ impl MxfMediaDemuxer {
             let packet_end = data_offset
                 .checked_add(data_size)
                 .ok_or_else(|| "MXF clip-wrapped PCM data range overflow".to_string())?;
-            let packet_data = data
-                .get(data_offset..packet_end)
-                .ok_or_else(|| "MXF clip-wrapped PCM data is truncated".to_string())?
-                .to_vec();
+            let last = split_frames.is_none() || packet_duration == remaining_frames;
+            let packet_data = if last && data_offset == 0 && packet_end == data.len() {
+                // One packet carries the whole value: it takes the value
+                // instead of a copy.
+                std::mem::take(&mut data)
+            } else {
+                data.get(data_offset..packet_end)
+                    .ok_or_else(|| "MXF clip-wrapped PCM data is truncated".to_string())?
+                    .to_vec()
+            };
             let packet = MediaTrackPacket {
                 track_id: active.config.track_id,
                 kind: active.config.kind,
@@ -960,7 +966,7 @@ impl MxfMediaDemuxer {
                 .checked_add(u64::from(packet_duration))
                 .ok_or_else(|| "MXF decode time overflow".to_string())?;
             output.push(MxfMediaDemuxEvent::Packet(packet));
-            if split_frames.is_none() || packet_duration == remaining_frames {
+            if last {
                 break;
             }
             remaining_frames -= packet_duration;

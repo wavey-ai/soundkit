@@ -481,25 +481,55 @@ fn decode_stream_bytes(
     ima4_state: &mut [AdpcmImaState; 2],
     output: &mut Vec<u8>,
 ) -> Result<(), String> {
-    pending.extend_from_slice(input);
+    // The pending partial group is completed from the input first; the
+    // input's whole groups are then decoded in place, and only its tail is
+    // kept. Joining a copy of the pending bytes and the whole input gives the
+    // same bytes in the same order.
     let group_bytes = info.format.encoded_group_bytes(info.channels);
-    let complete_bytes = pending.len() / group_bytes * group_bytes;
-    let mut complete = std::mem::take(pending);
-    *pending = complete.split_off(complete_bytes);
+    let mut input = input;
+    if !pending.is_empty() {
+        let take = (group_bytes - pending.len()).min(input.len());
+        pending.extend_from_slice(&input[..take]);
+        input = &input[take..];
+        if pending.len() < group_bytes {
+            return Ok(());
+        }
+        decode_groups(info, pending, group_bytes, ima4_state, output);
+        pending.clear();
+    }
+    let complete_bytes = input.len() / group_bytes * group_bytes;
+    decode_groups(
+        info,
+        &input[..complete_bytes],
+        group_bytes,
+        ima4_state,
+        output,
+    );
+    pending.extend_from_slice(&input[complete_bytes..]);
     if pending.len() >= group_bytes {
         return Err("AIFF decoder retained more than one encoded group".to_string());
     }
+    Ok(())
+}
 
+/// Decodes whole encoded groups to little-endian PCM.
+fn decode_groups(
+    info: StreamInfo,
+    complete: &[u8],
+    group_bytes: usize,
+    ima4_state: &mut [AdpcmImaState; 2],
+    output: &mut Vec<u8>,
+) {
     match info.format {
         StreamSampleFormat::Unsigned8 => {
             output.reserve(complete.len() * 2);
-            for value in complete {
+            for &value in complete {
                 output.extend_from_slice(&((i16::from(value) - 128) << 8).to_le_bytes());
             }
         }
         StreamSampleFormat::SignedBe(1) | StreamSampleFormat::SignedLe(1) => {
             output.reserve(complete.len() * 2);
-            for value in complete {
+            for &value in complete {
                 output.extend_from_slice(&(i16::from(value as i8) << 8).to_le_bytes());
             }
         }
@@ -510,7 +540,7 @@ fn decode_stream_bytes(
                 output.extend(sample.iter().rev());
             }
         }
-        StreamSampleFormat::SignedLe(_) => output.extend_from_slice(&complete),
+        StreamSampleFormat::SignedLe(_) => output.extend_from_slice(complete),
         StreamSampleFormat::Float32Be => {
             output.reserve(complete.len());
             for sample in complete.chunks_exact(4) {
@@ -528,13 +558,13 @@ fn decode_stream_bytes(
         }
         StreamSampleFormat::Ulaw => {
             output.reserve(complete.len() * 2);
-            for sample in complete {
+            for &sample in complete {
                 output.extend_from_slice(&decode_ulaw(sample).to_le_bytes());
             }
         }
         StreamSampleFormat::Alaw => {
             output.reserve(complete.len() * 2);
-            for sample in complete {
+            for &sample in complete {
                 output.extend_from_slice(&decode_alaw(sample).to_le_bytes());
             }
         }
@@ -556,7 +586,6 @@ fn decode_stream_bytes(
             }
         }
     }
-    Ok(())
 }
 
 pub fn decode_aiff_container(data: &[u8]) -> Result<AudioData, String> {
@@ -1168,6 +1197,92 @@ fn float_to_i24(value: f32) -> i32 {
 
 fn float_to_i32(value: f32) -> i32 {
     (f64::from(value).clamp(-1.0, 1.0) * 2_147_483_647.0).round() as i32
+}
+
+#[cfg(test)]
+mod stream_decode_tests {
+    use super::*;
+
+    /// `decode_stream_bytes` as it was: a joined copy of the pending bytes
+    /// and the input, split at the last whole group.
+    fn reference_decode(
+        info: StreamInfo,
+        input: &[u8],
+        pending: &mut Vec<u8>,
+        ima4_state: &mut [AdpcmImaState; 2],
+        output: &mut Vec<u8>,
+    ) -> Result<(), String> {
+        pending.extend_from_slice(input);
+        let group_bytes = info.format.encoded_group_bytes(info.channels);
+        let complete_bytes = pending.len() / group_bytes * group_bytes;
+        let mut complete = std::mem::take(pending);
+        *pending = complete.split_off(complete_bytes);
+        decode_groups(info, &complete, group_bytes, ima4_state, output);
+        Ok(())
+    }
+
+    #[test]
+    fn in_place_decode_matches_joined_decode() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let data: Vec<u8> = (0..20_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        let formats = [
+            StreamSampleFormat::Unsigned8,
+            StreamSampleFormat::SignedBe(1),
+            StreamSampleFormat::SignedBe(2),
+            StreamSampleFormat::SignedBe(3),
+            StreamSampleFormat::SignedLe(3),
+            StreamSampleFormat::Float32Be,
+            StreamSampleFormat::Float64Be,
+            StreamSampleFormat::Ulaw,
+            StreamSampleFormat::Alaw,
+            StreamSampleFormat::Ima4,
+        ];
+        for format in formats {
+            for channels in [1u8, 2] {
+                let info = StreamInfo {
+                    sample_rate: 44_100,
+                    channels,
+                    format,
+                };
+                for piece in [1usize, 3, 7, 33, 35, 1_000, data.len()] {
+                    let (mut pending, mut state, mut output) = (
+                        Vec::new(),
+                        [AdpcmImaState::new(), AdpcmImaState::new()],
+                        Vec::new(),
+                    );
+                    let (mut want_pending, mut want_state, mut want_output) = (
+                        Vec::new(),
+                        [AdpcmImaState::new(), AdpcmImaState::new()],
+                        Vec::new(),
+                    );
+                    for chunk in data.chunks(piece) {
+                        decode_stream_bytes(info, chunk, &mut pending, &mut state, &mut output)
+                            .unwrap();
+                        reference_decode(
+                            info,
+                            chunk,
+                            &mut want_pending,
+                            &mut want_state,
+                            &mut want_output,
+                        )
+                        .unwrap();
+                        assert_eq!(pending, want_pending);
+                    }
+                    assert_eq!(
+                        output, want_output,
+                        "{format:?} {channels} ch in {piece}-byte pieces"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

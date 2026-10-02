@@ -4927,6 +4927,8 @@ impl MpegTsAudioDemuxer {
         dts: Option<u64>,
     ) -> Result<Vec<AudioDemuxEvent>, String> {
         let mut events = Vec::new();
+        // The packets pushed so far: the index of the next frame in the PES.
+        let mut packets = 0u64;
         let mut pos = 0usize;
         while pos + 7 <= payload.len() {
             if payload[pos] != 0xff || payload[pos + 1] & 0xf0 != 0xf0 {
@@ -4947,10 +4949,8 @@ impl MpegTsAudioDemuxer {
                 (90_000_u64 * u64::from(header.samples_per_frame)) / u64::from(header.sample_rate),
             )
             .ok();
-            let frame_index = events
-                .iter()
-                .filter(|event| matches!(event, AudioDemuxEvent::Packet(_)))
-                .count() as u64;
+            let frame_index = packets;
+            packets += 1;
             let timestamp_offset = u64::from(duration.unwrap_or(0)).saturating_mul(frame_index);
             let frame_pts = pts.and_then(|value| value.checked_add(timestamp_offset));
             let frame_dts = dts.and_then(|value| value.checked_add(timestamp_offset));
