@@ -13,16 +13,18 @@ pub struct WasmEncodedSoundKitStream {
     packet_count: u64,
 }
 
+// The byte getters copy straight into a new JavaScript `Uint8Array`, so a
+// read does not first clone the bytes inside WASM memory.
 #[wasm_bindgen]
 impl WasmEncodedSoundKitStream {
     #[wasm_bindgen(getter)]
-    pub fn stream(&self) -> Vec<u8> {
-        self.stream.clone()
+    pub fn stream(&self) -> js_sys::Uint8Array {
+        js_sys::Uint8Array::from(self.stream.as_slice())
     }
 
     #[wasm_bindgen(getter)]
-    pub fn index(&self) -> Vec<u8> {
-        self.index.clone()
+    pub fn index(&self) -> js_sys::Uint8Array {
+        js_sys::Uint8Array::from(self.index.as_slice())
     }
 
     #[wasm_bindgen(js_name = metadataJson)]
@@ -52,23 +54,23 @@ pub struct WasmEncodedSoundKitStreams {
 #[wasm_bindgen]
 impl WasmEncodedSoundKitStreams {
     #[wasm_bindgen(getter, js_name = opusStream)]
-    pub fn opus_stream(&self) -> Vec<u8> {
-        self.opus_stream.clone()
+    pub fn opus_stream(&self) -> js_sys::Uint8Array {
+        js_sys::Uint8Array::from(self.opus_stream.as_slice())
     }
 
     #[wasm_bindgen(getter, js_name = opusIndex)]
-    pub fn opus_index(&self) -> Vec<u8> {
-        self.opus_index.clone()
+    pub fn opus_index(&self) -> js_sys::Uint8Array {
+        js_sys::Uint8Array::from(self.opus_index.as_slice())
     }
 
     #[wasm_bindgen(getter, js_name = flacStream)]
-    pub fn flac_stream(&self) -> Vec<u8> {
-        self.flac_stream.clone()
+    pub fn flac_stream(&self) -> js_sys::Uint8Array {
+        js_sys::Uint8Array::from(self.flac_stream.as_slice())
     }
 
     #[wasm_bindgen(getter, js_name = flacIndex)]
-    pub fn flac_index(&self) -> Vec<u8> {
-        self.flac_index.clone()
+    pub fn flac_index(&self) -> js_sys::Uint8Array {
+        js_sys::Uint8Array::from(self.flac_index.as_slice())
     }
 
     #[wasm_bindgen(getter, js_name = opusPacketCount)]
@@ -83,8 +85,8 @@ impl WasmEncodedSoundKitStreams {
 
     /// The stereo, three-band waveform sidecar, from the same PCM pass.
     #[wasm_bindgen(getter, js_name = visuals)]
-    pub fn visuals(&self) -> Vec<u8> {
-        self.visuals.clone()
+    pub fn visuals(&self) -> js_sys::Uint8Array {
+        js_sys::Uint8Array::from(self.visuals.as_slice())
     }
 
     #[wasm_bindgen(js_name = metadataJson)]

@@ -81,12 +81,14 @@ impl Developed {
     #[wasm_bindgen(getter, js_name = bitDepth)] pub fn bit_depth(&self) -> u8 { self.inner.bit_depth }
     #[wasm_bindgen(getter, js_name = clippedHigh)] pub fn clipped_high(&self) -> u32 { self.inner.clipped_high }
     #[wasm_bindgen(getter, js_name = clippedLow)] pub fn clipped_low(&self) -> u32 { self.inner.clipped_low }
+    // The pixel getters copy straight into a new typed array, so a read does
+    // not first clone the image inside WASM memory.
     /// 8-bit output, RGBA.
     #[wasm_bindgen(js_name = dataU8)]
-    pub fn data_u8(&self) -> Vec<u8> { match &self.inner.data { Pixels::U8(v) => v.clone(), Pixels::U16(_) => Vec::new() } }
+    pub fn data_u8(&self) -> js_sys::Uint8Array { match &self.inner.data { Pixels::U8(v) => js_sys::Uint8Array::from(v.as_slice()), Pixels::U16(_) => js_sys::Uint8Array::new_with_length(0) } }
     /// 10- or 12-bit output, RGBA.
     #[wasm_bindgen(js_name = dataU16)]
-    pub fn data_u16(&self) -> Vec<u16> { match &self.inner.data { Pixels::U16(v) => v.clone(), Pixels::U8(_) => Vec::new() } }
+    pub fn data_u16(&self) -> js_sys::Uint16Array { match &self.inner.data { Pixels::U16(v) => js_sys::Uint16Array::from(v.as_slice()), Pixels::U8(_) => js_sys::Uint16Array::new_with_length(0) } }
     pub fn histogram(&self) -> Vec<u32> { self.inner.histogram.clone() }
     #[wasm_bindgen(js_name = histogramRGB)]
     pub fn histogram_rgb(&self) -> Vec<u32> { self.inner.histogram_rgb.clone() }

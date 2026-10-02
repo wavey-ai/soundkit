@@ -11,8 +11,9 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-wasm = ["dep:wasm-bindgen"]
+wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies]
 serde_json = "1"
 wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }

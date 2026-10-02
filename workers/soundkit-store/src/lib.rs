@@ -511,14 +511,16 @@ async fn append_chunk(
         cache_control: Some("no-store".to_string()),
         ..Default::default()
     };
+    // Only the length is needed after the put, so the chunk moves into it.
+    let byte_len = bytes.len();
     let custom_metadata = HashMap::from([
         ("objectId".to_string(), object_id.to_string()),
         ("chunkNo".to_string(), chunk_no.to_string()),
         ("startOffset".to_string(), start_offset.to_string()),
-        ("byteLength".to_string(), bytes.len().to_string()),
+        ("byteLength".to_string(), byte_len.to_string()),
     ]);
     bucket
-        .put(&r2_key, bytes.clone())
+        .put(&r2_key, bytes)
         .http_metadata(metadata)
         .custom_metadata(custom_metadata)
         .execute()
@@ -533,7 +535,7 @@ async fn append_chunk(
         .max()
         .unwrap_or(object.duration_frames)
         .max(object.duration_frames);
-    let committed_bytes = object.committed_bytes + bytes.len() as i64;
+    let committed_bytes = object.committed_bytes + byte_len as i64;
 
     let mut statements = Vec::with_capacity(frames.len() + 2);
     statements.push(
@@ -546,7 +548,7 @@ async fn append_chunk(
             JsValue::from_str(object_id),
             js_i64(chunk_no)?,
             js_i64(start_offset)?,
-            js_i64(bytes.len() as i64)?,
+            js_i64(byte_len as i64)?,
             JsValue::from_str(&r2_key),
             js_i64(now)?,
         ])
@@ -602,7 +604,7 @@ async fn append_chunk(
         chunk_no,
         r2_key,
         start_offset,
-        byte_length: bytes.len() as i64,
+        byte_length: byte_len as i64,
         frame_count: frames.len() as i64,
         committed_bytes,
         duration_frames,
