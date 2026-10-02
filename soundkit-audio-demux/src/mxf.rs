@@ -1304,7 +1304,12 @@ impl MxfMediaDemuxer {
     fn consume(&mut self, bytes: usize) {
         self.cursor += bytes;
         self.absolute_start += bytes as u64;
-        if self.cursor > 64 * 1024 || self.cursor == self.buffer.len() {
+        // The consumed prefix is removed only once it is at least half the
+        // buffer, so each byte moves a bounded number of times. A fixed
+        // threshold alone moves the rest of a large push for every 64 KiB.
+        if (self.cursor > 64 * 1024 && self.cursor.saturating_mul(2) >= self.buffer.len())
+            || self.cursor == self.buffer.len()
+        {
             self.buffer.drain(..self.cursor);
             self.cursor = 0;
         }

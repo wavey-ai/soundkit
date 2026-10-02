@@ -381,6 +381,10 @@ pub struct Mp4MediaDemuxer {
     tracks: Vec<MediaTrackConfig>,
     track_defaults: Vec<Fmp4TrackDefaults>,
     pending_fragments: Vec<Fmp4Fragment>,
+    /// Indexed samples not yet emitted, in offset order. New fragments are
+    /// merged in by the sort that ordered these, so samples are sorted again
+    /// only when a fragment arrives.
+    pending_samples: VecDeque<(u32, Fmp4Sample)>,
     next_sample_ids: Vec<(u64, u32)>,
 }
 
@@ -1864,6 +1868,7 @@ impl Mp4MediaDemuxer {
             tracks: Vec::new(),
             track_defaults: Vec::new(),
             pending_fragments: Vec::new(),
+            pending_samples: VecDeque::new(),
             next_sample_ids: Vec::new(),
         }
     }
@@ -1996,7 +2001,7 @@ impl Mp4MediaDemuxer {
         if finalizing && self.active_mdat.is_some() {
             return Err("truncated fragmented MP4 mdat".to_string());
         }
-        if finalizing && !self.pending_fragments.is_empty() {
+        if finalizing && (!self.pending_fragments.is_empty() || !self.pending_samples.is_empty()) {
             return Err("fragmented MP4 ended before all indexed samples arrived".to_string());
         }
         Ok(events)
@@ -2005,7 +2010,12 @@ impl Mp4MediaDemuxer {
     fn drain_front(&mut self, bytes: usize) {
         self.cursor += bytes;
         self.absolute_start += bytes as u64;
-        if self.cursor > 64 * 1024 || self.cursor == self.buffer.len() {
+        // The consumed prefix is removed only once it is at least half the
+        // buffer, so each byte moves a bounded number of times. A fixed
+        // threshold alone moves the rest of a large push for every 64 KiB.
+        if (self.cursor > 64 * 1024 && self.cursor.saturating_mul(2) >= self.buffer.len())
+            || self.cursor == self.buffer.len()
+        {
             self.buffer.drain(..self.cursor);
             self.cursor = 0;
         }
@@ -2195,14 +2205,20 @@ impl Mp4MediaDemuxer {
             .active_mdat
             .clone()
             .ok_or_else(|| "fragmented MP4 has no active mdat".to_string())?;
-        let mut pending = Vec::new();
-        for fragment in std::mem::take(&mut self.pending_fragments) {
-            for sample in fragment.samples {
-                pending.push((fragment.track_id, sample));
+        // The leftover samples are already in offset order, and sorting a
+        // slice that is already in order leaves it unchanged. So the sort
+        // runs, over the same sequence as before, only when fragments are new.
+        let mut pending = std::mem::take(&mut self.pending_samples);
+        if !self.pending_fragments.is_empty() {
+            let mut all: Vec<_> = pending.into();
+            for fragment in std::mem::take(&mut self.pending_fragments) {
+                for sample in fragment.samples {
+                    all.push((fragment.track_id, sample));
+                }
             }
+            all.sort_unstable_by_key(|(_, sample)| sample.absolute_offset);
+            pending = all.into();
         }
-        pending.sort_unstable_by_key(|(_, sample)| sample.absolute_offset);
-        let mut pending: VecDeque<_> = pending.into();
 
         let mut events = Vec::new();
         loop {
@@ -2297,13 +2313,7 @@ impl Mp4MediaDemuxer {
                 break;
             }
         }
-        self.pending_fragments = pending
-            .into_iter()
-            .map(|(track_id, sample)| Fmp4Fragment {
-                track_id,
-                samples: vec![sample],
-            })
-            .collect();
+        self.pending_samples = pending;
         Ok(events)
     }
 }
