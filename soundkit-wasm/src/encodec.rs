@@ -107,7 +107,7 @@ impl WasmEncodecDecoder {
 
     #[wasm_bindgen(js_name = decodeChunk)]
     pub fn decode_chunk(
-        &self,
+        &mut self,
         payload: &[u8],
         frame_length: usize,
     ) -> Result<WasmEncodecCodes, JsValue> {
