@@ -827,24 +827,23 @@ impl FlacFrameDecoder {
             )));
         }
 
-        let frame_buffer = std::mem::take(&mut self.frame_buffer);
         let decoded = crate::decode::frame::decode_frame_slice(
             payload,
             Some(self.config.sample_rate),
             Some(u32::from(self.config.bits_per_sample)),
-            frame_buffer,
+            &mut self.frame_buffer,
             self.verify_checksums,
         );
         let (block, consumed) = match decoded {
             Ok(Some(decoded)) => decoded,
             Ok(None) => {
-                self.frame_buffer = Vec::with_capacity(self.config.sample_count()?);
+                self.config.sample_count()?;
                 return Err(FlacFrameError::Decode(
                     "FLAC packet has no frame".to_string(),
                 ));
             }
             Err(error) => {
-                self.frame_buffer = Vec::with_capacity(self.config.sample_count()?);
+                self.config.sample_count()?;
                 return Err(FlacFrameError::Decode(error.to_string()));
             }
         };

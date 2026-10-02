@@ -142,6 +142,11 @@ pub struct Decoder {
     /// When false, frame checksums are neither accumulated nor verified;
     /// see `set_verify_checksums`.
     verify_checksums: bool,
+    /// The buffered byte count of a frame attempt that ran out of bytes.
+    /// Bytes are only appended until a frame is consumed, so the same count
+    /// means the same bytes.
+    incomplete_at: Option<usize>,
+    f32_scratch: Vec<i32>,
 }
 
 impl Default for Decoder {
@@ -167,6 +172,8 @@ impl Decoder {
             // into the streaming reader with WAVEY_FLAC_STREAMING_DECODE.
             slice_decode: std::env::var_os("WAVEY_FLAC_STREAMING_DECODE").is_none(),
             verify_checksums: true,
+            incomplete_at: None,
+            f32_scratch: Vec::new(),
         }
     }
 
@@ -179,6 +186,7 @@ impl Decoder {
     /// the same process.
     pub fn set_verify_checksums(&mut self, enabled: bool) {
         self.verify_checksums = enabled;
+        self.incomplete_at = None;
     }
 
     /// Returns parsed `STREAMINFO` once it has arrived.
@@ -227,16 +235,23 @@ impl Decoder {
         input: &[u8],
         output: &mut [f32],
     ) -> Result<usize, FlacFrameError> {
-        let mut scratch = vec![0_i32; output.len()];
-        let written = self.decode_i32(input, &mut scratch)?;
-        let bits = self
-            .stream_info
-            .map_or(16, |stream_info| stream_info.bits_per_sample);
-        let scale = (1_i64 << (bits - 1)) as f32;
-        for (target, sample) in output.iter_mut().zip(scratch).take(written) {
-            *target = sample as f32 / scale;
-        }
-        Ok(written)
+        // The integer samples go to a buffer kept between calls; only the
+        // written part of it is read.
+        let mut scratch = std::mem::take(&mut self.f32_scratch);
+        scratch.resize(output.len(), 0);
+        let decoded = self.decode_i32(input, &mut scratch);
+        let result = decoded.map(|written| {
+            let bits = self
+                .stream_info
+                .map_or(16, |stream_info| stream_info.bits_per_sample);
+            let scale = (1_i64 << (bits - 1)) as f32;
+            for (target, &sample) in output.iter_mut().zip(&scratch).take(written) {
+                *target = sample as f32 / scale;
+            }
+            written
+        });
+        self.f32_scratch = scratch;
+        result
     }
 
     /// Verifies that the compressed stream ended at a frame boundary and all
@@ -271,6 +286,7 @@ impl Decoder {
         self.pending_start = 0;
         self.stream_info = None;
         self.state = StreamState::Magic;
+        self.incomplete_at = None;
     }
 
     fn append_input(&mut self, input: &[u8]) -> Result<(), FlacFrameError> {
@@ -316,6 +332,7 @@ impl Decoder {
             ));
         }
         self.input_start += count;
+        self.incomplete_at = None;
         if self.input_start == self.input.len() {
             self.input.clear();
             self.input_start = 0;
@@ -449,14 +466,19 @@ impl Decoder {
         let stream_info = self.stream_info.ok_or_else(|| {
             FlacFrameError::Decode("FLAC stream has no STREAMINFO block".to_string())
         })?;
-        let frame_buffer = std::mem::take(&mut self.frame_buffer);
+        // An attempt that ran out of bytes gives the same answer until more
+        // bytes arrive.
+        if self.incomplete_at == Some(self.buffered_bytes()) {
+            return Ok(None);
+        }
+        self.incomplete_at = None;
 
         if self.slice_decode {
             let decoded = crate::decode::frame::decode_frame_slice(
-                self.available_input(),
+                &self.input[self.input_start..],
                 Some(stream_info.sample_rate),
                 Some(stream_info.bits_per_sample),
-                frame_buffer,
+                &mut self.frame_buffer,
                 self.verify_checksums,
             );
             return match decoded {
@@ -468,15 +490,20 @@ impl Decoder {
                     }
                     self.validate_frame(block, &stream_info, consumed)
                 }
-                Ok(None) => Ok(None),
+                Ok(None) => {
+                    self.incomplete_at = Some(self.buffered_bytes());
+                    Ok(None)
+                }
                 Err(DecodeError::IoError(error))
                     if error.kind() == io::ErrorKind::UnexpectedEof =>
                 {
+                    self.incomplete_at = Some(self.buffered_bytes());
                     Ok(None)
                 }
                 Err(error) => Err(FlacFrameError::Decode(error.to_string())),
             };
         }
+        let frame_buffer = std::mem::take(&mut self.frame_buffer);
 
         let cursor = Cursor::new(self.available_input());
         let mut reader = FrameReader::with_stream_info(
@@ -489,8 +516,12 @@ impl Decoder {
         }
         let block = match reader.read_next_or_eof(frame_buffer) {
             Ok(Some(block)) => block,
-            Ok(None) => return Ok(None),
+            Ok(None) => {
+                self.incomplete_at = Some(self.buffered_bytes());
+                return Ok(None);
+            }
             Err(DecodeError::IoError(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                self.incomplete_at = Some(self.buffered_bytes());
                 return Ok(None);
             }
             Err(error) => return Err(FlacFrameError::Decode(error.to_string())),
@@ -605,6 +636,118 @@ mod tests {
         file.extend_from_slice(&final_header);
         file.extend_from_slice(&packets[metadata_len..]);
         file
+    }
+
+    /// Decodes `file` in pieces from `sizes`, draining after each, and
+    /// returns the samples, the first error, and the state at the end.
+    fn decode_pieces(
+        file: &[u8],
+        slice_decode: bool,
+        float: bool,
+        sizes: &mut dyn FnMut() -> usize,
+    ) -> (Vec<u32>, Option<String>, usize, usize) {
+        let mut decoder = Decoder::new();
+        decoder.slice_decode = slice_decode;
+        let mut decoded = Vec::new();
+        let mut ints = [0_i32; 1_000];
+        let mut floats = [0_f32; 1_000];
+        let mut rest = file;
+        let mut decode = |decoder: &mut Decoder, input: &[u8], decoded: &mut Vec<u32>| {
+            if float {
+                decoder.decode_f32(input, &mut floats).map(|written| {
+                    decoded.extend(floats[..written].iter().map(|sample| sample.to_bits()));
+                    written
+                })
+            } else {
+                decoder.decode_i32(input, &mut ints).map(|written| {
+                    decoded.extend(ints[..written].iter().map(|&sample| sample as u32));
+                    written
+                })
+            }
+        };
+        while !rest.is_empty() {
+            let take = sizes().clamp(1, rest.len());
+            let (piece, tail) = rest.split_at(take);
+            rest = tail;
+            let mut input = piece;
+            loop {
+                match decode(&mut decoder, input, &mut decoded) {
+                    Ok(0) => break,
+                    Ok(_) => input = &[],
+                    Err(error) => {
+                        return (decoded, Some(error.to_string()), 0, 0);
+                    }
+                }
+            }
+        }
+        (
+            decoded,
+            None,
+            decoder.buffered_bytes(),
+            decoder.pending_samples(),
+        )
+    }
+
+    /// Both decode paths give the same samples and errors for every cut of
+    /// an intact, a truncated and a corrupt stream, with output buffers
+    /// smaller than a block.
+    #[test]
+    fn decode_is_the_same_for_every_cut_of_the_stream() {
+        let config = FlacFrameConfig::new(44_100, 2, 24, 1_024, FlacProfile::Balanced).unwrap();
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let samples: Vec<i32> = (0..1_024 * 2 * 4 + 2 * 300)
+            .map(|index| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let tone = ((index / 2) as i32 % 400 - 200) * 20_000;
+                tone + (state % 2_001) as i32 - 1_000
+            })
+            .collect();
+        let file = encode_file(config, &samples);
+        let mut corrupt = file.clone();
+        let middle = corrupt.len() / 2;
+        corrupt[middle] ^= 0x5a;
+        let truncated = file[..file.len() - 100].to_vec();
+        for stream in [&file, &corrupt, &truncated] {
+            for float in [false, true] {
+                let intact = decode_pieces(&file, true, float, &mut || usize::MAX).0;
+                let whole = decode_pieces(stream, true, float, &mut || usize::MAX);
+                for slice_decode in [true, false] {
+                    for size in [1usize, 7, 513, 4_096] {
+                        let got = decode_pieces(stream, slice_decode, float, &mut || size);
+                        let context = format!(
+                            "stream of {} bytes, {size}-byte pieces, slice {slice_decode}, float {float}: \
+                             {} samples and {:?}, whole gave {} and {:?}",
+                            stream.len(),
+                            got.0.len(),
+                            got.1,
+                            whole.0.len(),
+                            whole.1
+                        );
+                        assert_eq!(got.1, whole.1, "{context}");
+                        if got.1.is_none() {
+                            assert!(got.0 == whole.0, "{context}");
+                            assert_eq!(got.2, whole.2);
+                            assert_eq!(got.3, whole.3);
+                        } else {
+                            // Samples written by a call that then fails are
+                            // not returned, and which call fails depends on
+                            // the cut; what was returned is a prefix.
+                            assert!(intact.starts_with(&got.0), "{context}");
+                        }
+                    }
+                }
+            }
+        }
+        let whole = decode_pieces(&file, true, false, &mut || usize::MAX);
+        assert_eq!(
+            whole.0,
+            samples
+                .iter()
+                .map(|&sample| sample as u32)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

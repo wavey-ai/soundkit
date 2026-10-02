@@ -985,7 +985,7 @@ pub(crate) fn decode_frame_slice(
     bytes: &[u8],
     stream_sample_rate: Option<u32>,
     stream_bits_per_sample: Option<u32>,
-    buffer: Vec<i32>,
+    frame_buffer: &mut Vec<i32>,
     verify_checksums: bool,
 ) -> Result<Option<(Block, usize)>> {
     // Parse the header fields first, then read the stored CRC-8 byte. The
@@ -1015,8 +1015,11 @@ pub(crate) fn decode_frame_slice(
 
     // We must allocate enough space for all channels in the block to be
     // decoded, then resolve the sample width exactly like the streaming path.
+    // The buffer stays with the caller when the frame is incomplete or
+    // refused, so the next attempt reuses it instead of allocating.
     let total_samples = header.channels() as usize * header.block_size as usize;
-    let mut buffer = ensure_buffer_len(buffer, total_samples);
+    *frame_buffer = ensure_buffer_len(std::mem::take(frame_buffer), total_samples);
+    let buffer = &mut frame_buffer[..];
     let bps = resolve_bits_per_sample(header.bits_per_sample, stream_bits_per_sample)?;
     debug_assert!(bps as usize <= 32);
 
@@ -1078,7 +1081,7 @@ pub(crate) fn decode_frame_slice(
         BlockTime::SampleNumber(snr) => snr,
     };
 
-    let block = Block::new(time, header.block_size as u32, buffer);
+    let block = Block::new(time, header.block_size as u32, std::mem::take(frame_buffer));
 
     Ok(Some((block, consumed + 2)))
 }
