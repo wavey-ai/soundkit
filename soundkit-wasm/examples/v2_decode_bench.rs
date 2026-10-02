@@ -5,7 +5,8 @@
 //!
 //! Each chunk goes to `SoundKitFrameStream::push` and then to
 //! `SoundKitV2Decoder::push_float`. With RUNS above one, each run decodes the
-//! file again and the times are the totals of all runs.
+//! file again and the times are the totals of all runs. With the environment
+//! variable V2_BENCH_NO_DIGEST set, no digest is computed, for profiling.
 use sha2::{Digest, Sha256};
 use soundkit::frame_stream::SoundKitFrameStream;
 use soundkit_wasm::v2::SoundKitV2Decoder;
@@ -56,21 +57,26 @@ fn decode(bytes: &[u8], chunk_bytes: usize, times: &mut Times) -> Result<String,
     let mut pcm_digest = Sha256::new();
     let mut frame_count = 0usize;
     let mut pcm_bytes = 0usize;
+    let digest = std::env::var_os("V2_BENCH_NO_DIGEST").is_none();
     for chunk in bytes.chunks(chunk_bytes.max(1)) {
         let start = Instant::now();
         let read = frames.push(chunk)?;
         times.frame_stream += start.elapsed();
         for frame in read {
             frame_count += 1;
-            frame_digest.update(&frame.encoded_header_bytes);
-            frame_digest.update(&frame.payload);
+            if digest {
+                frame_digest.update(&frame.encoded_header_bytes);
+                frame_digest.update(&frame.payload);
+            }
         }
         let start = Instant::now();
         let batch = decoder.push_float(chunk)?;
         times.push_float += start.elapsed();
         for block in batch.frames {
             pcm_bytes += block.data().len();
-            pcm_digest.update(block.data());
+            if digest {
+                pcm_digest.update(block.data());
+            }
         }
     }
     Ok(format!(

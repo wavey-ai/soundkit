@@ -33,6 +33,10 @@ use soundkit_opus::Decoder as OpusPacketDecoder;
 #[derive(Debug, Default)]
 pub struct SoundKitV2Batch {
     pub frames: Vec<AudioData>,
+    /// The encoding of every v2 frame the call read, in stream order,
+    /// including frames that decode to no samples. A caller that only checks
+    /// the codec of each frame needs no frame stream of its own.
+    pub encodings: Vec<EncodingFlag>,
 }
 
 impl SoundKitV2Batch {
@@ -58,6 +62,9 @@ pub struct SoundKitV2Decoder {
     encoding: Option<EncodingFlag>,
     sample_rate: u32,
     channels: u8,
+    /// When set, a call that reads a frame of another encoding fails before
+    /// it decodes any frame it read.
+    required_encoding: Option<EncodingFlag>,
     /// Output space for the FLAC decoder, kept between frames. A new zeroed
     /// buffer for every frame costs more than the decode of a short frame.
     #[cfg(feature = "flac")]
@@ -88,6 +95,7 @@ impl SoundKitV2Decoder {
             encoding: None,
             sample_rate: 0,
             channels: 0,
+            required_encoding: None,
             #[cfg(feature = "flac")]
             flac_i32: Vec::new(),
             #[cfg(feature = "flac")]
@@ -106,6 +114,13 @@ impl SoundKitV2Decoder {
 
     pub fn buffered_bytes(&self) -> usize {
         self.frames.buffered_bytes()
+    }
+
+    /// Accepts only frames of `encoding`, or every encoding with `None`.
+    /// A call that reads a frame of another encoding returns an error before
+    /// it decodes any of the frames it read.
+    pub fn require_encoding(&mut self, encoding: Option<EncodingFlag>) {
+        self.required_encoding = encoding;
     }
 
     pub fn reset(&mut self) {
@@ -129,7 +144,21 @@ impl SoundKitV2Decoder {
 
     fn push_precision(&mut self, bytes: &[u8], float: bool) -> Result<SoundKitV2Batch, String> {
         let read = self.frames.push(bytes)?;
-        let mut batch = SoundKitV2Batch::default();
+        let mut batch = SoundKitV2Batch {
+            frames: Vec::new(),
+            encodings: read.iter().map(|frame| *frame.header.encoding()).collect(),
+        };
+        if let Some(required) = self.required_encoding {
+            if let Some(other) = batch
+                .encodings
+                .iter()
+                .find(|&&encoding| encoding != required)
+            {
+                return Err(format!(
+                    "a SoundKit v2 frame carries {other:?}, not the required {required:?}"
+                ));
+            }
+        }
         for frame in read {
             let encoding = *frame.header.encoding();
             let rate = frame.header.sample_rate();
@@ -519,6 +548,71 @@ mod tests {
             2,
             "both frames decode across the codec change"
         );
+    }
+
+    /// The batch names the encoding of every frame read, the same list a
+    /// separate frame stream gives, and a required encoding refuses a call
+    /// that reads another one before any of its frames decode.
+    #[test]
+    fn reports_and_requires_frame_encodings() {
+        let signed: Vec<i16> = (0..480).map(|n| n as i16).collect();
+        let mut stream = Vec::new();
+        for index in 0..9 {
+            let encoding = if index == 6 {
+                EncodingFlag::PCMFloat
+            } else {
+                EncodingFlag::PCMSigned
+            };
+            let payload = if index == 3 {
+                Vec::new()
+            } else {
+                i16_bytes(&signed)
+            };
+            stream.extend(frame(
+                encoding,
+                &payload,
+                240,
+                48_000,
+                2,
+                if index == 6 { 32 } else { 16 },
+            ));
+        }
+        for piece in [1usize, 7, 333, stream.len()] {
+            let mut decoder = SoundKitV2Decoder::new();
+            let mut frames = SoundKitFrameStream::default();
+            let mut decoded = 0;
+            for chunk in stream.chunks(piece) {
+                let want: Vec<_> = frames
+                    .push(chunk)
+                    .unwrap()
+                    .iter()
+                    .map(|frame| *frame.header.encoding())
+                    .collect();
+                let batch = decoder.push(chunk).unwrap();
+                assert_eq!(batch.encodings, want);
+                decoded += batch.frames.len();
+            }
+            assert_eq!(decoded, 8, "the empty frame decodes to nothing");
+
+            let mut decoder = SoundKitV2Decoder::new();
+            decoder.require_encoding(Some(EncodingFlag::PCMSigned));
+            let mut before_error = 0;
+            let mut error = None;
+            for chunk in stream.chunks(piece) {
+                match decoder.push(chunk) {
+                    Ok(batch) => before_error += batch.encodings.len(),
+                    Err(message) => {
+                        error = Some(message);
+                        break;
+                    }
+                }
+            }
+            assert_eq!(
+                error.as_deref(),
+                Some("a SoundKit v2 frame carries PCMFloat, not the required PCMSigned")
+            );
+            assert!(before_error <= 6);
+        }
     }
 
     /// A stream arrives in whatever slices the transport gives it, and a
