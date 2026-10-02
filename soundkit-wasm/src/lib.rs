@@ -5006,20 +5006,25 @@ impl RawOpusDeboxer {
             self.header_parsed = true;
         }
 
-        while self.buffer.len() >= 2 {
-            let packet_len = u16::from_le_bytes([self.buffer[0], self.buffer[1]]) as usize;
-            if packet_len == 0 || self.buffer.len() < 2 + packet_len {
+        // Packets are read at an offset and the consumed bytes are removed
+        // once per push.
+        let mut consumed = 0;
+        while self.buffer.len() - consumed >= 2 {
+            let rest = &self.buffer[consumed..];
+            let packet_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
+            if packet_len == 0 || rest.len() < 2 + packet_len {
                 break;
             }
 
-            let packet = self.buffer[2..2 + packet_len].to_vec();
-            self.buffer.drain(..2 + packet_len);
+            let packet = rest[2..2 + packet_len].to_vec();
+            consumed += 2 + packet_len;
             events.push(OpusDeboxEvent::Packet {
                 container: "raw",
                 data: packet,
                 timecode: None,
             });
         }
+        self.buffer.drain(..consumed);
 
         Ok(events)
     }
@@ -7724,4 +7729,86 @@ fn merge_library_batches(batches: Vec<JsValue>) -> Result<JsValue, JsValue> {
     Reflect::set(&merged, &JsValue::from_str("opusPackets"), &opus)?;
     Reflect::set(&merged, &JsValue::from_str("flacPackets"), &flac)?;
     Ok(merged.into())
+}
+
+/// The raw Opus deboxer against its form that removed each packet from the
+/// front of the buffer.
+#[cfg(all(test, feature = "opus-debox"))]
+mod raw_opus_debox_reference {
+    use super::*;
+
+    fn reference_add(
+        deboxer: &mut RawOpusDeboxer,
+        data: &[u8],
+    ) -> Result<Vec<OpusDeboxEvent>, String> {
+        deboxer.buffer.extend_from_slice(data);
+        let mut events = Vec::new();
+        if !deboxer.header_parsed {
+            if deboxer.buffer.len() < 19 {
+                return Ok(events);
+            }
+            if !deboxer.buffer.starts_with(b"OpusHead") {
+                return Err("Invalid raw Opus stream: missing OpusHead".to_string());
+            }
+            let head = deboxer.buffer[..19].to_vec();
+            events.push(opus_config_event("raw", &head, None, None)?);
+            deboxer.buffer.drain(..19);
+            deboxer.header_parsed = true;
+        }
+        while deboxer.buffer.len() >= 2 {
+            let packet_len = u16::from_le_bytes([deboxer.buffer[0], deboxer.buffer[1]]) as usize;
+            if packet_len == 0 || deboxer.buffer.len() < 2 + packet_len {
+                break;
+            }
+            let packet = deboxer.buffer[2..2 + packet_len].to_vec();
+            deboxer.buffer.drain(..2 + packet_len);
+            events.push(OpusDeboxEvent::Packet {
+                container: "raw",
+                data: packet,
+                timecode: None,
+            });
+        }
+        Ok(events)
+    }
+
+    #[test]
+    fn offset_reader_matches_front_removing_reader() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut stream = b"OpusHead".to_vec();
+        stream.extend_from_slice(&[1, 2, 0x38, 1, 0x80, 0xbb, 0, 0, 0, 0, 0]);
+        for index in 0..300 {
+            let length = if index == 250 {
+                0
+            } else {
+                (next() % 400) as usize + 1
+            };
+            stream.extend_from_slice(&(length as u16).to_le_bytes());
+            stream.extend((0..length).map(|_| next() as u8));
+        }
+        let mut wrong_magic = stream.clone();
+        wrong_magic[0] = b'X';
+        for stream in [
+            stream.clone(),
+            stream[..stream.len() - 3].to_vec(),
+            wrong_magic,
+        ] {
+            for chunk in [1usize, 7, 500, stream.len()] {
+                let mut actual = RawOpusDeboxer::new();
+                let mut reference = RawOpusDeboxer::new();
+                for piece in stream.chunks(chunk) {
+                    let got = format!("{:?}", actual.add(piece));
+                    let want = format!("{:?}", reference_add(&mut reference, piece));
+                    assert_eq!(got, want);
+                    assert_eq!(actual.buffer, reference.buffer);
+                    assert_eq!(actual.header_parsed, reference.header_parsed);
+                }
+            }
+        }
+    }
 }

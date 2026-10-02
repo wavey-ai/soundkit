@@ -65,28 +65,36 @@ impl Ac3Decoder {
         Ok(self.pending.pop_front())
     }
 
+    /// Decodes every whole frame in the buffer. Frames are read at an offset
+    /// and the consumed bytes are removed once, also when a frame is refused.
     fn decode_available_frames(&mut self) -> Result<(), String> {
+        let mut start = 0;
+        let result = self.decode_frames_from(&mut start);
+        self.buffer.drain(..start);
+        result
+    }
+
+    fn decode_frames_from(&mut self, start: &mut usize) -> Result<(), String> {
         loop {
-            let Some(sync_offset) = syncinfo::find_syncword(&self.buffer, 0) else {
-                self.buffer.clear();
+            let Some(sync_offset) = syncinfo::find_syncword(&self.buffer[*start..], 0) else {
+                *start = self.buffer.len();
                 return Ok(());
             };
-            if sync_offset > 0 {
-                self.buffer.drain(..sync_offset);
-            }
+            *start += sync_offset;
+            let available = &self.buffer[*start..];
 
-            if self.buffer.len() < 5 {
+            if available.len() < 5 {
                 return Ok(());
             }
 
-            let sync = syncinfo::parse(&self.buffer).map_err(oxide_error_to_string)?;
+            let sync = syncinfo::parse(available).map_err(oxide_error_to_string)?;
             let frame_len = sync.frame_length as usize;
-            if self.buffer.len() < frame_len {
+            if available.len() < frame_len {
                 return Ok(());
             }
 
-            let frame = self.buffer[..frame_len].to_vec();
-            self.buffer.drain(..frame_len);
+            let frame = available[..frame_len].to_vec();
+            *start += frame_len;
             let stream_info = bsi::parse(&frame[5..]).map_err(oxide_error_to_string)?;
             let channels = stream_info.nchans as u8;
             if channels == 0 {
@@ -279,5 +287,145 @@ mod tests {
             .chunks_exact(2)
             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
             .any(|sample| sample != 0));
+    }
+
+    /// `decode_available_frames` as it was: each frame and each skipped run
+    /// of bytes removed from the front of the buffer.
+    fn reference_decode_available(decoder: &mut Ac3Decoder) -> Result<(), String> {
+        loop {
+            let Some(sync_offset) = syncinfo::find_syncword(&decoder.buffer, 0) else {
+                decoder.buffer.clear();
+                return Ok(());
+            };
+            if sync_offset > 0 {
+                decoder.buffer.drain(..sync_offset);
+            }
+            if decoder.buffer.len() < 5 {
+                return Ok(());
+            }
+            let sync = syncinfo::parse(&decoder.buffer).map_err(oxide_error_to_string)?;
+            let frame_len = sync.frame_length as usize;
+            if decoder.buffer.len() < frame_len {
+                return Ok(());
+            }
+            let frame = decoder.buffer[..frame_len].to_vec();
+            decoder.buffer.drain(..frame_len);
+            let stream_info = bsi::parse(&frame[5..]).map_err(oxide_error_to_string)?;
+            let channels = stream_info.nchans as u8;
+            if channels == 0 {
+                return Err("AC-3 stream reports zero channels".to_string());
+            }
+            let pkt = OxidePacket::new(0, TimeBase::new(1, sync.sample_rate as i64), frame)
+                .with_pts(decoder.frame_index * SAMPLES_PER_FRAME as i64);
+            decoder.frame_index += 1;
+            decoder
+                .decoder
+                .send_packet(&pkt)
+                .map_err(oxide_error_to_string)?;
+            loop {
+                match decoder.decoder.receive_frame() {
+                    Ok(Frame::Audio(audio)) => {
+                        let Some(bytes) = audio.data.into_iter().next() else {
+                            return Err(
+                                "AC-3 decoder returned audio frame with no data".to_string()
+                            );
+                        };
+                        decoder.pending.push_back(AudioData::new(
+                            16,
+                            channels,
+                            sync.sample_rate,
+                            bytes,
+                            EncodingFlag::PCMSigned,
+                            Endianness::LittleEndian,
+                        ));
+                    }
+                    Ok(_) => continue,
+                    Err(OxideError::NeedMore) => break,
+                    Err(OxideError::Eof) => break,
+                    Err(error) => return Err(oxide_error_to_string(error)),
+                }
+            }
+        }
+    }
+
+    fn reference_add(decoder: &mut Ac3Decoder, data: &[u8]) -> Result<Option<AudioData>, String> {
+        if !data.is_empty() {
+            if decoder.buffer.len().saturating_add(data.len()) > MAX_AC3_STREAM_BUFFER_BYTES {
+                return Err(format!(
+                    "AC-3 stream exceeds the {MAX_AC3_STREAM_BUFFER_BYTES} byte buffer budget"
+                ));
+            }
+            decoder.buffer.extend_from_slice(data);
+        }
+        if let Some(audio) = decoder.pending.pop_front() {
+            return Ok(Some(audio));
+        }
+        reference_decode_available(decoder)?;
+        Ok(decoder.pending.pop_front())
+    }
+
+    type AudioView = Option<(u8, u8, u32, Vec<u8>)>;
+
+    fn view(result: Result<Option<AudioData>, String>) -> Result<AudioView, String> {
+        result.map(|audio| {
+            audio.map(|audio| {
+                (
+                    audio.bits_per_sample(),
+                    audio.channel_count(),
+                    audio.sampling_rate(),
+                    audio.data().clone(),
+                )
+            })
+        })
+    }
+
+    /// The offset reader returns the same audio, errors and buffered bytes as
+    /// the front-removing reader for the fixture, the fixture behind junk,
+    /// corrupt and truncated copies, in pushes of 1 byte to the whole stream.
+    #[test]
+    fn offset_reader_matches_front_removing_reader() {
+        let fixture =
+            fs::read(testdata_path("ac3/A_Tusk_is_used_to_make_costly_gifts.ac3")).unwrap();
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut junk_first: Vec<u8> = (0..777).map(|_| next() as u8 & 0x7f).collect();
+        junk_first.extend_from_slice(&fixture);
+        let mut corrupt = fixture.clone();
+        for _ in 0..12 {
+            let at = (next() as usize) % corrupt.len();
+            corrupt[at] = next() as u8;
+        }
+        let streams = [
+            fixture.clone(),
+            junk_first,
+            corrupt,
+            fixture[..fixture.len() * 2 / 3].to_vec(),
+        ];
+        let mut frames = 0;
+        for stream in &streams {
+            for chunk in [1usize, 7, 1_000, 65_536, stream.len()] {
+                let mut actual = Ac3Decoder::try_new().unwrap();
+                let mut reference = Ac3Decoder::try_new().unwrap();
+                let pieces = stream.chunks(chunk).chain(std::iter::repeat_n(&[][..], 4));
+                for piece in pieces {
+                    loop {
+                        let got = view(actual.add(piece));
+                        let want = view(reference_add(&mut reference, piece));
+                        assert_eq!(got, want);
+                        assert_eq!(actual.buffer, reference.buffer);
+                        frames += usize::from(matches!(want, Ok(Some(_))));
+                        if !matches!(want, Ok(Some(_))) || !piece.is_empty() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(frames > 0);
     }
 }

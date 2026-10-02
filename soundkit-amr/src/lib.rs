@@ -284,24 +284,74 @@ impl AmrNbDecoder {
         strip_magic(&mut self.pending_bytes, &mut self.checked_magic);
     }
 
+    /// The samples a decode of the pending bytes followed by `input` would
+    /// write. The bytes are read in place: the two parts are not joined, and
+    /// no frame is removed from the front.
     fn decoded_samples_available(&self, input: &[u8]) -> Result<usize, String> {
-        let mut pending = self.pending_bytes.clone();
-        let mut checked_magic = self.checked_magic;
-        pending.extend_from_slice(input);
-        strip_magic(&mut pending, &mut checked_magic);
+        let pending = &self.pending_bytes;
+        let total = pending.len() + input.len();
+        let byte = |index: usize| {
+            if index < pending.len() {
+                pending[index]
+            } else {
+                input[index - pending.len()]
+            }
+        };
+        // The magic is skipped exactly when `strip_magic` would remove it.
+        let mut offset = 0;
+        if !self.checked_magic
+            && total >= AMR_NB_FILE_MAGIC.len()
+            && (0..AMR_NB_FILE_MAGIC.len()).all(|index| byte(index) == AMR_NB_FILE_MAGIC[index])
+        {
+            offset = AMR_NB_FILE_MAGIC.len();
+        }
 
         let mut samples = 0;
-        while !pending.is_empty() {
-            let frame_len = amr_nb_frame_len(pending[0])?;
-            if pending.len() < frame_len {
+        while offset < total {
+            let frame_len = amr_nb_frame_len(byte(offset))?;
+            if total - offset < frame_len {
                 break;
             }
             if frame_len > 1 {
                 samples += AMR_NB_FRAME_SAMPLES;
             }
-            pending.drain(..frame_len);
+            offset += frame_len;
         }
         Ok(samples)
+    }
+
+    /// Decodes the whole frames at the front of the pending bytes. Frames are
+    /// read at an offset; the consumed bytes are removed once.
+    fn decode_pending(&mut self, output: &mut [i16]) -> Result<usize, String> {
+        let mut written = 0;
+        let mut consumed = 0;
+        let result = loop {
+            let pending = &self.pending_bytes[consumed..];
+            if pending.is_empty() {
+                break Ok(());
+            }
+            let frame_len = match amr_nb_frame_len(pending[0]) {
+                Ok(frame_len) => frame_len,
+                Err(error) => break Err(error),
+            };
+            if pending.len() < frame_len {
+                break Ok(());
+            }
+            if frame_len > 1 {
+                unsafe {
+                    Decoder_Interface_Decode(
+                        self.state,
+                        pending.as_ptr(),
+                        output[written..].as_mut_ptr(),
+                        0,
+                    );
+                }
+                written += AMR_NB_FRAME_SAMPLES;
+            }
+            consumed += frame_len;
+        };
+        self.pending_bytes.drain(..consumed);
+        result.map(|()| written)
     }
 }
 
@@ -338,36 +388,7 @@ impl Decoder for AmrNbDecoder {
 
         self.pending_bytes.extend_from_slice(input);
         self.strip_magic_if_needed();
-
-        let mut written = 0;
-        loop {
-            if self.pending_bytes.is_empty() {
-                break;
-            }
-
-            let frame_len = amr_nb_frame_len(self.pending_bytes[0])?;
-            if self.pending_bytes.len() < frame_len {
-                break;
-            }
-
-            if frame_len == 1 {
-                self.pending_bytes.drain(..1);
-                continue;
-            }
-
-            unsafe {
-                Decoder_Interface_Decode(
-                    self.state,
-                    self.pending_bytes.as_ptr(),
-                    output[written..].as_mut_ptr(),
-                    0,
-                );
-            }
-            written += AMR_NB_FRAME_SAMPLES;
-            self.pending_bytes.drain(..frame_len);
-        }
-
-        Ok(written)
+        self.decode_pending(output)
     }
 
     fn decode_i32(
@@ -627,5 +648,129 @@ mod tests {
         let output_path = golden_path("amr_nb/A_Tusk_is_used_to_make_costly_gifts.decoded.wav");
         fs::create_dir_all(output_path.parent().unwrap()).unwrap();
         fs::write(output_path, wav).unwrap();
+    }
+
+    /// `decoded_samples_available` as it was: a joined copy of the pending
+    /// bytes and the input, with each frame removed from its front.
+    fn reference_available(decoder: &AmrNbDecoder, input: &[u8]) -> Result<usize, String> {
+        let mut pending = decoder.pending_bytes.clone();
+        let mut checked_magic = decoder.checked_magic;
+        pending.extend_from_slice(input);
+        strip_magic(&mut pending, &mut checked_magic);
+        let mut samples = 0;
+        while !pending.is_empty() {
+            let frame_len = amr_nb_frame_len(pending[0])?;
+            if pending.len() < frame_len {
+                break;
+            }
+            if frame_len > 1 {
+                samples += AMR_NB_FRAME_SAMPLES;
+            }
+            pending.drain(..frame_len);
+        }
+        Ok(samples)
+    }
+
+    /// `decode_i16` as it was.
+    fn reference_decode_i16(
+        decoder: &mut AmrNbDecoder,
+        input: &[u8],
+        output: &mut [i16],
+    ) -> Result<usize, String> {
+        let required = reference_available(decoder, input)?;
+        if output.len() < required {
+            return Err(format!(
+                "Output buffer too small for AMR-NB decode: need {}, have {}",
+                required,
+                output.len()
+            ));
+        }
+        decoder.pending_bytes.extend_from_slice(input);
+        decoder.strip_magic_if_needed();
+        let mut written = 0;
+        loop {
+            if decoder.pending_bytes.is_empty() {
+                break;
+            }
+            let frame_len = amr_nb_frame_len(decoder.pending_bytes[0])?;
+            if decoder.pending_bytes.len() < frame_len {
+                break;
+            }
+            if frame_len == 1 {
+                decoder.pending_bytes.drain(..1);
+                continue;
+            }
+            unsafe {
+                Decoder_Interface_Decode(
+                    decoder.state,
+                    decoder.pending_bytes.as_ptr(),
+                    output[written..].as_mut_ptr(),
+                    0,
+                );
+            }
+            written += AMR_NB_FRAME_SAMPLES;
+            decoder.pending_bytes.drain(..frame_len);
+        }
+        Ok(written)
+    }
+
+    /// The offset decoder writes the same samples, errors, pending bytes and
+    /// magic state as the front-removing decoder, for the fixture with and
+    /// without its magic, corrupt bytes, and pushes of 1 byte to the whole
+    /// stream, with output buffers that fit and that are one frame short.
+    #[test]
+    fn offset_decoder_matches_front_removing_decoder() {
+        let fixture = fs::read(testdata_path(
+            "amr_nb/A_Tusk_is_used_to_make_costly_gifts.amr",
+        ))
+        .unwrap();
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut corrupt = fixture.clone();
+        for _ in 0..40 {
+            let at = (next() as usize) % corrupt.len();
+            corrupt[at] = next() as u8;
+        }
+        let streams = [
+            fixture.clone(),
+            fixture[AMR_NB_FILE_MAGIC.len()..].to_vec(),
+            fixture[..fixture.len() - 5].to_vec(),
+            corrupt,
+            b"#!AM".to_vec(),
+            (0..3_000).map(|_| next() as u8).collect(),
+        ];
+        let mut decoded = 0;
+        for stream in &streams {
+            for chunk in [1usize, 7, 33, 1_000, stream.len()] {
+                for short in [false, true] {
+                    let mut actual = AmrNbDecoder::new_decoder();
+                    let mut reference = AmrNbDecoder::new_decoder();
+                    for piece in stream.chunks(chunk) {
+                        let need = reference_available(&reference, piece).unwrap();
+                        let size = if short {
+                            need.saturating_sub(AMR_NB_FRAME_SAMPLES)
+                        } else {
+                            need
+                        };
+                        let mut got = vec![0i16; size];
+                        let mut want = vec![0i16; size];
+                        let got_count = actual.decode_i16(piece, &mut got, false);
+                        let want_count = reference_decode_i16(&mut reference, piece, &mut want);
+                        assert_eq!(got_count, want_count);
+                        assert_eq!(got, want);
+                        assert_eq!(actual.pending_bytes, reference.pending_bytes);
+                        assert_eq!(actual.checked_magic, reference.checked_magic);
+                        decoded += want_count.unwrap_or(0);
+                    }
+                    assert_eq!(actual.flush(), reference.flush());
+                }
+            }
+        }
+        assert!(decoded > 0);
     }
 }
