@@ -45,3 +45,7 @@ required-features = ["decode-video"]
 [[example]]
 name = "inspect-mxf-media"
 required-features = ["mxf"]
+
+[[example]]
+name = "video_digest"
+required-features = ["decode-video"]

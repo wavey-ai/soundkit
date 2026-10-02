@@ -754,9 +754,9 @@ fn plane_u8(width: u32, height: u32, data: Vec<u8>) -> VideoPlane {
 
 #[cfg(any(feature = "hevc", feature = "vp9"))]
 fn plane_u16(width: u32, height: u32, data: Vec<u16>) -> VideoPlane {
-    let mut bytes = Vec::with_capacity(data.len() * 2);
-    for sample in data {
-        bytes.extend_from_slice(&sample.to_le_bytes());
+    let mut bytes = vec![0u8; data.len() * 2];
+    for (target, sample) in bytes.chunks_exact_mut(2).zip(&data) {
+        target.copy_from_slice(&sample.to_le_bytes());
     }
     VideoPlane {
         width,
@@ -886,10 +886,13 @@ fn drain_av1(decoder: &mut rusty_av1d::Decoder) -> Result<Vec<VideoFrame>, Strin
                 } else {
                     let source = picture.plane16(component);
                     validate_source_plane(source.len(), stride, plane_width, plane_height)?;
-                    for row in 0..plane_height as usize {
+                    let row_bytes = plane_width as usize * 2;
+                    data.resize(row_bytes * plane_height as usize, 0);
+                    for (row, target) in data.chunks_exact_mut(row_bytes.max(1)).enumerate() {
                         let start = row * stride;
-                        for sample in &source[start..start + plane_width as usize] {
-                            data.extend_from_slice(&sample.to_le_bytes());
+                        let samples = &source[start..start + plane_width as usize];
+                        for (bytes, sample) in target.chunks_exact_mut(2).zip(samples) {
+                            bytes.copy_from_slice(&sample.to_le_bytes());
                         }
                     }
                 }
@@ -976,32 +979,33 @@ fn prores_frame(
         ChromaSampling::Cs444
     };
     let has_alpha = planes.len() == 4;
-    let mut output_planes = vec![
-        VideoPlane {
-            width,
-            height,
-            stride: (y.stride / bytes_per_sample) as u32,
-            data: y.data.clone(),
-        },
-        VideoPlane {
-            width: (u.stride / bytes_per_sample) as u32,
-            height,
-            stride: (u.stride / bytes_per_sample) as u32,
-            data: u.data.clone(),
-        },
-        VideoPlane {
-            width: (v.stride / bytes_per_sample) as u32,
-            height,
-            stride: (v.stride / bytes_per_sample) as u32,
-            data: v.data.clone(),
-        },
-    ];
-    if let Some(alpha) = planes.get(3) {
+    let strides = [y.stride, u.stride, v.stride];
+    let alpha_stride = planes.get(3).map(|alpha| alpha.stride);
+    // The decoded planes move into the output; the frame is not used after.
+    let image_planes = frame.image_plane_count();
+    let frame_pts = frame.pts;
+    let mut decoded = frame.planes;
+    decoded.truncate(image_planes);
+    let mut decoded = decoded.into_iter().map(|plane| plane.data);
+    let mut output_planes = Vec::with_capacity(4);
+    for (index, stride) in strides.into_iter().enumerate() {
         output_planes.push(VideoPlane {
-            width: (alpha.stride / bytes_per_sample) as u32,
+            width: if index == 0 {
+                width
+            } else {
+                (stride / bytes_per_sample) as u32
+            },
             height,
-            stride: (alpha.stride / bytes_per_sample) as u32,
-            data: alpha.data.clone(),
+            stride: (stride / bytes_per_sample) as u32,
+            data: decoded.next().unwrap_or_default(),
+        });
+    }
+    if let Some(stride) = alpha_stride {
+        output_planes.push(VideoPlane {
+            width: (stride / bytes_per_sample) as u32,
+            height,
+            stride: (stride / bytes_per_sample) as u32,
+            data: decoded.next().unwrap_or_default(),
         });
     }
     Ok(VideoFrame {
@@ -1011,7 +1015,7 @@ fn prores_frame(
         color_model: VideoColorModel::Ycbcr,
         chroma_sampling,
         has_alpha,
-        pts: frame.pts.or(pts),
+        pts: frame_pts.or(pts),
         duration,
         planes: output_planes,
     })
@@ -1036,15 +1040,11 @@ fn dnx_frame(frame: soundkit_dnx::DnxFrame, pts: Option<i64>, duration: Option<u
         .into_iter()
         .map(|plane| {
             let data = if bit_depth <= 8 {
-                plane
-                    .samples
-                    .into_iter()
-                    .map(|sample| sample as u8)
-                    .collect()
+                plane.samples.iter().map(|&sample| sample as u8).collect()
             } else {
-                let mut data = Vec::with_capacity(plane.samples.len() * 2);
-                for sample in plane.samples {
-                    data.extend_from_slice(&sample.to_le_bytes());
+                let mut data = vec![0u8; plane.samples.len() * 2];
+                for (target, sample) in data.chunks_exact_mut(2).zip(&plane.samples) {
+                    target.copy_from_slice(&sample.to_le_bytes());
                 }
                 data
             };
