@@ -2473,6 +2473,11 @@ impl StreamingDecoder for FormatDecoder {
                 dec.flush()?;
                 Ok(Vec::new())
             }
+            FormatDecoder::Mp3(dec) => {
+                // The last frame waits for the end of the input.
+                dec.end_input();
+                self.process(&[], scratch)
+            }
             _ => self.process(&[], scratch),
         }
     }

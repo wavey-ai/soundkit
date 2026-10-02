@@ -12,6 +12,8 @@ use tables::*;
 #[derive(Default)]
 pub(super) struct CoreFrameInfo {
     pub frame_bytes: usize,
+    /// The decoder searched and found no frame.
+    pub not_found: bool,
     pub frame_offset: usize,
     pub channels: u32,
     pub sample_rate: u32,
@@ -1460,25 +1462,66 @@ fn synthesize_granule(
     qmf_state.copy_from_slice(&lins[nbands * 64..nbands * 64 + 960]);
 }
 
-fn match_frame(hdr: &[u8], frame_bytes: usize) -> bool {
+/// How `match_frame` reached its answer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FrameMatch {
+    /// Ten following headers agree: the same answer with any further data.
+    Complete,
+    /// A following header disagrees: the same answer with any further data.
+    Mismatch,
+    /// The data ended first. `matched` headers agreed before it did.
+    DataEnd { matched: usize },
+}
+
+fn match_frame_status(hdr: &[u8], frame_bytes: usize) -> FrameMatch {
     let mut i: usize = 0;
     for matched in 0..10 {
         i += hdr_frame_bytes(&hdr[i..], frame_bytes) + hdr_padding(&hdr[i..]);
         if i + 4 > hdr.len() {
-            return matched > 0;
+            return FrameMatch::DataEnd { matched };
         }
         if !hdr_compare(hdr, &hdr[i..]) {
-            return false;
+            return FrameMatch::Mismatch;
         }
     }
-    true
+    FrameMatch::Complete
 }
 
-fn find_frame(mut mp3: &[u8], free_format_bytes: &mut usize, ptr_frame_bytes: &mut usize) -> usize {
+/// Whether the result of a frame search would be the same with more data
+/// after the searched bytes.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct SearchFinality {
+    /// The first position whose result could change with more data, or the
+    /// end of the searched positions.
+    pub first_open: usize,
+    /// The frame found, if any, is found with any further data.
+    pub accept_final: bool,
+}
+
+fn find_frame(mp3: &[u8], free_format_bytes: &mut usize, ptr_frame_bytes: &mut usize) -> usize {
+    find_frame_tracked(
+        mp3,
+        free_format_bytes,
+        ptr_frame_bytes,
+        &mut SearchFinality::default(),
+    )
+}
+
+/// The minimp3 frame search. `finality` records which of its answers depend
+/// on where the data ends. A search over fewer than five bytes examines no
+/// position, as in minimp3, where the byte count is signed.
+fn find_frame_tracked(
+    mut mp3: &[u8],
+    free_format_bytes: &mut usize,
+    ptr_frame_bytes: &mut usize,
+    finality: &mut SearchFinality,
+) -> usize {
     let mp3_bytes = mp3.len();
     let mut i: usize = 0;
-    while i < mp3_bytes - 4 {
+    let mut open = None;
+    while i + 4 < mp3_bytes {
         if hdr_valid(mp3) {
+            let mut data_end = false;
             let mut frame_bytes = hdr_frame_bytes(mp3, *free_format_bytes);
             let mut frame_and_padding = frame_bytes + hdr_padding(mp3);
             let mut k = 4;
@@ -1486,21 +1529,41 @@ fn find_frame(mut mp3: &[u8], free_format_bytes: &mut usize, ptr_frame_bytes: &m
                 if hdr_compare(mp3, &mp3[k..]) {
                     let fb = k - hdr_padding(mp3);
                     let nextfb = fb + hdr_padding(&mp3[k..]);
-                    if i + k + nextfb + 4 <= mp3_bytes && hdr_compare(mp3, &mp3[k + nextfb..]) {
-                        frame_and_padding = k;
-                        frame_bytes = fb;
-                        *free_format_bytes = fb;
+                    if i + k + nextfb + 4 <= mp3_bytes {
+                        if hdr_compare(mp3, &mp3[k + nextfb..]) {
+                            frame_and_padding = k;
+                            frame_bytes = fb;
+                            *free_format_bytes = fb;
+                        }
+                    } else {
+                        data_end = true;
                     }
                 }
                 k += 1;
             }
-            if frame_bytes != 0
-                && i + frame_and_padding <= mp3_bytes
-                && match_frame(mp3, frame_bytes)
-                || i == 0 && frame_and_padding == mp3_bytes
-            {
+            if frame_bytes == 0 && k < 2304 {
+                data_end = true;
+            }
+            let status = if frame_bytes != 0 && i + frame_and_padding <= mp3_bytes {
+                Some(match_frame_status(mp3, frame_bytes))
+            } else {
+                if frame_bytes != 0 {
+                    data_end = true;
+                }
+                None
+            };
+            let matched = matches!(
+                status,
+                Some(FrameMatch::Complete) | Some(FrameMatch::DataEnd { matched: 1.. })
+            );
+            if matched || i == 0 && frame_and_padding == mp3_bytes {
                 *ptr_frame_bytes = frame_and_padding;
+                finality.first_open = open.unwrap_or(i);
+                finality.accept_final = !data_end && status == Some(FrameMatch::Complete);
                 return i;
+            }
+            if data_end || matches!(status, Some(FrameMatch::DataEnd { .. })) {
+                open.get_or_insert(i);
             }
             *free_format_bytes = 0;
         }
@@ -1508,7 +1571,62 @@ fn find_frame(mut mp3: &[u8], free_format_bytes: &mut usize, ptr_frame_bytes: &m
         mp3 = &mp3[1..];
     }
     *ptr_frame_bytes = 0;
+    finality.first_open = open.unwrap_or(i);
+    finality.accept_final = false;
     mp3_bytes
+}
+
+/// A frame search with no decoder state: the search `decode_frame` makes
+/// after it resets the decoder. Returns the frame offset and length, if one
+/// is found, and the finality of the answer.
+pub(super) fn probe_frame(mp3: &[u8]) -> (Option<(usize, usize)>, SearchFinality) {
+    let mut free_format_bytes = 0;
+    let mut frame_bytes = 0;
+    let mut finality = SearchFinality::default();
+    let offset = find_frame_tracked(mp3, &mut free_format_bytes, &mut frame_bytes, &mut finality);
+    (
+        (frame_bytes != 0).then_some((offset, frame_bytes)),
+        finality,
+    )
+}
+
+/// How the next `decode_frame` call on `mp3` would locate its frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum NextFrame {
+    /// The frame follows the last one and its length is confirmed by the
+    /// next header, or the frame ends the data.
+    Continues { frame_bytes: usize },
+    /// The answer depends on bytes that have not arrived.
+    NeedsData,
+    /// The decoder resets and searches.
+    Searches,
+}
+
+/// The first test of `decode_frame`, without changing the decoder.
+pub(super) fn next_frame(dec: &Layer3Decoder, mp3: &[u8]) -> NextFrame {
+    if mp3.len() <= 4 {
+        return NextFrame::NeedsData;
+    }
+    if dec.header[0] != 0xff || !hdr_compare(&dec.header, mp3) {
+        return NextFrame::Searches;
+    }
+    let frame_size = hdr_frame_bytes(mp3, dec.free_format_bytes) + hdr_padding(mp3);
+    if frame_size == mp3.len() || frame_size + 4 > mp3.len() {
+        return NextFrame::NeedsData;
+    }
+    if hdr_compare(mp3, &mp3[frame_size..]) {
+        NextFrame::Continues {
+            frame_bytes: frame_size,
+        }
+    } else {
+        NextFrame::Searches
+    }
+}
+
+/// Whether a frame search would skip the position at the start of `mp3`
+/// whatever data follows.
+pub(super) fn starts_with_invalid_header(mp3: &[u8]) -> bool {
+    mp3.len() >= 4 && !hdr_valid(mp3)
 }
 
 fn reset_decoder(dec: &mut Layer3Decoder) {
@@ -1566,6 +1684,7 @@ pub(super) fn decode_frame(
         i = find_frame(mp3, &mut dec.free_format_bytes, &mut frame_size);
         if frame_size == 0 || i + frame_size > mp3.len() {
             info.frame_bytes = i;
+            info.not_found = frame_size == 0;
             return 0;
         }
     }
@@ -1623,4 +1742,178 @@ pub(super) fn decode_frame(
     }
     save_reservoir(dec, &mut scratch_bs);
     success as usize * hdr_frame_samples(&dec.header) as usize
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    fn reference_match_frame(hdr: &[u8], frame_bytes: usize) -> bool {
+        let mut i: usize = 0;
+        for matched in 0..10 {
+            i += hdr_frame_bytes(&hdr[i..], frame_bytes) + hdr_padding(&hdr[i..]);
+            if i + 4 > hdr.len() {
+                return matched > 0;
+            }
+            if !hdr_compare(hdr, &hdr[i..]) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The minimp3 frame search as it was ported, with the byte count
+    /// compared as minimp3 compares its signed count.
+    fn reference_find_frame(
+        mut mp3: &[u8],
+        free_format_bytes: &mut usize,
+        ptr_frame_bytes: &mut usize,
+    ) -> usize {
+        let mp3_bytes = mp3.len();
+        let mut i: usize = 0;
+        while i + 4 < mp3_bytes {
+            if hdr_valid(mp3) {
+                let mut frame_bytes = hdr_frame_bytes(mp3, *free_format_bytes);
+                let mut frame_and_padding = frame_bytes + hdr_padding(mp3);
+                let mut k = 4;
+                while frame_bytes == 0 && k < 2304 && i + 2 * k < mp3_bytes - 4 {
+                    if hdr_compare(mp3, &mp3[k..]) {
+                        let fb = k - hdr_padding(mp3);
+                        let nextfb = fb + hdr_padding(&mp3[k..]);
+                        if i + k + nextfb + 4 <= mp3_bytes && hdr_compare(mp3, &mp3[k + nextfb..]) {
+                            frame_and_padding = k;
+                            frame_bytes = fb;
+                            *free_format_bytes = fb;
+                        }
+                    }
+                    k += 1;
+                }
+                if frame_bytes != 0
+                    && i + frame_and_padding <= mp3_bytes
+                    && reference_match_frame(mp3, frame_bytes)
+                    || i == 0 && frame_and_padding == mp3_bytes
+                {
+                    *ptr_frame_bytes = frame_and_padding;
+                    return i;
+                }
+                *free_format_bytes = 0;
+            }
+            i += 1;
+            mp3 = &mp3[1..];
+        }
+        *ptr_frame_bytes = 0;
+        mp3_bytes
+    }
+
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    /// Buffers dense in plausible headers: real frames, frames with their
+    /// bytes changed, free-format headers, and runs of 0xff.
+    fn buffers() -> Vec<Vec<u8>> {
+        let fixture = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../testdata/mp3/A_Tusk_is_used_to_make_costly_gifts.mp3"),
+        )
+        .unwrap();
+        let mut rng = Xorshift(0x9e37_79b9_7f4a_7c15);
+        let mut out = Vec::new();
+        for round in 0..48 {
+            let mut buffer = Vec::new();
+            let pieces = 1 + rng.next() % 6;
+            for _ in 0..pieces {
+                match rng.next() % 5 {
+                    0 => {
+                        let start = (rng.next() as usize) % fixture.len();
+                        let length = (rng.next() as usize) % 6_000;
+                        buffer.extend_from_slice(
+                            &fixture[start..(start + length).min(fixture.len())],
+                        );
+                    }
+                    1 => buffer.extend((0..(rng.next() % 3_000)).map(|_| rng.next() as u8)),
+                    2 => {
+                        // A free-format header, bitrate index 0, repeated.
+                        let header = [0xff, 0xfb, 0x00 | ((rng.next() as u8) & 0x0c), 0x44];
+                        let gap = 40 + (rng.next() as usize) % 900;
+                        for _ in 0..(rng.next() % 6) {
+                            buffer.extend_from_slice(&header);
+                            buffer.extend((0..gap).map(|_| rng.next() as u8 & 0x7f));
+                        }
+                    }
+                    3 => buffer.extend(std::iter::repeat_n(0xffu8, (rng.next() % 40) as usize)),
+                    _ => {
+                        let start = (rng.next() as usize) % fixture.len();
+                        let mut piece = fixture[start..(start + 3_000).min(fixture.len())].to_vec();
+                        for _ in 0..4 {
+                            if !piece.is_empty() {
+                                let at = (rng.next() as usize) % piece.len();
+                                piece[at] = rng.next() as u8;
+                            }
+                        }
+                        buffer.extend(piece);
+                    }
+                }
+            }
+            if round % 7 == 0 {
+                buffer.truncate((rng.next() % 6) as usize);
+            }
+            out.push(buffer);
+        }
+        out.push(fixture);
+        out
+    }
+
+    #[test]
+    fn tracked_search_matches_the_ported_search() {
+        for buffer in buffers() {
+            for start in [0usize, 1, 3, 17] {
+                let data = &buffer[start.min(buffer.len())..];
+                for free_format in [0usize, 417] {
+                    let (mut a_ffb, mut a_len) = (free_format, 0);
+                    let (mut b_ffb, mut b_len) = (free_format, 0);
+                    let a = find_frame(data, &mut a_ffb, &mut a_len);
+                    let b = reference_find_frame(data, &mut b_ffb, &mut b_len);
+                    assert_eq!((a, a_len, a_ffb), (b, b_len, b_ffb));
+                }
+            }
+        }
+    }
+
+    /// An answer marked final is the answer for every longer buffer, and a
+    /// longer buffer never finds a frame before the first open position.
+    #[test]
+    fn final_answers_hold_for_longer_buffers() {
+        let all = buffers();
+        let mut final_accepts = 0;
+        for buffer in &all {
+            for cut in (0..buffer.len()).step_by(31).chain([buffer.len()]) {
+                let (found, finality) = probe_frame(&buffer[..cut]);
+                let (longer, _) = probe_frame(buffer);
+                if let Some((offset, length)) = found {
+                    if finality.accept_final && finality.first_open == offset {
+                        final_accepts += 1;
+                        assert_eq!(longer, Some((offset, length)), "cut {cut}");
+                    }
+                }
+                if let Some((offset, _)) = longer {
+                    assert!(
+                        offset >= finality.first_open,
+                        "cut {cut}: a longer buffer found {offset} before {}",
+                        finality.first_open
+                    );
+                }
+            }
+        }
+        assert!(final_accepts > 100, "{final_accepts}");
+    }
 }

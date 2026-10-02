@@ -14,6 +14,8 @@ fn main() {
     let input = fs::read(&input_path).expect("read MP3 input");
     let mut pcm = vec![0.0f32; input.len().saturating_mul(64).max(2304)];
     let mut decoder = Mp3Decoder::new();
+    // The whole file is the input.
+    decoder.end_input();
     let samples = decoder
         .decode_f32(&input, &mut pcm, false)
         .expect("decode MP3");

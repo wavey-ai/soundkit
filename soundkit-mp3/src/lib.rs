@@ -42,20 +42,24 @@ impl Mp3FrameDecoder {
         Self(decoder::Layer3Decoder::new())
     }
 
-    fn decode(&mut self, mp3: &[u8], pcm: &mut [f32]) -> (usize, Option<FrameInfo>) {
+    /// Decodes the frame at or after the start of `mp3`. Returns the bytes
+    /// up to the end of the frame, whether the search found no frame, and
+    /// the frame when it produced audio.
+    fn decode(&mut self, mp3: &[u8], pcm: &mut [f32]) -> (usize, bool, Option<FrameInfo>) {
         assert!(pcm.len() >= MAX_SAMPLES_PER_FRAME, "PCM buffer too small");
         let mut info = decoder::CoreFrameInfo::default();
         let samples = decoder::decode_frame(&mut self.0, mp3, pcm, &mut info);
         if samples == 0 {
-            return (0, None);
+            return (info.frame_bytes, info.not_found, None);
         }
         let channels = match info.channels {
             1 => Channels::Mono,
             2 => Channels::Stereo,
-            _ => return (0, None),
+            _ => return (info.frame_bytes, false, None),
         };
         (
             info.frame_bytes,
+            false,
             Some(FrameInfo {
                 samples_produced: samples,
                 channels,
@@ -198,10 +202,19 @@ impl Encoder for Mp3Encoder {
     }
 }
 
+/// Streaming MP3 decoder.
+///
+/// A frame is decoded only when the decision that locates it would be the
+/// same with any further input, so the output is the same for every way the
+/// stream is cut. The last frame waits for [`Mp3Decoder::end_input`].
 pub struct Mp3Decoder {
     inner: Mp3FrameDecoder,
     buffer: Vec<u8>,
     buffer_start: usize,
+    /// Bytes after `buffer_start` that a frame search skips whatever data
+    /// follows. The search resumes here, at a byte that is not a header.
+    search_from: usize,
+    input_ended: bool,
     pcm: [f32; MAX_SAMPLES_PER_FRAME],
     sample_rate: Option<u32>,
     channels: Option<u8>,
@@ -215,6 +228,8 @@ impl Mp3Decoder {
             inner: Mp3FrameDecoder::new(),
             buffer: Vec::with_capacity(16 * 1024),
             buffer_start: 0,
+            search_from: 0,
+            input_ended: false,
             pcm: [0.0; MAX_SAMPLES_PER_FRAME],
             sample_rate: None,
             channels: None,
@@ -238,8 +253,69 @@ impl Mp3Decoder {
         self.inner = Mp3FrameDecoder::new();
         self.buffer.clear();
         self.buffer_start = 0;
+        self.search_from = 0;
+        self.input_ended = false;
         self.sample_rate = None;
         self.channels = None;
+    }
+
+    /// States that no more input follows. Later decode calls decode the
+    /// frames that waited for data after them, including the last frame.
+    pub fn end_input(&mut self) {
+        self.input_ended = true;
+    }
+
+    /// Decodes the next frame into `self.pcm`. Frames that produce no audio,
+    /// such as a frame whose bit reservoir starts before the stream, are
+    /// skipped as minimp3 specifies.
+    fn next_frame(&mut self) -> Option<FrameInfo> {
+        loop {
+            let available = &self.buffer[self.buffer_start..];
+            if available.is_empty() {
+                return None;
+            }
+            if !self.input_ended {
+                match decoder::next_frame(&self.inner.0, available) {
+                    decoder::NextFrame::Continues { .. } => {
+                        debug_assert_eq!(self.search_from, 0);
+                    }
+                    decoder::NextFrame::NeedsData => return None,
+                    decoder::NextFrame::Searches => {
+                        let searched = &available[self.search_from..];
+                        let (found, finality) = decoder::probe_frame(searched);
+                        let ready = found.is_some_and(|(offset, _)| {
+                            finality.accept_final && finality.first_open == offset
+                        });
+                        if !ready {
+                            // Every position before `first_open` is skipped by
+                            // any later search. Resume at the last of them
+                            // that is not a header, so the search starts on a
+                            // byte it skips.
+                            let open = finality.first_open.min(searched.len());
+                            if let Some(skip) = (1..open)
+                                .rev()
+                                .find(|&at| decoder::starts_with_invalid_header(&searched[at..]))
+                            {
+                                self.search_from += skip;
+                            }
+                            return None;
+                        }
+                    }
+                }
+            }
+
+            let from = self.buffer_start + self.search_from;
+            let (frame_bytes, not_found, frame) =
+                self.inner.decode(&self.buffer[from..], &mut self.pcm);
+            if not_found || frame_bytes == 0 {
+                return None;
+            }
+            self.buffer_start = from + frame_bytes;
+            self.search_from = 0;
+            if frame.is_some() {
+                return frame;
+            }
+        }
     }
 
     fn capture_header(&mut self, info: &FrameInfo) {
@@ -258,14 +334,13 @@ impl Mp3Decoder {
         self.channels.get_or_insert(info.channels.num());
     }
 
-    fn log_frame_decode(&self, info: &FrameInfo, consumed: usize, frame_samples: usize) {
+    fn log_frame_decode(&self, info: &FrameInfo, frame_samples: usize) {
         tracing::trace!(
             sample_rate_hz = info.sample_rate,
             channel_mode = ?info.channels,
             channels = info.channels.num(),
             bitrate_kbps = info.bitrate,
             samples_produced = info.samples_produced,
-            bytes_consumed = consumed,
             pcm_samples_written = frame_samples,
             "decoded MP3 frame"
         );
@@ -292,12 +367,6 @@ impl Mp3Decoder {
             self.buffer.truncate(self.buffer.len() - self.buffer_start);
             self.buffer_start = 0;
         }
-    }
-
-    #[inline]
-    fn advance_buffer(&mut self, consumed: usize) {
-        debug_assert!(consumed <= self.buffer_len());
-        self.buffer_start += consumed;
     }
 
     fn write_frame_i16(&self, info: &FrameInfo, output: &mut [i16]) -> Result<usize, String> {
@@ -356,22 +425,10 @@ impl Decoder for Mp3Decoder {
         self.append_input(input)?;
 
         let mut written = 0;
-        while self.buffer_start < self.buffer.len() {
-            let (consumed, frame) = self
-                .inner
-                .decode(&self.buffer[self.buffer_start..], &mut self.pcm);
-
-            if consumed > 0 {
-                self.advance_buffer(consumed);
-            }
-
-            let Some(info) = frame else {
-                break;
-            };
-
+        while let Some(info) = self.next_frame() {
             self.capture_header(&info);
             let frame_written = self.write_frame_i16(&info, &mut out[written..])?;
-            self.log_frame_decode(&info, consumed, frame_written);
+            self.log_frame_decode(&info, frame_written);
             written += frame_written;
 
             if out.len().saturating_sub(written) < MAX_SAMPLES_PER_FRAME {
@@ -388,22 +445,10 @@ impl Decoder for Mp3Decoder {
         self.append_input(input)?;
 
         let mut written = 0;
-        while self.buffer_start < self.buffer.len() {
-            let (consumed, frame) = self
-                .inner
-                .decode(&self.buffer[self.buffer_start..], &mut self.pcm);
-
-            if consumed > 0 {
-                self.advance_buffer(consumed);
-            }
-
-            let Some(info) = frame else {
-                break;
-            };
-
+        while let Some(info) = self.next_frame() {
             self.capture_header(&info);
             let frame_written = self.write_frame_i32(&info, &mut out[written..])?;
-            self.log_frame_decode(&info, consumed, frame_written);
+            self.log_frame_decode(&info, frame_written);
             written += frame_written;
 
             if out.len().saturating_sub(written) < MAX_SAMPLES_PER_FRAME {
@@ -420,19 +465,7 @@ impl Decoder for Mp3Decoder {
         self.append_input(input)?;
 
         let mut written = 0;
-        while self.buffer_start < self.buffer.len() {
-            let (consumed, frame) = self
-                .inner
-                .decode(&self.buffer[self.buffer_start..], &mut self.pcm);
-
-            if consumed > 0 {
-                self.advance_buffer(consumed);
-            }
-
-            let Some(info) = frame else {
-                break;
-            };
-
+        while let Some(info) = self.next_frame() {
             self.capture_header(&info);
 
             let channels = info.channels.num() as usize;
@@ -447,7 +480,7 @@ impl Decoder for Mp3Decoder {
             }
 
             out[written..written + frame_samples].copy_from_slice(&self.pcm[..frame_samples]);
-            self.log_frame_decode(&info, consumed, frame_samples);
+            self.log_frame_decode(&info, frame_samples);
             written += frame_samples;
 
             if out.len().saturating_sub(written) < MAX_SAMPLES_PER_FRAME {
@@ -849,5 +882,148 @@ mod tests {
             large_chunk_output, small_chunk_output,
             "Decoded PCM should be identical regardless of input chunk size"
         );
+    }
+
+    /// The decode loop before frames were located chunk-independently: a
+    /// frame is consumed only when it produces audio.
+    fn reference_whole_decode(data: &[u8]) -> Vec<i16> {
+        let mut inner = Mp3FrameDecoder::new();
+        let mut pcm = [0.0f32; MAX_SAMPLES_PER_FRAME];
+        let mut start = 0;
+        let mut out = Vec::new();
+        while start < data.len() {
+            let (frame_bytes, _, frame) = inner.decode(&data[start..], &mut pcm);
+            let Some(info) = frame else {
+                break;
+            };
+            start += frame_bytes;
+            let samples = info.samples_produced * info.channels.num() as usize;
+            out.extend(pcm[..samples].iter().map(|&sample| f32_to_i16(sample)));
+        }
+        out
+    }
+
+    fn stream_decode(data: &[u8], chunking: &mut dyn FnMut() -> usize) -> Vec<i16> {
+        let mut decoder = Mp3Decoder::new();
+        let mut out = vec![0i16; MAX_SAMPLES_PER_FRAME * 3];
+        let mut decoded = Vec::new();
+        let mut rest = data;
+        loop {
+            let piece = if rest.is_empty() {
+                decoder.end_input();
+                &[][..]
+            } else {
+                let take = chunking().clamp(1, rest.len());
+                let (piece, tail) = rest.split_at(take);
+                rest = tail;
+                piece
+            };
+            let mut input = piece;
+            loop {
+                let written = decoder.decode_i16(input, &mut out, false).unwrap();
+                decoded.extend_from_slice(&out[..written]);
+                if written == 0 {
+                    break;
+                }
+                input = &[];
+            }
+            if piece.is_empty() {
+                return decoded;
+            }
+        }
+    }
+
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    /// Every cut of a stream decodes to the same samples, and a clean stream,
+    /// with or without a tag and junk before it, decodes to the samples the
+    /// whole-buffer loop gave before.
+    #[test]
+    fn decode_is_the_same_for_every_cut_of_the_stream() {
+        let fixture =
+            fs::read(testdata_path("mp3/A_Tusk_is_used_to_make_costly_gifts.mp3")).unwrap();
+        let mut rng = Xorshift(0x2545_f491_4f6c_dd1d);
+        // An ID3v2 tag of random bytes, with 0xff runs, then the stream.
+        let mut tagged = b"ID3\x03\x00\x00".to_vec();
+        let body: Vec<u8> = (0..40_000)
+            .map(|index| {
+                if index % 997 < 3 {
+                    0xff
+                } else {
+                    rng.next() as u8
+                }
+            })
+            .collect();
+        let size = body.len() as u32;
+        tagged.extend([
+            (size >> 21) as u8 & 0x7f,
+            (size >> 14) as u8 & 0x7f,
+            (size >> 7) as u8 & 0x7f,
+            size as u8 & 0x7f,
+        ]);
+        tagged.extend_from_slice(&body);
+        tagged.extend_from_slice(&fixture);
+        let mut corrupt = fixture.clone();
+        for _ in 0..25 {
+            let at = 600 + (rng.next() as usize) % (corrupt.len() - 600);
+            corrupt[at] = rng.next() as u8;
+        }
+        let cut = fixture[fixture.len() / 3 + 51..].to_vec();
+
+        for (name, data, clean) in [
+            ("fixture", &fixture, true),
+            ("tagged", &tagged, true),
+            ("corrupt", &corrupt, false),
+            ("cut", &cut, false),
+        ] {
+            let whole = stream_decode(data, &mut || usize::MAX);
+            assert!(!whole.is_empty(), "{name}");
+            if clean {
+                assert_eq!(whole, reference_whole_decode(data), "{name}");
+            }
+            for size in [1usize, 2, 3, 7, 417, 4_096] {
+                assert_eq!(
+                    stream_decode(data, &mut || size),
+                    whole,
+                    "{name} in {size}-byte pieces"
+                );
+            }
+            let mut sizes = Xorshift(data.len() as u64);
+            assert_eq!(
+                stream_decode(data, &mut || 1 + (sizes.next() % 3_000) as usize),
+                whole,
+                "{name} in random pieces"
+            );
+        }
+        // A stream that starts inside the bit reservoir decoded to nothing.
+        assert!(reference_whole_decode(&cut).is_empty());
+    }
+
+    #[test]
+    fn inputs_shorter_than_a_header_wait_for_more() {
+        for bytes in [
+            &[0xffu8][..],
+            &[0xff, 0xfb],
+            &[0xff, 0xfb, 0x90],
+            &[1, 2, 3, 4],
+        ] {
+            let mut decoder = Mp3Decoder::new();
+            let mut out = vec![0i16; MAX_SAMPLES_PER_FRAME];
+            assert_eq!(decoder.decode_i16(bytes, &mut out, false), Ok(0));
+            decoder.end_input();
+            assert_eq!(decoder.decode_i16(&[], &mut out, false), Ok(0));
+            assert_eq!(decoder.buffer_len(), bytes.len());
+        }
     }
 }

@@ -4743,6 +4743,12 @@ impl FormatDecoder {
             FormatDecoder::RawPcm(decoder) => {
                 decoder.flush().map(|frame| frame.into_iter().collect())
             }
+            #[cfg(feature = "mp3")]
+            FormatDecoder::Mp3(decoder) => {
+                // The last frame waits for the end of the input.
+                decoder.end_input();
+                self.process(&[], scratch)
+            }
             _ => self.process(&[], scratch),
         }
     }

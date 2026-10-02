@@ -7,6 +7,8 @@ use std::time::Instant;
 
 fn decode_once(input: &[u8], output: &mut [f32]) -> (usize, u32, u8) {
     let mut decoder = Mp3Decoder::new();
+    // The whole file is the input.
+    decoder.end_input();
     let samples = decoder
         .decode_f32(black_box(input), black_box(output), false)
         .expect("decode MP3");
