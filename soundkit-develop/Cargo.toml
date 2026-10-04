@@ -10,10 +10,12 @@ repository = "https://github.com/wavey-ai/soundkit"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
-wasm = ["dep:wasm-bindgen", "dep:js-sys"]
+default = ["tiff"]
+tiff = ["dep:tiff"]
+wasm = ["dep:wasm-bindgen", "dep:js-sys", "tiff"]
 
 [dependencies]
 serde_json = "1"
+tiff = { version = "0.11", optional = true, default-features = false, features = ["deflate", "jpeg", "lzw"] }
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }

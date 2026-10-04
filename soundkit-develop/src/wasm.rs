@@ -31,14 +31,34 @@ fn frame_from(width: usize, height: usize, data: Samples, alpha: Option<Vec<u8>>
         scale: v.get("scale").and_then(Value::as_f64).unwrap_or(1.0) as f32,
         wb: [wb[0] as f32, wb[1] as f32, wb[2] as f32], matrix,
         camera: Camera { matrix, wb, daylight },
-        source_width: v.get("sourceWidth").and_then(Value::as_u64).map(|w| w as usize).unwrap_or(width) }
+        source_width: v.get("sourceWidth").and_then(Value::as_u64).map(|w| w as usize).unwrap_or(width), curve: None }
 }
 
 #[wasm_bindgen]
 impl Engine {
-    /// An 8-bit sRGB photograph, straight from a canvas.
+    /// An 8-bit photograph, straight from a canvas or a decoder. `icc` is
+    /// the photograph's ICC profile. Without one, the photograph is sRGB.
     #[wasm_bindgen(js_name = fromRGBA)]
-    pub fn from_rgba(width: usize, height: usize, rgba: &[u8]) -> Engine { Engine { frame: develop::from_rgba(width, height, rgba) } }
+    pub fn from_rgba(width: usize, height: usize, rgba: &[u8], icc: Option<Vec<u8>>) -> Engine {
+        let mut frame = develop::from_rgba(width, height, rgba);
+        if let Some(icc) = icc { frame.set_profile(&icc); }
+        Engine { frame }
+    }
+    /// A photograph of more than 8 bits, kept at 16 bits. The values run from
+    /// zero to the largest value of `bit_depth`. `icc` is the photograph's
+    /// ICC profile. Without one, the photograph is sRGB.
+    #[wasm_bindgen(js_name = fromRGBA16)]
+    pub fn from_rgba16(width: usize, height: usize, rgba: &[u16], bit_depth: u8, icc: Option<Vec<u8>>) -> Engine {
+        let mut frame = develop::from_rgba16(width, height, rgba, bit_depth);
+        if let Some(icc) = icc { frame.set_profile(&icc); }
+        Engine { frame }
+    }
+    /// The first image of a TIFF file, at the file's 8 or 16 bits, with its
+    /// orientation applied and its ICC profile read.
+    #[wasm_bindgen(js_name = fromTiff)]
+    pub fn from_tiff(bytes: &[u8]) -> Result<Engine, JsError> {
+        crate::tiff_file::from_tiff(bytes).map(|frame| Engine { frame }).map_err(|message| JsError::new(&message))
+    }
     /// A RAW frame's 16-bit sensor samples with its camera facts.
     #[wasm_bindgen(js_name = fromU16)]
     pub fn from_u16(width: usize, height: usize, data: Vec<u16>, meta: &str) -> Engine { Engine { frame: frame_from(width, height, Samples::U16(data), None, meta) } }
@@ -49,6 +69,8 @@ impl Engine {
     pub fn preview(&self, edge: usize) -> Engine { Engine { frame: self.frame.linear_preview(edge) } }
     #[wasm_bindgen(getter)] pub fn width(&self) -> usize { self.frame.width }
     #[wasm_bindgen(getter)] pub fn height(&self) -> usize { self.frame.height }
+    /// The bits in each stored sample: 8, 16, or 32 for a float frame.
+    #[wasm_bindgen(getter, js_name = bitDepth)] pub fn bit_depth(&self) -> u8 { self.frame.bit_depth() }
     #[wasm_bindgen(js_name = hasDaylightReference)]
     pub fn has_daylight_reference(&self) -> bool { self.frame.has_daylight_reference() }
     /// Develops the frame. `options` is JSON: edge, bitDepth, before, clipping.

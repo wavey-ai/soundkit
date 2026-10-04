@@ -30,15 +30,18 @@ pub const RGB_TO_XYZ: Matrix = [0.4124564, 0.3575761, 0.1804375, 0.2126729, 0.71
 // Bradford cone response, for chromatic adaptation.
 const BRADFORD: Matrix = [0.8951, 0.2664, -0.1614, -0.7502, 1.7135, 0.0367, 0.0389, -0.0685, 1.0296];
 
-/// The linear-sRGB transform that adapts colours seen under `from` (a white
-/// in XYZ) to how they look under `to`.
-pub fn adaptation(from: [f64; 3], to: [f64; 3]) -> Matrix {
+/// The XYZ transform that adapts colours seen under `from` (a white in XYZ)
+/// to how they look under `to`.
+pub fn adaptation_xyz(from: [f64; 3], to: [f64; 3]) -> Matrix {
     let bradford_inverse = invert(&BRADFORD).unwrap();
-    let xyz_to_rgb = invert(&RGB_TO_XYZ).unwrap();
     let source = apply(&BRADFORD, from);
     let target = apply(&BRADFORD, to);
-    let cone = multiply(&bradford_inverse, &multiply(&diagonal([target[0] / source[0], target[1] / source[1], target[2] / source[2]]), &BRADFORD));
-    multiply(&xyz_to_rgb, &multiply(&cone, &RGB_TO_XYZ))
+    multiply(&bradford_inverse, &multiply(&diagonal([target[0] / source[0], target[1] / source[1], target[2] / source[2]]), &BRADFORD))
+}
+/// The same adaptation as a linear-sRGB transform.
+pub fn adaptation(from: [f64; 3], to: [f64; 3]) -> Matrix {
+    let xyz_to_rgb = invert(&RGB_TO_XYZ).unwrap();
+    multiply(&xyz_to_rgb, &multiply(&adaptation_xyz(from, to), &RGB_TO_XYZ))
 }
 
 /// CIE 1960 uv of the black body at `kelvin` (Krystek's approximation).

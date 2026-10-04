@@ -8,26 +8,62 @@ use crate::recipe::{Profile, Recipe, WhiteBalance};
 use std::sync::OnceLock;
 
 /// The samples a frame holds: a RAW stays 16-bit sensor data, a photograph
-/// stays 8-bit sRGB and is made linear as it is read, and a working proxy is
-/// linear float. An 8-bit photograph takes a quarter of the memory of float.
-pub enum Samples { F32(Vec<f32>), U16(Vec<u16>), Srgb8(Vec<u8>) }
+/// stays 8-bit or 16-bit encoded and is made linear as it is read, and a
+/// working proxy is linear float. An 8-bit photograph takes a quarter of the
+/// memory of float, and a 16-bit photograph takes half.
+pub enum Samples { F32(Vec<f32>), U16(Vec<u16>), Srgb8(Vec<u8>), Srgb16(Vec<Encoded16>) }
+
+/// A 16-bit sample of an encoded photograph. `u16` alone is linear sensor data.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(transparent)]
+pub struct Encoded16(pub u16);
+
+/// The transfer curve of an encoded frame, as a table from each stored value
+/// to linear light. A frame without a curve is sRGB.
+pub enum Curve { Eight(Box<[f32; 256]>), Sixteen(Box<[f32; 65536]>) }
 
 /// 8-bit sRGB to linear light.
 fn srgb8() -> &'static [f32; 256] {
     static T: OnceLock<[f32; 256]> = OnceLock::new();
     T.get_or_init(|| std::array::from_fn(|i| to_linear(i as f32 / 255.0)))
 }
-
-impl Samples {
-    #[inline(always)]
-    fn at(&self, i: usize) -> f32 { match self { Samples::F32(v) => v[i], Samples::U16(v) => v[i] as f32, Samples::Srgb8(v) => srgb8()[v[i] as usize] } }
+/// 16-bit sRGB to linear light.
+fn srgb16() -> &'static [f32; 65536] {
+    static T: OnceLock<Box<[f32; 65536]>> = OnceLock::new();
+    T.get_or_init(|| curve_table(|v| to_linear(v)))
+}
+/// A table of `N` entries over the encoded range of zero to one.
+pub(crate) fn curve_table<const N: usize>(decode: impl Fn(f32) -> f32) -> Box<[f32; N]> {
+    let values: Vec<f32> = (0..N).map(|i| decode(i as f32 / (N - 1) as f32)).collect();
+    values.into_boxed_slice().try_into().unwrap()
 }
 
-/// A stored sample, read as linear light.
-pub trait Texel: Copy { fn value(self, srgb: &[f32; 256]) -> f32; }
-impl Texel for f32 { #[inline(always)] fn value(self, _: &[f32; 256]) -> f32 { self } }
-impl Texel for u16 { #[inline(always)] fn value(self, _: &[f32; 256]) -> f32 { self as f32 } }
-impl Texel for u8 { #[inline(always)] fn value(self, srgb: &[f32; 256]) -> f32 { srgb[self as usize] } }
+/// A stored sample, read as linear light through the table of its frame.
+pub trait Texel: Copy {
+    type Table: ?Sized;
+    fn table(frame: &Frame) -> &Self::Table;
+    fn value(self, table: &Self::Table) -> f32;
+}
+impl Texel for f32 {
+    type Table = ();
+    fn table(_: &Frame) -> &() { &() }
+    #[inline(always)] fn value(self, _: &()) -> f32 { self }
+}
+impl Texel for u16 {
+    type Table = ();
+    fn table(_: &Frame) -> &() { &() }
+    #[inline(always)] fn value(self, _: &()) -> f32 { self as f32 }
+}
+impl Texel for u8 {
+    type Table = [f32; 256];
+    fn table(frame: &Frame) -> &[f32; 256] { match &frame.curve { Some(Curve::Eight(table)) => table, _ => srgb8() } }
+    #[inline(always)] fn value(self, table: &[f32; 256]) -> f32 { table[self as usize] }
+}
+impl Texel for Encoded16 {
+    type Table = [f32; 65536];
+    fn table(frame: &Frame) -> &[f32; 65536] { match &frame.curve { Some(Curve::Sixteen(table)) => table, _ => srgb16() } }
+    #[inline(always)] fn value(self, table: &[f32; 65536]) -> f32 { table[self.0 as usize] }
+}
 
 /// The camera a frame came from. A proxy has its camera's white balance
 /// baked in and keeps these facts to change it later.
@@ -46,6 +82,8 @@ pub struct Frame {
     /// The full-resolution width this frame stands for: radii given in
     /// source pixels shrink with a preview.
     pub source_width: usize,
+    /// The transfer curve of an encoded photograph that is not sRGB.
+    pub curve: Option<Curve>,
 }
 
 fn to_linear(v: f32) -> f32 { if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) } }
@@ -92,15 +130,63 @@ pub fn from_rgba(width: usize, height: usize, rgba: &[u8]) -> Frame {
         opaque &= rgba[i * 4 + 3] == 255;
     }
     let alpha = if opaque { None } else { Some((0..pixels).map(|i| rgba[i * 4 + 3]).collect()) };
-    Frame { width, height, data: Samples::Srgb8(data), alpha, scale: 1.0, wb: [1.0; 3], matrix: IDENTITY,
-        camera: Camera { matrix: IDENTITY, wb: [1.0; 3], daylight: None }, source_width: width }
+    encoded(width, height, Samples::Srgb8(data), alpha)
+}
+/// A frame from encoded RGBA of more than 8 bits, kept as 16-bit. The values
+/// run from zero to the largest value of `bit_depth`. Opacity is kept at 8
+/// bits, and only when some pixel is not opaque.
+pub fn from_rgba16(width: usize, height: usize, rgba: &[u16], bit_depth: u8) -> Frame {
+    let pixels = width * height;
+    let max = (1u32 << bit_depth.clamp(9, 16)) - 1;
+    let widen = |v: u16| if max == 65535 { v } else { (((v as u32).min(max) * 65535 + max / 2) / max) as u16 };
+    let mut data = Vec::with_capacity(pixels * 3);
+    let mut opaque = true;
+    for i in 0..pixels {
+        data.extend(rgba[i * 4..i * 4 + 3].iter().map(|v| Encoded16(widen(*v))));
+        opaque &= rgba[i * 4 + 3] as u32 >= max;
+    }
+    let alpha = if opaque { None } else { Some((0..pixels).map(|i| (((rgba[i * 4 + 3] as u32).min(max) * 255 + max / 2) / max) as u8).collect()) };
+    encoded(width, height, Samples::Srgb16(data), alpha)
+}
+/// A frame of encoded sRGB samples.
+pub(crate) fn encoded(width: usize, height: usize, data: Samples, alpha: Option<Vec<u8>>) -> Frame {
+    Frame { width, height, data, alpha, scale: 1.0, wb: [1.0; 3], matrix: IDENTITY,
+        camera: Camera { matrix: IDENTITY, wb: [1.0; 3], daylight: None }, source_width: width, curve: None }
 }
 
 impl Frame {
     pub fn has_daylight_reference(&self) -> bool { self.camera.daylight.is_some() }
 
+    /// The number of bits in each stored sample.
+    pub fn bit_depth(&self) -> u8 { match self.data { Samples::Srgb8(_) => 8, Samples::U16(_) | Samples::Srgb16(_) => 16, Samples::F32(_) => 32 } }
+
+    /// Reads the frame's colours through an ICC profile. The frame must hold
+    /// encoded samples. An sRGB profile leaves the frame as it is. Returns
+    /// false, and changes nothing, for a profile that is not an RGB matrix
+    /// profile with one curve.
+    pub fn set_profile(&mut self, icc: &[u8]) -> bool {
+        let Some(profile) = crate::icc::parse(icc) else { return false };
+        if profile.is_srgb() { return true; }
+        self.curve = match self.data {
+            Samples::Srgb8(_) => Some(Curve::Eight(curve_table(|v| profile.to_linear(v)))),
+            Samples::Srgb16(_) => Some(Curve::Sixteen(curve_table(|v| profile.to_linear(v)))),
+            _ => return false,
+        };
+        self.matrix = profile.matrix;
+        true
+    }
+
     /// Box-filters the frame once into a small working image every edit reuses.
     pub fn linear_preview(&self, edge: usize) -> Frame {
+        match &self.data {
+            Samples::F32(data) => self.preview_on(data.as_slice(), edge),
+            Samples::U16(data) => self.preview_on(data.as_slice(), edge),
+            Samples::Srgb8(data) => self.preview_on(data.as_slice(), edge),
+            Samples::Srgb16(data) => self.preview_on(data.as_slice(), edge),
+        }
+    }
+    fn preview_on<T: Texel>(&self, source: &[T], edge: usize) -> Frame {
+        let table = T::table(self);
         let factor = (edge as f64 / self.width.max(self.height) as f64).min(1.0);
         let width = ((self.width as f64 * factor).round() as usize).max(1);
         let height = ((self.height as f64 * factor).round() as usize).max(1);
@@ -114,7 +200,7 @@ impl Frame {
             let (mut acc, mut count, mut opacity) = ([0.0f64; 3], 0u32, 0u32);
             for sy in top..bottom { for sx in left..right {
                 let p = sy * self.width + sx;
-                let (r, g, b) = (self.data.at(p * 3) * sr, self.data.at(p * 3 + 1) * sg, self.data.at(p * 3 + 2) * sb);
+                let (r, g, b) = (source[p * 3].value(table) * sr, source[p * 3 + 1].value(table) * sg, source[p * 3 + 2].value(table) * sb);
                 let (r, g, b) = (r as f64, g as f64, b as f64);
                 acc[0] += m[0] * r + m[1] * g + m[2] * b; acc[1] += m[3] * r + m[4] * g + m[5] * b; acc[2] += m[6] * r + m[7] * g + m[8] * b;
                 if let Some(a) = &self.alpha { opacity += a[p] as u32; }
@@ -125,7 +211,7 @@ impl Frame {
             if let Some(a) = alpha.as_mut() { a[y * width + x] = ((opacity as f64 / count as f64).round()) as u8; }
         } }
         Frame { width, height, data: Samples::F32(data), alpha, scale: 1.0, wb: [1.0; 3], matrix: IDENTITY,
-            camera: self.camera, source_width: self.source_width }
+            camera: self.camera, source_width: self.source_width, curve: None }
     }
 
     /// The transform that changes the as-shot white balance to a RAW preset.
@@ -145,12 +231,12 @@ fn nonzero(v: f64) -> f64 { if v == 0.0 { 1.0 } else { v } }
 /// and exposure, with its opacity. Generic over the stored sample, so the
 /// read compiles into the loop.
 struct Sampler<'a, T: Texel> {
-    data: &'a [T], alpha: Option<&'a [u8]>, fw: usize, fh: usize, srgb: &'static [f32; 256],
+    data: &'a [T], alpha: Option<&'a [u8]>, fw: usize, fh: usize, srgb: &'a T::Table,
     m: [f32; 9], n: [f32; 9], balanced: bool, k: f32, s: [f32; 3], xs: f32, ys: f32, exact: bool,
 }
 impl<'a, T: Texel> Sampler<'a, T> {
     fn new(frame: &'a Frame, data: &'a [T], width: usize, height: usize, balance: Option<Matrix>, exposure: f32) -> Self {
-        Sampler { data, alpha: frame.alpha.as_deref(), fw: frame.width, fh: frame.height, srgb: srgb8(),
+        Sampler { data, alpha: frame.alpha.as_deref(), fw: frame.width, fh: frame.height, srgb: T::table(frame),
             m: frame.matrix.map(|v| v as f32), n: balance.unwrap_or(IDENTITY).map(|v| v as f32), balanced: balance.is_some(), k: exposure,
             s: [frame.scale * frame.wb[0], frame.scale * frame.wb[1], frame.scale * frame.wb[2]],
             xs: frame.width as f32 / width as f32, ys: frame.height as f32 / height as f32,
@@ -294,6 +380,7 @@ pub fn develop(frame: &Frame, recipe: &Recipe, options: &Options) -> Developed {
         Samples::F32(data) => develop_on(frame, data.as_slice(), recipe, options),
         Samples::U16(data) => develop_on(frame, data.as_slice(), recipe, options),
         Samples::Srgb8(data) => develop_on(frame, data.as_slice(), recipe, options),
+        Samples::Srgb16(data) => develop_on(frame, data.as_slice(), recipe, options),
     }
 }
 
@@ -709,6 +796,27 @@ mod tests {
         for y in 0..40 { for x in 0..60 { for c in 0..4 {
             assert_eq!(a[((50 + y) * 240 + 100 + x) * 4 + c], b[(y * 60 + x) * 4 + c], "pixel {x},{y}");
         } } }
+    }
+    #[test]
+    fn a_deep_photograph_is_kept_as_sixteen_bit() {
+        // 10-bit values, as a HEIC decoder returns them: the largest value is 1023.
+        let rgba: Vec<u16> = (0..16).flat_map(|i| [i * 68, 512, 1023, 1023]).collect();
+        let frame = from_rgba16(4, 4, &rgba, 10);
+        let Samples::Srgb16(data) = &frame.data else { panic!("not a 16-bit frame") };
+        assert_eq!((frame.bit_depth(), data[1], data[2]), (16, Encoded16(32800), Encoded16(65535)));
+        assert!(frame.alpha.is_none());
+        // Neighbouring 10-bit values stay apart in a 10-bit result, and the default recipe returns the picture.
+        let developed = develop(&frame, &Recipe::default(), &Options { bit_depth: 10, ..Options::default() });
+        let Pixels::U16(out) = &developed.data else { panic!() };
+        for (i, pixel) in out.chunks(4).enumerate() { assert!((pixel[0] as i32 - i as i32 * 68).abs() <= 1 && (pixel[1] as i32 - 512).abs() <= 1 && pixel[2] == 1023); }
+        // Opacity is kept at 8 bits when a pixel is not opaque.
+        let mut clear = rgba.clone(); clear[3] = 512;
+        assert_eq!(from_rgba16(4, 4, &clear, 10).alpha.unwrap()[..2], [128, 255]);
+        // An ICC profile changes how the same values are read.
+        let mut managed = from_rgba16(4, 4, &rgba, 10);
+        assert!(managed.set_profile(&crate::icc::tests::display_p3()) && managed.curve.is_some() && managed.matrix[0] > 1.2);
+        let mut plain = from_rgba(4, 4, &card(4, 4));
+        assert!(!plain.set_profile(b"not a profile") && plain.curve.is_none());
     }
     #[test]
     fn an_opaque_photograph_is_kept_as_eight_bit() {

@@ -9,13 +9,17 @@
     "test": "npm run test:js && npm run test:rust",
     "build:raw": "npm run build --workspace @wavey-ai/soundkit-raw",
     "build:avif": "npm run build --workspace @wavey-ai/soundkit-avif",
-    "build:images": "npm run build:raw && npm run build:avif",
-    "test:images": "npm test --workspace @wavey-ai/soundkit-raw --workspace @wavey-ai/soundkit-avif"
+    "build:heif": "npm run build --workspace @wavey-ai/soundkit-heif",
+    "build:images": "npm run build:raw && npm run build:avif && npm run build:heif",
+    "test:images": "npm test --workspace @wavey-ai/soundkit-raw --workspace @wavey-ai/soundkit-avif --workspace @wavey-ai/soundkit-heif",
+    "build:develop": "wasm-pack build soundkit-develop --target web --out-dir pkg -- --features wasm && wasm-pack build soundkit-develop --target nodejs --out-dir pkg-node -- --features wasm",
+    "test:develop": "cargo test -p soundkit-develop && node --test soundkit-develop/test/*.test.mjs"
   },
   "workspaces": [
     "packages/soundkit-stream-js",
     "workers/*",
     "soundkit-raw",
-    "soundkit-avif"
+    "soundkit-avif",
+    "soundkit-heif"
   ]
 }

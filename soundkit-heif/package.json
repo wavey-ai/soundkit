@@ -1,0 +1,31 @@
+{
+  "name": "@wavey-ai/soundkit-heif",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "HEIC still-image decoding with libheif and libde265 WebAssembly.",
+  "license": "MIT AND LGPL-3.0-or-later",
+  "exports": {
+    ".": "./dist/index.mjs"
+  },
+  "files": [
+    "dist",
+    "src",
+    "scripts",
+    "patches",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "prepare": "node scripts/build.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wavey-ai/soundkit.git",
+    "directory": "soundkit-heif"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
