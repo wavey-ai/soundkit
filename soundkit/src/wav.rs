@@ -35,6 +35,9 @@ pub struct WavStreamProcessor {
     received: u64,
     riff_end: Option<u64>,
     data_seen: bool,
+    /// A writer that cannot seek gives the data chunk the size 0xFFFFFFFF:
+    /// the data then runs to the end of the stream.
+    data_to_end: bool,
 }
 
 impl Default for WavStreamProcessor {
@@ -60,6 +63,7 @@ impl WavStreamProcessor {
             received: 0,
             riff_end: None,
             data_seen: false,
+            data_to_end: false,
         }
     }
 
@@ -93,7 +97,7 @@ impl WavStreamProcessor {
     pub fn total_frames(&self) -> Option<u64> {
         let bytes_per_sample = self.bits_per_sample.checked_div(8)?;
         let bytes_per_frame = bytes_per_sample.checked_mul(self.channel_count)?;
-        if bytes_per_frame == 0 || !self.data_seen {
+        if bytes_per_frame == 0 || !self.data_seen || self.data_to_end {
             return None;
         }
         Some(self.data_chunk_size / (bytes_per_frame as u64))
@@ -132,7 +136,11 @@ impl WavStreamProcessor {
                         if size < 4 {
                             return Err("Invalid RIFF length".to_string());
                         }
-                        self.set_riff_end(u64::from(size) + 8)?;
+                        // A writer that cannot seek leaves the RIFF length
+                        // at 0xFFFFFFFF: the length is unknown.
+                        if size != u32::MAX {
+                            self.set_riff_end(u64::from(size) + 8)?;
+                        }
                     }
                     self.buffer.drain(..12);
                     self.state = StreamWavState::ChunkHeader;
@@ -168,9 +176,11 @@ impl WavStreamProcessor {
                     } else {
                         size as u64
                     };
-                    if self
-                        .riff_end
-                        .is_some_and(|end| payload_size > end.saturating_sub(offset + 8))
+                    let to_end = !self.rf64 && &kind == b"data" && size == u32::MAX as usize;
+                    if !to_end
+                        && self
+                            .riff_end
+                            .is_some_and(|end| payload_size > end.saturating_sub(offset + 8))
                     {
                         return Err("WAV chunk exceeds RIFF length".to_string());
                     }
@@ -193,6 +203,15 @@ impl WavStreamProcessor {
                             size as u64
                         };
                         let frame_bytes = self.channel_count * (self.bits_per_sample / 8);
+                        if to_end {
+                            self.data_to_end = true;
+                            self.data_chunk_size = 0;
+                            self.data_chunk_collected = 0;
+                            self.state = StreamWavState::ReadingData {
+                                remaining: u64::MAX,
+                            };
+                            continue;
+                        }
                         if data_size % frame_bytes as u64 != 0 {
                             return Err("WAV data chunk is not frame-aligned".to_string());
                         }
@@ -330,6 +349,15 @@ impl WavStreamProcessor {
     pub fn finish(&mut self) -> Result<(), String> {
         if self.add(&[])?.is_some() {
             return Err("WAV stream contains undrained audio".to_string());
+        }
+        if self.data_to_end {
+            // The end of the stream ends the data; a partial frame remains
+            // only when the stream is cut.
+            if !self.buffer.is_empty() {
+                return Err("WAV data chunk is not frame-aligned".to_string());
+            }
+            self.state = StreamWavState::Finished;
+            return Ok(());
         }
         if !self.data_seen
             || self.riff_end != Some(self.received)
@@ -943,6 +971,54 @@ mod tests {
         }
 
         assert!(!audio_packets.is_empty(), "No audio packets processed");
+    }
+
+    /// A 16-bit stereo WAV as a writer that cannot seek gives it: the RIFF
+    /// length and the data size are 0xFFFFFFFF.
+    fn streamed_wav(data: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&u32::MAX.to_le_bytes());
+        buf.extend_from_slice(b"WAVEfmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes());
+        buf.extend_from_slice(&1u16.to_le_bytes());
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        buf.extend_from_slice(&48000u32.to_le_bytes());
+        buf.extend_from_slice(&(48000u32 * 4).to_le_bytes());
+        buf.extend_from_slice(&4u16.to_le_bytes());
+        buf.extend_from_slice(&16u16.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&u32::MAX.to_le_bytes());
+        buf.extend_from_slice(data);
+        buf
+    }
+
+    #[test]
+    fn streamed_wav_reads_to_the_end_of_the_stream() {
+        let data: Vec<u8> = (0..12u8).collect();
+        let mut processor = WavStreamProcessor::new();
+        let mut audio = Vec::new();
+        for chunk in streamed_wav(&data).chunks(5) {
+            if let Some(block) = processor.add(chunk).unwrap() {
+                audio.extend_from_slice(block.data());
+            }
+        }
+        while let Some(block) = processor.add(&[]).unwrap() {
+            audio.extend_from_slice(block.data());
+        }
+        assert_eq!(audio, data);
+        assert_eq!(processor.total_frames(), None);
+        processor.finish().unwrap();
+    }
+
+    #[test]
+    fn streamed_wav_cut_inside_a_frame_fails() {
+        let mut processor = WavStreamProcessor::new();
+        let mut block = processor.add(&streamed_wav(&[1, 2, 3, 4, 5, 6])).unwrap();
+        while block.is_some() {
+            block = processor.add(&[]).unwrap();
+        }
+        assert!(processor.finish().is_err());
     }
 
     #[test]
