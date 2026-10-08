@@ -147,7 +147,13 @@ export async function createGpuDeveloper(options = {}) {
         device.queue.submit([encoder.finish()]);
         const memory = await device.popErrorScope();
         const validation = await device.popErrorScope();
-        if (validation || memory) throw new Error(`GPU develop failed: ${(validation || memory).message}`);
+        if (validation || memory) {
+            const error = new Error(`GPU develop failed: ${(validation || memory).message}`);
+            // Out of memory is the picture's size, not a broken device: the
+            // next, smaller develop can use the GPU again.
+            error.kind = validation ? 'validation' : 'out-of-memory';
+            throw error;
+        }
         await Promise.all([outRead.mapAsync(GPUMapMode.READ, 0, outBytes), statsRead.mapAsync(GPUMapMode.READ, 0, STATS * 4)]);
         const bytes = outRead.getMappedRange(0, outBytes).slice(0);
         const stats = new Uint32Array(statsRead.getMappedRange(0, STATS * 4).slice(0));
