@@ -13,7 +13,8 @@
     "build:images": "npm run build:raw && npm run build:avif && npm run build:heif",
     "test:images": "npm test --workspace @wavey-ai/soundkit-raw --workspace @wavey-ai/soundkit-avif --workspace @wavey-ai/soundkit-heif",
     "build:develop": "wasm-pack build soundkit-develop --target web --out-dir pkg -- --features wasm && wasm-pack build soundkit-develop --target nodejs --out-dir pkg-node -- --features wasm",
-    "test:develop": "cargo test -p soundkit-develop && node --test soundkit-develop/test/*.test.mjs"
+    "test:develop": "cargo test -p soundkit-develop && node --test soundkit-develop/test/*.test.mjs",
+    "test:develop:gpu": "node soundkit-develop/test/gpu.browser.mjs"
   },
   "workspaces": [
     "packages/soundkit-stream-js",
@@ -21,5 +22,8 @@
     "soundkit-raw",
     "soundkit-avif",
     "soundkit-heif"
-  ]
+  ],
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
 }

@@ -27,6 +27,23 @@ pub fn apply(m: &Matrix, [x, y, z]: [f64; 3]) -> [f64; 3] {
 
 // Linear sRGB (D65) and CIE XYZ.
 pub const RGB_TO_XYZ: Matrix = [0.4124564, 0.3575761, 0.1804375, 0.2126729, 0.7151522, 0.0721750, 0.0193339, 0.1191920, 0.9503041];
+
+// The working space is linear Rec.2020 with the sRGB white, so a camera's
+// saturated colours keep their hue through every edit until the final gamut
+// map. Each row sums to one: a neutral stays exactly neutral.
+pub const SRGB_TO_WORK: Matrix = [0.627452331038, 0.329248518088, 0.0432991508737, 0.0691092776042, 0.919530987598, 0.0113597347977, 0.0163975636156, 0.0880301151684, 0.895572321216];
+pub const WORK_TO_SRGB: Matrix = [1.66036293778, -0.587540226938, -0.0728227108432, -0.124563751098, 1.1329115641, -0.00834781299972, -0.0181565968008, -0.100601710304, 1.1187583071];
+/// Luminance weights of the working space.
+pub const WORK_LUMA: [f32; 3] = [0.2627216817, 0.6779893173, 0.0592890010];
+/// A linear-sRGB transform, as the same transform in the working space.
+pub fn to_work(m: &Matrix) -> Matrix { multiply(&SRGB_TO_WORK, &multiply(m, &WORK_TO_SRGB)) }
+#[inline(always)]
+pub fn work_to_srgb(c: [f32; 3]) -> [f32; 3] {
+    const M: [f32; 9] = [1.66036293778, -0.587540226938, -0.0728227108432, -0.124563751098, 1.1329115641, -0.00834781299972, -0.0181565968008, -0.100601710304, 1.1187583071];
+    [M[0] * c[0] + M[1] * c[1] + M[2] * c[2], M[3] * c[0] + M[4] * c[1] + M[5] * c[2], M[6] * c[0] + M[7] * c[1] + M[8] * c[2]]
+}
+#[inline(always)]
+pub fn work_luma(c: [f32; 3]) -> f32 { WORK_LUMA[0] * c[0] + WORK_LUMA[1] * c[1] + WORK_LUMA[2] * c[2] }
 // Bradford cone response, for chromatic adaptation.
 const BRADFORD: Matrix = [0.8951, 0.2664, -0.1614, -0.7502, 1.7135, 0.0367, 0.0389, -0.0685, 1.0296];
 
@@ -106,9 +123,10 @@ pub fn fit_gamut(l: f32, a: f32, b: f32) -> [f32; 3] {
     let l = l.clamp(0.0, 1.0);
     let first = from_oklab(l, a, b);
     if in_gamut(&first) { return first; }
-    // Eight halvings place the chroma within half a percent.
+    // Twelve halvings place the chroma within 0.03 percent: near black, where
+    // sRGB is steepest, that is less than a level of 10-bit output.
     let (mut lo, mut hi) = (0.0f32, 1.0f32);
-    for _ in 0..8 {
+    for _ in 0..12 {
         let k = (lo + hi) * 0.5;
         if in_gamut(&from_oklab(l, a * k, b * k)) { lo = k; } else { hi = k; }
     }
@@ -118,11 +136,20 @@ pub fn fit_gamut(l: f32, a: f32, b: f32) -> [f32; 3] {
 #[inline(always)]
 pub fn hue_of(a: f32, b: f32) -> f32 { crate::fast::hue(a, b) }
 
-/// The OKLCh hue of each colour band, measured from the sRGB colour the band
-/// is named after.
+/// The OKLCh hue of each colour band. The bands sit where Lightroom's colour
+/// mixer puts them: the sRGB colours at HSV hues 0, 30, 60, 120, 180, 225,
+/// 270 and 315 degrees, made linear.
 pub fn band_hues() -> [f32; 8] {
-    let named = [[1.0, 0.0, 0.0], [1.0, 0.216, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 1.0], [0.0, 0.0, 1.0], [0.216, 0.0, 1.0], [1.0, 0.0, 1.0]];
-    named.map(|[r, g, b]| { let lab = to_oklab(r, g, b); hue_of(lab[1], lab[2]) })
+    let named: [[f32; 3]; 8] = [[1.0, 0.0, 0.0], [1.0, 0.5, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 1.0], [0.0, 0.5, 1.0], [0.5, 0.0, 1.0], [1.0, 0.0, 0.5]];
+    let mut hues = named.map(|c| {
+        let [r, g, b] = c.map(|v| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) });
+        let lab = to_oklab(r, g, b);
+        hue_of(lab[1], lab[2])
+    });
+    // Magenta lies just past 360 degrees: the bands run once round the circle
+    // from red, so each hue is larger than the one before.
+    for i in 1..8 { while hues[i] <= hues[i - 1] { hues[i] += 360.0; } }
+    hues
 }
 
 #[cfg(test)]

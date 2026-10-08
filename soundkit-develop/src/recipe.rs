@@ -6,6 +6,10 @@ use serde_json::Value;
 
 pub const COLOUR_BANDS: [&str; 8] = ["red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta"];
 pub const GRADING_ZONES: [&str; 4] = ["shadows", "midtones", "highlights", "global"];
+/// The point curves: the master curve, then red, green and blue.
+pub const CURVE_CHANNELS: [&str; 4] = ["points", "red", "green", "blue"];
+/// The most points a point curve keeps.
+pub const MAX_CURVE_POINTS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Profile { Standard, Vivid, Neutral, Monochrome }
@@ -54,6 +58,10 @@ pub struct Recipe {
     pub saturation: f32,
     /// Highlights, lights, darks, shadows.
     pub curve: [f32; 4],
+    /// Point curves on the encoded values, as x, y from 0 to 1 with x
+    /// increasing: the master curve, then red, green and blue. An empty
+    /// curve changes nothing.
+    pub points: [Vec<[f32; 2]>; 4],
     pub mixer: [Band; 8],
     /// Shadows, midtones, highlights, global.
     pub zones: [Zone; 4],
@@ -77,7 +85,7 @@ impl Default for Recipe {
             profile: Profile::Standard, white_balance: WhiteBalance::Shot,
             exposure: 0.0, temperature: 0.0, tint: 0.0, highlights: 0.0, shadows: 0.0, whites: 0.0, blacks: 0.0, contrast: 0.0,
             texture: 0.0, clarity: 0.0, dehaze: 0.0, vibrance: 0.0, saturation: 0.0,
-            curve: [0.0; 4], mixer: [Band::default(); 8], zones: [Zone::default(); 4], blending: 50.0, balance: 0.0,
+            curve: [0.0; 4], points: Default::default(), mixer: [Band::default(); 8], zones: [Zone::default(); 4], blending: 50.0, balance: 0.0,
             sharpen_amount: 0.0, sharpen_radius: 1.0, sharpen_masking: 0.0, noise_luminance: 0.0, noise_colour: 0.0,
             vignette_amount: 0.0, vignette_midpoint: 50.0, vignette_feather: 50.0, grain_amount: 0.0, grain_size: 25.0,
         }
@@ -104,6 +112,23 @@ fn clamped(value: &Value, path: &[&str], fallback: f64, lo: f64, hi: f64) -> f32
 fn signed(value: &Value, path: &[&str]) -> f32 { clamped(value, path, 0.0, -100.0, 100.0) }
 fn unit(value: &Value, path: &[&str], fallback: f64) -> f32 { clamped(value, path, fallback, 0.0, 100.0) }
 fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> { value.get(key).and_then(Value::as_str) }
+/// A point curve as Lightroom writes one: pairs of input and output from 0 to
+/// 255. Points are sorted by input, a repeated input keeps its last point,
+/// and unreadable points are left out.
+fn points(value: Option<&Value>) -> Vec<[f32; 2]> {
+    let Some(list) = value.and_then(Value::as_array) else { return Vec::new() };
+    let mut out: Vec<[f32; 2]> = list.iter().filter_map(|p| {
+        let pair = p.as_array()?;
+        let (x, y) = (pair.first()?.as_f64()?, pair.get(1)?.as_f64()?);
+        (x.is_finite() && y.is_finite()).then(|| [(x.clamp(0.0, 255.0) / 255.0) as f32, (y.clamp(0.0, 255.0) / 255.0) as f32])
+    }).collect();
+    out.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal));
+    out.reverse();
+    out.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-6);
+    out.reverse();
+    out.truncate(MAX_CURVE_POINTS);
+    out
+}
 
 impl Recipe {
     pub fn from_json(json: &str) -> Recipe {
@@ -124,6 +149,7 @@ impl Recipe {
         r.texture = signed(v, &["texture"]); r.clarity = signed(v, &["clarity"]); r.dehaze = signed(v, &["dehaze"]);
         r.vibrance = signed(v, &["vibrance"]); r.saturation = signed(v, &["saturation"]);
         for (i, key) in ["highlights", "lights", "darks", "shadows"].iter().enumerate() { r.curve[i] = signed(v, &["curve", key]); }
+        for (i, key) in CURVE_CHANNELS.iter().enumerate() { r.points[i] = points(v.get("curve").and_then(|c| c.get(*key))); }
         for (i, band) in COLOUR_BANDS.iter().enumerate() {
             r.mixer[i] = Band { hue: signed(v, &["mixer", band, "hue"]), saturation: signed(v, &["mixer", band, "saturation"]), luminance: signed(v, &["mixer", band, "luminance"]) };
         }
@@ -161,5 +187,9 @@ mod tests {
         assert_eq!(r.mixer[1].saturation, 12.0);
         assert_eq!(r.blending, 50.0);
         assert_eq!(Recipe::from_json("not json"), Recipe::default());
+        let c = Recipe::from_json(r#"{"curve":{"points":[[255,240],[0,10],[128,140],[128,150],"x"],"red":[[0,0],[300,-5]]}}"#);
+        assert_eq!(c.points[0], vec![[0.0, 10.0 / 255.0], [128.0 / 255.0, 150.0 / 255.0], [1.0, 240.0 / 255.0]]);
+        assert_eq!(c.points[1], vec![[0.0, 0.0], [1.0, 0.0]]);
+        assert!(c.points[2].is_empty() && c.points[3].is_empty());
     }
 }

@@ -2,7 +2,7 @@
 //! developed as many times as the recipe changes.
 
 use crate::colour::IDENTITY;
-use crate::develop::{self, Camera, Frame, Options, Pixels, Samples};
+use crate::develop::{self, next_id, Camera, Frame, Options, Pixels, Samples};
 use crate::recipe::Recipe;
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
@@ -12,6 +12,36 @@ pub struct Engine { frame: Frame }
 
 #[wasm_bindgen]
 pub struct Developed { inner: develop::Developed }
+
+/// A develop plan laid out for the GPU path.
+#[wasm_bindgen]
+pub struct GpuPlan { inner: crate::gpu::GpuPlan, width: usize, height: usize, bit_depth: u8 }
+
+#[wasm_bindgen]
+impl GpuPlan {
+    #[wasm_bindgen(getter)] pub fn width(&self) -> usize { self.width }
+    #[wasm_bindgen(getter)] pub fn height(&self) -> usize { self.height }
+    #[wasm_bindgen(getter, js_name = bitDepth)] pub fn bit_depth(&self) -> u8 { self.bit_depth }
+    /// The number of window planes the operations use.
+    #[wasm_bindgen(getter)] pub fn planes(&self) -> u32 { self.inner.planes }
+    pub fn params(&self) -> js_sys::Uint32Array { js_sys::Uint32Array::from(self.inner.params.as_slice()) }
+    pub fn tables(&self) -> js_sys::Float32Array { js_sys::Float32Array::from(self.inner.tables.as_slice()) }
+    pub fn ops(&self) -> js_sys::Uint32Array { js_sys::Uint32Array::from(self.inner.ops.as_slice()) }
+}
+
+fn options_from(options: &str) -> Options {
+    let o: Value = serde_json::from_str(options).unwrap_or(Value::Null);
+    Options {
+        edge: o.get("edge").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as usize,
+        bit_depth: o.get("bitDepth").and_then(Value::as_u64).unwrap_or(8) as u8,
+        before: o.get("before").and_then(Value::as_bool).unwrap_or(false),
+        clipping: o.get("clipping").and_then(Value::as_bool).unwrap_or(false),
+        measure: false,
+        // x, y, width, height within the full output, for a 100% view.
+        region: o.get("region").and_then(Value::as_array).filter(|r| r.len() == 4)
+            .map(|r| std::array::from_fn(|i| r[i].as_f64().unwrap_or(0.0).max(0.0) as usize)),
+    }
+}
 
 fn array<const N: usize>(value: &Value, key: &str, fallback: [f64; N]) -> [f64; N] {
     match value.get(key).and_then(Value::as_array) {
@@ -27,11 +57,15 @@ fn frame_from(width: usize, height: usize, data: Samples, alpha: Option<Vec<u8>>
     let matrix = if matrix.iter().any(|x| *x != 0.0) { matrix } else { IDENTITY };
     let wb = array::<3>(&v, "wb", [1.0; 3]);
     let daylight = v.get("daylight").and_then(Value::as_array).filter(|d| d.len() >= 3).map(|_| array::<3>(&v, "daylight", [1.0; 3]));
-    Frame { width, height, data, alpha,
-        scale: v.get("scale").and_then(Value::as_f64).unwrap_or(1.0) as f32,
-        wb: [wb[0] as f32, wb[1] as f32, wb[2] as f32], matrix,
-        camera: Camera { matrix, wb, daylight },
-        source_width: v.get("sourceWidth").and_then(Value::as_u64).map(|w| w as usize).unwrap_or(width), curve: None }
+    let camera = Camera { matrix, wb, daylight };
+    let scale = v.get("scale").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+    let source_width = v.get("sourceWidth").and_then(Value::as_u64).map(|w| w as usize).unwrap_or(width);
+    match data {
+        // Sensor samples: a RAW, with its clipped highlights rebuilt.
+        Samples::U16(samples) => { let mut frame = develop::from_sensor(width, height, samples, scale, camera); frame.source_width = source_width; frame }
+        data => Frame { width, height, data, alpha, scale, wb: [wb[0] as f32, wb[1] as f32, wb[2] as f32], matrix, camera, source_width, curve: None,
+            working: false, scene: v.get("scene").and_then(Value::as_bool).unwrap_or(false), id: next_id() },
+    }
 }
 
 #[wasm_bindgen]
@@ -73,20 +107,21 @@ impl Engine {
     #[wasm_bindgen(getter, js_name = bitDepth)] pub fn bit_depth(&self) -> u8 { self.frame.bit_depth() }
     #[wasm_bindgen(js_name = hasDaylightReference)]
     pub fn has_daylight_reference(&self) -> bool { self.frame.has_daylight_reference() }
-    /// Develops the frame. `options` is JSON: edge, bitDepth, before, clipping.
+    /// Develops the frame. `options` is JSON: edge, bitDepth, before, clipping, region.
     pub fn develop(&self, recipe: &str, options: &str) -> Developed {
-        let o: Value = serde_json::from_str(options).unwrap_or(Value::Null);
-        let options = Options {
-            edge: o.get("edge").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as usize,
-            bit_depth: o.get("bitDepth").and_then(Value::as_u64).unwrap_or(8) as u8,
-            before: o.get("before").and_then(Value::as_bool).unwrap_or(false),
-            clipping: o.get("clipping").and_then(Value::as_bool).unwrap_or(false),
-            measure: false,
-            // x, y, width, height within the full output, for a 100% view.
-            region: o.get("region").and_then(Value::as_array).filter(|r| r.len() == 4)
-                .map(|r| std::array::from_fn(|i| r[i].as_f64().unwrap_or(0.0).max(0.0) as usize)),
-        };
-        Developed { inner: develop::develop(&self.frame, &Recipe::from_json(recipe), &options) }
+        Developed { inner: develop::develop(&self.frame, &Recipe::from_json(recipe), &options_from(options)) }
+    }
+    /// The frame's pixels, for the GPU path's source buffer.
+    #[wasm_bindgen(js_name = gpuSource)]
+    pub fn gpu_source(&self) -> js_sys::Uint32Array { js_sys::Uint32Array::from(crate::gpu::source_words(&self.frame).as_slice()) }
+    /// Identifies the frame's pixels: the GPU path keeps one upload per frame.
+    #[wasm_bindgen(getter)] pub fn id(&self) -> f64 { self.frame.id as f64 }
+    /// The plan of a develop, for the GPU path. Takes the same JSON as `develop`.
+    #[wasm_bindgen(js_name = gpuPlan)]
+    pub fn gpu_plan(&self, recipe: &str, options: &str) -> GpuPlan {
+        let plan = develop::plan(&self.frame, &Recipe::from_json(recipe), &options_from(options));
+        let [_, _, width, height] = plan.region;
+        GpuPlan { inner: crate::gpu::gpu_plan(&self.frame, &plan), width, height, bit_depth: plan.bit_depth }
     }
     /// Auto tone, as JSON: exposure, contrast, highlights, shadows, whites, blacks.
     #[wasm_bindgen(js_name = autoTone)]

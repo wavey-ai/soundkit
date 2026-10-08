@@ -21,7 +21,7 @@ export const defaultRecipe = () => ({
     version: 2, profile: 'standard', whiteBalance: 'shot',
     exposure: 0, temperature: 0, tint: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0, contrast: 0,
     texture: 0, clarity: 0, dehaze: 0, vibrance: 0, saturation: 0,
-    curve: { highlights: 0, lights: 0, darks: 0, shadows: 0 },
+    curve: { highlights: 0, lights: 0, darks: 0, shadows: 0, points: [], red: [], green: [], blue: [] },
     mixer: Object.fromEntries(COLOUR_BANDS.map(band => [band, { hue: 0, saturation: 0, luminance: 0 }])),
     grading: { shadows: zone(), midtones: zone(), highlights: zone(), global: zone(), blending: 50, balance: 0 },
     sharpening: { amount: 0, radius: 1, masking: 0 },
@@ -30,6 +30,20 @@ export const defaultRecipe = () => ({
     grain: { amount: 0, size: 25 },
 });
 const signed = value => clamp(finite(value), -100, 100);
+/// The point curves: the master curve, then red, green and blue.
+export const CURVE_CHANNELS = Object.freeze(['points', 'red', 'green', 'blue']);
+export const MAX_CURVE_POINTS = 16;
+/// A point curve as Lightroom writes one: pairs of input and output from 0
+/// to 255, sorted by input. A repeated input keeps its last point; an
+/// unreadable point is left out.
+export function curvePoints(value) {
+    if (!Array.isArray(value)) return [];
+    const read = value.filter(p => Array.isArray(p) && p.length >= 2 && typeof p[0] === 'number' && typeof p[1] === 'number' && Number.isFinite(p[0]) && Number.isFinite(p[1]))
+        .map(([x, y]) => [clamp(x, 0, 255), clamp(y, 0, 255)]);
+    const byInput = new Map();
+    for (const p of read) byInput.set(p[0], p);
+    return [...byInput.values()].sort((a, b) => a[0] - b[0]).slice(0, MAX_CURVE_POINTS);
+}
 const unit = (value, fallback = 0) => clamp(finite(value, fallback), 0, 100);
 export function normalizeRecipe(value = {}) {
     const r = defaultRecipe();
@@ -38,7 +52,8 @@ export function normalizeRecipe(value = {}) {
     r.exposure = clamp(finite(value.exposure), -5, 5);
     for (const key of ['temperature', 'tint', 'highlights', 'shadows', 'whites', 'blacks', 'contrast',
         'texture', 'clarity', 'dehaze', 'vibrance', 'saturation']) r[key] = signed(value[key]);
-    for (const key of Object.keys(r.curve)) r.curve[key] = signed(value.curve?.[key]);
+    for (const key of ['highlights', 'lights', 'darks', 'shadows']) r.curve[key] = signed(value.curve?.[key]);
+    for (const key of CURVE_CHANNELS) r.curve[key] = curvePoints(value.curve?.[key]);
     for (const band of COLOUR_BANDS) for (const key of ['hue', 'saturation', 'luminance']) r.mixer[band][key] = signed(value.mixer?.[band]?.[key]);
     for (const name of GRADING_ZONES) {
         const source = value.grading?.[name] ?? {};
@@ -206,10 +221,13 @@ function fitGamut(L, a, b, out) {
     return out;
 }
 const hueOfLab = (a, b) => (Math.atan2(b, a) * 180 / Math.PI + 360) % 360;
-/// The OKLCh hue of each colour band, measured from the sRGB colour the
-/// band is named after.
-const BAND_HUES = [[1, 0, 0], [1, .216, 0], [1, 1, 0], [0, 1, 0], [0, 1, 1], [0, 0, 1], [.216, 0, 1], [1, 0, 1]]
-    .map(([r, g, b]) => { const lab = toOklab(r, g, b, [0, 0, 0]); return hueOfLab(lab[1], lab[2]); });
+/// The OKLCh hue of each colour band. The bands sit where Lightroom's colour
+/// mixer puts them: the sRGB colours at HSV hues 0, 30, 60, 120, 180, 225,
+/// 270 and 315 degrees. Magenta lies just past 360 degrees, so each hue is
+/// larger than the one before.
+const BAND_HUES = [[1, 0, 0], [1, .5, 0], [1, 1, 0], [0, 1, 0], [0, 1, 1], [0, .5, 1], [.5, 0, 1], [1, 0, .5]]
+    .map(c => { const [r, g, b] = c.map(toLinear); const lab = toOklab(r, g, b, [0, 0, 0]); return hueOfLab(lab[1], lab[2]); })
+    .reduce((hues, hue) => { let h = hue; while (hues.length && h <= hues[hues.length - 1]) h += 360; hues.push(h); return hues; }, []);
 export const COLOUR_BAND_HUES = Object.freeze([...BAND_HUES]);
 /// Whether a frame can take the RAW white balance presets.
 export const hasDaylightReference = frame => Boolean(cameraOf(frame).daylight);

@@ -9,6 +9,8 @@
 pub fn round(x: f32) -> usize { (x + 0.5) as usize }
 
 /// 2 to the power `x`.
+// The series coefficients are fitted values; the first is close to ln 2 by design.
+#[allow(clippy::approx_constant)]
 #[inline(always)]
 pub fn exp2(x: f32) -> f32 {
     let x = x.clamp(-126.0, 126.0);
@@ -48,11 +50,11 @@ pub fn powf(a: f32, b: f32) -> f32 { exp2(b * log2(a)) }
 pub fn cbrt(x: f32) -> f32 {
     if x == 0.0 { return 0.0; }
     let a = x.abs();
-    // A first guess from the exponent bits, then two Newton steps.
+    // A first guess from the exponent bits, within a few percent, then two
+    // Halley steps: each triples the correct digits.
     let mut y = f32::from_bits(a.to_bits() / 3 + 0x2a51_7d3c);
-    y = y - (y * y * y - a) / (3.0 * y * y);
-    y = y - (y * y * y - a) / (3.0 * y * y);
-    y = y - (y * y * y - a) / (3.0 * y * y);
+    let y3 = y * y * y; y *= (y3 + 2.0 * a) / (2.0 * y3 + a);
+    let y3 = y * y * y; y *= (y3 + 2.0 * a) / (2.0 * y3 + a);
     if x < 0.0 { -y } else { y }
 }
 
