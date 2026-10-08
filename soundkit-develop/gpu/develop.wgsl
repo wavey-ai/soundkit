@@ -33,6 +33,7 @@ const OFF_DECODE = 130u; const OFF_ENCODE = 131u; const OFF_TONE = 132u; const O
 const OFF_SHADOW_W = 134u; const OFF_HIGHLIGHT_W = 135u; const OFF_HAZE = 136u;
 const OFF_BASE_A = 137u; const OFF_BASE_B = 138u; const OFF_CLAR_A = 139u; const OFF_CLAR_B = 140u;
 const SRC_TABLE = 141u; const SRC_ALPHA = 142u; const PLANE_SIZE = 143u; const NEED_CHROMA = 144u;
+const TURN_ON = 145u; const TURN_COS = 146u; const TURN_SIN = 147u;
 
 const PL_LUM = 0u; const PL_CHROMA_R = 1u; const PL_CHROMA_B = 2u; const PL_TEXTURE = 3u; const PL_SHARP = 4u;
 const PL_NOISE_A = 5u; const PL_NOISE_B = 6u; const PL_T2 = 9u; const PL_T3 = 10u;
@@ -309,6 +310,10 @@ fn colour_stage(out_in: vec3f) -> vec3f {
             let turned = a * c - b * s; b = a * s + b * c; a = turned;
         }
         a *= factor; b *= factor;
+    }
+    if (P(TURN_ON) == 1u) {
+        let c = F(TURN_COS); let s = F(TURN_SIN);
+        let turned = a * c - b * s; b = a * s + b * c; a = turned;
     }
     if (P(GRADING) == 1u) {
         let k = round_up(clamp(ll - F(BALANCE), 0.0, 1.0) * f32(ZONE_STEPS));

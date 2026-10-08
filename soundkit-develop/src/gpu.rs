@@ -66,6 +66,7 @@ pub mod p {
     pub const OFF_SHADOW_W: usize = 134; pub const OFF_HIGHLIGHT_W: usize = 135; pub const OFF_HAZE: usize = 136;
     pub const OFF_BASE_A: usize = 137; pub const OFF_BASE_B: usize = 138; pub const OFF_CLAR_A: usize = 139; pub const OFF_CLAR_B: usize = 140;
     pub const SRC_TABLE: usize = 141; pub const SRC_ALPHA: usize = 142; pub const PLANE_SIZE: usize = 143; pub const NEED_CHROMA: usize = 144;
+    pub const TURN_ON: usize = 145; pub const TURN_COS: usize = 146; pub const TURN_SIN: usize = 147;
     pub const COUNT: usize = 160;
 }
 
@@ -189,6 +190,7 @@ pub fn gpu_plan(frame: &Frame, p: &Plan) -> GpuPlan {
     }
     if let Some(c) = &p.colour {
         w[p::COLOUR_ON] = 1; w[p::MONO] = c.mono as u32; w[p::MIXER_ACTIVE] = c.mixer_active as u32;
+        if let Some([cos, sin]) = c.turn { w[p::TURN_ON] = 1; w[p::TURN_COS] = f(cos); w[p::TURN_SIN] = f(sin); }
         w[p::SATURATION] = f(c.saturation); w[p::VIBRANCE] = f(c.vibrance); w[p::GRADING] = c.grading as u32; w[p::BALANCE] = f(c.balance);
         for k in 0..8 { for j in 0..3 { w[p::MIXER + k * 3 + j] = f(c.mixer[k][j]); } }
         for i in 0..4 { w[p::TINT + i * 2] = f(c.tint[i][0]); w[p::TINT + i * 2 + 1] = f(c.tint[i][1]); w[p::LIFT + i] = f(c.lift[i]); }

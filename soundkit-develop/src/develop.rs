@@ -398,6 +398,8 @@ pub struct ColourPlan {
     pub mixer: [[f32; 3]; 8],
     pub saturation: f32,
     pub vibrance: f32,
+    /// The whole picture's turn round the OKLCh circle, as cosine and sine.
+    pub turn: Option<[f32; 2]>,
     pub grading: bool,
     pub tint: [[f32; 2]; 4],
     pub lift: [f32; 4],
@@ -685,13 +687,14 @@ fn plan_on<T: Texel>(frame: &Frame, data: &[T], recipe: &Recipe, options: &Optio
     let vibrance = s.vibrance / 100.0;
     let saturation = s.saturation / 100.0 + match s.profile { Profile::Vivid => 0.15, Profile::Neutral => -0.08, _ => 0.0 };
     let grading = s.zones.iter().any(|z| z.saturation != 0.0 || z.luminance != 0.0);
-    let colour = (mono || mixer_active || vibrance != 0.0 || saturation != 0.0 || grading).then(|| {
+    let colour = (mono || mixer_active || vibrance != 0.0 || saturation != 0.0 || grading || s.hue != 0.0).then(|| {
         let t = tables();
         let exponent = 1.0 + (100.0 - s.blending) / 100.0 * 3.0;
         ColourPlan {
             mono, mixer_active,
             mixer: std::array::from_fn(|k| [s.mixer[k].hue / 100.0 * t.band_gap[k], s.mixer[k].saturation / 100.0, s.mixer[k].luminance / 100.0]),
             saturation, vibrance, grading,
+            turn: (s.hue != 0.0).then(|| { let (sin, cos) = s.hue.to_radians().sin_cos(); [cos, sin] }),
             // Grading hues are OKLCh hues: a zone's colour is pushed along its own hue.
             tint: std::array::from_fn(|i| { let z = s.zones[i]; let h = z.hue.to_radians(); [h.cos() * z.saturation / 100.0 * 0.09, h.sin() * z.saturation / 100.0 * 0.09] }),
             lift: std::array::from_fn(|i| s.zones[i].luminance / 100.0 * 0.12),
@@ -918,6 +921,7 @@ fn colour_stage(cp: &ColourPlan, t: &Tables, out: [f32; 3]) -> [f32; 3] {
         }
         a *= factor; b *= factor;
     }
+    if let Some([cos, sin]) = cp.turn { let turned = a * cos - b * sin; b = a * sin + b * cos; a = turned; }
     if cp.grading {
         let k = fast::round((ll - cp.balance).clamp(0.0, 1.0) * ZONE_STEPS as f32);
         let (ws, wh) = (cp.shadow_weight[k], cp.highlight_weight[k]);
@@ -1180,6 +1184,21 @@ mod tests {
         assert!(scene_tone(-2.0, 0.0, 0.0, -1.0) < scene_tone(-2.0, 0.0, 0.0, 0.0));
         assert!(scene_tone(1.0, 0.0, 1.0, 0.0) > scene_tone(1.0, 0.0, 0.0, 0.0));
         assert!(scene_tone(1.0, 50.0, 0.0, 0.0) > scene_tone(1.0, 0.0, 0.0, 0.0) && scene_tone(-1.0, 50.0, 0.0, 0.0) < scene_tone(-1.0, 0.0, 0.0, 0.0));
+    }
+    #[test]
+    fn hue_turns_every_colour_and_keeps_greys() {
+        let rgba = card(64, 48);
+        let frame = from_rgba(64, 48, &rgba);
+        let turned = develop(&frame, &Recipe::from_json(r#"{"hue":120}"#), &Options::default());
+        let px = bytes(&turned);
+        // A red turns towards green; a grey stays grey.
+        let red = from_rgba(1, 1, &[200, 30, 30, 255]);
+        let out = develop(&red, &Recipe::from_json(r#"{"hue":120}"#), &Options::default());
+        let q = bytes(&out);
+        assert!(q[1] > q[0], "{q:?}");
+        let grey = from_rgba(1, 1, &[128, 128, 128, 255]);
+        assert_eq!(&bytes(&develop(&grey, &Recipe::from_json(r#"{"hue":120}"#), &Options::default()))[..3], &[128, 128, 128]);
+        assert_ne!(px, rgba.as_slice());
     }
     #[test]
     fn band_weights_sum_to_one_and_peak_on_their_band() {

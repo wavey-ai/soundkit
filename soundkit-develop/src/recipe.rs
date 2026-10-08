@@ -56,6 +56,8 @@ pub struct Recipe {
     pub dehaze: f32,
     pub vibrance: f32,
     pub saturation: f32,
+    /// Turns every colour round the OKLCh circle, in degrees.
+    pub hue: f32,
     /// Highlights, lights, darks, shadows.
     pub curve: [f32; 4],
     /// Point curves on the encoded values, as x, y from 0 to 1 with x
@@ -84,7 +86,7 @@ impl Default for Recipe {
         Recipe {
             profile: Profile::Standard, white_balance: WhiteBalance::Shot,
             exposure: 0.0, temperature: 0.0, tint: 0.0, highlights: 0.0, shadows: 0.0, whites: 0.0, blacks: 0.0, contrast: 0.0,
-            texture: 0.0, clarity: 0.0, dehaze: 0.0, vibrance: 0.0, saturation: 0.0,
+            texture: 0.0, clarity: 0.0, dehaze: 0.0, vibrance: 0.0, saturation: 0.0, hue: 0.0,
             curve: [0.0; 4], points: Default::default(), mixer: [Band::default(); 8], zones: [Zone::default(); 4], blending: 50.0, balance: 0.0,
             sharpen_amount: 0.0, sharpen_radius: 1.0, sharpen_masking: 0.0, noise_luminance: 0.0, noise_colour: 0.0,
             vignette_amount: 0.0, vignette_midpoint: 50.0, vignette_feather: 50.0, grain_amount: 0.0, grain_size: 25.0,
@@ -148,6 +150,7 @@ impl Recipe {
         r.whites = signed(v, &["whites"]); r.blacks = signed(v, &["blacks"]); r.contrast = signed(v, &["contrast"]);
         r.texture = signed(v, &["texture"]); r.clarity = signed(v, &["clarity"]); r.dehaze = signed(v, &["dehaze"]);
         r.vibrance = signed(v, &["vibrance"]); r.saturation = signed(v, &["saturation"]);
+        r.hue = clamped(v, &["hue"], 0.0, -180.0, 180.0);
         for (i, key) in ["highlights", "lights", "darks", "shadows"].iter().enumerate() { r.curve[i] = signed(v, &["curve", key]); }
         for (i, key) in CURVE_CHANNELS.iter().enumerate() { r.points[i] = points(v.get("curve").and_then(|c| c.get(*key))); }
         for (i, band) in COLOUR_BANDS.iter().enumerate() {

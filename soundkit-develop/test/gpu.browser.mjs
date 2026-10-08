@@ -29,7 +29,7 @@ const RECIPES = {
     dehaze: { dehaze: 40 }, haze: { dehaze: -40 }, vibrance: { vibrance: 60 }, saturation: { saturation: -40 }, curve: { curve: { darks: 40, highlights: -30 } },
     points: { curve: { points: [[0, 12], [70, 50], [190, 210], [255, 245]], red: [[0, 0], [128, 140], [255, 255]], blue: [[0, 10], [255, 230]] } },
     mixer: { mixer: { orange: { hue: 30, saturation: 40, luminance: 20 }, blue: { saturation: -50 } } }, mono: { profile: 'monochrome', mixer: { red: { luminance: 40 } } },
-    vivid: { profile: 'vivid' }, grading: { grading: { shadows: { hue: 240, saturation: 40 }, highlights: { hue: 70, saturation: 30 }, balance: 20 } },
+    vivid: { profile: 'vivid' }, hue: { hue: 120, vibrance: 20 }, grading: { grading: { shadows: { hue: 240, saturation: 40 }, highlights: { hue: 70, saturation: 30 }, balance: 20 } },
     detail: { sharpening: { amount: 80, masking: 30 }, noise: { luminance: 40, colour: 40 } }, vignette: { vignette: { amount: -50 } }, grain: { grain: { amount: 40, size: 40 } },
     skin: { highlights: -30, shadows: 25, texture: -15, mixer: { red: { hue: 20, saturation: -27 }, orange: { saturation: -10, luminance: 14 } } },
     everything: { exposure: .3, contrast: 20, highlights: -40, shadows: 30, whites: 10, blacks: -10, clarity: 25, texture: 20, dehaze: 15, vibrance: 25,

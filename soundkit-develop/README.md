@@ -80,8 +80,8 @@ run the plan for each pixel in the same order:
    photograph.
 5. The gamut map into sRGB, at constant hue.
 6. The parametric curve, then the point curves.
-7. The colour controls in OKLab: the colour mixer, vibrance, saturation and
-   colour grading.
+7. The colour controls in OKLab: the colour mixer, vibrance, saturation, the
+   hue turn of the whole picture and colour grading.
 8. Vignette and grain, then quantisation.
 
 ### Working space
