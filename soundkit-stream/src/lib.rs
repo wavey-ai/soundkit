@@ -149,6 +149,7 @@ pub struct StreamEncoder {
     flac_frame_size: usize,
     flac_sample_rate: u32,
     flac_channels: u8,
+    flac_bits: u8,
     /// Pushed samples not yet encoded start at `flac_start`. Blocks are read
     /// at that offset and the encoded prefix is removed once per push:
     /// removing each block from the front moves the rest of a long push for
@@ -187,6 +188,7 @@ impl StreamEncoder {
             flac_frame_size: 0,
             flac_sample_rate: 0,
             flac_channels: 0,
+            flac_bits: 24,
             flac_frame: Vec::new(),
             flac_start: 0,
             flac_stream: Vec::new(),
@@ -224,13 +226,32 @@ impl StreamEncoder {
         channels: u8,
         frame_size: Option<usize>,
     ) -> Result<(), String> {
+        self.ensure_flac_geometry_bits(sample_rate, channels, 24, frame_size)
+    }
+
+    /// `ensure_flac_geometry` with the sample width of the FLAC stream, 16
+    /// or 24 bits. A 16-bit source keeps its own width, so its samples need
+    /// no 8 empty low bits.
+    pub fn ensure_flac_geometry_bits(
+        &mut self,
+        sample_rate: u32,
+        channels: u8,
+        bits_per_sample: u8,
+        frame_size: Option<usize>,
+    ) -> Result<(), String> {
+        if !matches!(bits_per_sample, 16 | 24) {
+            return Err(format!("FLAC preservation has unsupported width {bits_per_sample} bits"));
+        }
         if sample_rate == 0 || channels == 0 || channels > 8 {
             return Err(format!(
                 "FLAC preservation has unsupported PCM geometry {sample_rate} Hz/{channels} ch"
             ));
         }
         if self.flac.is_some() {
-            if self.flac_sample_rate != sample_rate || self.flac_channels != channels {
+            if self.flac_sample_rate != sample_rate
+                || self.flac_channels != channels
+                || self.flac_bits != bits_per_sample
+            {
                 return Err(format!(
                     "FLAC geometry changed from {} Hz/{} ch to {sample_rate} Hz/{channels} ch",
                     self.flac_sample_rate, self.flac_channels
@@ -245,7 +266,7 @@ impl StreamEncoder {
         let config = FlacFrameConfig::new(
             sample_rate,
             u16::from(channels),
-            24,
+            bits_per_sample,
             size as u32,
             FlacProfile::Balanced,
         )
@@ -254,6 +275,7 @@ impl StreamEncoder {
         self.flac_frame_size = size;
         self.flac_sample_rate = sample_rate;
         self.flac_channels = channels;
+        self.flac_bits = bits_per_sample;
         self.flac_frame = Vec::with_capacity((size + FLAC_MIN_BLOCK_SIZE) * channels as usize);
         Ok(())
     }
@@ -469,7 +491,7 @@ impl StreamEncoder {
             frame_count as u32,
             self.flac_sample_rate,
             self.flac_channels,
-            24,
+            self.flac_bits,
             self.flac_entries.len() as u64,
             start_frame,
             self.include_crc,

@@ -535,6 +535,10 @@ pub struct WasmStreamingLibraryEncoder {
     aac_lc_decoder: Option<AacLcAccessUnitDecoder>,
     normalizer: StreamingStereo48kNormalizer,
     preserve_lossless: bool,
+    /// Makes the 48 kHz Opus playback stream, its index and the waveform.
+    /// A lossless-only import turns it off, so a second worker can make the
+    /// lossless copy beside the playback stream.
+    playback: bool,
     finished: bool,
     source_digest: Sha256,
     opus_digest: Sha256,
@@ -3596,6 +3600,7 @@ impl WasmStreamingLibraryEncoder {
             aac_lc_decoder: None,
             normalizer: StreamingStereo48kNormalizer::new(),
             preserve_lossless,
+            playback: true,
             finished: false,
             source_digest: Sha256::new(),
             opus_digest: Sha256::new(),
@@ -3830,25 +3835,46 @@ impl WasmStreamingLibraryEncoder {
         let mut opus_packets = Vec::new();
         let mut flac_packets = Vec::new();
         self.encode_decoded(decoded, &mut opus_packets, &mut flac_packets)?;
-        if let Some(tail) = self.normalizer.finish()? {
-            self.encode_stereo(tail.left, tail.right, &mut opus_packets)?;
+        if self.playback {
+            if let Some(tail) = self.normalizer.finish()? {
+                self.encode_stereo(tail.left, tail.right, &mut opus_packets)?;
+            }
         }
         self.finished = true;
-        let total_frames = self.normalizer.output_frames();
+        // A lossless-only import counts the frames of its FLAC stream, with
+        // the last block, so that block is flushed first.
+        let mut flac_finished = false;
+        if !self.playback && self.preserve_lossless {
+            let flac_tail = self.stream.finish_flac()?;
+            self.absorb_packets(&mut flac_packets, flac_tail, StreamCodec::Flac);
+            flac_finished = true;
+        }
+        let total_frames = if self.playback {
+            self.normalizer.output_frames()
+        } else {
+            self.stream.flac_frames()
+        };
         if total_frames == 0 {
             return Err("source contained no decoded PCM".to_owned());
         }
-        let opus_tail = self.stream.finish_opus()?;
-        self.absorb_packets(&mut opus_packets, opus_tail, StreamCodec::Opus);
-        if self.preserve_lossless {
+        if self.playback {
+            let opus_tail = self.stream.finish_opus()?;
+            self.absorb_packets(&mut opus_packets, opus_tail, StreamCodec::Opus);
+        }
+        if self.preserve_lossless && !flac_finished {
             let flac_tail = self.stream.finish_flac()?;
             self.absorb_packets(&mut flac_packets, flac_tail, StreamCodec::Flac);
         }
-        let opus_index = encode_soundkit_index(&SoundKitIndex {
-            timescale: 48_000,
-            duration_frames: total_frames,
-            entries: self.stream.opus_entries().to_vec(),
-        })?;
+        let opus_index = self
+            .playback
+            .then(|| {
+                encode_soundkit_index(&SoundKitIndex {
+                    timescale: 48_000,
+                    duration_frames: total_frames,
+                    entries: self.stream.opus_entries().to_vec(),
+                })
+            })
+            .transpose()?;
         let flac_index = self
             .preserve_lossless
             .then(|| {
@@ -3860,7 +3886,9 @@ impl WasmStreamingLibraryEncoder {
             })
             .transpose()?;
         let source_identity = format!("sha256:{:x}", self.source_digest.clone().finalize());
-        let opus_identity = format!("sha256:{:x}", self.opus_digest.clone().finalize());
+        let opus_identity = self
+            .playback
+            .then(|| format!("sha256:{:x}", self.opus_digest.clone().finalize()));
         let flac_identity = self
             .preserve_lossless
             .then(|| format!("sha256:{:x}", self.flac_digest.clone().finalize()));
@@ -3870,10 +3898,10 @@ impl WasmStreamingLibraryEncoder {
             true,
             total_frames,
             total_frames,
-            Some(opus_index),
+            opus_index,
             flac_index,
             Some(source_identity),
-            Some(opus_identity),
+            opus_identity,
             flac_identity,
         );
         if !self.visuals.is_empty() {
@@ -3991,6 +4019,9 @@ impl WasmStreamingLibraryEncoder {
             if self.preserve_lossless {
                 self.encode_preservation_audio(&audio, flac_packets)?;
             }
+            if !self.playback {
+                continue;
+            }
             if let Some(block) = self.normalizer.push(&audio)? {
                 self.encode_stereo(block.left, block.right, opus_packets)?;
             }
@@ -4032,7 +4063,16 @@ impl WasmStreamingLibraryEncoder {
                 "lossless preservation has unsupported PCM geometry {sample_rate} Hz/{channels} ch"
             ));
         }
-        self.stream.ensure_flac_geometry(sample_rate, channels, None)?;
+        // A 16-bit source stays 16-bit. Its samples decode to the same
+        // floats as from 24 bits (each 16-bit value times 256), without 8
+        // empty low bits in each sample.
+        let sixteen = audio.bits_per_sample() == 16;
+        self.stream.ensure_flac_geometry_bits(
+            sample_rate,
+            channels,
+            if sixteen { 16 } else { 24 },
+            None,
+        )?;
 
         let planar = audio_to_f32_channels(audio)?;
         let frames = planar
@@ -4048,13 +4088,28 @@ impl WasmStreamingLibraryEncoder {
         let mut interleaved = Vec::with_capacity(frames * channels as usize);
         for frame in 0..frames {
             for channel in &planar {
-                interleaved.push(library_float_to_s24(channel[frame]));
+                interleaved.push(if sixteen {
+                    library_float_to_s16_exact(channel[frame])
+                } else {
+                    library_float_to_s24(channel[frame])
+                });
             }
         }
         let emitted = self.stream.push_flac_i32(&interleaved)?;
         self.absorb_packets(packets, emitted, StreamCodec::Flac);
         Ok(())
     }
+}
+
+/// A sample that came from 16-bit PCM (value / 32768) back to that value.
+#[cfg(all(feature = "opus", feature = "flac"))]
+fn library_float_to_s16_exact(sample: f32) -> i32 {
+    let sample = if sample.is_finite() {
+        sample.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    ((f64::from(sample) * 32_768.0).round() as i64).clamp(-32_768, 32_767) as i32
 }
 
 #[cfg(all(feature = "opus", feature = "flac"))]
@@ -7400,11 +7455,14 @@ enum LibraryImportSource {
 ))]
 #[wasm_bindgen]
 impl WasmLibraryImport {
+    /// `playback` false makes only the lossless copy (with
+    /// `preserve_lossless`); it is true when it is not given.
     #[wasm_bindgen(constructor)]
     pub fn new(
         read: js_sys::Function,
         size: f64,
         preserve_lossless: bool,
+        playback: Option<bool>,
     ) -> Result<WasmLibraryImport, JsValue> {
         let size = size.max(0.0) as u64;
         if size == 0 {
@@ -7420,6 +7478,8 @@ impl WasmLibraryImport {
             total: 0,
         };
         import.resolve_source(preserve_lossless)?;
+        // After `resolve_source`, which can replace the encoder for an MP4.
+        import.encoder.playback = playback.unwrap_or(true);
         Ok(import)
     }
 
