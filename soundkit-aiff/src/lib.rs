@@ -27,13 +27,16 @@ enum StreamSampleFormat {
 }
 
 impl StreamSampleFormat {
+    /// The bytes of one sample of every channel, or of one IMA4 packet of
+    /// every channel. A push keeps the bytes of a part group, so each PCM
+    /// block holds whole frames.
     fn encoded_group_bytes(self, channels: u8) -> usize {
         let channels = usize::from(channels);
         match self {
-            Self::Unsigned8 | Self::Ulaw | Self::Alaw => 1,
-            Self::SignedBe(bytes) | Self::SignedLe(bytes) => usize::from(bytes),
-            Self::Float32Be => 4,
-            Self::Float64Be => 8,
+            Self::Unsigned8 | Self::Ulaw | Self::Alaw => channels,
+            Self::SignedBe(bytes) | Self::SignedLe(bytes) => usize::from(bytes) * channels,
+            Self::Float32Be => 4 * channels,
+            Self::Float64Be => 8 * channels,
             Self::Ima4 => 34 * channels,
         }
     }
@@ -1348,6 +1351,47 @@ mod encoder_tests {
         let out = encoder.push_planar_f32(&[1.0, -1.0, 0.5], 3).unwrap();
         encoder.finish().unwrap();
         assert_eq!(out, [0x7f, 0xff, 0x80, 0x01, 0x40, 0x00]);
+    }
+
+    #[test]
+    fn a_streamed_stereo_aiff_gives_whole_frames_in_each_block() {
+        let frames = 1_000;
+        let left: Vec<i32> = (0..frames as i32).map(|i| i * 37 - 9_000).collect();
+        let right: Vec<i32> = (0..frames as i32).map(|i| 4_000 - i * 23).collect();
+        let planar: Vec<i32> = left.iter().chain(&right).copied().collect();
+        for (format, frame_bytes) in [(AiffSampleFormat::I16, 4), (AiffSampleFormat::I24, 6)] {
+            let mut encoder = AiffStreamEncoder::new(format, 44_100, 2, frames as u64).unwrap();
+            let mut file = encoder.header().to_vec();
+            file.extend(match format {
+                AiffSampleFormat::I16 => {
+                    let samples: Vec<i16> = planar.iter().map(|&s| s as i16).collect();
+                    encoder.push_planar_i16(&samples, frames).unwrap()
+                }
+                _ => encoder.push_planar_i24(&planar, frames).unwrap(),
+            });
+            encoder.finish().unwrap();
+            let reference = decode_aiff_container(&file).unwrap();
+            // Pushes of these sizes end inside a frame.
+            for push in [7, 113, 997] {
+                let mut decoder = AiffDecoder::new();
+                let mut pcm = Vec::new();
+                for chunk in file.chunks(push).chain([&[][..]]) {
+                    if let Some(block) = decoder.add(chunk).unwrap() {
+                        assert_eq!(
+                            block.data().len() % frame_bytes,
+                            0,
+                            "{format:?}, pushes of {push}"
+                        );
+                        pcm.extend_from_slice(block.data());
+                    }
+                }
+                assert_eq!(
+                    pcm.as_slice(),
+                    &reference.data()[..],
+                    "{format:?}, pushes of {push}"
+                );
+            }
+        }
     }
 
     #[test]
