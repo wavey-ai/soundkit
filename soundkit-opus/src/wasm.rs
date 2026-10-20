@@ -134,6 +134,12 @@ impl Encoder {
         self.inner.set_vbr(enabled).map_err(opus_error)
     }
 
+    /// Selects constrained VBR (`true`, the default) or unconstrained VBR.
+    #[wasm_bindgen(js_name = set_vbr_constraint)]
+    pub fn set_vbr_constraint(&mut self, constrained: bool) -> Result<(), JsValue> {
+        self.inner.set_vbr_constraint(constrained).map_err(opus_error)
+    }
+
     pub fn destroy(self) {}
 }
 

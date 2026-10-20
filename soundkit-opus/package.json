@@ -18,7 +18,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='-C target-feature=+simd128' wasm-pack build --target web --release --features wasm && rm -f pkg/.gitignore",
+    "build": "CARGO_PROFILE_RELEASE_LTO=fat CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='-C target-feature=+simd128 -C no-vectorize-slp' wasm-pack build --target web --release --features wasm && rm -f pkg/.gitignore",
     "bench:browser-wasm": "node tools/run_browser_wasm_compare.mjs",
     "prepare": "npm run build"
   },

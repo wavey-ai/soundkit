@@ -1,7 +1,5 @@
 //! CELT band helper routines, ported from official `celt/bands.c`.
 
-use wide::f32x4;
-
 use crate::celt::cwrs::get_pulses;
 use crate::celt::cwrs::CwrsDecodeCache;
 use crate::celt::entropy::{RangeDecoder, RangeEncoder, RangeEncoderSnapshot};
@@ -191,8 +189,8 @@ pub fn denormalise_bands(
         let band_end = m * mode.ebands[i + 1] as usize;
         let lg = band_log_e[i] + E_MEANS[i];
         let g = celt_exp2_db(lg.min(32.0));
-        for j in band_start..band_end {
-            freq[j] = x[j] * g;
+        for (out, &value) in freq[band_start..band_end].iter_mut().zip(&x[band_start..band_end]) {
+            *out = value * g;
         }
     }
     freq[bound..n].fill(0.0);
@@ -522,46 +520,20 @@ pub fn interleave_hadamard_with_scratch(
 
 pub fn haar1(x: &mut [f32], n0: usize, stride: usize) {
     assert!(x.len() >= n0 * stride);
-    let n0 = n0 >> 1;
-    let c = 0.707_106_77f32;
-    if stride == 1 {
-        // Adjacent pairs: process four per lane group with identical
-        // per-element multiply/add order as the scalar loop.
-        let cv = f32x4::splat(c);
-        let mut j = 0;
-        while j + 4 <= n0 {
-            let evens = f32x4::new([x[2 * j], x[2 * j + 2], x[2 * j + 4], x[2 * j + 6]]);
-            let odds = f32x4::new([x[2 * j + 1], x[2 * j + 3], x[2 * j + 5], x[2 * j + 7]]);
-            let t1 = evens * cv;
-            let t2 = odds * cv;
-            let lo = t1 + t2;
-            let hi = t1 - t2;
-            let lo_arr = lo.to_array();
-            let hi_arr = hi.to_array();
-            for t in 0..4 {
-                x[2 * j + 2 * t] = lo_arr[t];
-                x[2 * j + 2 * t + 1] = hi_arr[t];
-            }
-            j += 4;
-        }
-        for jj in j..n0 {
-            let a = 2 * jj;
-            let b = a + 1;
-            let tmp1 = c * x[a];
-            let tmp2 = c * x[b];
-            x[a] = tmp1 + tmp2;
-            x[b] = tmp1 - tmp2;
-        }
+    if stride == 0 {
         return;
     }
-    for i in 0..stride {
-        for j in 0..n0 {
-            let a = stride * 2 * j + i;
-            let b = stride * (2 * j + 1) + i;
-            let tmp1 = c * x[a];
-            let tmp2 = c * x[b];
-            x[a] = tmp1 + tmp2;
-            x[b] = tmp1 - tmp2;
+    let pairs = n0 >> 1;
+    let c = 0.707_106_77f32;
+    // Each block holds one pair of `stride` interleaved rows. The pairs are
+    // independent, so block order does not change the result.
+    for block in x[..2 * pairs * stride].chunks_exact_mut(2 * stride) {
+        let (lo, hi) = block.split_at_mut(stride);
+        for (a, b) in lo.iter_mut().zip(hi.iter_mut()) {
+            let tmp1 = c * *a;
+            let tmp2 = c * *b;
+            *a = tmp1 + tmp2;
+            *b = tmp1 - tmp2;
         }
     }
 }
@@ -1132,27 +1104,34 @@ fn compute_channel_weights(ex: f32, ey: f32) -> (f32, f32) {
 }
 
 fn inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::kernels::inner_prod_pairwise_f32(x, y, n)
+    }
     // Four independent partial sums instead of one serial chain; lane order
     // keeps element order so results only differ from the serial fold by
     // normal float reassociation inside the RDO distance heuristics.
-    let mut acc0 = 0.0f32;
-    let mut acc1 = 0.0f32;
-    let mut acc2 = 0.0f32;
-    let mut acc3 = 0.0f32;
-    let chunks = n / 4 * 4;
-    let xv = &x[..chunks];
-    let yv = &y[..chunks];
-    for i in (0..chunks).step_by(4) {
-        acc0 += xv[i] * yv[i];
-        acc1 += xv[i + 1] * yv[i + 1];
-        acc2 += xv[i + 2] * yv[i + 2];
-        acc3 += xv[i + 3] * yv[i + 3];
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut acc0 = 0.0f32;
+        let mut acc1 = 0.0f32;
+        let mut acc2 = 0.0f32;
+        let mut acc3 = 0.0f32;
+        let chunks = n / 4 * 4;
+        let xv = &x[..chunks];
+        let yv = &y[..chunks];
+        for i in (0..chunks).step_by(4) {
+            acc0 += xv[i] * yv[i];
+            acc1 += xv[i + 1] * yv[i + 1];
+            acc2 += xv[i + 2] * yv[i + 2];
+            acc3 += xv[i + 3] * yv[i + 3];
+        }
+        let mut sum = (acc0 + acc2) + (acc1 + acc3);
+        for i in chunks..n {
+            sum += x[i] * y[i];
+        }
+        sum
     }
-    let mut sum = (acc0 + acc2) + (acc1 + acc3);
-    for i in chunks..n {
-        sum += x[i] * y[i];
-    }
-    sum
 }
 
 fn shift_right_i32(value: i32, shift: isize) -> i32 {

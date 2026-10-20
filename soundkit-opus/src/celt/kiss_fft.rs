@@ -17,6 +17,8 @@ pub struct KissFftState {
     twiddles: Vec<KissFftCpx>,
     #[cfg(target_arch = "aarch64")]
     radix5_twiddles: Vec<KissFftCpx>,
+    #[cfg(target_arch = "wasm32")]
+    stage_twiddles: Vec<Vec<KissFftCpx>>,
 }
 
 impl KissFftState {
@@ -50,6 +52,8 @@ impl KissFftState {
         let bitrev = InRangeIndices::new(bitrev, nfft)?;
         #[cfg(target_arch = "aarch64")]
         let radix5_twiddles = pack_first_radix5_twiddles(&factors, shift, &twiddles);
+        #[cfg(target_arch = "wasm32")]
+        let stage_twiddles = pack_stage_twiddles(&factors, shift, &twiddles);
 
         Some(Self {
             nfft,
@@ -60,6 +64,8 @@ impl KissFftState {
             twiddles,
             #[cfg(target_arch = "aarch64")]
             radix5_twiddles,
+            #[cfg(target_arch = "wasm32")]
+            stage_twiddles,
         })
     }
 
@@ -101,6 +107,39 @@ fn pack_first_radix5_twiddles(
         }
     }
     packed
+}
+
+/// Packs the twiddles of each radix-3, radix-4, and radix-5 stage with a
+/// multiple-of-four `m` into contiguous blocks, one block of `m` values per
+/// twiddle power. The SIMD128 butterflies then load four twiddles at once.
+/// Other stages get an empty block list.
+#[cfg(target_arch = "wasm32")]
+fn pack_stage_twiddles(
+    factors: &[i16; 2 * MAX_FACTORS],
+    shift: i32,
+    twiddles: &[KissFftCpx],
+) -> Vec<Vec<KissFftCpx>> {
+    let shift = shift.max(0) as usize;
+    let mut stages = Vec::new();
+    let mut fstride = 1usize;
+    for stage in 0..MAX_FACTORS {
+        let p = factors[2 * stage] as usize;
+        let m = factors[2 * stage + 1] as usize;
+        let stride = fstride << shift;
+        let packed = if (3..=5).contains(&p) && m != 0 && m % 4 == 0 {
+            (1..p)
+                .flat_map(|power| (0..m).map(move |u| twiddles[power * u * stride]))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        stages.push(packed);
+        fstride *= p;
+        if m <= 1 {
+            break;
+        }
+    }
+    stages
 }
 
 #[inline]
@@ -215,6 +254,11 @@ fn round_static_float(value: f64) -> f32 {
 }
 
 fn kf_bfly2(fout: &mut [KissFftCpx], m: usize, n: usize) {
+    #[cfg(target_arch = "wasm32")]
+    if m == 4 {
+        crate::kernels::fft_radix2_m4(fout, n);
+        return;
+    }
     if m == 1 {
         for i in 0..n {
             let base = 2 * i;
@@ -261,7 +305,22 @@ fn kf_bfly4(
     m: usize,
     n: usize,
     mm: usize,
+    stage: usize,
 ) {
+    #[cfg(target_arch = "wasm32")]
+    if m > 1 && simd_stage(fout, st, stage, 4, m, n, mm, |block, packed| {
+        crate::kernels::fft_radix4(block, packed, m)
+    }) {
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = stage;
+
+    #[cfg(target_arch = "wasm32")]
+    if m == 1 {
+        crate::kernels::fft_radix4_m1(fout, n);
+        return;
+    }
     if m == 1 {
         for i in 0..n {
             let base = 4 * i;
@@ -306,9 +365,19 @@ fn kf_bfly3(
     m: usize,
     n: usize,
     mm: usize,
+    stage: usize,
 ) {
     let m2 = 2 * m;
     let epi3 = st.twiddles[fstride * m];
+
+    #[cfg(target_arch = "wasm32")]
+    if simd_stage(fout, st, stage, 3, m, n, mm, |block, packed| {
+        crate::kernels::fft_radix3(block, packed, epi3.i, m)
+    }) {
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = stage;
 
     for i in 0..n {
         let base = i * mm;
@@ -341,9 +410,19 @@ fn kf_bfly5(
     m: usize,
     n: usize,
     mm: usize,
+    stage: usize,
 ) {
     let ya = st.twiddles[fstride * m];
     let yb = st.twiddles[fstride * 2 * m];
+
+    #[cfg(target_arch = "wasm32")]
+    if simd_stage(fout, st, stage, 5, m, n, mm, |block, packed| {
+        crate::kernels::fft_radix5(block, packed, ya, yb, m)
+    }) {
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = stage;
 
     #[cfg(target_arch = "aarch64")]
     if n == 1 && crate::kernels::fft_radix5_neon(fout, &st.radix5_twiddles, ya, yb, m) {
@@ -402,6 +481,40 @@ fn kf_bfly5(
     }
 }
 
+/// Runs a SIMD128 butterfly on each of the `n` blocks of one stage. Returns
+/// `false`, before it changes any value, when the stage has no packed
+/// twiddles or a block does not fit.
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+fn simd_stage(
+    fout: &mut [KissFftCpx],
+    st: &KissFftState,
+    stage: usize,
+    radix: usize,
+    m: usize,
+    n: usize,
+    mm: usize,
+    kernel: impl Fn(&mut [KissFftCpx], &[KissFftCpx]) -> bool,
+) -> bool {
+    let Some(packed) = st.stage_twiddles.get(stage).filter(|p| !p.is_empty()) else {
+        return false;
+    };
+    // Blocks are `radix * m` values long. The first stage passes `mm == 1`
+    // with a single block; every later stage has `mm == radix * m`.
+    let block_len = radix * m;
+    if packed.len() != (radix - 1) * m
+        || (n > 1 && mm != block_len)
+        || n.checked_mul(block_len).map_or(true, |len| len > fout.len())
+    {
+        return false;
+    }
+    for block in fout[..n * block_len].chunks_exact_mut(block_len) {
+        let done = kernel(block, packed);
+        debug_assert!(done);
+    }
+    true
+}
+
 pub fn opus_fft_impl(st: &KissFftState, fout: &mut [KissFftCpx]) {
     assert!(fout.len() >= st.nfft);
     let shift = st.shift.max(0) as usize;
@@ -428,9 +541,9 @@ pub fn opus_fft_impl(st: &KissFftState, fout: &mut [KissFftCpx]) {
         };
         match st.factors[2 * i] {
             2 => kf_bfly2(fout, m, fstride[i]),
-            3 => kf_bfly3(fout, fstride[i] << shift, st, m, fstride[i], m2),
-            4 => kf_bfly4(fout, fstride[i] << shift, st, m, fstride[i], m2),
-            5 => kf_bfly5(fout, fstride[i] << shift, st, m, fstride[i], m2),
+            3 => kf_bfly3(fout, fstride[i] << shift, st, m, fstride[i], m2, i),
+            4 => kf_bfly4(fout, fstride[i] << shift, st, m, fstride[i], m2, i),
+            5 => kf_bfly5(fout, fstride[i] << shift, st, m, fstride[i], m2, i),
             radix => unreachable!("unsupported FFT radix {radix}"),
         }
         m = m2;

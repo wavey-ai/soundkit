@@ -1,6 +1,10 @@
 //! CELT vector-quantization helpers, ported from official `celt/vq.c`.
 
-#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(not(any(
+    target_arch = "aarch64",
+    target_arch = "x86_64",
+    target_arch = "wasm32"
+)))]
 use wide::{f32x4, CmpGt};
 
 use crate::celt::cwrs::{decode_pulses, decode_pulses_with_cache, encode_pulses, CwrsDecodeCache};
@@ -219,7 +223,13 @@ pub fn op_pvq_search_with_scratch(
         #[cfg(target_arch = "x86_64")]
         let best_id = crate::kernels::pvq_best_candidate_sse2(x, y, xy, yy, n);
 
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "wasm32")]
+        let best_id = crate::kernels::pvq_best_candidate(x, y, xy, yy, n);
+
+        #[cfg(not(any(
+            target_arch = "x86_64",
+            target_arch = "wasm32"
+        )))]
         let best_id = {
             let mut best_id = 0usize;
             let mut rxy = xy + x[0];

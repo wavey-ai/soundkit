@@ -160,6 +160,10 @@ pub struct Encoder {
     stereo_saving: f32,
     last_coded_bands: usize,
     vbr: bool,
+    vbr_constraint: bool,
+    dual_stereo_ratio: f32,
+    #[cfg(feature = "trace")]
+    trace_frame: u64,
     vbr_reservoir: i32,
     vbr_drift: i32,
     vbr_offset: i32,
@@ -219,6 +223,10 @@ impl Encoder {
             stereo_saving: 0.0,
             last_coded_bands: 0,
             vbr: false,
+            vbr_constraint: true,
+            dual_stereo_ratio: 1.0,
+            #[cfg(feature = "trace")]
+            trace_frame: 0,
             vbr_reservoir: 0,
             vbr_drift: 0,
             vbr_offset: 0,
@@ -352,6 +360,26 @@ impl Encoder {
         Ok(())
     }
 
+    /// Selects constrained VBR (`true`, the default) or unconstrained VBR.
+    ///
+    /// Constrained VBR keeps each frame within a one-frame bit reservoir of
+    /// the target rate. Unconstrained VBR lets each frame take what its
+    /// analysis asks for, up to the CELT packet limit. In both modes a slow
+    /// drift correction holds the long-term average at the target rate.
+    pub fn set_vbr_constraint(&mut self, constrained: bool) -> Result<()> {
+        self.vbr_constraint = constrained;
+        self.reset_vbr_state();
+        Ok(())
+    }
+
+    pub const fn vbr_constraint(&self) -> bool {
+        self.vbr_constraint
+    }
+
+    fn vbr_constrained(&self) -> bool {
+        self.vbr_constraint && crate::tuning::get(crate::tuning::VBR_UNCONSTRAINED, 0.0) == 0.0
+    }
+
     fn reset_vbr_state(&mut self) {
         self.vbr_reservoir = 0;
         self.vbr_drift = 0;
@@ -384,6 +412,10 @@ impl Encoder {
     }
 
     fn vbr_initial_frame_bytes(&self, frame_size: usize) -> usize {
+        if !self.vbr_constrained() {
+            let lm = self.frame_lm(frame_size).unwrap_or(0);
+            return (packet::MAX_FRAME_BYTES as usize >> (3 - lm)).min(CELT_MAX_FRAME_BYTES);
+        }
         let vbr_rate = self.vbr_rate_frac(frame_size);
         let max_allowed = ((2 * vbr_rate - self.vbr_reservoir) >> (BITRES + 3))
             .clamp(2, CELT_MAX_FRAME_BYTES as i32);
@@ -561,7 +593,8 @@ impl Encoder {
             }
         }
 
-        let mut is_transient = mask_metric > 200;
+        let mut is_transient =
+            mask_metric as f32 > crate::tuning::get(crate::tuning::TRANSIENT_THRESHOLD, 200.0);
         if tone.toneishness > 0.98 && tone.frequency < 0.026 {
             is_transient = false;
             mask_metric = 0;
@@ -813,10 +846,59 @@ impl Encoder {
         if let Some(tonality_slope) = analysis_tonality_slope {
             trim -= (2.0 * (tonality_slope + 0.05)).clamp(-2.0, 2.0);
         }
+        trim += crate::tuning::get(crate::tuning::TRIM_OFFSET, 0.0);
         (0.5 + trim).floor().clamp(0.0, 10.0) as i32
     }
 
+    /// `stereo_analysis` over the first `bands` bands. The theta cost scales
+    /// with the number of bands.
+    fn stereo_analysis_bands(
+        mode: &CeltMode,
+        x: &[f32],
+        y: &[f32],
+        lm: usize,
+        bands: usize,
+    ) -> bool {
+        let mut sum_lr = f32::EPSILON;
+        let mut sum_ms = f32::EPSILON;
+        for i in 0..bands {
+            let band_start = (mode.ebands[i] as usize) << lm;
+            let band_end = (mode.ebands[i + 1] as usize) << lm;
+            for j in band_start..band_end {
+                sum_lr += x[j].abs() + y[j].abs();
+                sum_ms += (x[j] + y[j]).abs() + (x[j] - y[j]).abs();
+            }
+        }
+        sum_ms *= core::f32::consts::FRAC_1_SQRT_2;
+        let thetas = if lm <= 1 { bands.saturating_sub(8) } else { bands };
+        let bins = ((mode.ebands[bands] as usize) << (lm + 1)) as f32;
+        (bins + thetas as f32) * sum_ms > bins * sum_lr
+    }
+
+    /// Returns the M/S-to-L/R cost ratio that `stereo_analysis` compares
+    /// with one, in the log2 domain.
+    fn stereo_analysis_ratio(mode: &CeltMode, x: &[f32], y: &[f32], lm: usize) -> f32 {
+        let mut sum_lr = f32::EPSILON;
+        let mut sum_ms = f32::EPSILON;
+        for i in 0..13 {
+            let band_start = (mode.ebands[i] as usize) << lm;
+            let band_end = (mode.ebands[i + 1] as usize) << lm;
+            for j in band_start..band_end {
+                sum_lr += x[j].abs() + y[j].abs();
+                sum_ms += (x[j] + y[j]).abs() + (x[j] - y[j]).abs();
+            }
+        }
+        sum_ms *= core::f32::consts::FRAC_1_SQRT_2;
+        let thetas = if lm <= 1 { 5 } else { 13 };
+        let bins = ((mode.ebands[13] as usize) << (lm + 1)) as f32;
+        (bins + thetas as f32) * sum_ms / (bins * sum_lr)
+    }
+
     fn stereo_analysis(mode: &CeltMode, x: &[f32], y: &[f32], lm: usize) -> bool {
+        let bands = crate::tuning::get(crate::tuning::DUAL_STEREO_BANDS, 13.0) as usize;
+        if bands != 13 {
+            return Self::stereo_analysis_bands(mode, x, y, lm, bands.min(mode.nb_ebands));
+        }
         let mut sum_lr = f32::EPSILON;
         let mut sum_ms = f32::EPSILON;
         for i in 0..13 {
@@ -835,7 +917,9 @@ impl Encoder {
             thetas -= 8;
         }
         (((mode.ebands[13] as usize) << (lm + 1)) + thetas) as f32 * sum_ms
-            > ((mode.ebands[13] as usize) << (lm + 1)) as f32 * sum_lr
+            > ((mode.ebands[13] as usize) << (lm + 1)) as f32
+                * sum_lr
+                * crate::tuning::get(crate::tuning::DUAL_STEREO_BIAS, 1.0)
     }
 
     fn dc_reject_frame_into(&mut self, pcm: &[f32], frame_size: usize, filtered: &mut Vec<f32>) {
@@ -913,7 +997,7 @@ impl Encoder {
         config.spread = SPREAD_NORMAL;
         config.last_coded_bands = self.last_coded_bands;
         config.vbr = self.vbr;
-        config.constrained_vbr = self.vbr;
+        config.constrained_vbr = self.vbr && self.vbr_constrained();
         let analysis_tonality_slope = self
             .analysis_info
             .valid
@@ -952,7 +1036,10 @@ impl Encoder {
                 input.resize(2 * n, 0.0);
                 input[..2 * n].fill(0.0);
             }
-            input[..overlap].copy_from_slice(&self.overlap_mem[c]);
+            // The tone and transient analyses see the unfiltered history, as
+            // in libopus. `run_prefilter` gets the filtered overlap below.
+            input[..overlap]
+                .copy_from_slice(&self.prefilter_mem[c][COMBFILTER_MAXPERIOD - overlap..]);
             for i in 0..n {
                 let sample = pcm[i * self.channels + c] * CELT_SIG_SCALE;
                 input[overlap + i] = sample - self.preemph_mem[c];
@@ -976,6 +1063,17 @@ impl Encoder {
         );
         let toneishness = tone.toneishness.min(1.0 - transient.tf_estimate);
         config.is_transient = lm > 0 && transient.is_transient && (frame_bytes * 8) as i32 >= 16;
+        #[cfg(feature = "trace")]
+        {
+            crate::trace::count(0);
+            if config.is_transient {
+                crate::trace::count(1);
+                if std::env::var_os("TRACE_FRAMES").is_some() {
+                    eprintln!("T {}", self.trace_frame);
+                }
+            }
+            self.trace_frame += 1;
+        }
         config.tf_estimate = transient.tf_estimate;
         config.tone_frequency = tone.frequency;
         config.toneishness = toneishness;
@@ -985,8 +1083,13 @@ impl Encoder {
             transient.tf_chan.min(stream_channels - 1)
         };
 
-        let prefilter_enabled =
-            frame_bytes > 12 * stream_channels && (frame_bytes * 8) as i32 >= 16;
+        for c in 0..self.channels {
+            scratch.inputs[c][..overlap].copy_from_slice(&self.overlap_mem[c]);
+        }
+
+        let prefilter_enabled = frame_bytes > 12 * stream_channels
+            && (frame_bytes * 8) as i32 >= 16
+            && crate::tuning::get(crate::tuning::PREFILTER_ENABLE, 1.0) != 0.0;
         let prefilter_tapset = self.tapset_decision as usize;
         let previous_prefilter_period = self.prefilter_period.max(COMBFILTER_MINPERIOD);
         let previous_prefilter_gain = self.prefilter_gain;
@@ -1127,6 +1230,8 @@ impl Encoder {
         {
             config.is_transient = true;
             config.tf_estimate = 0.2;
+            #[cfg(feature = "trace")]
+            crate::trace::count(2);
             let mut long_band_log_e = std::mem::take(&mut scratch.long_band_log_e);
             long_band_log_e[..band_count].copy_from_slice(&scratch.band_log_e[..band_count]);
             for c in 0..stream_channels {
@@ -1196,6 +1301,10 @@ impl Encoder {
                 &scratch.spread.weights,
             );
             self.spread_decision = config.spread;
+            let forced = crate::tuning::get(crate::tuning::SPREAD_FORCE, -1.0);
+            if forced >= 0.0 {
+                config.spread = forced as i32;
+            }
         } else {
             config.spread = SPREAD_NORMAL;
             self.spread_decision = config.spread;
@@ -1240,7 +1349,16 @@ impl Encoder {
                 )
                 .clamp(config.start, config.end);
                 config.intensity = self.intensity;
-                config.dual_stereo = lm != 0 && Self::stereo_analysis(&self.mode, left, right, lm);
+                let smooth = crate::tuning::get(crate::tuning::DUAL_STEREO_SMOOTH, 0.0);
+                config.dual_stereo = if smooth == 0.0 {
+                    lm != 0 && Self::stereo_analysis(&self.mode, left, right, lm)
+                } else {
+                    let ratio = Self::stereo_analysis_ratio(&self.mode, left, right, lm);
+                    self.dual_stereo_ratio = smooth * self.dual_stereo_ratio + (1.0 - smooth) * ratio;
+                    lm != 0
+                        && self.dual_stereo_ratio
+                            > crate::tuning::get(crate::tuning::DUAL_STEREO_BIAS, 1.0)
+                };
             }
             config.alloc_trim = Self::alloc_trim_analysis(
                 &self.mode,
@@ -1523,6 +1641,9 @@ impl Encoder {
             return Err(Error::BadArg);
         }
         self.analysis_info = self.analysis.run(pcm, frame_size, self.channels);
+        if crate::tuning::get(crate::tuning::ANALYSIS_OFF, 0.0) != 0.0 {
+            self.analysis_info.valid = false;
+        }
         let mut filtered = std::mem::take(&mut self.filtered_scratch);
         self.dc_reject_frame_into(pcm, frame_size, &mut filtered);
         let frame_bytes = if self.vbr {

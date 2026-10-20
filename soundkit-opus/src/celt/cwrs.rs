@@ -374,10 +374,10 @@ fn fast_decode_index(
         return Some(table_walk_decode_index(n, k_total, i, y, &table.rows));
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "wasm32"))]
     return crate::kernels::cwrs_decode_index_rect(&table.rows, TABLE_K_LEN, n, k_total, i, y);
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "wasm32")))]
     {
         let mut i = i;
         let mut dims = n;
@@ -585,10 +585,13 @@ fn fast_encode_index(n: usize, k_total: usize, y: &[i32]) -> Option<(u32, u32)> 
         let dims = n - pos;
         let row = pvq_row_for_dims(table, dims);
         let ay = abs_i32_to_usize(y[pos]);
-        idx = idx.wrapping_add(row[sum]);
-        if y[pos] < 0 {
-            idx = idx.wrapping_add(row[sum + ay + 1]);
-        }
+        // Pulse signs are close to random, so a branch on the sign
+        // mispredicts often. `sum + ay + 1 <= k_total + 1` stays inside the
+        // row, so the load is unconditional and the sign masks it.
+        let negative = (y[pos] >> 31) as u32;
+        idx = idx
+            .wrapping_add(row[sum])
+            .wrapping_add(row[sum + ay + 1] & negative);
         sum += ay;
     }
     Some((idx, table_v(table, n, k_total)))

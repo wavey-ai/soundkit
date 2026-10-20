@@ -55,6 +55,32 @@ current upstream code correctly rejects.
 - Keep exact packet comparisons as diagnostic evidence, not the quality target.
 - Port later ordinary-CELT improvements from upstream main when they apply.
 
+## P1: Encoder Decisions
+
+The 2026-10-20 tuning report gives the measurements for these items.
+
+- Replace the dual-stereo L1 heuristic. Dual stereo always on raised the
+  `nocturnal-animals` PEAQ DI by 0.022. Dual stereo always off raised the DI of
+  two other sources by up to 0.013. A threshold change moves gain between
+  sources and does not raise the mean.
+- Give VBR a better per-frame target. Unconstrained VBR at the same mean rate
+  lowered the PEAQ DI by 0.049 against constrained VBR.
+- Test allocation trim once a listening test can resolve the metrics. Trim +1
+  raised the advanced PEAQ DI. It lowered the basic PEAQ DI and ViSQOL.
+- Repeat the prefilter tests with a corpus that has more tonal solo material.
+- Find the 192 kb/s CBR difference on the held-out corpus. PEAQ basic scored
+  Rust 0.114 lower, with and without the tuning changes. PEAQ advanced and
+  ViSQOL scored Rust higher. Run the blind listening kit on these items.
+
+## P1: WebAssembly Speed
+
+- Make the build without SIMD128 at least as fast as libopus without SIMD.
+  It uses 3.8-11% more time on x86-64 and 11-14% more on AArch64.
+- Increase the AArch64 margin. The encoder and decoder use 0-2% less time than
+  libopus there, against about 3.5% on x86-64.
+- Vectorize the forward-MDCT folding loops and the short-block MDCT
+  rotations. Both use scalar code on wasm.
+
 ## P2: Complete CELT Decode Coverage
 
 - Decode all valid packet frame layouts.

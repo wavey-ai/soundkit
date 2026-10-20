@@ -152,21 +152,28 @@ pub fn tone_detect(
 }
 
 fn inner_prod(x: &[f32], y: &[f32], len: usize) -> f32 {
-    let mut acc = f32x4::ZERO;
-    let mut i = 0usize;
-    while i + 4 <= len {
-        let lhs = f32x4::new([x[i], x[i + 1], x[i + 2], x[i + 3]]);
-        let rhs = f32x4::new([y[i], y[i + 1], y[i + 2], y[i + 3]]);
-        acc += lhs * rhs;
-        i += 4;
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::kernels::inner_prod_f32(x, y, len)
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut acc = f32x4::ZERO;
+        let mut i = 0usize;
+        while i + 4 <= len {
+            let lhs = f32x4::new([x[i], x[i + 1], x[i + 2], x[i + 3]]);
+            let rhs = f32x4::new([y[i], y[i + 1], y[i + 2], y[i + 3]]);
+            acc += lhs * rhs;
+            i += 4;
+        }
 
-    let mut sum = acc.reduce_add();
-    while i < len {
-        sum += x[i] * y[i];
-        i += 1;
+        let mut sum = acc.reduce_add();
+        while i < len {
+            sum += x[i] * y[i];
+            i += 1;
+        }
+        sum
     }
-    sum
 }
 
 fn autocorr(x: &[f32], lag: usize, n: usize, ac: &mut Vec<f32>) {
@@ -285,7 +292,16 @@ fn pitch_xcorr(x: &[f32], y: &[f32], len: usize, max_pitch: usize, xcorr: &mut V
     let used_native_simd = crate::kernels::pitch_xcorr_8(x, y, len, grouped, &mut xcorr[..grouped]);
     #[cfg(target_arch = "aarch64")]
     let used_native_simd = crate::kernels::pitch_xcorr_4(x, y, len, grouped, &mut xcorr[..grouped]);
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(target_arch = "wasm32")]
+    let used_native_simd = {
+        crate::kernels::pitch_xcorr_4(x, y, len, grouped, &mut xcorr[..grouped]);
+        true
+    };
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        target_arch = "wasm32"
+    )))]
     let used_native_simd = false;
 
     if !used_native_simd {
@@ -401,26 +417,33 @@ fn dual_inner_prod(x: &[f32], y01: &[f32], y02: &[f32], n: usize) -> (f32, f32) 
         return result;
     }
 
-    let mut xy01 = f32x4::ZERO;
-    let mut xy02 = f32x4::ZERO;
-    let mut i = 0usize;
-    while i + 4 <= n {
-        let lhs = f32x4::new([x[i], x[i + 1], x[i + 2], x[i + 3]]);
-        let rhs01 = f32x4::new([y01[i], y01[i + 1], y01[i + 2], y01[i + 3]]);
-        let rhs02 = f32x4::new([y02[i], y02[i + 1], y02[i + 2], y02[i + 3]]);
-        xy01 += lhs * rhs01;
-        xy02 += lhs * rhs02;
-        i += 4;
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::kernels::dual_inner_prod_f32(x, y01, y02, n)
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut xy01 = f32x4::ZERO;
+        let mut xy02 = f32x4::ZERO;
+        let mut i = 0usize;
+        while i + 4 <= n {
+            let lhs = f32x4::new([x[i], x[i + 1], x[i + 2], x[i + 3]]);
+            let rhs01 = f32x4::new([y01[i], y01[i + 1], y01[i + 2], y01[i + 3]]);
+            let rhs02 = f32x4::new([y02[i], y02[i + 1], y02[i + 2], y02[i + 3]]);
+            xy01 += lhs * rhs01;
+            xy02 += lhs * rhs02;
+            i += 4;
+        }
 
-    let mut xy01_scalar = xy01.reduce_add();
-    let mut xy02_scalar = xy02.reduce_add();
-    while i < n {
-        xy01_scalar += x[i] * y01[i];
-        xy02_scalar += x[i] * y02[i];
-        i += 1;
+        let mut xy01_scalar = xy01.reduce_add();
+        let mut xy02_scalar = xy02.reduce_add();
+        while i < n {
+            xy01_scalar += x[i] * y01[i];
+            xy02_scalar += x[i] * y02[i];
+            i += 1;
+        }
+        (xy01_scalar, xy02_scalar)
     }
-    (xy01_scalar, xy02_scalar)
 }
 
 fn remove_doubling(
@@ -669,6 +692,9 @@ pub fn comb_filter_in_place(
         return;
     }
 
+    if crate::kernels::comb_filter_steady(y, base, i, n, t1, g10, g11, g12) {
+        return;
+    }
     x4 = y[base + i - t1 - 2];
     x3 = y[base + i - t1 - 1];
     x2 = y[base + i - t1];
@@ -804,7 +830,10 @@ pub fn run_prefilter(
     if prev_gain > 0.55 {
         threshold -= 0.1;
     }
-    threshold = threshold.max(0.2);
+    // A higher threshold and 0.8 times the libopus pitch gain. In PEAQ tests
+    // at music rates, the libopus comb filter was stronger than optimal.
+    threshold = threshold.max(0.2) + crate::tuning::get(crate::tuning::PF_THRESHOLD_OFFSET, 0.1);
+    gain1 *= crate::tuning::get(crate::tuning::PF_GAIN_SCALE, 0.8);
 
     let (mut enabled, mut qgain) = if gain1 < threshold {
         gain1 = 0.0;

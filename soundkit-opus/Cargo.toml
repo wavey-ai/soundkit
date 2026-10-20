@@ -19,6 +19,8 @@ exclude = [
 [features]
 default = []
 wasm = ["dep:wasm-bindgen"]
+tuning = []
+trace = []
 
 [dependencies]
 soundkit = { version = "0.13.1", path = "../soundkit" }
@@ -31,3 +33,11 @@ wide = "0.7"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[[example]]
+name = "trace_packets"
+required-features = ["trace"]
+
+[[example]]
+name = "trace_encode"
+required-features = ["trace", "tuning"]

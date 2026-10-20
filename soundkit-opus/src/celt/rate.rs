@@ -104,17 +104,30 @@ fn interp_bits2pulses(
     let stereo = c > 1;
     let log_m = (lm as i32) << BITRES;
 
+    // One range check per slice lets the loops below run without per-band
+    // bounds checks.
+    let band_bits1 = &bits1[start..end];
+    let band_bits2 = &bits2[start..end];
+    let band_thresh = &thresh[start..end];
+    let band_cap = &cap[start..end];
+
     let mut lo = 0i32;
     let mut hi = 1 << ALLOC_STEPS;
     for _ in 0..ALLOC_STEPS {
         let mid = (lo + hi) >> 1;
         let mut psum = 0i32;
         let mut done = false;
-        for j in (start..end).rev() {
-            let tmp = bits1[j] + ((mid * bits2[j]) >> ALLOC_STEPS);
-            if tmp >= thresh[j] || done {
+        for (((&b1, &b2), &th), &cp) in band_bits1
+            .iter()
+            .zip(band_bits2)
+            .zip(band_thresh)
+            .zip(band_cap)
+            .rev()
+        {
+            let tmp = b1 + ((mid * b2) >> ALLOC_STEPS);
+            if tmp >= th || done {
                 done = true;
-                psum += tmp.min(cap[j]);
+                psum += tmp.min(cp);
             } else if tmp >= alloc_floor {
                 psum += alloc_floor;
             }
@@ -128,15 +141,22 @@ fn interp_bits2pulses(
 
     let mut psum = 0i32;
     let mut done = false;
-    for j in (start..end).rev() {
-        let mut tmp = bits1[j] + ((lo * bits2[j]) >> ALLOC_STEPS);
-        if tmp < thresh[j] && !done {
+    for ((((&b1, &b2), &th), &cp), pulse) in band_bits1
+        .iter()
+        .zip(band_bits2)
+        .zip(band_thresh)
+        .zip(band_cap)
+        .zip(pulses[start..end].iter_mut())
+        .rev()
+    {
+        let mut tmp = b1 + ((lo * b2) >> ALLOC_STEPS);
+        if tmp < th && !done {
             tmp = if tmp >= alloc_floor { alloc_floor } else { 0 };
         } else {
             done = true;
         }
-        tmp = tmp.min(cap[j]);
-        pulses[j] = tmp;
+        tmp = tmp.min(cp);
+        *pulse = tmp;
         psum += tmp;
     }
 
@@ -411,22 +431,34 @@ pub fn clt_compute_allocation_with_scratch(
 
     let mut lo = 1i32;
     let mut hi = mode.nb_alloc_vectors as i32 - 1;
+    let band_edges = &mode.ebands[start..=end];
+    let band_trim = &trim_offset[start..end];
+    let band_offsets = &offsets[start..end];
+    let band_thresh = &thresh[start..end];
+    let band_cap = &cap[start..end];
     while lo <= hi {
         let mut done = false;
         let mut psum = 0i32;
         let mid = (lo + hi) >> 1;
-        for j in (start..end).rev() {
-            let width = mode.ebands[j + 1] as i32 - mode.ebands[j] as i32;
-            let mut bitsj =
-                channels as i32 * width * (mode.alloc_vectors[mid as usize * len + j] as i32) << lm
-                    >> 2;
+        let vector = &mode.alloc_vectors[mid as usize * len + start..mid as usize * len + end];
+        for (((((edges, &alloc), &trim), &offset), &th), &cp) in band_edges
+            .windows(2)
+            .zip(vector)
+            .zip(band_trim)
+            .zip(band_offsets)
+            .zip(band_thresh)
+            .zip(band_cap)
+            .rev()
+        {
+            let width = edges[1] as i32 - edges[0] as i32;
+            let mut bitsj = channels as i32 * width * (alloc as i32) << lm >> 2;
             if bitsj > 0 {
-                bitsj = 0.max(bitsj + trim_offset[j]);
+                bitsj = 0.max(bitsj + trim);
             }
-            bitsj += offsets[j];
-            if bitsj >= thresh[j] || done {
+            bitsj += offset;
+            if bitsj >= th || done {
                 done = true;
-                psum += bitsj.min(cap[j]);
+                psum += bitsj.min(cp);
             } else if bitsj >= (channels as i32) << BITRES {
                 psum += (channels as i32) << BITRES;
             }

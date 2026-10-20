@@ -144,41 +144,52 @@ impl TonalityAnalysisState {
         let subframe = subframe_24k * 2;
         let offset = offset_24k * 2;
         tmp.resize(subframe, 0.0);
-        for j in 0..subframe {
-            let frame = offset + j;
-            let mut sample = pcm[frame * channels];
-            for c in 1..channels {
-                sample += pcm[frame * channels + c];
-            }
-            if channels == 2 {
+        let tmp = &mut tmp[..subframe];
+        let frames = &pcm[offset * channels..(offset + subframe) * channels];
+        if channels == 2 {
+            for (dst, pair) in tmp.iter_mut().zip(frames.chunks_exact(2)) {
+                let mut sample = pair[0];
+                sample += pair[1];
                 sample *= 0.5;
+                *dst = sample * CELT_SIG_SCALE;
             }
-            tmp[j] = sample * CELT_SIG_SCALE;
+        } else {
+            for (dst, frame) in tmp.iter_mut().zip(frames.chunks_exact(channels)) {
+                let mut sample = frame[0];
+                for &value in &frame[1..] {
+                    sample += value;
+                }
+                *dst = sample * CELT_SIG_SCALE;
+            }
         }
 
+        // The filter state lives in locals for the loop and returns to
+        // `self` at the end.
+        let [mut s0, mut s1, mut s2] = self.downmix_state;
         let mut hp_ener = 0.0f32;
-        for k in 0..subframe_24k {
-            let in32 = tmp[2 * k];
-            let y = in32 - self.downmix_state[0];
+        for (pair, dst) in tmp.chunks_exact(2).zip(out[..subframe_24k].iter_mut()) {
+            let in32 = pair[0];
+            let y = in32 - s0;
             let x = 0.607_437_1 * y;
-            let mut out32 = self.downmix_state[0] + x;
-            self.downmix_state[0] = in32 + x;
+            let mut out32 = s0 + x;
+            s0 = in32 + x;
             let mut out32_hp = out32;
 
-            let in32 = tmp[2 * k + 1];
-            let y = in32 - self.downmix_state[1];
+            let in32 = pair[1];
+            let y = in32 - s1;
             let x = 0.150_63 * y;
-            out32 += self.downmix_state[1] + x;
-            self.downmix_state[1] = in32 + x;
+            out32 += s1 + x;
+            s1 = in32 + x;
 
-            let y = -in32 - self.downmix_state[2];
+            let y = -in32 - s2;
             let x = 0.150_63 * y;
-            out32_hp += self.downmix_state[2] + x;
-            self.downmix_state[2] = -in32 + x;
+            out32_hp += s2 + x;
+            s2 = -in32 + x;
 
             hp_ener += out32_hp * out32_hp;
-            out[k] = 0.5 * out32;
+            *dst = 0.5 * out32;
         }
+        self.downmix_state = [s0, s1, s2];
 
         hp_ener * INV_CELT_SIG_SCALE_SQUARED
     }

@@ -25,6 +25,16 @@ All packet sizes and checksums matched the preceding Rust checkpoint. See the
 [complete native performance report](performance-results/2026-08-24-native-48k/README.md)
 for the matrix, test method, quality gate, and profiler evidence.
 
+## WebAssembly Performance
+
+On x86-64, the wasm encoder used 3.44-3.59% less time than trunk libopus
+compiled to wasm. The wasm decoder used 2.82-3.70% less time. On Graviton3,
+the encoder used 0.82-0.88% less time and the decoder used 0.64-0.74% less.
+
+Both modules ran in one Node.js 26.7.0 process on the same PCM and packets.
+See the [wasm performance report](performance-results/2026-10-20-wasm-48k/README.md)
+for the method, the changes, and the build configuration.
+
 ## Current Support
 
 - safe packet parser and packet helper APIs
@@ -43,7 +53,8 @@ for the matrix, test method, quality gate, and profiler evidence.
   algebraic VQ
 - experimental 48 kHz CELT-only raw packet encode/decode through the Rust
   `Encoder`/`Decoder` types for 2.5, 5, 10, and 20 ms fullband frames
-  with CBR, constrained VBR, or exact compressed-frame-byte controls
+  with CBR, constrained VBR, unconstrained VBR, or exact
+  compressed-frame-byte controls
 - signed 24-bit PCM encode/decode APIs using sign-extended `i32` samples
 
 The codec is incomplete. The supported audio path is limited to CELT-only raw
@@ -240,6 +251,37 @@ check, use:
 ```sh
 AUDIO_SECONDS=1 REPEATS=1 MODE=both tools/run_raw_celt_bench.sh
 ```
+
+## Wasm A/B benchmark
+
+`tools/build_wasm_ab.sh` builds trunk libopus and this crate as two wasm
+modules with the same whole-buffer API. `tools/run_wasm_ab.mjs` times both
+modules on the same PCM and the same packets. It also reports delay-aligned
+SNR and the packet bitrate:
+
+```sh
+OPUS_SRC=/path/to/libopus EMSDK=/path/to/emsdk tools/build_wasm_ab.sh
+node tools/run_wasm_ab.mjs --c ../target/opus-wasm-ab/wasm_ab_c.wasm \
+  --rust ../target/opus-wasm-ab/wasm_ab_rust.wasm \
+  --sources a.s32le,b.s32le --seconds 20 --rounds 5 --modes cbr,vbr,uvbr
+```
+
+`uvbr` selects unconstrained VBR. With `--wav-dir`, the runner writes the
+source excerpt and each delay-aligned decode as 32-bit float WAV files for
+PEAQ or ViSQOL. With `--slot-seconds 10`, it writes one file pair per
+10-second slot.
+
+With `CROSS_DECODE=1`, the runner decodes both packet sets with the first
+module's decoder before it scores them. Use it to compare two encoders through
+one decoder.
+
+`tools/wasm_ab/rust_variant.sh <name>` builds the Rust module from the working
+tree. Give two Rust builds to the runner to compare them. The runner prints
+`identical pcm` when the packets and the decoded PCM are the same.
+
+Build with `FEATURES=tuning` to make the encoder decision constants in
+`src/tuning.rs` adjustable at run time. Then `--tune-a` and `--tune-b` set
+knobs on each module, for example `--tune-b 5=3,11=0.8`.
 
 ## Wasm CELT benchmark
 

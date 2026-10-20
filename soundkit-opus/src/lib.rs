@@ -10,6 +10,9 @@ mod kernels;
 mod packet;
 mod repacketizer;
 mod soft_clip;
+pub mod tuning;
+#[cfg(feature = "trace")]
+pub mod trace;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod wasm;
 

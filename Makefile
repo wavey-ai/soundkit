@@ -18,10 +18,22 @@ image-codecs:
 test-image-codecs: image-codecs
 	npm run test:images
 
+# The bundle uses WebAssembly SIMD128 and fat LTO. The Opus codec and other
+# crates select SIMD128 kernels at compile time. `wasm-nosimd` builds for
+# engines without WebAssembly SIMD, such as Safari before 16.4.
 wasm:
+	CARGO_PROFILE_RELEASE_LTO=fat \
+	CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='-C target-feature=+simd128' \
 	wasm-pack build soundkit-wasm \
 		--target web \
 		--out-dir pkg \
+		--features default
+
+.PHONY: wasm-nosimd
+wasm-nosimd:
+	wasm-pack build soundkit-wasm \
+		--target web \
+		--out-dir pkg-nosimd \
 		--features default
 
 .PHONY: media-fixtures

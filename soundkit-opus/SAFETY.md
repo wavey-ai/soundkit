@@ -21,7 +21,8 @@ The crate root requires explicit unsafe operations inside unsafe functions:
 ```
 
 The private `kernels` module contains the unsafe boundary. It provides checked
-safe functions for MDCT indexing, AArch64 NEON, and x86 SIMD. Other modules do
+safe functions for MDCT indexing, AArch64 NEON, x86 SIMD, and wasm32
+SIMD128. Other modules do
 not receive raw pointers from that boundary.
 
 Each pointer operation needs an explicit unsafe block. Unit tests compare
@@ -51,3 +52,10 @@ uses raw pointers. The inner kernel clamps each sample to a finite signed
 24-bit range before it uses unchecked float-to-integer conversion. Direct tests
 cover odd and even lengths, compare every output value and final filter state
 with the scalar calculation, and reject invalid slice lengths.
+
+The wasm32 SIMD128 kernels take checked slices. Each wrapper checks the block
+lengths before the vector loads and stores. The two MDCT pre-rotation heads
+store to bit-reversed indices. They are `unsafe fn`, and their only caller
+passes indices that `InRangeIndices::new` checked against the output length.
+Every SIMD128 kernel keeps the scalar operation order. The wasm A/B harness
+confirms that the packets and the decoded PCM do not change.

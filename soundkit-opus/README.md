@@ -38,9 +38,25 @@ performance gate because constrained-VBR bitstreams differ.
 
 Read the [native performance report](performance-results/2026-08-24-native-48k/README.md) for the complete method and matrix.
 
-The four-source perceptual test scored Rust at 4.5731 MOS-LQO. Trunk libopus scored 4.5724.
+In WebAssembly, the encoder used 3.44-3.59% less time than trunk libopus on
+x86-64 and 0.82-0.88% less on Graviton3. The decoder used 2.82-3.70% and
+0.64-0.74% less time. Read the
+[wasm performance report](performance-results/2026-10-20-wasm-48k/README.md).
 
-Read the [perceptual quality report](quality-results/2026-08-25-soundkit-diverse-v1-5ms/README.md) for the complete results and limits.
+The encoder changes four libopus decision constants. Over 360 paired 10-second
+items at 96-320 kb/s, CBR and constrained VBR, Rust scored higher than trunk
+libopus. The PEAQ advanced Distortion Index was 0.0118 higher, and the ViSQOL
+MOS-LQO was 0.0025 higher. Read the
+[encoder tuning report](quality-results/2026-10-20-encoder-tuning/README.md).
+
+`set_vbr_constraint(false)` selects unconstrained VBR. A drift correction holds
+its long-term rate at the target. Constrained VBR scored higher and remains
+the default.
+
+Before the encoder changes, the 2026-08-25 four-source test scored Rust at
+4.5731 MOS-LQO and trunk libopus at 4.5724.
+
+Read the [2026-08-25 perceptual quality report](quality-results/2026-08-25-soundkit-diverse-v1-5ms/README.md) for the complete results and limits.
 
 Read [CODEC.md](CODEC.md) for the codec API, support limits, and benchmark commands.
 

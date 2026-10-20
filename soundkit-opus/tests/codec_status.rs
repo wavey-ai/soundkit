@@ -181,7 +181,7 @@ fn celt_encoder_carries_final_range_rng_between_frames() {
 
     assert_eq!(
         hex(&packet),
-        "e43c70f02c5aeb1305c47c5e813c60a15a50274252efa7b98bfe08aac87f87a6c573bbe22a2f87df"
+        "e4470843d07d10572bda46363ec9582c9711da5013c76fd6a7083d337c502ae115cf6b3530c6b7f5"
     );
 }
 
@@ -201,7 +201,7 @@ fn celt_encoder_keeps_decay_limited_coarse_energy_regression() {
 
     assert_eq!(
         hex(&packet),
-        "e442126dc9145bdb5c7ae8f555987aa98418f3013da12183861f51e914dfcf9c90b4ac22e7d3c63d"
+        "e461ff142a9f61e82995ad052263392711ac38b439c4c5143d047cdf5911ec48d014e1861fe0ec43"
     );
 }
 
@@ -435,6 +435,6 @@ fn vbr_packet_budget_varies_with_signal_shape() {
 
 #[test]
 fn celt_vbr_tracks_constrained_reservoir_over_raw_fixture() {
-    assert_eq!(vbr_stats(120, 128_000, 400), (16_439, 35, 59));
+    assert_eq!(vbr_stats(120, 128_000, 400), (16_439, 36, 59));
     assert_eq!(vbr_stats(960, 128_000, 50), (16_370, 321, 500));
 }

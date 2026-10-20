@@ -143,6 +143,10 @@ pub(crate) fn floor_bounded_to_i32(x: f32) -> i32 {
     truncated - i32::from((truncated as f32) > x)
 }
 
+// Kept out of line: inlined, LLVM's SLP vectorizer packs the `imid` and
+// `iside` calls in `compute_theta` into 128-bit operations that V8 runs
+// slower than the two scalar calls.
+#[inline(never)]
 pub fn bitexact_cos(x: i16) -> i16 {
     let tmp = (4096 + (x as i32) * (x as i32)) >> 13;
     debug_assert!(tmp <= 32767);
@@ -154,6 +158,7 @@ pub fn bitexact_cos(x: i16) -> i16 {
     (1 + x2) as i16
 }
 
+#[inline(never)]
 pub fn bitexact_log2tan(isin: i32, icos: i32) -> i32 {
     let lc = ec_ilog(icos as u32);
     let ls = ec_ilog(isin as u32);
