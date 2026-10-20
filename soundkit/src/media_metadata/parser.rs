@@ -765,7 +765,7 @@ fn parse_apev2(bytes: &[u8], metadata: &mut MediaMetadata) -> Result<(), String>
     }
     let size = u32::from_le_bytes(footer[12..16].try_into().unwrap()) as usize;
     let count = u32::from_le_bytes(footer[16..20].try_into().unwrap()) as usize;
-    if size < 32 || size > MAX_TAG_BYTES || size > footer_end {
+    if !(32..=MAX_TAG_BYTES).contains(&size) || size > footer_end {
         return Err("APE tag size is invalid or exceeds budget".to_owned());
     }
     if count > MAX_TAG_COUNT {
@@ -904,7 +904,7 @@ fn parse_asf_objects(
         return Err("ASF metadata nesting exceeds budget".to_owned());
     }
     let mut parsed = 0usize;
-    while cursor < end && object_count.map_or(true, |count| parsed < count) {
+    while cursor < end && object_count.is_none_or(|count| parsed < count) {
         let object_header = bytes
             .get(cursor..cursor + 24)
             .ok_or_else(|| "ASF object header is truncated".to_owned())?;
@@ -913,7 +913,7 @@ fn parse_asf_objects(
             object_header[16..24].try_into().unwrap(),
         ))
         .map_err(|_| "ASF object size exceeds this platform".to_owned())?;
-        if size < 24 || size > MAX_TAG_BYTES {
+        if !(24..=MAX_TAG_BYTES).contains(&size) {
             return Err("ASF object size is invalid or exceeds budget".to_owned());
         }
         let object_end = cursor
@@ -1201,7 +1201,7 @@ fn take_asf_utf16z(bytes: &[u8], cursor: &mut usize, context: &str) -> Result<St
 }
 
 fn decode_utf16le(bytes: &[u8], context: &str) -> Result<String, String> {
-    if bytes.len() > MAX_TAG_BYTES || bytes.len() % 2 != 0 {
+    if bytes.len() > MAX_TAG_BYTES || !bytes.len().is_multiple_of(2) {
         return Err(format!("{context} has an invalid length"));
     }
     let units = bytes

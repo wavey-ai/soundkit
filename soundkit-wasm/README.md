@@ -25,7 +25,7 @@ Safari 16.4 and later support WebAssembly SIMD.
 ```sh
 CARGO_PROFILE_RELEASE_LTO=fat \
 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='-C target-feature=+simd128' \
-  wasm-pack build soundkit-wasm --target web --out-dir pkg --release -- --features default
+  wasm-pack build soundkit-wasm --target web --out-dir pkg --release -- --features default,encodec,video-keyframes
 ```
 
 `make wasm` runs this command. For an engine without WebAssembly SIMD, run

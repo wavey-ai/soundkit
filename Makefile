@@ -27,14 +27,14 @@ wasm:
 	wasm-pack build soundkit-wasm \
 		--target web \
 		--out-dir pkg \
-		--features default
+		--features default,encodec,video-keyframes
 
 .PHONY: wasm-nosimd
 wasm-nosimd:
 	wasm-pack build soundkit-wasm \
 		--target web \
 		--out-dir pkg-nosimd \
-		--features default
+		--features default,encodec,video-keyframes
 
 .PHONY: media-fixtures
 media-fixtures:
