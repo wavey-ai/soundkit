@@ -777,9 +777,10 @@ struct BudgetCase {
     cvbr: bool,
     max_bytes: usize,
     native_pvq: bool,
+    input: fn(&BudgetCase) -> Vec<i16>,
 }
 
-const BUDGET_CASES: [BudgetCase; 4] = [
+const BUDGET_CASES: [BudgetCase; 5] = [
     BudgetCase {
         name: "budget-f48-mono-max-2byte",
         frame: 48,
@@ -789,6 +790,7 @@ const BUDGET_CASES: [BudgetCase; 4] = [
         cvbr: true,
         max_bytes: 2,
         native_pvq: false,
+        input: budget_signal,
     },
     BudgetCase {
         name: "budget-f64-stereo-64k-2byte",
@@ -799,6 +801,7 @@ const BUDGET_CASES: [BudgetCase; 4] = [
         cvbr: true,
         max_bytes: 2,
         native_pvq: false,
+        input: budget_signal,
     },
     BudgetCase {
         name: "budget-f48-mono-4k-cvbr",
@@ -809,6 +812,7 @@ const BUDGET_CASES: [BudgetCase; 4] = [
         cvbr: true,
         max_bytes: 1275,
         native_pvq: true,
+        input: budget_signal,
     },
     BudgetCase {
         name: "budget-f72-stereo-4k-vbr",
@@ -819,8 +823,60 @@ const BUDGET_CASES: [BudgetCase; 4] = [
         cvbr: false,
         max_bytes: 1275,
         native_pvq: true,
+        input: budget_signal,
+    },
+    // Constrained VBR on a mostly hard-panned signal: many frames leave no
+    // room for the trim symbol, where libopus keeps the previous stereo
+    // saving instead of re-running the trim analysis. The VBR target follows
+    // it, and here first moves a packet size at frame 1870.
+    BudgetCase {
+        name: "pan-f72-stereo-208k-cvbr",
+        frame: 72,
+        channels: 2,
+        bitrate: Some(208_000),
+        vbr: true,
+        cvbr: true,
+        max_bytes: 1275,
+        native_pvq: true,
+        input: pan_signal,
     },
 ];
+
+/// 1950 frames of 72 samples of a rising parabolic-sine chirp with noise
+/// bursts, in integer arithmetic. The first 640 of every 4800 samples go to
+/// both channels; the rest alternate between left only and right only.
+fn pan_signal(_case: &BudgetCase) -> Vec<i16> {
+    let parabola = |phase: i64| -> i64 {
+        let x = phase & 0xffff;
+        if x >= 32_768 {
+            -(((x - 32_768) * (65_536 - x)) >> 14)
+        } else {
+            (x * (32_768 - x)) >> 14
+        }
+    };
+    let mut out = Vec::with_capacity(1950 * 72 * 2);
+    let mut seed = 0x1234_5678u32;
+    let mut phase = 0i64;
+    for i in 0..1950 * 72i64 {
+        let step = (80 * 65_536 + 4000 * 65_536 * i / 48_000) / 48_000;
+        phase = (phase + step) & 0xffff;
+        let mut v = (parabola(phase) * 10).div_euclid(16) * 2;
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        if (i / 4800) % 3 == 0 {
+            v += ((((seed >> 16) & 0x7fff) as i64 - 0x4000) * 10).div_euclid(16);
+        }
+        let v = v.clamp(-32_768, 32_767) as i16;
+        let (left, right) = if i % 4800 < 640 {
+            (v, v)
+        } else if (i / 4800) % 2 == 0 {
+            (v, 0)
+        } else {
+            (0, v)
+        };
+        out.extend_from_slice(&[left, right]);
+    }
+    out
+}
 
 /// The test signal from its first non-silent sample, cut to 0.2 s.
 fn budget_signal(case: &BudgetCase) -> Vec<i16> {
@@ -837,7 +893,7 @@ fn budget_packets(case: &BudgetCase) -> Vec<u8> {
     encoder.set_vbr_constraint(case.cvbr).unwrap();
     encoder.set_max_packet_bytes(case.max_bytes).unwrap();
     encoder.set_portable_pvq(!case.native_pvq).unwrap();
-    let packets: Vec<Vec<u8>> = budget_signal(case)
+    let packets: Vec<Vec<u8>> = (case.input)(case)
         .chunks_exact(case.frame * case.channels)
         .map(|frame| encoder.encode_i16_vec(frame, case.frame).unwrap())
         .collect();
@@ -877,7 +933,7 @@ fn regenerate_budget_vectors() {
     let tool = c_tool().expect("set OPUS_CUSTOM_INTEROP_C to the libopus tool");
     for case in &BUDGET_CASES {
         let scratch = Scratch::new(case.name);
-        let pcm: Vec<u8> = budget_signal(case)
+        let pcm: Vec<u8> = (case.input)(case)
             .iter()
             .flat_map(|v| v.to_le_bytes())
             .collect();

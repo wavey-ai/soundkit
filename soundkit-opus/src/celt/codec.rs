@@ -887,7 +887,13 @@ pub struct CeltVbrConfig {
     pub drift: i32,
     pub offset: i32,
     pub count: i32,
+    /// Stereo saving after this frame's trim analysis, used for the VBR
+    /// target when the trim symbol is coded.
     pub stereo_saving: f32,
+    /// Stereo saving carried from the previous frame. With libopus decisions
+    /// the VBR target uses it when the trim symbol does not fit, because
+    /// libopus then skips the trim analysis that updates it.
+    pub stereo_saving_uncoded: f32,
     pub temporal_vbr: f32,
     pub analysis_valid: bool,
     pub activity: f32,
@@ -915,6 +921,8 @@ pub struct CeltFrameEncodeResult {
     pub is_transient: bool,
     pub spread: i32,
     pub alloc_trim: i32,
+    /// Whether the allocation trim symbol fitted in the frame and was coded.
+    pub trim_coded: bool,
     pub vbr_update: Option<CeltVbrUpdate>,
 }
 
@@ -1436,8 +1444,12 @@ fn encode_spectral_frame_with_scratch_inner(
         config.lm,
         &mut enc,
     );
+    let trim_coded = enc.tell_frac() as i32 + (6 << BITRES) <= total_bits_frac - total_boost;
     let alloc_trim = encode_alloc_trim(config.alloc_trim, total_bits_frac, total_boost, &mut enc);
-    let vbr_update = config.vbr_state.map(|vbr| {
+    let vbr_update = config.vbr_state.map(|mut vbr| {
+        if !trim_coded && config.decisions.libopus_float {
+            vbr.stereo_saving = vbr.stereo_saving_uncoded;
+        }
         apply_vbr_shrink(
             mode,
             config,
@@ -1618,6 +1630,7 @@ fn encode_spectral_frame_with_scratch_inner(
         is_transient,
         spread,
         alloc_trim,
+        trim_coded,
         vbr_update,
     })
 }

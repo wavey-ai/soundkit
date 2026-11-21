@@ -1633,6 +1633,11 @@ impl Encoder {
             stream_channels,
         );
 
+        // libopus runs alloc_trim_analysis, the only place that updates
+        // stereo_saving, only when the trim symbol fits in the frame. The
+        // analysis runs here, before the budget is known, so it works on a
+        // copy that is committed after encoding if the symbol was coded.
+        let mut stereo_saving = self.stereo_saving;
         if config.silence {
             // No bits for the trim symbol: libopus keeps the default trim and
             // leaves the stereo saving alone.
@@ -1660,7 +1665,7 @@ impl Encoder {
                 stream_channels,
                 n,
                 config.intensity,
-                &mut self.stereo_saving,
+                &mut stereo_saving,
                 config.tf_estimate,
                 analysis_tonality_slope,
                 equiv_rate,
@@ -1698,7 +1703,7 @@ impl Encoder {
                 stream_channels,
                 n,
                 config.intensity,
-                &mut self.stereo_saving,
+                &mut stereo_saving,
                 config.tf_estimate,
                 analysis_tonality_slope,
                 equiv_rate,
@@ -1720,7 +1725,8 @@ impl Encoder {
                 drift: self.vbr_drift,
                 offset: self.vbr_offset,
                 count: self.vbr_count,
-                stereo_saving: self.stereo_saving,
+                stereo_saving,
+                stereo_saving_uncoded: self.stereo_saving,
                 temporal_vbr,
                 analysis_valid: self.analysis_info.valid,
                 activity: self.analysis_info.activity,
@@ -1765,6 +1771,11 @@ impl Encoder {
         let encoded = encoded?;
         if stream_channels == 2 {
             self.intensity = encoded.allocation.intensity;
+        }
+        if encoded.trim_coded || !self.decisions.libopus_float {
+            // SoundKit's own decisions keep their original update on every
+            // non-silent frame, so standard packets do not change.
+            self.stereo_saving = stereo_saving;
         }
         if let Some(update) = encoded.vbr_update {
             self.vbr_reservoir = update.reservoir;
