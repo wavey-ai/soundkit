@@ -90,20 +90,20 @@ pub unsafe extern "C" fn ci_encode(
     for chunk in pcm.chunks_exact(frame_bytes) {
         let result = match format {
             0 => {
-                for (d, b) in s16.iter_mut().zip(chunk.chunks_exact(2)) {
-                    *d = i16::from_le_bytes([b[0], b[1]]);
+                for (d, &b) in s16.iter_mut().zip(chunk.as_chunks::<2>().0) {
+                    *d = i16::from_le_bytes(b);
                 }
                 encoder.encode_i16_into(&s16, frame, &mut packet)
             }
             1 => {
-                for (d, b) in s32.iter_mut().zip(chunk.chunks_exact(4)) {
-                    *d = i32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                for (d, &b) in s32.iter_mut().zip(chunk.as_chunks::<4>().0) {
+                    *d = i32::from_le_bytes(b);
                 }
                 encoder.encode_i24_into(&s32, frame, &mut packet)
             }
             _ => {
-                for (d, b) in f32s.iter_mut().zip(chunk.chunks_exact(4)) {
-                    *d = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                for (d, &b) in f32s.iter_mut().zip(chunk.as_chunks::<4>().0) {
+                    *d = f32::from_le_bytes(b);
                 }
                 encoder.encode_f32_into(&f32s, frame, &mut packet)
             }

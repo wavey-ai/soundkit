@@ -88,7 +88,7 @@ fn custom_round_trip_with_and_without_signalling() {
         decoder.set_custom_signalling(signalling).unwrap();
         let pcm = tone(64, 2, 50);
         let mut decoded = Vec::new();
-        for chunk in pcm.chunks_exact(128) {
+        for chunk in pcm.as_chunks::<128>().0 {
             let packet = encoder.encode_i16_vec(chunk, 64).unwrap();
             decoded.extend(decoder.decode_i16_vec(&packet, false).unwrap());
         }
@@ -113,7 +113,7 @@ fn empty_packets_conceal_a_frame() {
     encoder.set_bitrate(128_000).unwrap();
     let mut decoder = Decoder::new_custom(48_000, 1, 48).unwrap();
     let pcm = tone(48, 1, 40);
-    for chunk in pcm.chunks_exact(48) {
+    for chunk in pcm.as_chunks::<48>().0 {
         let packet = encoder.encode_i16_vec(chunk, 48).unwrap();
         assert_eq!(decoder.decode_i16_vec(&packet, false).unwrap().len(), 48);
     }
@@ -156,14 +156,18 @@ fn settings_survive_reset() {
     encoder.set_portable_pvq(true).unwrap();
     let pcm = tone(72, 2, 3);
     let first: Vec<_> = pcm
-        .chunks_exact(144)
+        .as_chunks::<144>()
+        .0
+        .iter()
         .map(|chunk| encoder.encode_i16_vec(chunk, 72).unwrap())
         .collect();
     encoder.reset().unwrap();
     assert!(encoder.is_custom() && !encoder.custom_signalling() && encoder.vbr());
     assert!(encoder.portable_pvq() && encoder.libopus_arithmetic());
     let second: Vec<_> = pcm
-        .chunks_exact(144)
+        .as_chunks::<144>()
+        .0
+        .iter()
         .map(|chunk| encoder.encode_i16_vec(chunk, 72).unwrap())
         .collect();
     assert_eq!(first, second);

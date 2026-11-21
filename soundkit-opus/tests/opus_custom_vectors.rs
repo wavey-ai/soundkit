@@ -17,10 +17,12 @@
 //!   estimates match the generating machine's, the Rust encoder's default
 //!   packets equal libopus's when `native_identical` is 1.
 //!
-//! `regenerate_vectors` (ignored; needs `OPUS_CUSTOM_INTEROP_C`, the tool
-//! built from `tools/opus_custom_interop.c`) rewrites the files, and
-//! `live_libopus_comparison` (ignored, same variable) compares against
-//! libopus directly.
+//! `regenerate_vectors`, `regenerate_switch_vectors` and
+//! `regenerate_budget_vectors` (ignored; need `OPUS_CUSTOM_INTEROP_C`, the
+//! tool built from `tools/opus_custom_interop.c`) rewrite the files; run them
+//! on their own (`-- --ignored regenerate`), not alongside the tests that read
+//! the files. `live_libopus_comparison` (ignored, same variable) compares
+//! against libopus directly.
 
 use soundkit_opus::{Decoder, Encoder};
 use std::path::PathBuf;
@@ -81,7 +83,7 @@ fn signal(channels: usize) -> Vec<i16> {
     let mut seed = 0x1234_5678u32;
     let mut lowpass = [0i32; 2];
     for i in 0..frames {
-        for c in 0..channels {
+        for (c, lowpass) in lowpass.iter_mut().enumerate().take(channels) {
             if i < 960 {
                 out.push(0);
                 continue;
@@ -97,9 +99,9 @@ fn signal(channels: usize) -> Vec<i16> {
             let mut v = triangle(218 + 40 * c) / 2 + triangle(15 + c) / 5;
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let noise = ((seed >> 16) as i32 & 0x3fff) - 0x2000;
-            lowpass[c] += (noise - lowpass[c]) / 4;
+            *lowpass += (noise - *lowpass) / 4;
             if (i / 4800) % 3 == 1 {
-                v += lowpass[c];
+                v += *lowpass;
             }
             if i % 4800 == 0 {
                 v += 12_000;
@@ -256,16 +258,22 @@ fn rust_packets_decode_as_libopus_decodes_them() {
 
 #[test]
 fn rust_encoder_matches_opus_custom_encode_on_the_same_cpu_family() {
+    // The default (native) PVQ search uses the CPU's approximate reciprocal,
+    // as libopus does, so its packets match the committed libopus packets only
+    // on a CPU whose `rcpps` gives the same estimates. Elsewhere the check is
+    // skipped, loudly; set SOUNDKIT_OPUS_REQUIRE_NATIVE_VECTORS=1 to make the
+    // skip a failure. The portable search is checked on every CPU.
+    let require =
+        std::env::var_os("SOUNDKIT_OPUS_REQUIRE_NATIVE_VECTORS").is_some_and(|v| v == "1");
     let fingerprint = soundkit_opus::celt::refkern::rcp_estimate_fingerprint();
+    let mut skipped = Vec::new();
     for case in &CASES {
         let m = manifest(case);
         if fingerprint.map(hex).as_deref() != Some(m["rcp_fingerprint"].as_str()) {
-            eprintln!(
-                "{}: this CPU's rcpps estimates differ from the vectors' machine; skipped",
-                case.name
-            );
+            skipped.push(case.name);
             continue;
         }
+
         let expected = std::fs::read(vectors_dir().join(format!("{}.pkt", case.name))).unwrap();
         let packets = encode(case, false);
         let identical = write_packets(&packets) == expected;
@@ -275,6 +283,18 @@ fn rust_encoder_matches_opus_custom_encode_on_the_same_cpu_family() {
             "{}: Rust packets differ from opus_custom_encode",
             case.name
         );
+    }
+    if !skipped.is_empty() {
+        let message = format!(
+            "SKIPPED native packet identity for {} of {} vectors ({}): this CPU's rcpps \
+             estimates (fingerprint {}) differ from the vectors' machine",
+            skipped.len(),
+            CASES.len(),
+            skipped.join(", "),
+            fingerprint.map(hex).unwrap_or_else(|| "none".into()),
+        );
+        assert!(!require, "{message}");
+        eprintln!("warning: {message}");
     }
 }
 
