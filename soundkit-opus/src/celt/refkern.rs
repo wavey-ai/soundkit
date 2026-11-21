@@ -512,3 +512,27 @@ pub fn comb_filter_no_window_gains(
         i += 1;
     }
 }
+
+/// A fingerprint of this CPU's SSE `rcpps` estimates, which libopus's x86-64
+/// PVQ search (and the encoder's default search on x86-64) depends on. Two
+/// CPUs with the same fingerprint give the same packets. `None` on targets
+/// without the instruction.
+#[doc(hidden)]
+pub fn rcp_estimate_fingerprint() -> Option<u64> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        let mut value = 0.75f32;
+        while value < 1024.0 {
+            for byte in crate::kernels::rcp_ps(value).to_bits().to_le_bytes() {
+                hash = (hash ^ byte as u64).wrapping_mul(0x0100_0000_01b3);
+            }
+            value *= 1.0137;
+        }
+        Some(hash)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        None
+    }
+}

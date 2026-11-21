@@ -201,6 +201,11 @@ pub struct CeltMode {
     /// rounding that SoundKit's standard path has always used. The tables
     /// are the same either way.
     pub exact_math: bool,
+    /// With `exact_math`: run the encoder's PVQ search as libopus's generic
+    /// C code does on every target, instead of libopus's x86-64 SSE2 search,
+    /// whose `rcpps`/`rsqrtps` estimates differ between CPU vendors and do
+    /// not exist in WebAssembly. Packets are then the same on every target.
+    pub portable_pvq: bool,
 }
 
 impl CeltMode {
@@ -314,6 +319,7 @@ impl CeltMode {
             },
             static_tables,
             exact_math,
+            portable_pvq: false,
         };
         mode.cache = compute_pulse_cache(&mode, mode.max_lm);
         Ok(mode)
@@ -359,25 +365,39 @@ impl CeltMode {
         frame_size: usize,
         exact_math: bool,
     ) -> Result<&'static Self> {
-        if (0..4).any(|shift| frame_size << shift == 960) {
+        Self::custom_48k_shared_with(frame_size, exact_math, false)
+    }
+
+    /// [`CeltMode::custom_48k_shared`] with a choice of arithmetic and of PVQ
+    /// search (see [`CeltMode::exact_math`] and [`CeltMode::portable_pvq`]).
+    pub fn custom_48k_shared_with(
+        frame_size: usize,
+        exact_math: bool,
+        portable_pvq: bool,
+    ) -> Result<&'static Self> {
+        let portable_pvq = portable_pvq && exact_math;
+        let standard = (0..4).any(|shift| frame_size << shift == 960);
+        if standard && !portable_pvq {
             return Ok(if exact_math {
                 Self::standard_48k_exact_shared()
             } else {
                 Self::standard_48k_shared()
             });
         }
-        type Cache = Mutex<BTreeMap<(usize, bool), &'static CeltMode>>;
+        let key_frame = if standard { 960 } else { frame_size };
+        type Cache = Mutex<BTreeMap<(usize, bool, bool), &'static CeltMode>>;
         static CUSTOM_48K: OnceLock<Cache> = OnceLock::new();
         let modes = CUSTOM_48K.get_or_init(|| Mutex::new(BTreeMap::new()));
         let mut modes = modes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(mode) = modes.get(&(frame_size, exact_math)) {
+        if let Some(mode) = modes.get(&(key_frame, exact_math, portable_pvq)) {
             return Ok(mode);
         }
-        let mode = Self::new_with_math(48_000, frame_size, exact_math)?;
+        let mut mode = Self::new_with_math(48_000, key_frame, exact_math)?;
+        mode.portable_pvq = portable_pvq;
         let mode: &'static CeltMode = Box::leak(Box::new(mode));
-        modes.insert((frame_size, exact_math), mode);
+        modes.insert((key_frame, exact_math, portable_pvq), mode);
         Ok(mode)
     }
 

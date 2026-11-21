@@ -491,7 +491,12 @@ fn remove_doubling(
     yy_lookup[0] = xx;
     let mut yy = xx;
     for i in 1..=maxperiod {
-        yy += x[base - i] * x[base - i] - x[base + n - i] * x[base + n - i];
+        if exact {
+            // libopus: yy = yy + x[-i]^2 - x[N-i]^2, left to right.
+            yy = yy + x[base - i] * x[base - i] - x[base + n - i] * x[base + n - i];
+        } else {
+            yy += x[base - i] * x[base - i] - x[base + n - i] * x[base + n - i];
+        }
         yy_lookup[i] = yy.max(0.0);
     }
 

@@ -326,14 +326,15 @@ pub fn op_pvq_search_with_scratch(
 
 /// `op_pvq_search` as a default libopus build runs it: the SSE2 version on
 /// x86-64 (`op_pvq_search_sse2`, whose `rcpps` and `rsqrtps` estimates come
-/// from the CPU), the generic C version elsewhere. `iy` needs `n + 3`
-/// entries. Returns `yy`.
+/// from the CPU), the generic C version elsewhere or when `portable`. `iy`
+/// needs `n + 3` entries. Returns `yy`.
 pub fn op_pvq_search_exact(
     x: &mut [f32],
     iy: &mut [i32],
     k: usize,
     n: usize,
     y_scratch: &mut Vec<f32>,
+    portable: bool,
 ) -> f32 {
     assert!(x.len() >= n && iy.len() >= n + 3);
     let mut signx = [false; 256];
@@ -356,8 +357,9 @@ pub fn op_pvq_search_exact(
     let mut yy = 0.0f32;
     let mut pulses_left = k as i32;
 
+    let sse2 = cfg!(target_arch = "x86_64") && !portable;
     #[cfg(target_arch = "x86_64")]
-    {
+    if sse2 {
         // Four lanes over x padded with zeros, as the SSE2 loop reads them.
         let padded = |x: &[f32], j: usize| if j < n { x[j] } else { 0.0 };
         let mut lanes = [0.0f32; 4];
@@ -398,8 +400,7 @@ pub fn op_pvq_search_exact(
             yy = (yy4[0] + yy4[2]) + (yy4[1] + yy4[3]);
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    if k > (n >> 1) {
+    if !sse2 && k > (n >> 1) {
         let mut sum = 0.0f32;
         for &value in x.iter().take(n) {
             sum += value;
@@ -430,9 +431,10 @@ pub fn op_pvq_search_exact(
     for _ in 0..pulses_left {
         yy += 1.0;
         #[cfg(target_arch = "x86_64")]
-        let best_id = crate::kernels::pvq_best_candidate_sse2(x, y, xy, yy, n);
+        let simd_best = sse2.then(|| crate::kernels::pvq_best_candidate_sse2(x, y, xy, yy, n));
         #[cfg(not(target_arch = "x86_64"))]
-        let best_id = {
+        let simd_best: Option<usize> = None;
+        let best_id = simd_best.unwrap_or_else(|| {
             let mut best_id = 0usize;
             let mut best_num = xy + x[0];
             best_num *= best_num;
@@ -448,7 +450,7 @@ pub fn op_pvq_search_exact(
                 }
             }
             best_id
-        };
+        });
         xy += x[best_id];
         yy += y[best_id];
         y[best_id] += 2.0;
@@ -511,6 +513,7 @@ pub fn alg_quant_with_scratch(
         y_scratch,
         signx_scratch,
         false,
+        false,
     )
 }
 
@@ -530,6 +533,7 @@ pub fn alg_quant_with_scratch_mode(
     y_scratch: &mut Vec<f32>,
     signx_scratch: &mut Vec<u8>,
     exact: bool,
+    portable_pvq: bool,
 ) -> u32 {
     assert!(k > 0);
     assert!(n > 1);
@@ -541,7 +545,7 @@ pub fn alg_quant_with_scratch_mode(
     let iy = &mut iy_scratch[..n + 3];
     exp_rotation_mode(exact, x, n, 1, b, k, spread);
     let yy = if exact {
-        op_pvq_search_exact(x, iy, k, n, y_scratch)
+        op_pvq_search_exact(x, iy, k, n, y_scratch, portable_pvq)
     } else {
         op_pvq_search_with_scratch(x, iy, k, n, y_scratch, signx_scratch)
     };

@@ -418,7 +418,34 @@ impl Encoder {
     /// stream state, so call it before encoding.
     pub fn set_libopus_arithmetic(&mut self, enabled: bool) -> Result<()> {
         if enabled != self.mode.exact_math {
-            self.mode = CeltMode::custom_48k_shared_with_math(self.mode.frame_size(), enabled)?;
+            self.mode = CeltMode::custom_48k_shared_with(
+                self.mode.frame_size(),
+                enabled,
+                self.mode.portable_pvq,
+            )?;
+        }
+        self.reset().map_err(|_| Error::BadArg)
+    }
+
+    /// Reports whether the PVQ search is the portable one (see
+    /// [`CeltMode::portable_pvq`]).
+    pub fn portable_pvq(&self) -> bool {
+        self.mode.portable_pvq
+    }
+
+    /// With libopus arithmetic, selects libopus's generic C PVQ search on
+    /// every target (`true`), so packets are the same on x86-64, AArch64 and
+    /// WebAssembly. The default (`false`) uses libopus's SSE2 search on
+    /// x86-64, which matches an x86-64 libopus on the same CPU; its
+    /// approximate-reciprocal instructions differ between CPU vendors.
+    /// Elsewhere the two settings are the same. Resets the stream state.
+    pub fn set_portable_pvq(&mut self, enabled: bool) -> Result<()> {
+        if enabled != self.mode.portable_pvq {
+            self.mode = CeltMode::custom_48k_shared_with(
+                self.mode.frame_size(),
+                self.mode.exact_math,
+                enabled,
+            )?;
         }
         self.reset().map_err(|_| Error::BadArg)
     }
@@ -741,6 +768,19 @@ impl Encoder {
         tone: ToneAnalysis,
         scratch: &mut Vec<f32>,
     ) -> TransientAnalysis {
+        Self::transient_analysis_mode(false, inputs, channels, len, tone, scratch)
+    }
+
+    /// `transient_analysis`; `exact` evaluates the two expressions libopus
+    /// computes in double precision the same way.
+    fn transient_analysis_mode(
+        exact: bool,
+        inputs: &[Vec<f32>],
+        channels: usize,
+        len: usize,
+        tone: ToneAnalysis,
+        scratch: &mut Vec<f32>,
+    ) -> TransientAnalysis {
         let len2 = len / 2;
         let mut mask_metric = 0i32;
         let mut tf_chan = 0usize;
@@ -778,7 +818,11 @@ impl Encoder {
                 max_e = max_e.max(tmp[i]);
             }
 
-            mean = celt_sqrt(mean * max_e * 0.5 * len2 as f32);
+            mean = if exact {
+                ((mean * max_e) as f64 * 0.5 * len2 as f64).sqrt() as f32
+            } else {
+                celt_sqrt(mean * max_e * 0.5 * len2 as f32)
+            };
             let norm = len2 as f32 / (1e-15f32 + mean);
             let mut unmask = 0i32;
             for i in (12..len2.saturating_sub(5)).step_by(4) {
@@ -801,7 +845,14 @@ impl Encoder {
             mask_metric = 0;
         }
         let tf_max = celt_sqrt(27.0 * mask_metric as f32).max(42.0) - 42.0;
-        let tf_estimate = celt_sqrt((0.0069 * tf_max.min(163.0) - 0.139).max(0.0));
+        let tf_estimate = if exact {
+            // libopus: sqrt(max(0, (float)0.0069 * min(163, tf_max) - 0.139))
+            // with the subtraction and the root in double precision.
+            let scaled = (0.0069f64 as f32 * tf_max.min(163.0)) as f64 - 0.139;
+            scaled.max(0.0).sqrt() as f32
+        } else {
+            celt_sqrt((0.0069 * tf_max.min(163.0) - 0.139).max(0.0))
+        };
         TransientAnalysis {
             is_transient,
             tf_estimate,
@@ -1297,7 +1348,8 @@ impl Encoder {
             self.mode.fs as usize,
             &mut self.tone_scratch,
         );
-        let transient = Self::transient_analysis(
+        let transient = Self::transient_analysis_mode(
+            self.mode.exact_math,
             &scratch.inputs,
             self.channels,
             n + overlap,

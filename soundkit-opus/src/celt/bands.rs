@@ -747,10 +747,23 @@ impl BandCoder<'_, '_> {
         pvq_y: &mut Vec<f32>,
         pvq_signx: &mut Vec<u8>,
         exact: bool,
+        portable_pvq: bool,
     ) -> u32 {
         match self {
             Self::Encode(enc) => alg_quant_with_scratch_mode(
-                x, n, k, spread, b, enc, gain, resynth, pulse_y, pvq_y, pvq_signx, exact,
+                x,
+                n,
+                k,
+                spread,
+                b,
+                enc,
+                gain,
+                resynth,
+                pulse_y,
+                pvq_y,
+                pvq_signx,
+                exact,
+                portable_pvq,
             ),
             Self::Decode(dec) => alg_unquant_with_scratch_mode(
                 x,
@@ -1406,6 +1419,7 @@ fn quant_partition(
                 pvq_y,
                 pvq_signx,
                 ctx.mode.exact_math,
+                ctx.mode.portable_pvq,
             )
         } else if ctx.resynth {
             let cm_mask = (1u32 << blocks) - 1;
