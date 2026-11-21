@@ -606,6 +606,7 @@ fn dynalloc_analysis_with_scratch(
             max_depth,
         };
     }
+    let mut last = 0usize;
     for c in 0..channels {
         let channel = c * mode.nb_ebands;
         band_log_e3[..end].copy_from_slice(&band_log_e2[channel..channel + end]);
@@ -616,7 +617,11 @@ fn dynalloc_analysis_with_scratch(
         }
 
         let f = &mut follower[channel..channel + mode.nb_ebands];
-        let mut last = 0usize;
+        // libopus declares `last` outside the channel loop, so the second
+        // channel starts from the first channel's value.
+        if !libopus_float {
+            last = 0;
+        }
         if end > 0 {
             f[0] = band_log_e3[0];
         }
@@ -729,6 +734,7 @@ fn dynalloc_analysis_with_scratch(
     for i in start..end {
         let width = (channels as i32 * (mode.ebands[i + 1] as i32 - mode.ebands[i] as i32)) << lm;
         let follower = (dynalloc_scale * follower[i]).min(4.0);
+
         let (boost, boost_bits) = if width < 6 {
             let boost = follower as i32;
             (boost, boost * width << BITRES)
