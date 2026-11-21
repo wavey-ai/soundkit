@@ -47,6 +47,7 @@ typedef struct {
     int complexity;
     int max_bytes;
     int skip_errors;
+    const char *schedule;
     const char *pcm;
     const char *in;
     const char *out;
@@ -62,7 +63,7 @@ static void usage(void) {
             "usage: opus_custom_interop encode|decode|modeinfo --frame N [--channels C] "
             "[--bitrate B|max] [--vbr 0|1] [--cvbr 0|1] [--signalling 0|1] "
             "[--complexity N] [--max-bytes N] [--errors stop|skip] [--pcm s16|s24|f32] "
-            "[IN OUT]\n");
+            "[--rate-schedule FRAME:BITRATE,...] [IN OUT]\n");
     exit(2);
 }
 
@@ -94,6 +95,7 @@ static Args parse(int argc, char **argv, int first) {
             else if (!strcmp(k, "--max-bytes")) a.max_bytes = atoi(v);
             else if (!strcmp(k, "--pcm")) a.pcm = v;
             else if (!strcmp(k, "--errors")) a.skip_errors = !strcmp(v, "skip");
+            else if (!strcmp(k, "--rate-schedule")) a.schedule = v;
             else usage();
         } else if (positional == 0) {
             a.in = k;
@@ -152,9 +154,22 @@ static int encode(Args a) {
     size_t frame_bytes = (size_t)a.frame * a.channels * sample_bytes(a.pcm);
     size_t frames = len / frame_bytes;
     unsigned char packet[MAX_PACKET];
+    const char *next = a.schedule;
     for (size_t f = 0; f < frames; f++) {
         const unsigned char *p = raw + f * frame_bytes;
         int n;
+        /* OPUS_SET_BITRATE before the scheduled frame, as a live encoder
+           would change rate mid-stream. */
+        while (next && *next) {
+            char *end;
+            long at = strtol(next, &end, 10);
+            if (*end != ':') die("bad --rate-schedule");
+            if ((size_t)at != f) break;
+            long rate = strtol(end + 1, &end, 10);
+            if (opus_custom_encoder_ctl(enc, OPUS_SET_BITRATE((opus_int32)rate)) != OPUS_OK)
+                die("scheduled bitrate");
+            next = *end == ',' ? end + 1 : end;
+        }
         if (!strcmp(a.pcm, "s16")) {
             n = opus_custom_encode(enc, (const opus_int16 *)p, a.frame, packet, a.max_bytes);
         } else if (!strcmp(a.pcm, "s24")) {

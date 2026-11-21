@@ -568,6 +568,10 @@ impl Encoder {
     /// [`CELT_MIN_BITRATE`] to [`CELT_MAX_BITRATE`]. Opus Custom encoders
     /// accept what `OPUS_SET_BITRATE` accepts: above 500 b/s (capped at
     /// 750 kb/s per channel), or [`BITRATE_MAX`].
+    ///
+    /// A standard encoder restarts its VBR reservoir and drift here. An Opus
+    /// Custom encoder keeps them, as libopus does, so the rate can change
+    /// between frames of a live stream.
     pub fn set_bitrate(&mut self, bitrate: i32) -> Result<()> {
         let bitrate = if self.is_custom() {
             if bitrate <= 500 && bitrate != BITRATE_MAX {
@@ -585,13 +589,15 @@ impl Encoder {
             bitrate
         };
         self.bitrate = bitrate;
-        self.reset_vbr_state();
+        self.reset_vbr_state_unless_custom();
         Ok(())
     }
 
+    /// Selects VBR. See [`Encoder::set_bitrate`] for what happens to the
+    /// VBR state when this changes mid-stream.
     pub fn set_vbr(&mut self, enabled: bool) -> Result<()> {
         self.vbr = enabled;
-        self.reset_vbr_state();
+        self.reset_vbr_state_unless_custom();
         Ok(())
     }
 
@@ -603,7 +609,7 @@ impl Encoder {
     /// drift correction holds the long-term average at the target rate.
     pub fn set_vbr_constraint(&mut self, constrained: bool) -> Result<()> {
         self.vbr_constraint = constrained;
-        self.reset_vbr_state();
+        self.reset_vbr_state_unless_custom();
         Ok(())
     }
 
@@ -613,6 +619,17 @@ impl Encoder {
 
     fn vbr_constrained(&self) -> bool {
         self.vbr_constraint && crate::tuning::get(crate::tuning::VBR_UNCONSTRAINED, 0.0) == 0.0
+    }
+
+    /// Standard Opus encoders restart the VBR reservoir, drift and spectral
+    /// average when the rate settings change. Opus Custom encoders keep them,
+    /// as libopus's `OPUS_SET_BITRATE`, `OPUS_SET_VBR` and
+    /// `OPUS_SET_VBR_CONSTRAINT` do, so a mid-stream rate change keeps the
+    /// packets equal to `opus_custom_encode`'s and the reservoir history.
+    fn reset_vbr_state_unless_custom(&mut self) {
+        if !self.is_custom() {
+            self.reset_vbr_state();
+        }
     }
 
     fn reset_vbr_state(&mut self) {

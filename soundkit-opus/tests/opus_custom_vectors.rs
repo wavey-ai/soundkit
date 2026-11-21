@@ -778,6 +778,8 @@ struct BudgetCase {
     max_bytes: usize,
     native_pvq: bool,
     input: fn(&BudgetCase) -> Pcm,
+    /// Bitrate changes before the given frames (`OPUS_SET_BITRATE`).
+    schedule: &'static [(usize, i32)],
 }
 
 enum Pcm {
@@ -801,7 +803,7 @@ impl Pcm {
     }
 }
 
-const BUDGET_CASES: [BudgetCase; 7] = [
+const BUDGET_CASES: [BudgetCase; 8] = [
     BudgetCase {
         name: "budget-f48-mono-max-2byte",
         frame: 48,
@@ -812,6 +814,7 @@ const BUDGET_CASES: [BudgetCase; 7] = [
         max_bytes: 2,
         native_pvq: false,
         input: budget_signal,
+        schedule: &[],
     },
     BudgetCase {
         // 3 bytes, the smallest CBR limit with the signalling byte where
@@ -825,6 +828,7 @@ const BUDGET_CASES: [BudgetCase; 7] = [
         max_bytes: 3,
         native_pvq: false,
         input: budget_signal,
+        schedule: &[],
     },
     BudgetCase {
         name: "budget-f48-mono-4k-cvbr",
@@ -836,6 +840,7 @@ const BUDGET_CASES: [BudgetCase; 7] = [
         max_bytes: 1275,
         native_pvq: true,
         input: budget_signal,
+        schedule: &[],
     },
     BudgetCase {
         name: "budget-f72-stereo-4k-vbr",
@@ -847,6 +852,7 @@ const BUDGET_CASES: [BudgetCase; 7] = [
         max_bytes: 1275,
         native_pvq: true,
         input: budget_signal,
+        schedule: &[],
     },
     // Constrained VBR on a mostly hard-panned signal: many frames leave no
     // room for the trim symbol, where libopus keeps the previous stereo
@@ -862,6 +868,7 @@ const BUDGET_CASES: [BudgetCase; 7] = [
         max_bytes: 1275,
         native_pvq: true,
         input: pan_signal,
+        schedule: &[],
     },
     // Float input with infinities and samples beyond 65536 times full scale,
     // which libopus clips to twice full scale.
@@ -875,6 +882,21 @@ const BUDGET_CASES: [BudgetCase; 7] = [
         max_bytes: 1275,
         native_pvq: true,
         input: huge_signal,
+        schedule: &[],
+    },
+    // Rate changes mid-stream keep the constrained-VBR reservoir and drift,
+    // as libopus's OPUS_SET_BITRATE does.
+    BudgetCase {
+        name: "rates-f48-stereo-cvbr",
+        frame: 48,
+        channels: 2,
+        bitrate: Some(192_000),
+        vbr: true,
+        cvbr: true,
+        max_bytes: 1275,
+        native_pvq: true,
+        input: budget_signal,
+        schedule: &[(50, 96_000), (120, 256_000)],
     },
     // 20 ms frames (LM 3) reserve an anti-collapse bit in transient frames;
     // libopus sets it unless the two previous frames were transient.
@@ -888,6 +910,7 @@ const BUDGET_CASES: [BudgetCase; 7] = [
         max_bytes: 1275,
         native_pvq: true,
         input: budget_signal,
+        schedule: &[],
     },
 ];
 
@@ -963,16 +986,22 @@ fn budget_packets(case: &BudgetCase) -> Vec<u8> {
     encoder.set_max_packet_bytes(case.max_bytes).unwrap();
     encoder.set_portable_pvq(!case.native_pvq).unwrap();
     let samples = case.frame * case.channels;
-    let packets: Vec<Vec<u8>> = match (case.input)(case) {
-        Pcm::I16(pcm) => pcm
-            .chunks_exact(samples)
-            .map(|frame| encoder.encode_i16_vec(frame, case.frame).unwrap())
-            .collect(),
-        Pcm::F32(pcm) => pcm
-            .chunks_exact(samples)
-            .map(|frame| encoder.encode_f32_vec(frame, case.frame).unwrap())
-            .collect(),
+    let pcm = (case.input)(case);
+    let frames = match &pcm {
+        Pcm::I16(pcm) => pcm.len() / samples,
+        Pcm::F32(pcm) => pcm.len() / samples,
     };
+    let mut packets = Vec::with_capacity(frames);
+    for index in 0..frames {
+        for &(_, rate) in case.schedule.iter().filter(|(at, _)| *at == index) {
+            encoder.set_bitrate(rate).unwrap();
+        }
+        let range = index * samples..(index + 1) * samples;
+        packets.push(match &pcm {
+            Pcm::I16(pcm) => encoder.encode_i16_vec(&pcm[range], case.frame).unwrap(),
+            Pcm::F32(pcm) => encoder.encode_f32_vec(&pcm[range], case.frame).unwrap(),
+        });
+    }
     write_packets(&packets)
 }
 
@@ -1011,7 +1040,12 @@ fn regenerate_budget_vectors() {
         let scratch = Scratch::new(case.name);
         let pcm = (case.input)(case);
         std::fs::write(scratch.path("in.pcm"), pcm.bytes()).unwrap();
-        let args = [
+        let schedule: Vec<String> = case
+            .schedule
+            .iter()
+            .map(|(at, rate)| format!("{at}:{rate}"))
+            .collect();
+        let mut args = vec![
             "encode".to_string(),
             "--frame".into(),
             case.frame.to_string(),
@@ -1027,9 +1061,13 @@ fn regenerate_budget_vectors() {
             case.max_bytes.to_string(),
             "--pcm".into(),
             pcm.format().into(),
-            scratch.path("in.pcm"),
-            scratch.path("lib.pkt"),
         ];
+        if !schedule.is_empty() {
+            args.push("--rate-schedule".into());
+            args.push(schedule.join(","));
+        }
+        args.push(scratch.path("in.pcm"));
+        args.push(scratch.path("lib.pkt"));
         run_c(&tool, &args.iter().map(String::as_str).collect::<Vec<_>>());
         let fingerprint = soundkit_opus::celt::refkern::rcp_estimate_fingerprint();
         let lines = [

@@ -35,6 +35,7 @@ struct Args {
     libopus_arith: bool,
     portable_pvq: bool,
     skip_errors: bool,
+    schedule: Vec<(usize, i32)>,
     input: String,
     output: String,
 }
@@ -44,7 +45,7 @@ fn usage() -> ! {
         "usage: opus_custom_interop encode|decode --frame N [--channels C] [--bitrate B|max] \
          [--vbr 0|1] [--cvbr 0|1] [--signalling 0|1] [--max-bytes N] [--pcm s16|s24|f32] \
          [--decisions libopus|soundkit] [--arith libopus|soundkit] [--pvq native|portable] \
-         [--errors stop|skip] IN OUT"
+         [--errors stop|skip] [--rate-schedule FRAME:BITRATE,...] IN OUT"
     );
     exit(2);
 }
@@ -68,6 +69,7 @@ fn parse() -> Args {
         libopus_arith: true,
         portable_pvq: false,
         skip_errors: false,
+        schedule: Vec::new(),
         input: String::new(),
         output: String::new(),
     };
@@ -98,6 +100,18 @@ fn parse() -> Args {
                 "arith" => args.libopus_arith = value == "libopus",
                 "pvq" => args.portable_pvq = value == "portable",
                 "errors" => args.skip_errors = value == "skip",
+                "rate-schedule" => {
+                    args.schedule = value
+                        .split(',')
+                        .map(|item| {
+                            let (frame, rate) = item.split_once(':').unwrap_or_else(|| usage());
+                            (
+                                frame.parse().unwrap_or_else(|_| usage()),
+                                rate.parse().unwrap_or_else(|_| usage()),
+                            )
+                        })
+                        .collect()
+                }
                 _ => usage(),
             }
             i += 2;
@@ -161,6 +175,14 @@ fn encode(args: &Args) {
         .set_portable_pvq(args.portable_pvq)
         .unwrap_or_else(|e| fail(format!("pvq: {e}")));
     let samples_per_frame = args.frame * args.channels;
+    // Bitrate changes before scheduled frames, as a live encoder makes them.
+    let reschedule = |encoder: &mut Encoder, index: usize| {
+        for &(_, rate) in args.schedule.iter().filter(|(at, _)| *at == index) {
+            encoder
+                .set_bitrate(rate)
+                .unwrap_or_else(|e| fail(format!("scheduled bitrate: {e}")));
+        }
+    };
     let mut out = Vec::new();
     let mut packet = Vec::new();
     let emit = |packet: &[u8], out: &mut Vec<u8>| {
@@ -169,7 +191,8 @@ fn encode(args: &Args) {
     };
     match args.pcm.as_str() {
         "s16" => {
-            for frame in read_i16(&raw).chunks_exact(samples_per_frame) {
+            for (index, frame) in read_i16(&raw).chunks_exact(samples_per_frame).enumerate() {
+                reschedule(&mut encoder, index);
                 encoder
                     .encode_i16_into(frame, args.frame, &mut packet)
                     .unwrap_or_else(|e| fail(format!("encode: {e}")));
@@ -177,7 +200,8 @@ fn encode(args: &Args) {
             }
         }
         "s24" => {
-            for frame in read_i32(&raw).chunks_exact(samples_per_frame) {
+            for (index, frame) in read_i32(&raw).chunks_exact(samples_per_frame).enumerate() {
+                reschedule(&mut encoder, index);
                 encoder
                     .encode_i24_into(frame, args.frame, &mut packet)
                     .unwrap_or_else(|e| fail(format!("encode: {e}")));
@@ -185,7 +209,8 @@ fn encode(args: &Args) {
             }
         }
         "f32" => {
-            for frame in read_f32(&raw).chunks_exact(samples_per_frame) {
+            for (index, frame) in read_f32(&raw).chunks_exact(samples_per_frame).enumerate() {
+                reschedule(&mut encoder, index);
                 encoder
                     .encode_f32_into(frame, args.frame, &mut packet)
                     .unwrap_or_else(|e| fail(format!("encode: {e}")));
