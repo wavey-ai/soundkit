@@ -1537,16 +1537,27 @@ mod wasm32 {
 
     /// Checks the ranges for one FFT stage block: `radix * m` values and
     /// `(radix - 1) * m` packed twiddles, with `m` a nonzero multiple of four.
-    fn fft_block_fits(values: &[Complex32], twiddles: &[Complex32], radix: usize, m: usize) -> bool {
+    fn fft_block_fits(
+        values: &[Complex32],
+        twiddles: &[Complex32],
+        radix: usize,
+        m: usize,
+    ) -> bool {
         m != 0
             && m % 4 == 0
             && m.checked_mul(radix).is_some_and(|len| values.len() >= len)
-            && m.checked_mul(radix - 1).is_some_and(|len| twiddles.len() >= len)
+            && m.checked_mul(radix - 1)
+                .is_some_and(|len| twiddles.len() >= len)
     }
 
     /// One radix-3 KISS FFT block, four butterflies at a time. `twiddles`
     /// holds the twiddles for powers one and two, `m` values each.
-    pub fn fft_radix3(values: &mut [Complex32], twiddles: &[Complex32], epi3_i: f32, m: usize) -> bool {
+    pub fn fft_radix3(
+        values: &mut [Complex32],
+        twiddles: &[Complex32],
+        epi3_i: f32,
+        m: usize,
+    ) -> bool {
         if !fft_block_fits(values, twiddles, 3, m) {
             return false;
         }
@@ -1602,7 +1613,10 @@ mod wasm32 {
                 let f0 = load_complex4(v.add(j));
                 let s0 = c4_mul(load_complex4(v.add(m + j)), load_complex4(t.add(j)));
                 let s1 = c4_mul(load_complex4(v.add(2 * m + j)), load_complex4(t.add(m + j)));
-                let s2 = c4_mul(load_complex4(v.add(3 * m + j)), load_complex4(t.add(2 * m + j)));
+                let s2 = c4_mul(
+                    load_complex4(v.add(3 * m + j)),
+                    load_complex4(t.add(2 * m + j)),
+                );
                 let s5 = c4_sub(f0, s1);
                 let f0 = c4_add(f0, s1);
                 let s3 = c4_add(s0, s2);
@@ -1651,8 +1665,14 @@ mod wasm32 {
                 let s0 = load_complex4(v.add(u));
                 let s1 = c4_mul(load_complex4(v.add(m + u)), load_complex4(t.add(u)));
                 let s2 = c4_mul(load_complex4(v.add(2 * m + u)), load_complex4(t.add(m + u)));
-                let s3 = c4_mul(load_complex4(v.add(3 * m + u)), load_complex4(t.add(2 * m + u)));
-                let s4 = c4_mul(load_complex4(v.add(4 * m + u)), load_complex4(t.add(3 * m + u)));
+                let s3 = c4_mul(
+                    load_complex4(v.add(3 * m + u)),
+                    load_complex4(t.add(2 * m + u)),
+                );
+                let s4 = c4_mul(
+                    load_complex4(v.add(4 * m + u)),
+                    load_complex4(t.add(3 * m + u)),
+                );
                 let s7 = c4_add(s1, s4);
                 let s10 = c4_sub(s1, s4);
                 let s8 = c4_add(s2, s3);
@@ -1699,6 +1719,7 @@ mod wasm32 {
                 i32x4_shuffle::<0, 1, 0, 1>(diff, diff),
                 v128_xor(i32x4_shuffle::<3, 2, 3, 2>(diff, diff), flip_mid),
             ); // [f1', f3']
+
             // SAFETY: As for the loads above.
             unsafe {
                 v128_store(ptr, i32x4_shuffle::<0, 1, 4, 5>(even, odd));
@@ -1718,6 +1739,7 @@ mod wasm32 {
             let (f, g) = unsafe { (load_complex4(ptr), load_complex4(ptr.add(4))) };
             let sum_tw = f32x4_mul(f32x4_add(g.r, g.i), tw); // (r + i) * tw
             let diff_tw = f32x4_mul(f32x4_sub(g.i, g.r), tw); // (i - r) * tw
+
             // Lane 0: g; lane 1: ((r + i) tw, (i - r) tw); lane 2: (i, -r);
             // lane 3: ((i - r) tw, -(i + r) tw).
             let t_r = i32x4_shuffle::<0, 5, 2, 7>(
@@ -1887,7 +1909,11 @@ mod wasm32 {
     /// values `[i, i + 4)` and `[n4 - 4 - i, n4 - i)` together, so both
     /// eight-value output blocks are complete. Returns the number of values
     /// done at each end; the scalar loop finishes the middle.
-    pub fn mdct_forward_post_rotate_ends(values: &[Complex32], trig: &[f32], output: &mut [f32]) -> usize {
+    pub fn mdct_forward_post_rotate_ends(
+        values: &[Complex32],
+        trig: &[f32],
+        output: &mut [f32],
+    ) -> usize {
         let n4 = values.len();
         let n2 = 2 * n4;
         let trig = &trig[..n2];
@@ -2105,7 +2131,11 @@ mod wasm32_scalar {
         let (x, y01, y02) = (&x[..n], &y01[..n], &y02[..n]);
         let mut acc01 = [0.0f32; 4];
         let mut acc02 = [0.0f32; 4];
-        for ((a, b), c) in x.chunks_exact(4).zip(y01.chunks_exact(4)).zip(y02.chunks_exact(4)) {
+        for ((a, b), c) in x
+            .chunks_exact(4)
+            .zip(y01.chunks_exact(4))
+            .zip(y02.chunks_exact(4))
+        {
             for k in 0..4 {
                 acc01[k] += a[k] * b[k];
                 acc02[k] += a[k] * c[k];
@@ -2145,7 +2175,10 @@ mod wasm32_scalar {
         }
         let x = &x[..len];
         let y = &y[..len + grouped - 1];
-        for (lag, out) in (0..grouped).step_by(4).zip(xcorr[..grouped].chunks_exact_mut(4)) {
+        for (lag, out) in (0..grouped)
+            .step_by(4)
+            .zip(xcorr[..grouped].chunks_exact_mut(4))
+        {
             let mut sums = [0.0f32; 4];
             for (&xs, window) in x.iter().zip(y[lag..lag + len + 3].windows(4)) {
                 for k in 0..4 {
@@ -2173,14 +2206,25 @@ mod wasm32_scalar {
 
     /// Scalar radix-3 block over packed twiddles; the scalar KISS FFT
     /// expressions in the same order.
-    pub fn fft_radix3(values: &mut [Complex32], twiddles: &[Complex32], epi3_i: f32, m: usize) -> bool {
+    pub fn fft_radix3(
+        values: &mut [Complex32],
+        twiddles: &[Complex32],
+        epi3_i: f32,
+        m: usize,
+    ) -> bool {
         if m == 0 || values.len() < 3 * m || twiddles.len() < 2 * m {
             return false;
         }
         let (f0, rest) = values[..3 * m].split_at_mut(m);
         let (f1, f2) = rest.split_at_mut(m);
         let (t1, t2) = twiddles[..2 * m].split_at(m);
-        for ((((a, b), c), &w1), &w2) in f0.iter_mut().zip(f1.iter_mut()).zip(f2.iter_mut()).zip(t1).zip(t2) {
+        for ((((a, b), c), &w1), &w2) in f0
+            .iter_mut()
+            .zip(f1.iter_mut())
+            .zip(f2.iter_mut())
+            .zip(t1)
+            .zip(t2)
+        {
             let s1 = mul(*b, w1);
             let s2 = mul(*c, w2);
             let s3 = add(s1, s2);
