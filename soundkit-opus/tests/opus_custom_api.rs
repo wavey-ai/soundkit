@@ -294,3 +294,29 @@ fn huge_and_infinite_input_is_clipped_as_libopus_does() {
         }
     }
 }
+
+#[test]
+fn portable_pvq_does_not_depend_on_the_order_of_setters() {
+    let mut first = Encoder::new_custom(48_000, 2, 48).unwrap();
+    first.set_libopus_arithmetic(false).unwrap();
+    first.set_portable_pvq(true).unwrap();
+    assert!(first.portable_pvq());
+    assert!(!first.mode().portable_pvq, "needs libopus arithmetic");
+    first.set_libopus_arithmetic(true).unwrap();
+    assert!(first.mode().portable_pvq);
+
+    let mut second = Encoder::new_custom(48_000, 2, 48).unwrap();
+    second.set_portable_pvq(true).unwrap();
+    second.set_libopus_arithmetic(false).unwrap();
+    second.set_libopus_arithmetic(true).unwrap();
+    assert!(second.mode().portable_pvq);
+    second.reset().unwrap();
+    assert!(second.portable_pvq() && second.mode().portable_pvq);
+
+    for frame in tone(48, 2, 20).chunks_exact(96) {
+        assert_eq!(
+            first.encode_i16_vec(frame, 48).unwrap(),
+            second.encode_i16_vec(frame, 48).unwrap()
+        );
+    }
+}

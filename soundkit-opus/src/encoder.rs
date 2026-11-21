@@ -218,6 +218,9 @@ pub struct Encoder {
     overlap_max: f32,
     /// Peak of the last frame's overlap, for the input clip.
     clip_overlap_max: f32,
+    /// The portable PVQ search was asked for. It applies whenever libopus
+    /// arithmetic is on, whichever setter was called first.
+    portable_pvq: bool,
 }
 
 impl Encoder {
@@ -288,6 +291,7 @@ impl Encoder {
             decisions: crate::tuning::Decisions::SOUNDKIT,
             overlap_max: 0.0,
             clip_overlap_max: 0.0,
+            portable_pvq: false,
             mode,
         })
     }
@@ -304,7 +308,9 @@ impl Encoder {
     ///
     /// The defaults are libopus's: [`BITRATE_MAX`] (each packet fills
     /// [`Encoder::set_max_packet_bytes`], 1275 bytes unless changed), CBR,
-    /// constrained VBR once VBR is on. The encoder uses libopus's decision
+    /// constrained VBR once VBR is on. At 1 ms frames that default is 1275
+    /// bytes 1000 times a second, about 10 Mb/s per stream, so set a
+    /// bitrate with [`Encoder::set_bitrate`] for any real link. The encoder uses libopus's decision
     /// constants and float arithmetic, so with `OPUS_SET_COMPLEXITY(10)` on
     /// the libopus side its packets are meant to match `opus_custom_encode`;
     /// see [`Encoder::set_libopus_decisions`]. There is no Opus-layer
@@ -425,19 +431,17 @@ impl Encoder {
     /// stream state, so call it before encoding.
     pub fn set_libopus_arithmetic(&mut self, enabled: bool) -> Result<()> {
         if enabled != self.mode.exact_math {
-            self.mode = CeltMode::custom_48k_shared_with(
-                self.mode.frame_size(),
-                enabled,
-                self.mode.portable_pvq,
-            )?;
+            self.mode =
+                CeltMode::custom_48k_shared_with(self.mode.frame_size(), enabled, self.portable_pvq)?;
         }
         self.reset().map_err(|_| Error::BadArg)
     }
 
-    /// Reports whether the PVQ search is the portable one (see
-    /// [`CeltMode::portable_pvq`]).
+    /// Reports whether the portable PVQ search was selected (see
+    /// [`Encoder::set_portable_pvq`]). [`Encoder::mode`] reports whether the
+    /// current mode uses it, which needs libopus arithmetic as well.
     pub fn portable_pvq(&self) -> bool {
-        self.mode.portable_pvq
+        self.portable_pvq
     }
 
     /// With libopus arithmetic, selects libopus's generic C PVQ search on
@@ -445,14 +449,16 @@ impl Encoder {
     /// WebAssembly. The default (`false`) uses libopus's SSE2 search on
     /// x86-64, which matches an x86-64 libopus on the same CPU; its
     /// approximate-reciprocal instructions differ between CPU vendors.
-    /// Elsewhere the two settings are the same. Resets the stream state.
+    /// Elsewhere the two settings are the same. Without libopus arithmetic
+    /// SoundKit's own search runs, which is the same on every target; the
+    /// setting is kept and applies once [`Encoder::set_libopus_arithmetic`]
+    /// turns libopus arithmetic on. Resets the stream state.
     pub fn set_portable_pvq(&mut self, enabled: bool) -> Result<()> {
-        if enabled != self.mode.portable_pvq {
-            self.mode = CeltMode::custom_48k_shared_with(
-                self.mode.frame_size(),
-                self.mode.exact_math,
-                enabled,
-            )?;
+        self.portable_pvq = enabled;
+        let portable = enabled && self.mode.exact_math;
+        if portable != self.mode.portable_pvq {
+            self.mode =
+                CeltMode::custom_48k_shared_with(self.mode.frame_size(), self.mode.exact_math, enabled)?;
         }
         self.reset().map_err(|_| Error::BadArg)
     }
@@ -521,6 +527,7 @@ impl Encoder {
         encoder.framing = self.framing;
         encoder.max_packet_bytes = self.max_packet_bytes;
         encoder.decisions = self.decisions;
+        encoder.portable_pvq = self.portable_pvq;
         encoder.experimental_direct_cubic = self.experimental_direct_cubic;
         encoder.vbr_constraint = self.vbr_constraint;
         encoder.bits_per_sample = self.bits_per_sample;
