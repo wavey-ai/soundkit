@@ -738,3 +738,165 @@ fn regenerate_switch_vectors() {
         .unwrap();
     }
 }
+
+// Encoder budget edge cases. Only hashes are kept: `<name>.txt` holds the
+// FNV-1a hash of libopus's packet file for the signal without its leading
+// silence. A 2-byte packet limit with signalling leaves one byte of CELT
+// data, which libopus encodes (no PVQ search runs, so every CPU must match).
+// A VBR rate that leaves no bits per frame keeps maximum-size packets with
+// an effective size of 0 for the analysis (PVQ runs, so this needs the
+// generating machine's `rcpps`, as for the native packets above).
+
+struct BudgetCase {
+    name: &'static str,
+    frame: usize,
+    channels: usize,
+    /// `None` is `BITRATE_MAX`.
+    bitrate: Option<i32>,
+    vbr: bool,
+    cvbr: bool,
+    max_bytes: usize,
+    native_pvq: bool,
+}
+
+const BUDGET_CASES: [BudgetCase; 4] = [
+    BudgetCase {
+        name: "budget-f48-mono-max-2byte",
+        frame: 48,
+        channels: 1,
+        bitrate: None,
+        vbr: false,
+        cvbr: true,
+        max_bytes: 2,
+        native_pvq: false,
+    },
+    BudgetCase {
+        name: "budget-f64-stereo-64k-2byte",
+        frame: 64,
+        channels: 2,
+        bitrate: Some(64_000),
+        vbr: false,
+        cvbr: true,
+        max_bytes: 2,
+        native_pvq: false,
+    },
+    BudgetCase {
+        name: "budget-f48-mono-4k-cvbr",
+        frame: 48,
+        channels: 1,
+        bitrate: Some(4_000),
+        vbr: true,
+        cvbr: true,
+        max_bytes: 1275,
+        native_pvq: true,
+    },
+    BudgetCase {
+        name: "budget-f72-stereo-4k-vbr",
+        frame: 72,
+        channels: 2,
+        bitrate: Some(4_000),
+        vbr: true,
+        cvbr: false,
+        max_bytes: 1275,
+        native_pvq: true,
+    },
+];
+
+/// The test signal from its first non-silent sample, cut to 0.2 s.
+fn budget_signal(case: &BudgetCase) -> Vec<i16> {
+    let start = 960 * case.channels;
+    signal(case.channels)[start..start + 9_600 * case.channels].to_vec()
+}
+
+fn budget_packets(case: &BudgetCase) -> Vec<u8> {
+    let mut encoder = Encoder::new_custom(48_000, case.channels, case.frame).unwrap();
+    encoder
+        .set_bitrate(case.bitrate.unwrap_or(soundkit_opus::BITRATE_MAX))
+        .unwrap();
+    encoder.set_vbr(case.vbr).unwrap();
+    encoder.set_vbr_constraint(case.cvbr).unwrap();
+    encoder.set_max_packet_bytes(case.max_bytes).unwrap();
+    encoder.set_portable_pvq(!case.native_pvq).unwrap();
+    let packets: Vec<Vec<u8>> = budget_signal(case)
+        .chunks_exact(case.frame * case.channels)
+        .map(|frame| encoder.encode_i16_vec(frame, case.frame).unwrap())
+        .collect();
+    write_packets(&packets)
+}
+
+fn budget_manifest(case: &BudgetCase) -> std::collections::BTreeMap<String, String> {
+    let text = std::fs::read_to_string(vectors_dir().join(format!("{}.txt", case.name)))
+        .expect("vector manifest");
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect()
+}
+
+#[test]
+fn rust_encoder_matches_libopus_at_budget_edges() {
+    let fingerprint = soundkit_opus::celt::refkern::rcp_estimate_fingerprint().map(hex);
+    for case in &BUDGET_CASES {
+        let m = budget_manifest(case);
+        if case.native_pvq && fingerprint.as_deref() != Some(m["rcp_fingerprint"].as_str()) {
+            eprintln!(
+                "warning: SKIPPED {}: this CPU's rcpps estimates differ from the vectors' machine",
+                case.name
+            );
+            continue;
+        }
+        let mut hash = FNV_START;
+        fnv(&mut hash, &budget_packets(case));
+        assert_eq!(hex(hash), m["libopus_packets"], "{}", case.name);
+    }
+}
+
+#[test]
+#[ignore = "needs OPUS_CUSTOM_INTEROP_C; rewrites the budget vectors"]
+fn regenerate_budget_vectors() {
+    let tool = c_tool().expect("set OPUS_CUSTOM_INTEROP_C to the libopus tool");
+    for case in &BUDGET_CASES {
+        let scratch = Scratch::new(case.name);
+        let pcm: Vec<u8> = budget_signal(case)
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        std::fs::write(scratch.path("in.s16"), pcm).unwrap();
+        let args = [
+            "encode".to_string(),
+            "--frame".into(),
+            case.frame.to_string(),
+            "--channels".into(),
+            case.channels.to_string(),
+            "--bitrate".into(),
+            case.bitrate.map_or("max".into(), |b| b.to_string()),
+            "--vbr".into(),
+            u8::from(case.vbr).to_string(),
+            "--cvbr".into(),
+            u8::from(case.cvbr).to_string(),
+            "--max-bytes".into(),
+            case.max_bytes.to_string(),
+            "--pcm".into(),
+            "s16".into(),
+            scratch.path("in.s16"),
+            scratch.path("lib.pkt"),
+        ];
+        run_c(&tool, &args.iter().map(String::as_str).collect::<Vec<_>>());
+        let fingerprint = soundkit_opus::celt::refkern::rcp_estimate_fingerprint();
+        let lines = [
+            format!(
+                "libopus_packets = {}",
+                hex(file_hash(&scratch.path("lib.pkt")))
+            ),
+            format!(
+                "rcp_fingerprint = {}",
+                fingerprint.map(hex).unwrap_or_else(|| "none".into())
+            ),
+        ];
+        std::fs::write(
+            vectors_dir().join(format!("{}.txt", case.name)),
+            lines.join("\n") + "\n",
+        )
+        .unwrap();
+    }
+}

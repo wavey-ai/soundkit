@@ -819,6 +819,10 @@ pub struct CeltFrameConfig {
     pub signal_bandwidth: usize,
     pub analysis_leak_boost: Option<[u8; 19]>,
     pub vbr_state: Option<CeltVbrConfig>,
+    /// Encoder: libopus's `effectiveBytes` when no VBR state is given. When
+    /// unset it is `packet_bytes`. An Opus Custom VBR encoder whose rate
+    /// leaves no bits per frame has no VBR state and an effective size of 0.
+    pub effective_bytes: Option<usize>,
     /// Decoder: frames concealed since the last decoded packet, in units of
     /// 2.5 ms short blocks (`st->loss_duration`). After a loss, an inter
     /// frame's energy prediction is made safe as libopus does.
@@ -836,7 +840,9 @@ pub struct CeltFrameConfig {
 
 impl CeltFrameConfig {
     pub fn new(mode: &CeltMode, lm: usize, channels: usize, packet_bytes: usize) -> Result<Self> {
-        if lm > mode.max_lm || !(1..=2).contains(&channels) || !(2..=1275).contains(&packet_bytes) {
+        // One byte is a valid Opus Custom encoder budget: a signalling byte
+        // and one byte of CELT data. Decoders conceal such frames instead.
+        if lm > mode.max_lm || !(1..=2).contains(&channels) || !(1..=1275).contains(&packet_bytes) {
             return Err(Error::BadArg);
         }
         Ok(Self {
@@ -863,6 +869,7 @@ impl CeltFrameConfig {
             signal_bandwidth: mode.nb_ebands - 1,
             analysis_leak_boost: None,
             vbr_state: None,
+            effective_bytes: None,
             loss_duration: 0,
             silence: false,
             decisions: crate::tuning::Decisions::SOUNDKIT,
@@ -979,7 +986,7 @@ fn validate_spectral_args(
         || config.start >= config.end
         || config.end > mode.nb_ebands
         || !(1..=2).contains(&config.channels)
-        || !(2..=1275).contains(&config.packet_bytes)
+        || !(1..=1275).contains(&config.packet_bytes)
         || config.signal_bandwidth >= mode.nb_ebands
     {
         return Err(Error::BadArg);
@@ -1272,9 +1279,10 @@ fn encode_spectral_frame_with_scratch_inner(
     let effective_bytes = if config.silence && config.vbr_state.is_some() {
         config.packet_bytes.min(2)
     } else {
-        config
-            .vbr_state
-            .map_or(config.packet_bytes, |vbr| vbr.effective_bytes)
+        config.vbr_state.map_or(
+            config.effective_bytes.unwrap_or(config.packet_bytes),
+            |vbr| vbr.effective_bytes,
+        )
     };
     let eff_end = config.end.min(mode.eff_ebands);
     let mut enc = RangeEncoder::with_buffer(config.packet_bytes, 1, packet_buffer);
@@ -1727,6 +1735,9 @@ fn decode_spectral_frame_into_impl(
     scratch: &mut CeltFrameDecodeScratch,
     reject_range_errors: bool,
 ) -> Result<CeltFrameDecodeInfo> {
+    if config.packet_bytes < 2 {
+        return Err(Error::BadArg);
+    }
     if data.len() != config.packet_bytes {
         return Err(Error::InvalidPacket);
     }

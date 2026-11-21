@@ -1265,8 +1265,9 @@ impl Encoder {
         };
         if custom.is_some() {
             // An Opus Custom frame without a signalling byte may use all
-            // 1275 bytes.
-            if !(CELT_MIN_FRAME_BYTES..=packet::MAX_FRAME_BYTES as usize).contains(&frame_bytes) {
+            // 1275 bytes; with one, a 2-byte packet leaves 1 byte of CELT
+            // data, which libopus encodes.
+            if !(1..=packet::MAX_FRAME_BYTES as usize).contains(&frame_bytes) {
                 return Err(Error::BadArg);
             }
         } else {
@@ -1283,6 +1284,7 @@ impl Encoder {
         }
         config.decisions = self.decisions;
         config.silence = custom.is_some_and(|control| control.silence);
+        config.effective_bytes = custom.map(|control| control.effective_bytes);
         config.experimental_direct_cubic = self.experimental_direct_cubic;
         config.spread = SPREAD_NORMAL;
         config.last_coded_bands = self.last_coded_bands;
@@ -2098,7 +2100,13 @@ impl Encoder {
             packet,
         );
         self.filtered_scratch = input;
-        result
+        // A range coder that runs out of room is `OPUS_INTERNAL_ERROR` in
+        // libopus (`ec_get_error` after `ec_enc_done`). It happens when a
+        // 2-byte packet limit with signalling leaves 1 byte for silence.
+        result.map_err(|error| match error {
+            Error::BufferTooSmall => Error::InternalError,
+            other => other,
+        })
     }
 
     pub fn encode_f32_with_frame_bytes(
