@@ -793,13 +793,15 @@ const BUDGET_CASES: [BudgetCase; 6] = [
         input: budget_signal,
     },
     BudgetCase {
-        name: "budget-f64-stereo-64k-2byte",
+        // 3 bytes, the smallest CBR limit with the signalling byte where
+        // libopus stays within the limit (see packets_never_exceed_the_packet_limit).
+        name: "budget-f64-stereo-64k-3byte",
         frame: 64,
         channels: 2,
         bitrate: Some(64_000),
         vbr: false,
         cvbr: true,
-        max_bytes: 2,
+        max_bytes: 3,
         native_pvq: false,
         input: budget_signal,
     },

@@ -271,7 +271,7 @@ with the same `rcpps` estimates as the generating machine (elsewhere the
 test prints a warning, and fails with `SOUNDKIT_OPUS_REQUIRE_NATIVE_VECTORS=1`).
 Further vectors check mono/stereo switches, downmixing and damaged packets
 against libopus's decodes (`f48-switch`, `f120-switch`, the latter also
-through the standard Opus decoder), and libopus's packets for 2-byte limits
+through the standard Opus decoder), and libopus's packets for 2 and 3-byte limits
 and 4 kb/s VBR (`budget-*`).
 
 WebAssembly (SIMD128 and scalar builds, in Node.js 26) decodes every packet

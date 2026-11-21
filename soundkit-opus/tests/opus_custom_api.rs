@@ -229,3 +229,30 @@ fn i24_output_stays_in_the_24_bit_range_unless_libopus_range_is_asked_for() {
     libopus.reset().unwrap();
     assert!(libopus.libopus_i24_range(), "the setting survives a reset");
 }
+
+#[test]
+fn packets_never_exceed_the_packet_limit() {
+    // A 2-byte limit with the signalling byte leaves 1 byte of CELT data;
+    // libopus's CBR path takes 2 there and writes a 3-byte packet.
+    for silent in [false, true] {
+        for bitrate in [64_000, 500_000, BITRATE_MAX] {
+            for signalling in [true, false] {
+                let mut encoder = Encoder::new_custom(48_000, 1, 48).unwrap();
+                encoder.set_bitrate(bitrate).unwrap();
+                encoder.set_custom_signalling(signalling).unwrap();
+                encoder.set_max_packet_bytes(2).unwrap();
+                for frame in tone(48, 1, 50).chunks_exact(48) {
+                    let frame: Vec<i16> = if silent { vec![0; 48] } else { frame.to_vec() };
+                    match encoder.encode_i16_vec(&frame, 48) {
+                        Ok(packet) => assert!(
+                            packet.len() <= 2,
+                            "{} bytes at {bitrate} b/s, signalling {signalling}, silent {silent}",
+                            packet.len()
+                        ),
+                        Err(error) => assert!(silent && signalling, "{error}"),
+                    }
+                }
+            }
+        }
+    }
+}

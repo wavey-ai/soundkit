@@ -2072,8 +2072,12 @@ impl Encoder {
         } else {
             if self.bitrate != BITRATE_MAX {
                 let tmp = self.bitrate * frame_size as i32;
-                nb_compressed =
-                    2.max(nb_compressed.min((tmp + 4 * fs) / (8 * fs) - i32::from(signalling)));
+                // libopus takes at least 2 bytes here even when the limit
+                // less the signalling byte leaves 1, and then writes 3 bytes
+                // into a 2-byte buffer. Keep to the limit instead.
+                nb_compressed = 2
+                    .max(nb_compressed.min((tmp + 4 * fs) / (8 * fs) - i32::from(signalling)))
+                    .min(nb_compressed);
             }
             (0, nb_compressed)
         };
