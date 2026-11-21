@@ -47,6 +47,72 @@ impl Encoder {
         })
     }
 
+    /// Creates an Opus Custom encoder at 48 kHz for `frame_size`-sample
+    /// frames: 48, 64 and 72 give 1, 1.33 and 1.5 ms frames. Packets are
+    /// the `opus_custom_encode` format (one signalling byte, no TOC).
+    /// Defaults follow libopus: the maximum bitrate (every packet fills the
+    /// maximum packet size) and CBR; call `set_bitrate` for a target rate.
+    #[wasm_bindgen(js_name = newCustom)]
+    pub fn new_custom(channels: usize, frame_size: usize) -> Result<Encoder, JsValue> {
+        let inner = RustEncoder::new_custom(48_000, channels, frame_size).map_err(opus_error)?;
+        Ok(Self {
+            inner,
+            channels,
+            frame_size,
+            input: vec![0; frame_size * channels],
+            input_i24: vec![0; frame_size * channels],
+            output: Vec::new(),
+        })
+    }
+
+    /// Sets the bitrate in bits per second; -1 selects the maximum (Opus
+    /// Custom only).
+    #[wasm_bindgen(js_name = set_bitrate)]
+    pub fn set_bitrate(&mut self, bitrate: i32) -> Result<(), JsValue> {
+        self.inner.set_bitrate(bitrate).map_err(opus_error)
+    }
+
+    /// Opus Custom: writes (`true`, the default) or omits the signalling byte.
+    #[wasm_bindgen(js_name = set_custom_signalling)]
+    pub fn set_custom_signalling(&mut self, enabled: bool) -> Result<(), JsValue> {
+        self.inner
+            .set_custom_signalling(enabled)
+            .map_err(opus_error)
+    }
+
+    /// Opus Custom: the largest packet, signalling byte included (2-1276).
+    #[wasm_bindgen(js_name = set_max_packet_bytes)]
+    pub fn set_max_packet_bytes(&mut self, bytes: usize) -> Result<(), JsValue> {
+        self.inner.set_max_packet_bytes(bytes).map_err(opus_error)
+    }
+
+    /// Selects libopus's encoder decision constants (`true`) or SoundKit's.
+    #[wasm_bindgen(js_name = set_libopus_decisions)]
+    pub fn set_libopus_decisions(&mut self, enabled: bool) {
+        self.inner.set_libopus_decisions(enabled);
+    }
+
+    #[wasm_bindgen(getter, js_name = isCustom)]
+    pub fn is_custom(&self) -> bool {
+        self.inner.is_custom()
+    }
+
+    #[wasm_bindgen(js_name = enc_frame_f32)]
+    pub fn enc_frame_f32(&mut self, input: &[f32]) -> Result<EncodeResult, JsValue> {
+        let required = self.frame_size * self.channels;
+        if input.len() < required {
+            return Err(js_error(format!(
+                "Opus encode input too short: got {}, need {required}",
+                input.len()
+            )));
+        }
+        let encoded = self
+            .inner
+            .encode_f32_vec(&input[..required], self.frame_size)
+            .map_err(opus_error)?;
+        Ok(EncodeResult { encoded })
+    }
+
     #[wasm_bindgen(js_name = enc_frame)]
     pub fn enc_frame(&mut self, input: &[i16]) -> Result<EncodeResult, JsValue> {
         let required = self.frame_size * self.channels;
@@ -187,6 +253,52 @@ impl Decoder {
             output_i24: Vec::new(),
             decoded_size: 0,
         })
+    }
+
+    /// Creates an Opus Custom decoder at 48 kHz for `frame_size`-sample
+    /// frames (48, 64, 72 for 1, 1.33, 1.5 ms). An empty packet conceals a
+    /// lost frame.
+    #[wasm_bindgen(js_name = newCustom)]
+    pub fn new_custom(channels: usize, frame_size: usize) -> Result<Decoder, JsValue> {
+        let inner = RustDecoder::new_custom(48_000, channels, frame_size).map_err(opus_error)?;
+        Ok(Self {
+            inner,
+            output: Vec::new(),
+            output_i24: Vec::new(),
+            decoded_size: 0,
+        })
+    }
+
+    /// Opus Custom: expects (`true`, the default) or omits the signalling
+    /// byte.
+    #[wasm_bindgen(js_name = set_custom_signalling)]
+    pub fn set_custom_signalling(&mut self, enabled: bool) -> Result<(), JsValue> {
+        self.inner
+            .set_custom_signalling(enabled)
+            .map_err(opus_error)
+    }
+
+    #[wasm_bindgen(getter, js_name = isCustom)]
+    pub fn is_custom(&self) -> bool {
+        self.inner.is_custom()
+    }
+
+    /// Conceals one lost frame (packet-loss concealment) into the i16
+    /// output.
+    #[wasm_bindgen(js_name = dec_lost)]
+    pub fn dec_lost(&mut self) -> Result<DecodeResult, JsValue> {
+        self.dec_frame(&[])
+    }
+
+    /// Decodes to interleaved floating-point samples.
+    #[wasm_bindgen(js_name = dec_frame_f32)]
+    pub fn dec_frame_f32(&mut self, packet: &[u8]) -> Result<Vec<f32>, JsValue> {
+        let mut output = Vec::new();
+        self.decoded_size = self
+            .inner
+            .decode_f32_into(packet, false, &mut output)
+            .map_err(opus_error)?;
+        Ok(output)
     }
 
     #[wasm_bindgen(js_name = dec_frame)]
