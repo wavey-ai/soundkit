@@ -104,7 +104,33 @@ pub fn xcorr_kernel(x: &[f32], y: &[f32], sum: &mut [f32; 4], len: usize) {
 /// `celt_pitch_xcorr_avx2`: eight lags at a time with eight-lane fused
 /// multiply-adds, the remaining lags through [`inner_prod`].
 pub fn pitch_xcorr(x: &[f32], y: &[f32], xcorr: &mut [f32], len: usize, max_pitch: usize) {
+    pitch_xcorr_from(x, y, xcorr, len, max_pitch, true);
+}
+
+/// [`pitch_xcorr`]; with `hardware` false it always runs the portable code.
+pub fn pitch_xcorr_from(
+    x: &[f32],
+    y: &[f32],
+    xcorr: &mut [f32],
+    len: usize,
+    max_pitch: usize,
+    hardware: bool,
+) {
+    let grouped = max_pitch / 8 * 8;
+    // The AVX2 kernel computes the same fused multiply-adds in the same
+    // order; use it when the CPU has it.
+    #[cfg(target_arch = "x86_64")]
+    let mut i = if hardware
+        && grouped > 0
+        && crate::kernels::pitch_xcorr_8(x, y, len, grouped, &mut xcorr[..grouped])
+    {
+        grouped
+    } else {
+        0
+    };
+    #[cfg(not(target_arch = "x86_64"))]
     let mut i = 0usize;
+    let _ = (grouped, hardware);
     while i + 7 < max_pitch {
         let yi = &y[i..];
         let mut acc = [[0.0f32; 8]; 8];
@@ -534,5 +560,32 @@ pub fn rcp_estimate_fingerprint() -> Option<u64> {
     #[cfg(not(target_arch = "x86_64"))]
     {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pitch_xcorr_from;
+
+    #[test]
+    fn hardware_and_portable_correlations_agree_bit_for_bit() {
+        let mut seed = 1u32;
+        let mut noise = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((seed >> 8) as f32 / 16_777_216.0 - 0.5) * 3000.0
+        };
+        for len in [3usize, 8, 12, 17, 64, 255, 332] {
+            for max_pitch in [5usize, 8, 25, 155, 244] {
+                let x: Vec<f32> = (0..len).map(|_| noise()).collect();
+                let y: Vec<f32> = (0..len + max_pitch).map(|_| noise()).collect();
+                let mut a = vec![0.0f32; max_pitch];
+                let mut b = vec![0.0f32; max_pitch];
+                pitch_xcorr_from(&x, &y, &mut a, len, max_pitch, true);
+                pitch_xcorr_from(&x, &y, &mut b, len, max_pitch, false);
+                let a: Vec<u32> = a.iter().map(|v| v.to_bits()).collect();
+                let b: Vec<u32> = b.iter().map(|v| v.to_bits()).collect();
+                assert_eq!(a, b, "len {len} max_pitch {max_pitch}");
+            }
+        }
     }
 }
