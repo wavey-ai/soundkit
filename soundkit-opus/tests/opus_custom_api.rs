@@ -193,7 +193,9 @@ fn overshoot_packets() -> Vec<Vec<u8>> {
             }
         })
         .collect();
-    pcm.chunks_exact(48)
+    pcm.as_chunks::<48>()
+        .0
+        .iter()
         .map(|frame| encoder.encode_i24_vec(frame, 48).unwrap())
         .collect()
 }
@@ -241,7 +243,7 @@ fn packets_never_exceed_the_packet_limit() {
                 encoder.set_bitrate(bitrate).unwrap();
                 encoder.set_custom_signalling(signalling).unwrap();
                 encoder.set_max_packet_bytes(2).unwrap();
-                for frame in tone(48, 1, 50).chunks_exact(48) {
+                for frame in tone(48, 1, 50).as_chunks::<48>().0 {
                     let frame: Vec<i16> = if silent { vec![0; 48] } else { frame.to_vec() };
                     match encoder.encode_i16_vec(&frame, 48) {
                         Ok(packet) => assert!(
@@ -290,7 +292,10 @@ fn huge_and_infinite_input_is_clipped_as_libopus_does() {
             }
             // After the bad samples stop, the encoder codes the tone again.
             let rms = (tail_energy / (frames / 8 * frame * channels) as f64).sqrt();
-            assert!((0.1..0.3).contains(&rms), "frame {frame}, {channels} ch: rms {rms}");
+            assert!(
+                (0.1..0.3).contains(&rms),
+                "frame {frame}, {channels} ch: rms {rms}"
+            );
         }
     }
 }
@@ -313,7 +318,7 @@ fn portable_pvq_does_not_depend_on_the_order_of_setters() {
     second.reset().unwrap();
     assert!(second.portable_pvq() && second.mode().portable_pvq);
 
-    for frame in tone(48, 2, 20).chunks_exact(96) {
+    for frame in tone(48, 2, 20).as_chunks::<96>().0 {
         assert_eq!(
             first.encode_i16_vec(frame, 48).unwrap(),
             second.encode_i16_vec(frame, 48).unwrap()

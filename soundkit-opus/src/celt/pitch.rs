@@ -1127,7 +1127,11 @@ mod tests {
         ] {
             // Keep the compiler from folding the call at build time.
             let lpc0 = std::hint::black_box(2.0 * f32::from_bits(half_lpc0));
-            assert_eq!(tone_frequency(true, lpc0, delay), expected, "{half_lpc0:#x}");
+            assert_eq!(
+                tone_frequency(true, lpc0, delay),
+                expected,
+                "{half_lpc0:#x}"
+            );
         }
     }
 

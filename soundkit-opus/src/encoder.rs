@@ -431,8 +431,11 @@ impl Encoder {
     /// stream state, so call it before encoding.
     pub fn set_libopus_arithmetic(&mut self, enabled: bool) -> Result<()> {
         if enabled != self.mode.exact_math {
-            self.mode =
-                CeltMode::custom_48k_shared_with(self.mode.frame_size(), enabled, self.portable_pvq)?;
+            self.mode = CeltMode::custom_48k_shared_with(
+                self.mode.frame_size(),
+                enabled,
+                self.portable_pvq,
+            )?;
         }
         self.reset().map_err(|_| Error::BadArg)
     }
@@ -457,8 +460,11 @@ impl Encoder {
         self.portable_pvq = enabled;
         let portable = enabled && self.mode.exact_math;
         if portable != self.mode.portable_pvq {
-            self.mode =
-                CeltMode::custom_48k_shared_with(self.mode.frame_size(), self.mode.exact_math, enabled)?;
+            self.mode = CeltMode::custom_48k_shared_with(
+                self.mode.frame_size(),
+                self.mode.exact_math,
+                enabled,
+            )?;
         }
         self.reset().map_err(|_| Error::BadArg)
     }
