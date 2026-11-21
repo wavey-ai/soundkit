@@ -43,6 +43,10 @@ fn count_allocation(ptr: *mut u8) {
 }
 
 #[test]
+#[cfg_attr(
+    feature = "trace",
+    ignore = "the trace feature records every decoded frame, which allocates"
+)]
 fn steady_state_soundkit_opus_reuses_caller_storage() {
     const SAMPLE_RATE: u32 = 48_000;
     const CHANNELS: u32 = 2;
