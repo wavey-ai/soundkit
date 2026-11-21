@@ -182,6 +182,9 @@ pub struct Encoder {
     stream_channels: usize,
     hybrid_stereo_width_q14: i32,
     stereo_saving: f32,
+    /// Consecutive transient (or transient-disabled) frames, which decide
+    /// the anti-collapse flag with libopus decisions.
+    consec_transient: u32,
     last_coded_bands: usize,
     vbr: bool,
     vbr_constraint: bool,
@@ -254,6 +257,7 @@ impl Encoder {
             stream_channels: channels,
             hybrid_stereo_width_q14: 1 << 14,
             stereo_saving: 0.0,
+            consec_transient: 0,
             last_coded_bands: 0,
             vbr: false,
             vbr_constraint: true,
@@ -1283,6 +1287,9 @@ impl Encoder {
             config.end = self.end;
         }
         config.decisions = self.decisions;
+        // libopus sets the anti-collapse flag unless the previous two frames
+        // were transient. SoundKit's decisions keep it off.
+        config.anti_collapse_on = self.decisions.libopus_float && self.consec_transient < 2;
         config.silence = custom.is_some_and(|control| control.silence);
         config.effective_bytes = custom.map(|control| control.effective_bytes);
         config.experimental_direct_cubic = self.experimental_direct_cubic;
@@ -1771,6 +1778,11 @@ impl Encoder {
         let encoded = encoded?;
         if stream_channels == 2 {
             self.intensity = encoded.allocation.intensity;
+        }
+        if encoded.is_transient || encoded.transient_disabled {
+            self.consec_transient = self.consec_transient.saturating_add(1);
+        } else {
+            self.consec_transient = 0;
         }
         if encoded.trim_coded || !self.decisions.libopus_float {
             // SoundKit's own decisions keep their original update on every

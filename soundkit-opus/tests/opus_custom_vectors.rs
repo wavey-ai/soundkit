@@ -780,7 +780,7 @@ struct BudgetCase {
     input: fn(&BudgetCase) -> Vec<i16>,
 }
 
-const BUDGET_CASES: [BudgetCase; 5] = [
+const BUDGET_CASES: [BudgetCase; 6] = [
     BudgetCase {
         name: "budget-f48-mono-max-2byte",
         frame: 48,
@@ -839,6 +839,19 @@ const BUDGET_CASES: [BudgetCase; 5] = [
         max_bytes: 1275,
         native_pvq: true,
         input: pan_signal,
+    },
+    // 20 ms frames (LM 3) reserve an anti-collapse bit in transient frames;
+    // libopus sets it unless the two previous frames were transient.
+    BudgetCase {
+        name: "anticollapse-f960-mono-128k-cbr",
+        frame: 960,
+        channels: 1,
+        bitrate: Some(128_000),
+        vbr: false,
+        cvbr: true,
+        max_bytes: 1275,
+        native_pvq: true,
+        input: budget_signal,
     },
 ];
 

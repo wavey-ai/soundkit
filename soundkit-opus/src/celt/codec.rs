@@ -831,6 +831,9 @@ pub struct CeltFrameConfig {
     pub silence: bool,
     /// Encoder decision constants.
     pub decisions: crate::tuning::Decisions,
+    /// Encoder: the anti-collapse flag written in transient frames that
+    /// reserve a bit for it (libopus: `consec_transient < 2`).
+    pub anti_collapse_on: bool,
     /// Selects the experimental direct-cubic band syntax.
     ///
     /// This syntax is not an Opus packet extension. The encoder and decoder
@@ -873,6 +876,7 @@ impl CeltFrameConfig {
             loss_duration: 0,
             silence: false,
             decisions: crate::tuning::Decisions::SOUNDKIT,
+            anti_collapse_on: false,
             experimental_direct_cubic: false,
         })
     }
@@ -923,6 +927,9 @@ pub struct CeltFrameEncodeResult {
     pub alloc_trim: i32,
     /// Whether the allocation trim symbol fitted in the frame and was coded.
     pub trim_coded: bool,
+    /// Whether the frame had no room for the transient flag, or no short
+    /// blocks (libopus's `transient_got_disabled`).
+    pub transient_disabled: bool,
     pub vbr_update: Option<CeltVbrUpdate>,
 }
 
@@ -1310,6 +1317,7 @@ fn encode_spectral_frame_with_scratch_inner(
         enc.pretend_tell(total_bits);
     }
     let prefilter_symbol = encode_prefilter(config.start, total_bits, config.prefilter, &mut enc);
+    let transient_disabled = !(config.lm > 0 && enc.tell() + 3 <= total_bits);
     let is_transient = encode_transient_flag(config.lm, total_bits, config.is_transient, &mut enc);
 
     let band_count = config.channels * mode.nb_ebands;
@@ -1558,7 +1566,7 @@ fn encode_spectral_frame_with_scratch_inner(
     }
 
     if anti_collapse_rsv > 0 {
-        enc.encode_bits(0, 1);
+        enc.encode_bits(u32::from(config.anti_collapse_on), 1);
     }
     quant_energy_finalise(
         mode,
@@ -1631,6 +1639,7 @@ fn encode_spectral_frame_with_scratch_inner(
         spread,
         alloc_trim,
         trim_coded,
+        transient_disabled,
         vbr_update,
     })
 }
