@@ -294,7 +294,13 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("soundkit-opus-{tag}-{}", std::process::id()));
+        // Unique per call: tests run in parallel and share case names.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "soundkit-opus-{tag}-{}-{serial}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
@@ -461,5 +467,274 @@ fn live_libopus_comparison() {
             case.name,
             lib_packets.len()
         );
+    }
+}
+
+// Channel switches and damaged packets.
+//
+// `<name>.pkt` interleaves libopus's mono and stereo packets of the same
+// signal and frame size (signalling on): runs of 37 packets in the first
+// half, then alternate packets. libopus decodes such a stream with each
+// output channel's own synthesis and post-filter state, downmixes stereo
+// packets in a mono decoder, and decodes packets whose range coding is
+// damaged. `<name>.txt` holds the hashes of libopus's decodes with a stereo
+// and a mono decoder: clean, with losses, and with damage (some payloads
+// bit-flipped, some packets with an invalid signalling byte, which libopus
+// rejects after taking their end band, followed by a loss).
+
+struct SwitchCase {
+    name: &'static str,
+    frame: usize,
+}
+
+const SWITCH_CASES: [SwitchCase; 2] = [
+    SwitchCase {
+        name: "f48-switch",
+        frame: 48,
+    },
+    SwitchCase {
+        name: "f120-switch",
+        frame: 120,
+    },
+];
+
+fn switch_stereo_at(index: usize, packets: usize) -> bool {
+    if index < packets / 2 {
+        (index / 37) % 2 == 1
+    } else {
+        index % 2 == 1
+    }
+}
+
+/// Deterministic damage: flipped payload bits, and packets whose signalling
+/// byte names an impossible frame size (or, in the standard mode, no CELT
+/// configuration), each followed by a lost packet, the first of them at the
+/// start of the stream.
+fn damaged(case: &SwitchCase, packets: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    packets
+        .iter()
+        .enumerate()
+        .map(|(i, packet)| {
+            let mut packet = packet.clone();
+            // At the start the decoder has not yet decoded two packets in a
+            // row, so the loss after the rejected packet is concealed with
+            // noise, which uses the end band the rejected packet set.
+            if i % 29 == 8 || i == 1 {
+                packet.clear();
+            } else if (i % 29 == 7 || i == 0) && !packet.is_empty() {
+                packet[0] = if case.frame == 120 {
+                    0x10
+                } else {
+                    (packet[0] & 0x07) | 0x40 | (3 << 3)
+                };
+            } else if i % 11 == 3 && packet.len() > 3 {
+                let middle = packet.len() / 2;
+                packet[middle] ^= 0x5a;
+                let last = packet.len() - 1;
+                packet[last] ^= 0x81;
+            }
+            packet
+        })
+        .collect()
+}
+
+/// Hashes the Rust decoder's output and counts the packets it rejects; a
+/// rejected packet adds no output, as with the C tool's `--errors skip`.
+fn decode_stream_hash(
+    frame: usize,
+    channels: usize,
+    packets: &[Vec<u8>],
+    format: &str,
+) -> (u64, usize) {
+    let mut decoder = Decoder::new_custom(48_000, channels, frame).unwrap();
+    let mut hash = FNV_START;
+    let mut errors = 0;
+    for packet in packets {
+        let ok = match format {
+            "s16" => decoder
+                .decode_i16_vec(packet, false)
+                .map(|pcm| pcm.iter().for_each(|v| fnv(&mut hash, &v.to_le_bytes()))),
+            _ => decoder
+                .decode_f32_vec(packet, false)
+                .map(|pcm| pcm.iter().for_each(|v| fnv(&mut hash, &v.to_le_bytes()))),
+        };
+        errors += usize::from(ok.is_err());
+    }
+    (hash, errors)
+}
+
+fn switch_manifest(case: &SwitchCase) -> std::collections::BTreeMap<String, String> {
+    let text = std::fs::read_to_string(vectors_dir().join(format!("{}.txt", case.name)))
+        .expect("vector manifest");
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect()
+}
+
+/// The streams each switch case decodes, by manifest key prefix.
+fn switch_streams(case: &SwitchCase, packets: &[Vec<u8>]) -> [(&'static str, Vec<Vec<u8>>); 3] {
+    [
+        ("clean", packets.to_vec()),
+        ("plc", with_losses(packets)),
+        ("damaged", damaged(case, packets)),
+    ]
+}
+
+#[test]
+fn rust_decoder_matches_libopus_across_channel_switches_and_damage() {
+    for case in &SWITCH_CASES {
+        let m = switch_manifest(case);
+        let packets =
+            read_packets(&std::fs::read(vectors_dir().join(format!("{}.pkt", case.name))).unwrap());
+        for (stream, input) in switch_streams(case, &packets) {
+            for channels in [2, 1] {
+                for format in ["s16", "f32"] {
+                    let key = format!("libopus_{stream}_c{channels}_{format}");
+                    let (hash, errors) = decode_stream_hash(case.frame, channels, &input, format);
+                    assert_eq!(hex(hash), m[&key], "{} {key}", case.name);
+                    assert_eq!(
+                        errors.to_string(),
+                        m[&format!("libopus_{stream}_rejected")],
+                        "{} {key} rejected packets",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The 120-sample custom packets carry libopus's TOC form of the signalling
+/// byte, so they are also CELT-only Opus packets. A standard decoder with
+/// libopus arithmetic must decode them as `opus_custom_decode` does,
+/// including stereo packets in a mono decoder.
+#[test]
+fn standard_decoder_matches_libopus_across_channel_switches() {
+    let case = &SWITCH_CASES[1];
+    assert_eq!(case.frame, 120);
+    let m = switch_manifest(case);
+    let packets =
+        read_packets(&std::fs::read(vectors_dir().join(format!("{}.pkt", case.name))).unwrap());
+    for (stream, input) in switch_streams(case, &packets).into_iter().take(2) {
+        for channels in [2, 1] {
+            let mut decoder = Decoder::new(48_000, channels).unwrap();
+            decoder.set_libopus_arithmetic(true).unwrap();
+            let mut hash = FNV_START;
+            for packet in &input {
+                for v in decoder.decode_i16_vec(packet, false).unwrap() {
+                    fnv(&mut hash, &v.to_le_bytes());
+                }
+            }
+            let key = format!("libopus_{stream}_c{channels}_s16");
+            assert_eq!(hex(hash), m[&key], "standard decoder {key}");
+        }
+    }
+}
+
+/// Runs the C tool's decoder with `--errors skip` and returns the output
+/// hash and the number of packets it rejected.
+fn c_stream_hash(
+    tool: &PathBuf,
+    frame: usize,
+    channels: usize,
+    packets: &[Vec<u8>],
+    format: &str,
+    scratch: &Scratch,
+) -> (u64, usize) {
+    std::fs::write(scratch.path("switch.pkt"), write_packets(packets)).unwrap();
+    let frame = frame.to_string();
+    let channels = channels.to_string();
+    let output = Command::new(tool)
+        .args([
+            "decode",
+            "--frame",
+            &frame,
+            "--channels",
+            &channels,
+            "--errors",
+            "skip",
+            "--pcm",
+            format,
+            &scratch.path("switch.pkt"),
+            &scratch.path("switch.pcm"),
+        ])
+        .output()
+        .expect("run the C tool");
+    assert!(output.status.success(), "C tool failed");
+    let errors = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter(|line| line.contains("decode error"))
+        .count();
+    (file_hash(&scratch.path("switch.pcm")), errors)
+}
+
+#[test]
+#[ignore = "needs OPUS_CUSTOM_INTEROP_C; rewrites the channel-switch vectors"]
+fn regenerate_switch_vectors() {
+    let tool = c_tool().expect("set OPUS_CUSTOM_INTEROP_C to the libopus tool");
+    for case in &SWITCH_CASES {
+        let scratch = Scratch::new(case.name);
+        let mut streams = Vec::new();
+        for (channels, bitrate) in [(1usize, "128000"), (2, "256000")] {
+            let pcm: Vec<u8> = signal(channels)
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect();
+            std::fs::write(scratch.path("in.s16"), pcm).unwrap();
+            let frame = case.frame.to_string();
+            let channels = channels.to_string();
+            run_c(
+                &tool,
+                &[
+                    "encode",
+                    "--frame",
+                    &frame,
+                    "--channels",
+                    &channels,
+                    "--bitrate",
+                    bitrate,
+                    "--vbr",
+                    "1",
+                    "--pcm",
+                    "s16",
+                    &scratch.path("in.s16"),
+                    &scratch.path("enc.pkt"),
+                ],
+            );
+            streams.push(read_packets(
+                &std::fs::read(scratch.path("enc.pkt")).unwrap(),
+            ));
+        }
+        let count = streams[0].len();
+        let packets: Vec<Vec<u8>> = (0..count)
+            .map(|i| streams[usize::from(switch_stereo_at(i, count))][i].clone())
+            .collect();
+        let mut lines = vec![format!("frame = {}", case.frame)];
+        for (stream, input) in switch_streams(case, &packets) {
+            let mut rejected = None;
+            for channels in [2, 1] {
+                for format in ["s16", "f32"] {
+                    let (hash, errors) =
+                        c_stream_hash(&tool, case.frame, channels, &input, format, &scratch);
+                    lines.push(format!(
+                        "libopus_{stream}_c{channels}_{format} = {}",
+                        hex(hash)
+                    ));
+                    assert_eq!(*rejected.get_or_insert(errors), errors);
+                }
+            }
+            lines.push(format!("libopus_{stream}_rejected = {}", rejected.unwrap()));
+        }
+        std::fs::write(
+            vectors_dir().join(format!("{}.pkt", case.name)),
+            write_packets(&packets),
+        )
+        .unwrap();
+        std::fs::write(
+            vectors_dir().join(format!("{}.txt", case.name)),
+            lines.join("\n") + "\n",
+        )
+        .unwrap();
     }
 }

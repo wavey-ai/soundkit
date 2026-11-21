@@ -1,0 +1,16 @@
+frame = 120
+libopus_clean_c2_s16 = 8285c22798362658
+libopus_clean_c2_f32 = 55c2b395794b2271
+libopus_clean_c1_s16 = 57c5f18507bd7e62
+libopus_clean_c1_f32 = abd9bd52ec8c4d6f
+libopus_clean_rejected = 0
+libopus_plc_c2_s16 = 464a27bc1e3d9845
+libopus_plc_c2_f32 = 85b532a4ebd266a4
+libopus_plc_c1_s16 = d53c05d0a0c317d0
+libopus_plc_c1_f32 = e8814c0d81c47708
+libopus_plc_rejected = 0
+libopus_damaged_c2_s16 = dedf6a9fcf624358
+libopus_damaged_c2_f32 = 44e22f1c9b885efe
+libopus_damaged_c1_s16 = af2cd45b942b136e
+libopus_damaged_c1_f32 = 36111493a2764fb1
+libopus_damaged_rejected = 8

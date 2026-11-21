@@ -74,6 +74,19 @@ pub(crate) struct CustomFrame<'a> {
     pub end: usize,
 }
 
+/// The end band a signalling byte sets, or `None` when the byte is not a
+/// valid CELT-only TOC in the standard mode. `celt_decode_with_ec` stores it
+/// in the decoder state before it validates the rest of the packet, so a
+/// packet it then rejects still changes the end band.
+pub(crate) fn signalled_end(mode: &CeltMode, first: u8) -> Option<usize> {
+    let byte = if uses_opus_toc(mode) {
+        from_opus(first)?
+    } else {
+        first
+    };
+    Some(1.max(mode.eff_ebands as isize - 2 * (byte >> 5) as isize) as usize)
+}
+
 /// Parses the signalling byte as `celt_decode_with_ec` does and returns the
 /// CELT frame that follows it.
 pub(crate) fn parse_signalled<'a>(mode: &CeltMode, data: &'a [u8]) -> Result<CustomFrame<'a>> {
@@ -83,7 +96,7 @@ pub(crate) fn parse_signalled<'a>(mode: &CeltMode, data: &'a [u8]) -> Result<Cus
     } else {
         first
     };
-    let end = 1.max(mode.eff_ebands as isize - 2 * (byte >> 5) as isize) as usize;
+    let end = signalled_end(mode, first).ok_or(Error::InvalidPacket)?;
     let lm = ((byte >> 3) & 0x3) as usize;
     let stream_channels = 1 + ((byte >> 2) & 0x1) as usize;
     let mut frame = &data[1..];

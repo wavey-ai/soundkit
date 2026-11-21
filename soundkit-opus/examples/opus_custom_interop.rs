@@ -7,7 +7,7 @@
 //! opus_custom_interop encode --frame N --channels C [--bitrate B|max] [--vbr 0|1]
 //!     [--cvbr 0|1] [--signalling 0|1] [--max-bytes N] --pcm s16|s24|f32 IN OUT
 //! opus_custom_interop decode --frame N --channels C [--signalling 0|1]
-//!     --pcm s16|s24|f32 IN OUT
+//!     [--errors stop|skip] --pcm s16|s24|f32 IN OUT
 //! ```
 //!
 //! Rust-only options: `--decisions libopus|soundkit` picks the encoder's
@@ -34,6 +34,7 @@ struct Args {
     libopus_decisions: bool,
     libopus_arith: bool,
     portable_pvq: bool,
+    skip_errors: bool,
     input: String,
     output: String,
 }
@@ -43,7 +44,7 @@ fn usage() -> ! {
         "usage: opus_custom_interop encode|decode --frame N [--channels C] [--bitrate B|max] \
          [--vbr 0|1] [--cvbr 0|1] [--signalling 0|1] [--max-bytes N] [--pcm s16|s24|f32] \
          [--decisions libopus|soundkit] [--arith libopus|soundkit] [--pvq native|portable] \
-         IN OUT"
+         [--errors stop|skip] IN OUT"
     );
     exit(2);
 }
@@ -66,6 +67,7 @@ fn parse() -> Args {
         libopus_decisions: true,
         libopus_arith: true,
         portable_pvq: false,
+        skip_errors: false,
         input: String::new(),
         output: String::new(),
     };
@@ -95,6 +97,7 @@ fn parse() -> Args {
                 "decisions" => args.libopus_decisions = value == "libopus",
                 "arith" => args.libopus_arith = value == "libopus",
                 "pvq" => args.portable_pvq = value == "portable",
+                "errors" => args.skip_errors = value == "skip",
                 _ => usage(),
             }
             i += 2;
@@ -239,7 +242,10 @@ fn decode(args: &Args) {
             _ => usage(),
         };
         if let Err(error) = result {
-            fail(format!("packet {index}: decode error {error}"));
+            if !args.skip_errors {
+                fail(format!("packet {index}: decode error {error}"));
+            }
+            eprintln!("packet {index}: decode error {error}");
         }
         pos += len;
         index += 1;

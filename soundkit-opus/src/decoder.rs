@@ -7,9 +7,9 @@ use crate::celt::modes::CeltMode;
 use crate::celt::pitch::{comb_filter_in_place_mode, COMBFILTER_MAXPERIOD, COMBFILTER_MINPERIOD};
 use crate::celt::refkern;
 use crate::celt::synthesis::{
-    celt_synthesis_with_overlap_into, deemphasis_interleaved_f32_slice,
-    deemphasis_interleaved_i24_into, deemphasis_interleaved_i24_slice, deemphasis_interleaved_into,
-    SynthesisScratch,
+    celt_synthesis_channels_into, celt_synthesis_with_overlap_into,
+    deemphasis_interleaved_f32_slice, deemphasis_interleaved_i24_into,
+    deemphasis_interleaved_i24_slice, deemphasis_interleaved_into, SynthesisScratch,
 };
 use crate::celt::vq::renormalise_vector_mode;
 use crate::constants::{valid_channels, valid_sample_rate, Bandwidth};
@@ -105,6 +105,11 @@ pub struct Decoder {
     prefilter_and_fold: bool,
     lpc: [[f32; CELT_LPC_ORDER]; 2],
     plc_scratch: PlcScratch,
+    /// A stereo decoder whose two channels hold identical state: every
+    /// frame so far was mono and nothing was concealed. A mono frame can
+    /// then be synthesised once and copied, with the same result as
+    /// libopus's per-channel synthesis.
+    channels_mirrored: bool,
 }
 
 impl Decoder {
@@ -198,6 +203,7 @@ impl Decoder {
             prefilter_and_fold: false,
             lpc: [[0.0; CELT_LPC_ORDER]; 2],
             plc_scratch: PlcScratch::default(),
+            channels_mirrored: true,
             mode,
             framing,
         }
@@ -531,7 +537,6 @@ impl Decoder {
         if parsed.count != 1
             || !packet::is_celt_only(parsed.toc)
             || packet::bandwidth(packet)? != Bandwidth::Fullband
-            || stream_channels > self.channels
         {
             return Err(Error::Unimplemented);
         }
@@ -565,8 +570,12 @@ impl Decoder {
             return self.conceal(frame_size, lm);
         }
         let (frame, lm, stream_channels) = if signalling {
+            // libopus sets the end band before it validates the rest of the
+            // packet, so even a rejected packet changes it.
+            if let Some(end) = custom::signalled_end(self.mode, packet[0]) {
+                self.end = end;
+            }
             let parsed = custom::parse_signalled(self.mode, packet)?;
-            self.end = parsed.end;
             if self.mode.short_mdct_size << parsed.lm > frame_size {
                 return Err(Error::BufferTooSmall);
             }
@@ -580,9 +589,6 @@ impl Decoder {
         };
         if frame.len() > 1275 {
             return Err(Error::BadArg);
-        }
-        if stream_channels > self.channels {
-            return Err(Error::Unimplemented);
         }
         if frame.len() <= 1 {
             return self.conceal(self.mode.short_mdct_size << lm, lm);
@@ -607,6 +613,10 @@ impl Decoder {
         config.end = self.end;
         config.experimental_direct_cubic = self.experimental_direct_cubic;
         config.loss_duration = self.loss_duration;
+        // libopus disables intensity-stereo phase inversion in mono decoders
+        // (`st->disable_inv = channels == 1`) so that a downmixed stereo
+        // stream does not cancel.
+        config.disable_inv = self.channels == 1;
         let decoded = decode_spectral_frame_into_with_anti_collapse(
             mode,
             &config,
@@ -620,8 +630,14 @@ impl Decoder {
         if self.prefilter_and_fold {
             self.fold_overlap(n);
         }
+        // libopus synthesises and post-filters every output channel from its
+        // own state, also when a mono stream feeds a stereo decoder or a
+        // stereo stream a mono one. While a stereo decoder's channels are
+        // still identical, one channel is computed and copied.
+        let mirror = stream_channels == 1 && self.channels == 2 && self.channels_mirrored;
+        let output_channels = if mirror { 1 } else { self.channels };
         let y = (config.channels == 2).then(|| &self.decode_scratch.y[..decoded.samples]);
-        celt_synthesis_with_overlap_into(
+        celt_synthesis_channels_into(
             mode,
             &self.decode_scratch.x[..decoded.samples],
             y,
@@ -629,16 +645,17 @@ impl Decoder {
             config.start,
             config.end.min(mode.eff_ebands),
             config.channels,
+            output_channels,
             decoded.is_transient,
             config.lm,
             1,
             decoded.silence,
-            &mut self.overlap_mem[..stream_channels],
-            &mut self.synthesis_channels,
+            &mut self.overlap_mem[..output_channels],
+            &mut self.synthesis_channels[..output_channels],
             &mut self.synthesis_scratch,
         )?;
-        self.apply_postfilter(stream_channels, config.lm, decoded.prefilter);
-        if stream_channels == 1 && self.channels == 2 {
+        self.apply_postfilter(output_channels, config.lm, decoded.prefilter);
+        if mirror {
             {
                 let (left, right) = self.overlap_mem.split_at_mut(1);
                 right[0].clone_from(&left[0]);
@@ -653,13 +670,14 @@ impl Decoder {
                 right[0].extend_from_slice(&left[0]);
             }
         }
+        self.channels_mirrored = mirror;
         self.update_energy_history(stream_channels, decoded.is_transient, 1 << lm);
         self.loss_duration = 0;
         self.plc_duration = 0;
         self.last_frame_type = FrameType::Normal;
         self.prefilter_and_fold = false;
         self.last_frame_size = n;
-        Ok(self.channels.max(stream_channels))
+        Ok(self.channels)
     }
 
     /// The energy bookkeeping at the end of `celt_decode_with_ec`.
@@ -691,7 +709,7 @@ impl Decoder {
 
     fn apply_postfilter(
         &mut self,
-        stream_channels: usize,
+        channels: usize,
         lm: usize,
         prefilter: Option<crate::celt::codec::DecodedPrefilter>,
     ) {
@@ -713,7 +731,7 @@ impl Decoder {
         let filters_active = self.postfilter_gain_old != 0.0
             || self.postfilter_gain != 0.0
             || (lm != 0 && postfilter_gain != 0.0);
-        for c in 0..stream_channels {
+        for c in 0..channels {
             // The history buffer gains the new frame at its end, is filtered
             // in place, and then drops its oldest `n` samples.
             let memory = &mut self.decode_mem[c];
@@ -833,6 +851,7 @@ impl Decoder {
             self.synthesis_channels[c].extend_from_slice(&memory[c][dbs - n..dbs]);
         }
         self.plc_scratch.memory = memory;
+        self.channels_mirrored = false;
         self.loss_duration = 10_000.min(self.loss_duration + (1 << lm));
         self.plc_duration = 10_000.min(self.plc_duration + (1 << lm));
         self.last_frame_type = frame_type;

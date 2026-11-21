@@ -1645,7 +1645,9 @@ pub fn decode_spectral_frame_into(
     seed: &mut u32,
     scratch: &mut CeltFrameDecodeScratch,
 ) -> Result<CeltFrameDecodeInfo> {
-    decode_spectral_frame_into_impl(mode, config, data, old_band_e, None, None, seed, scratch)
+    decode_spectral_frame_into_impl(
+        mode, config, data, old_band_e, None, None, seed, scratch, true,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1668,6 +1670,7 @@ pub(crate) fn decode_spectral_frame_into_with_anti_collapse(
         Some(old_log_e2),
         seed,
         scratch,
+        false,
     )
 }
 
@@ -1722,6 +1725,7 @@ fn decode_spectral_frame_into_impl(
     old_log_e2: Option<&[f32]>,
     seed: &mut u32,
     scratch: &mut CeltFrameDecodeScratch,
+    reject_range_errors: bool,
 ) -> Result<CeltFrameDecodeInfo> {
     if data.len() != config.packet_bytes {
         return Err(Error::InvalidPacket);
@@ -1993,7 +1997,10 @@ fn decode_spectral_frame_into_impl(
         old_band_e[..config.channels * mode.nb_ebands].fill(ENERGY_FLOOR_DB);
     }
     *seed = dec.final_range();
-    if dec.error() != 0 {
+    // libopus only records a range decoder error (`st->error`) and still
+    // outputs the frame; the stream decoder does the same. The standalone
+    // frame decoders reject such a frame.
+    if reject_range_errors && dec.error() != 0 {
         return Err(Error::InvalidPacket);
     }
 

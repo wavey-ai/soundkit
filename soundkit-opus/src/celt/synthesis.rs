@@ -21,6 +21,7 @@ fn celt_signal_to_i24(x: f32) -> i32 {
 #[derive(Clone, Debug, Default)]
 pub struct SynthesisScratch {
     freq: Vec<f32>,
+    freq2: Vec<f32>,
     mdct: MdctScratch,
 }
 
@@ -110,31 +111,77 @@ pub fn celt_synthesis_with_overlap_into(
     out: &mut [Vec<f32>],
     scratch: &mut SynthesisScratch,
 ) -> Result<()> {
+    celt_synthesis_channels_into(
+        mode,
+        x,
+        y,
+        band_log_e,
+        start,
+        eff_end,
+        channels,
+        channels,
+        is_transient,
+        lm,
+        downsample,
+        silence,
+        overlap_mem,
+        out,
+        scratch,
+    )
+}
+
+/// `celt_synthesis` with `stream_channels` coded channels (`C`) and
+/// `output_channels` output channels (`CC`).
+///
+/// A mono stream into two output channels runs one inverse MDCT per output
+/// channel, each overlapping with that channel's own previous tail. A stereo
+/// stream into one output channel averages the two denormalised spectra
+/// before a single inverse MDCT. Both follow libopus exactly.
+#[allow(clippy::too_many_arguments)]
+pub fn celt_synthesis_channels_into(
+    mode: &CeltMode,
+    x: &[f32],
+    y: Option<&[f32]>,
+    band_log_e: &[f32],
+    start: usize,
+    eff_end: usize,
+    stream_channels: usize,
+    output_channels: usize,
+    is_transient: bool,
+    lm: usize,
+    downsample: usize,
+    silence: bool,
+    overlap_mem: &mut [Vec<f32>],
+    out: &mut [Vec<f32>],
+    scratch: &mut SynthesisScratch,
+) -> Result<()> {
     if lm > mode.max_lm
         || start > eff_end
         || eff_end > mode.nb_ebands
-        || !(1..=2).contains(&channels)
+        || !(1..=2).contains(&stream_channels)
+        || !(1..=2).contains(&output_channels)
         || downsample == 0
-        || overlap_mem.len() < channels
-        || out.len() < channels
+        || overlap_mem.len() < output_channels
+        || out.len() < output_channels
     {
         return Err(Error::BadArg);
     }
 
     let n = mode.short_mdct_size << lm;
     if x.len() < n
-        || (channels == 2 && y.map_or(true, |right| right.len() < n))
-        || band_log_e.len() < channels * mode.nb_ebands
+        || (stream_channels == 2 && y.map_or(true, |right| right.len() < n))
+        || band_log_e.len() < stream_channels * mode.nb_ebands
         || overlap_mem
             .iter()
-            .take(channels)
+            .take(output_channels)
             .any(|memory| memory.len() < mode.overlap)
     {
         return Err(Error::BadArg);
     }
 
     let m = 1usize << lm;
-    let (blocks, block_len, shift) = if is_transient {
+    let nb = mode.nb_ebands;
+    let shape = if is_transient {
         (m, mode.short_mdct_size, mode.max_lm)
     } else {
         (1, n, mode.max_lm - lm)
@@ -143,38 +190,113 @@ pub fn celt_synthesis_with_overlap_into(
     if scratch.freq.len() < n {
         scratch.freq.resize(n, 0.0);
     }
-    for c in 0..channels {
-        let norm = if c == 0 {
-            x
-        } else {
-            y.expect("right channel validated")
-        };
-        let log_e = &band_log_e[c * mode.nb_ebands..(c + 1) * mode.nb_ebands];
-        let freq = &mut scratch.freq[..n];
-        denormalise_bands(
-            mode, norm, freq, log_e, start, eff_end, m, downsample, silence,
-        );
-
-        out[c].resize(n + mode.overlap, 0.0);
-        let channel = &mut out[c];
-        channel[..mode.overlap].copy_from_slice(&overlap_mem[c][..mode.overlap]);
-        for block in 0..blocks {
-            clt_mdct_backward_with_scratch(
-                &mode.mdct,
-                &freq[block..],
-                &mut channel[block_len * block..],
-                &mode.window,
-                mode.overlap,
-                shift,
-                blocks,
-                &mut scratch.mdct,
+    let SynthesisScratch { freq, freq2, mdct } = scratch;
+    let freq = &mut freq[..n];
+    match (stream_channels, output_channels) {
+        (1, 2) => {
+            // A mono stream copied to two channels.
+            denormalise_bands(
+                mode,
+                x,
+                freq,
+                &band_log_e[..nb],
+                start,
+                eff_end,
+                m,
+                downsample,
+                silence,
             );
+            for c in 0..2 {
+                inverse_mdct_channel(mode, freq, &mut overlap_mem[c], &mut out[c], n, shape, mdct);
+            }
         }
-        overlap_mem[c][..mode.overlap].copy_from_slice(&channel[n..n + mode.overlap]);
-        channel.truncate(n);
+        (2, 1) => {
+            // A stereo stream downmixed to mono.
+            if freq2.len() < n {
+                freq2.resize(n, 0.0);
+            }
+            let freq2 = &mut freq2[..n];
+            denormalise_bands(
+                mode,
+                x,
+                freq,
+                &band_log_e[..nb],
+                start,
+                eff_end,
+                m,
+                downsample,
+                silence,
+            );
+            denormalise_bands(
+                mode,
+                y.expect("right channel validated"),
+                freq2,
+                &band_log_e[nb..2 * nb],
+                start,
+                eff_end,
+                m,
+                downsample,
+                silence,
+            );
+            for (left, &right) in freq.iter_mut().zip(freq2.iter()) {
+                *left = 0.5 * *left + 0.5 * right;
+            }
+            inverse_mdct_channel(mode, freq, &mut overlap_mem[0], &mut out[0], n, shape, mdct);
+        }
+        _ => {
+            for c in 0..stream_channels {
+                let norm = if c == 0 {
+                    x
+                } else {
+                    y.expect("right channel validated")
+                };
+                denormalise_bands(
+                    mode,
+                    norm,
+                    freq,
+                    &band_log_e[c * nb..(c + 1) * nb],
+                    start,
+                    eff_end,
+                    m,
+                    downsample,
+                    silence,
+                );
+                inverse_mdct_channel(mode, freq, &mut overlap_mem[c], &mut out[c], n, shape, mdct);
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Inverse MDCT of one channel's spectrum into `out` (`n` samples), overlapped
+/// with that channel's previous tail in `overlap_mem`, which then receives the
+/// new tail. `shape` is (blocks, block length, MDCT shift).
+fn inverse_mdct_channel(
+    mode: &CeltMode,
+    freq: &[f32],
+    overlap_mem: &mut [f32],
+    out: &mut Vec<f32>,
+    n: usize,
+    (blocks, block_len, shift): (usize, usize, usize),
+    mdct: &mut MdctScratch,
+) {
+    out.resize(n + mode.overlap, 0.0);
+    out[..mode.overlap].copy_from_slice(&overlap_mem[..mode.overlap]);
+    for block in 0..blocks {
+        clt_mdct_backward_with_scratch(
+            &mode.mdct,
+            &freq[block..],
+            &mut out[block_len * block..],
+            &mode.window,
+            mode.overlap,
+            shift,
+            blocks,
+            mdct,
+        );
+    }
+    overlap_mem[..mode.overlap].copy_from_slice(&out[n..n + mode.overlap]);
+    out.truncate(n);
 }
 
 pub fn deemphasis_interleaved(

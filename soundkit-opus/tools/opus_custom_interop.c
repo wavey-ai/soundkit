@@ -11,15 +11,16 @@
  *   encode   --frame N --channels C [--bitrate B|max] [--vbr 0|1] [--cvbr 0|1]
  *            [--signalling 0|1] [--complexity N] [--max-bytes N]
  *            --pcm s16|s24|f32 IN.raw OUT.pkt
- *   decode   --frame N --channels C [--signalling 0|1] --pcm s16|s24|f32
- *            IN.pkt OUT.raw
+ *   decode   --frame N --channels C [--signalling 0|1] [--errors stop|skip]
+ *            --pcm s16|s24|f32 IN.pkt OUT.raw
  *   modeinfo --frame N
  *
  * Raw PCM is interleaved little-endian: s16 is int16, s24 is int32 holding a
  * sign-extended 24-bit value, f32 is float. A trailing partial frame is
  * ignored. A packet file is a sequence of records: a little-endian uint16
  * length followed by that many bytes. A zero length marks a lost packet,
- * which the decoder conceals.
+ * which the decoder conceals. With --errors skip, a packet the decoder rejects
+ * writes no output, its index is printed to stderr, and decoding continues.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -45,6 +46,7 @@ typedef struct {
     int signalling;
     int complexity;
     int max_bytes;
+    int skip_errors;
     const char *pcm;
     const char *in;
     const char *out;
@@ -59,7 +61,8 @@ static void usage(void) {
     fprintf(stderr,
             "usage: opus_custom_interop encode|decode|modeinfo --frame N [--channels C] "
             "[--bitrate B|max] [--vbr 0|1] [--cvbr 0|1] [--signalling 0|1] "
-            "[--complexity N] [--max-bytes N] [--pcm s16|s24|f32] [IN OUT]\n");
+            "[--complexity N] [--max-bytes N] [--errors stop|skip] [--pcm s16|s24|f32] "
+            "[IN OUT]\n");
     exit(2);
 }
 
@@ -90,6 +93,7 @@ static Args parse(int argc, char **argv, int first) {
             else if (!strcmp(k, "--complexity")) a.complexity = atoi(v);
             else if (!strcmp(k, "--max-bytes")) a.max_bytes = atoi(v);
             else if (!strcmp(k, "--pcm")) a.pcm = v;
+            else if (!strcmp(k, "--errors")) a.skip_errors = !strcmp(v, "skip");
             else usage();
         } else if (positional == 0) {
             a.in = k;
@@ -207,7 +211,7 @@ static int decode(Args a) {
         }
         if (ret <= 0) {
             fprintf(stderr, "packet %zu: decode error %d\n", index, ret);
-            return 1;
+            if (!a.skip_errors) return 1;
         }
         pos += (size_t)n;
         index++;
