@@ -140,5 +140,10 @@ independently when a product requires it.
   the interop work (silence flag, `last` shared across channels in
   dynalloc, trunk's pitch-doubling check, round-half-even output). Each one
   changes standard packets or PCM, so each needs the quality gate.
-- Support a stereo stream into a mono custom decoder.
+- Reproduce libopus's `OPUS_INTERNAL_ERROR` for a frame that reads past its
+  end (`ec_tell > 8 * len`), which libopus returns after updating its state.
+  No test has produced one.
+- Check packet identity against a libopus built without intrinsics (ARM,
+  `OPUS_DISABLE_INTRINSICS`): it sums in a different order, so its packets
+  and last decoded bits differ from x86-64 libopus's.
 

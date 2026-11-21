@@ -126,8 +126,21 @@ let concealed = decoder.decode_i16_vec(&[], false)?; // a lost packet
   Standard Opus decoders conceal the same way, one frame of the last decoded
   size per empty packet.
 - The encoder always runs the analysis of libopus complexity 10.
-- Not implemented: a stereo stream into a mono decoder, `CELT_SET_END_BAND`
-  and `CELT_SET_START_BAND`, and libopus's QEXT extension.
+- With signalling on, the channel count may change from packet to packet, as
+  libopus allows. A stereo decoder synthesises and post-filters each channel
+  of a mono packet from that channel's own state, and a mono decoder
+  downmixes stereo packets; mono decoders turn off intensity-stereo phase
+  inversion, as libopus's do. Standard Opus decoders do the same.
+- Damaged packets decode as in libopus: a frame whose range decoding fails is
+  still decoded (libopus only records the error), and a packet rejected after
+  its signalling byte still sets the end band that the next concealed frame
+  uses. libopus's `OPUS_INTERNAL_ERROR` for a frame that reads past its end is
+  not reproduced; no test has produced one.
+- A 2-byte packet limit with signalling leaves one byte of CELT data, which
+  both libopus and this crate encode; for digital silence both return an
+  internal error.
+- Not implemented: `CELT_SET_END_BAND` and `CELT_SET_START_BAND`, and
+  libopus's QEXT extension.
 
 The WebAssembly API (`wasm` feature) has `Encoder.newCustom(channels,
 frameSize)` and `Decoder.newCustom(channels, frameSize)`, with
@@ -156,14 +169,32 @@ interop evidence. `set_libopus_decisions(false)` selects SoundKit's
 constants, and the `tuning` feature's knobs still override either.
 
 Standard Opus encoders and decoders keep SoundKit's arithmetic and tuned
-constants, so their packets and decoded PCM do not change.
-`set_libopus_arithmetic(true)` and `set_libopus_decisions(true)` make them
-follow libopus as well.
+constants. Their packets do not change, nor does the PCM they decode from
+SoundKit's packets: a gate of 960 encode and decode configurations (2.5 to
+20 ms, 64 to 320 kb/s, CBR and both VBR modes, s16 and s24, synthetic and
+music inputs) and four libopus streams matches origin/main hash for hash.
+Decoding some other libopus streams changes, where the decoder now follows
+libopus: mono energy bookkeeping (one libopus `RESTRICTED_LOWDELAY` mono
+stream at 64 kb/s changed in 15 frames, its largest error against libopus
+falling from 7.9e-4 to 1.2e-4), stereo packets in a mono decoder and streams
+that switch channel count (decoded instead of rejected), damaged packets
+(decoded instead of rejected), and empty or 1-byte packets (concealed
+instead of an error). `set_libopus_arithmetic(true)` and
+`set_libopus_decisions(true)` make them follow libopus as well.
 
 On x86-64 the encoder's PVQ search follows libopus's SSE2 search, whose
 `rcpps`/`rsqrtps` estimates come from the CPU and differ between vendors.
 `Encoder::set_portable_pvq(true)` uses libopus's generic C search instead;
 native and WebAssembly builds then produce the same packets.
+
+Packet identity is with x86-64 libopus using its default run-time CPU
+dispatch. A libopus built without intrinsics (`OPUS_DISABLE_INTRINSICS`, or a
+build for ARM or another target) sums in a different order and searches PVQ
+differently: in one check 95% of its packets matched the portable Rust
+encoder's (77 of 144 cases had at least one differing packet), and 84%
+matched x86-64 libopus's. Those packets are still valid, and the Rust decoder decodes them
+exactly as x86-64 libopus does; a libopus decoder built without intrinsics
+may differ from both in its last bits.
 
 ### Interop with libopus custom modes
 
@@ -183,16 +214,36 @@ dispatch, DRED, deep PLC and OSCE off). The libopus encoder ran at
 Inputs were a 3 s synthetic signal (tones, a chirp, noise bursts, clicks, a
 quiet stretch and digital silence) and three 10 s excerpts of 24-bit studio
 masters, each in mono and stereo, through the s16, s24 and float APIs. Results
-on 2026-11-21, x86-64 (AMD EPYC 7713):
+on 2026-11-21, x86-64 (AMD EPYC 7713), after the fixes from the first review
+round:
 
 | Matrix | Frames | Cases | (a) PCM identical | (b) PCM identical | (d) PCM identical | (c) identical packets |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | 192, 256, 320 kb/s; CBR, constrained VBR; s16, s24, float; signalling on and off | 48, 64, 72, 120, 240 | 1440 | 1440 | 1440 | 1440 | 7,167,456 of 7,167,456 |
 | maximum, 64, 128, 510 kb/s; CBR, constrained and unconstrained VBR; s16; signalling on and off | 48, 64, 72, 120, 240 | 960 | 960 | 960 | 960 | 4,778,304 of 4,778,304 |
 | 192, 256, 320 kb/s; unconstrained VBR; s16, s24, float | 48, 64, 72, 120, 240 | 360 | 360 | 360 | 360 | 1,791,864 of 1,791,864 |
+| 4, 8, 12 kb/s; CBR, constrained and unconstrained VBR; s16; signalling on and off | 48, 64, 72, 120, 240 | 720 | 720 | 720 | 720 | 3,583,728 of 3,583,728 |
 
 Every decoded sample matched, in every PCM format, including concealment,
-and every packet matched. The 120 and 240-sample frames are the standard 2.5
+and every packet matched.
+
+Edge cases, checked with separate tools against the same libopus build:
+
+- Streams that switch between mono and stereo packets (runs of 37 and
+  alternate packets, 48, 64, 72 and 120 samples, synthetic and music, with
+  and without losses), decoded by stereo and mono decoders in s16 and float:
+  every sample identical, natively and in both WebAssembly builds (64 of 64
+  cases each, plus 96 of 96 with losses natively).
+- 576 corrupted streams (bit flips, truncation, random packets, trailing
+  junk; 48, 64 and 72 samples; signalling on and off): both decoders reject
+  the same 66,417 packets, and all 61,966,264 decoded samples are identical.
+- Packet limits from 2 to 1276 bytes at maximum bitrate and 2 Mb/s (8448
+  cases): 15,650,216 of 15,650,216 packets and every decoded sample
+  identical; in 72 cases (digital or near silence with a 2-byte limit and
+  signalling) both encoders return an internal error on the first frame.
+- Low and extreme rates, 501 b/s to 2 Mb/s, CBR and both VBR modes, at 48,
+  64 and 72 samples (2352 cases): every packet (4,978,288) and every
+  decoded sample identical. The 120 and 240-sample frames are the standard 2.5
 and 5 ms modes run through the custom API, whose packets are standard
 CELT-only Opus packets.
 
@@ -208,7 +259,12 @@ frame sizes match exactly, as the table shows.
 
 The golden vectors in `tests/data/opus_custom/vectors` repeat checks (a),
 (b) and (d) for four synthetic cases without libopus, and check (c) on CPUs
-with the same `rcpps` estimates as the generating machine.
+with the same `rcpps` estimates as the generating machine (elsewhere the
+test prints a warning, and fails with `SOUNDKIT_OPUS_REQUIRE_NATIVE_VECTORS=1`).
+Further vectors check mono/stereo switches, downmixing and damaged packets
+against libopus's decodes (`f48-switch`, `f120-switch`, the latter also
+through the standard Opus decoder), and libopus's packets for 2-byte limits
+and 4 kb/s VBR (`budget-*`).
 
 WebAssembly (SIMD128 and scalar builds, in Node.js 26) decodes every packet
 to the same samples as the native build. With the portable PVQ search the

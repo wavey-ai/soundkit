@@ -169,7 +169,7 @@ pub fn celt_synthesis_channels_into(
 
     let n = mode.short_mdct_size << lm;
     if x.len() < n
-        || (stream_channels == 2 && y.map_or(true, |right| right.len() < n))
+        || (stream_channels == 2 && y.is_none_or(|right| right.len() < n))
         || band_log_e.len() < stream_channels * mode.nb_ebands
         || overlap_mem
             .iter()
