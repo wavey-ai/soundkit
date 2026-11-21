@@ -256,3 +256,41 @@ fn packets_never_exceed_the_packet_limit() {
         }
     }
 }
+
+#[test]
+fn huge_and_infinite_input_is_clipped_as_libopus_does() {
+    // libopus clips a frame to twice full scale when a sample exceeds 65536
+    // times full scale. Without the clip, infinities reached the energy
+    // quantiser as NaN and overflowed it.
+    for frame in [48, 960] {
+        for channels in [1, 2] {
+            let mut encoder = Encoder::new_custom(48_000, channels, frame).unwrap();
+            encoder.set_bitrate(128_000).unwrap();
+            encoder.set_vbr(true).unwrap();
+            let mut decoder = Decoder::new_custom(48_000, channels, frame).unwrap();
+            let frames = 96_000 / frame;
+            let mut tail_energy = 0.0f64;
+            for k in 0..frames {
+                let pcm: Vec<f32> = (0..frame * channels)
+                    .map(|j| {
+                        let i = k * frame + j / channels;
+                        if k < frames / 2 && i % 500 == 17 {
+                            [f32::INFINITY, f32::NEG_INFINITY, 1e6, -1e6][(i / 500) % 4]
+                        } else {
+                            0.25 * (i as f32 * 0.0575).sin()
+                        }
+                    })
+                    .collect();
+                let packet = encoder.encode_f32_vec(&pcm, frame).unwrap();
+                let out = decoder.decode_f32_vec(&packet, false).unwrap();
+                assert!(out.iter().all(|v| v.is_finite()));
+                if k >= frames - frames / 8 {
+                    tail_energy += out.iter().map(|&v| f64::from(v * v)).sum::<f64>();
+                }
+            }
+            // After the bad samples stop, the encoder codes the tone again.
+            let rms = (tail_energy / (frames / 8 * frame * channels) as f64).sqrt();
+            assert!((0.1..0.3).contains(&rms), "frame {frame}, {channels} ch: rms {rms}");
+        }
+    }
+}

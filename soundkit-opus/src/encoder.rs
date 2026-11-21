@@ -216,6 +216,8 @@ pub struct Encoder {
     decisions: crate::tuning::Decisions,
     /// Peak of the last frame's overlap, for the silence check.
     overlap_max: f32,
+    /// Peak of the last frame's overlap, for the input clip.
+    clip_overlap_max: f32,
 }
 
 impl Encoder {
@@ -285,6 +287,7 @@ impl Encoder {
             max_packet_bytes: packet::MAX_FRAME_BYTES as usize,
             decisions: crate::tuning::Decisions::SOUNDKIT,
             overlap_max: 0.0,
+            clip_overlap_max: 0.0,
             mode,
         })
     }
@@ -1329,6 +1332,17 @@ impl Encoder {
         }
         self.hybrid_stereo_width_q14 = target_stereo_width_q14;
 
+        // libopus clips the input to twice full scale when any sample of the
+        // frame or the previous overlap exceeds 65536 times full scale
+        // (`st->clip`), so infinities stay finite.
+        let need_clip = {
+            let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+            let split = self.channels * (n - overlap.min(n));
+            let tail = peak(&pcm[split..self.channels * n]);
+            let sample_max = self.clip_overlap_max.max(peak(&pcm[..split])).max(tail);
+            self.clip_overlap_max = tail;
+            sample_max > 65_536.0
+        };
         scratch.inputs.resize_with(self.channels, Vec::new);
         for c in 0..self.channels {
             let input = &mut scratch.inputs[c];
@@ -1344,7 +1358,10 @@ impl Encoder {
             input[..overlap]
                 .copy_from_slice(&self.prefilter_mem[c][COMBFILTER_MAXPERIOD - overlap..]);
             for i in 0..n {
-                let sample = pcm[i * self.channels + c] * CELT_SIG_SCALE;
+                let mut sample = pcm[i * self.channels + c] * CELT_SIG_SCALE;
+                if need_clip {
+                    sample = sample.clamp(-65_536.0, 65_536.0);
+                }
                 input[overlap + i] = sample - self.preemph_mem[c];
                 self.preemph_mem[c] = self.mode.preemph[0] * sample;
             }

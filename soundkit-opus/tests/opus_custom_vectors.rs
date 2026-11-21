@@ -777,10 +777,31 @@ struct BudgetCase {
     cvbr: bool,
     max_bytes: usize,
     native_pvq: bool,
-    input: fn(&BudgetCase) -> Vec<i16>,
+    input: fn(&BudgetCase) -> Pcm,
 }
 
-const BUDGET_CASES: [BudgetCase; 6] = [
+enum Pcm {
+    I16(Vec<i16>),
+    F32(Vec<f32>),
+}
+
+impl Pcm {
+    fn bytes(&self) -> Vec<u8> {
+        match self {
+            Pcm::I16(v) => v.iter().flat_map(|s| s.to_le_bytes()).collect(),
+            Pcm::F32(v) => v.iter().flat_map(|s| s.to_le_bytes()).collect(),
+        }
+    }
+
+    fn format(&self) -> &'static str {
+        match self {
+            Pcm::I16(_) => "s16",
+            Pcm::F32(_) => "f32",
+        }
+    }
+}
+
+const BUDGET_CASES: [BudgetCase; 7] = [
     BudgetCase {
         name: "budget-f48-mono-max-2byte",
         frame: 48,
@@ -842,6 +863,19 @@ const BUDGET_CASES: [BudgetCase; 6] = [
         native_pvq: true,
         input: pan_signal,
     },
+    // Float input with infinities and samples beyond 65536 times full scale,
+    // which libopus clips to twice full scale.
+    BudgetCase {
+        name: "clip-f72-stereo-128k-cvbr",
+        frame: 72,
+        channels: 2,
+        bitrate: Some(128_000),
+        vbr: true,
+        cvbr: true,
+        max_bytes: 1275,
+        native_pvq: true,
+        input: huge_signal,
+    },
     // 20 ms frames (LM 3) reserve an anti-collapse bit in transient frames;
     // libopus sets it unless the two previous frames were transient.
     BudgetCase {
@@ -860,7 +894,7 @@ const BUDGET_CASES: [BudgetCase; 6] = [
 /// 1950 frames of 72 samples of a rising parabolic-sine chirp with noise
 /// bursts, in integer arithmetic. The first 640 of every 4800 samples go to
 /// both channels; the rest alternate between left only and right only.
-fn pan_signal(_case: &BudgetCase) -> Vec<i16> {
+fn pan_signal(_case: &BudgetCase) -> Pcm {
     let parabola = |phase: i64| -> i64 {
         let x = phase & 0xffff;
         if x >= 32_768 {
@@ -890,13 +924,33 @@ fn pan_signal(_case: &BudgetCase) -> Vec<i16> {
         };
         out.extend_from_slice(&[left, right]);
     }
-    out
+    Pcm::I16(out)
+}
+
+/// The budget signal as float, with infinities and +/-1e6 spikes in the
+/// first half.
+fn huge_signal(case: &BudgetCase) -> Pcm {
+    let Pcm::I16(pcm) = budget_signal(case) else {
+        unreachable!()
+    };
+    let half = pcm.len() / 2;
+    Pcm::F32(
+        pcm.iter()
+            .enumerate()
+            .map(|(i, &v)| match i % 701 {
+                13 if i < half => f32::INFINITY,
+                350 if i < half => -1e6,
+                500 if i < half => f32::NEG_INFINITY,
+                _ => f32::from(v) / 32_768.0,
+            })
+            .collect(),
+    )
 }
 
 /// The test signal from its first non-silent sample, cut to 0.2 s.
-fn budget_signal(case: &BudgetCase) -> Vec<i16> {
+fn budget_signal(case: &BudgetCase) -> Pcm {
     let start = 960 * case.channels;
-    signal(case.channels)[start..start + 9_600 * case.channels].to_vec()
+    Pcm::I16(signal(case.channels)[start..start + 9_600 * case.channels].to_vec())
 }
 
 fn budget_packets(case: &BudgetCase) -> Vec<u8> {
@@ -908,10 +962,17 @@ fn budget_packets(case: &BudgetCase) -> Vec<u8> {
     encoder.set_vbr_constraint(case.cvbr).unwrap();
     encoder.set_max_packet_bytes(case.max_bytes).unwrap();
     encoder.set_portable_pvq(!case.native_pvq).unwrap();
-    let packets: Vec<Vec<u8>> = (case.input)(case)
-        .chunks_exact(case.frame * case.channels)
-        .map(|frame| encoder.encode_i16_vec(frame, case.frame).unwrap())
-        .collect();
+    let samples = case.frame * case.channels;
+    let packets: Vec<Vec<u8>> = match (case.input)(case) {
+        Pcm::I16(pcm) => pcm
+            .chunks_exact(samples)
+            .map(|frame| encoder.encode_i16_vec(frame, case.frame).unwrap())
+            .collect(),
+        Pcm::F32(pcm) => pcm
+            .chunks_exact(samples)
+            .map(|frame| encoder.encode_f32_vec(frame, case.frame).unwrap())
+            .collect(),
+    };
     write_packets(&packets)
 }
 
@@ -948,11 +1009,8 @@ fn regenerate_budget_vectors() {
     let tool = c_tool().expect("set OPUS_CUSTOM_INTEROP_C to the libopus tool");
     for case in &BUDGET_CASES {
         let scratch = Scratch::new(case.name);
-        let pcm: Vec<u8> = (case.input)(case)
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        std::fs::write(scratch.path("in.s16"), pcm).unwrap();
+        let pcm = (case.input)(case);
+        std::fs::write(scratch.path("in.pcm"), pcm.bytes()).unwrap();
         let args = [
             "encode".to_string(),
             "--frame".into(),
@@ -968,8 +1026,8 @@ fn regenerate_budget_vectors() {
             "--max-bytes".into(),
             case.max_bytes.to_string(),
             "--pcm".into(),
-            "s16".into(),
-            scratch.path("in.s16"),
+            pcm.format().into(),
+            scratch.path("in.pcm"),
             scratch.path("lib.pkt"),
         ];
         run_c(&tool, &args.iter().map(String::as_str).collect::<Vec<_>>());
