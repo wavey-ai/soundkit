@@ -1122,7 +1122,11 @@ impl Decoder {
             for &value in &buf[dbs - n..dbs - n + extrapolation_len] {
                 s2 += value * value;
             }
-            if !(s1 > 0.2 * s2) {
+            // Written as in libopus so that a NaN from the filter also
+            // zeroes the frame.
+            #[allow(clippy::neg_cmp_op_on_partial_ord)]
+            let explosion = !(s1 > 0.2 * s2);
+            if explosion {
                 buf[dbs - n..dbs - n + extrapolation_len].fill(0.0);
             } else if s1 < s2 {
                 let ratio = ((s1 + 1.0) / (s2 + 1.0)).sqrt();

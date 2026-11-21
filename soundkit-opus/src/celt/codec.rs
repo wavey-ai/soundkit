@@ -1111,7 +1111,7 @@ fn apply_vbr_shrink(
     if config.silence {
         // A silent frame takes the minimum and leaves the drift alone.
         packet_bytes = 2;
-        quantized_target = 2 * 8 << BITRES;
+        quantized_target = (2 * 8) << BITRES;
         delta = 0;
     }
     let mut reservoir = vbr.reservoir;

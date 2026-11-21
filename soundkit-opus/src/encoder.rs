@@ -761,16 +761,6 @@ impl Encoder {
         }
     }
 
-    fn transient_analysis(
-        inputs: &[Vec<f32>],
-        channels: usize,
-        len: usize,
-        tone: ToneAnalysis,
-        scratch: &mut Vec<f32>,
-    ) -> TransientAnalysis {
-        Self::transient_analysis_mode(false, inputs, channels, len, tone, scratch)
-    }
-
     /// `transient_analysis`; `exact` evaluates the two expressions libopus
     /// computes in double precision the same way.
     fn transient_analysis_mode(
@@ -1224,6 +1214,7 @@ impl Encoder {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_filtered_f32_with_frame_bytes_into(
         &mut self,
         pcm: &mut [f32],
@@ -1254,6 +1245,7 @@ impl Encoder {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_filtered_f32_with_frame_bytes_inner(
         &mut self,
         pcm: &mut [f32],
@@ -1394,7 +1386,8 @@ impl Encoder {
             Some(control) => {
                 control.nb_available_bytes > 12 * stream_channels
                     && !control.silence
-                    && 1 + 16 <= (frame_bytes * 8) as i32
+                    // libopus: tell + 16 <= total_bits, with tell = 1.
+                    && (frame_bytes * 8) as i32 > 16
             }
             None => frame_bytes > 12 * stream_channels && (frame_bytes * 8) as i32 >= 16,
         } && crate::tuning::get(crate::tuning::PREFILTER_ENABLE, 1.0)
@@ -2268,7 +2261,8 @@ mod tests {
         input[0][540] = 1.0;
         let mut scratch = Vec::new();
 
-        let without_tone = Encoder::transient_analysis(
+        let without_tone = Encoder::transient_analysis_mode(
+            false,
             &input,
             1,
             input[0].len(),
@@ -2277,7 +2271,8 @@ mod tests {
         );
         assert!(without_tone.tf_estimate > 0.0);
 
-        let low_tone = Encoder::transient_analysis(
+        let low_tone = Encoder::transient_analysis_mode(
+            false,
             &input,
             1,
             input[0].len(),

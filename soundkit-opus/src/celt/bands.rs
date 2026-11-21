@@ -586,7 +586,7 @@ pub fn stereo_itheta(x: &[f32], y: &[f32], stereo: bool, n: usize) -> i32 {
 }
 
 /// libopus trunk's `celt_atan_norm`: atan(x) * 2 / pi on [0, 1].
-#[allow(clippy::excessive_precision)]
+#[allow(clippy::excessive_precision, clippy::approx_constant)]
 fn celt_atan_norm(x: f32) -> f32 {
     // The literals of libopus's `celt/mathops.h`, rounded to f32 as C does.
     const ATAN2_2_OVER_PI: f32 = 0.636619772367581;
@@ -732,6 +732,7 @@ impl BandCoder<'_, '_> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn alg_quant_or_unquant(
         &mut self,
         x: &mut [f32],

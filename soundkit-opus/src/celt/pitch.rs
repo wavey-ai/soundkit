@@ -447,6 +447,7 @@ fn dual_inner_prod(x: &[f32], y01: &[f32], y02: &[f32], n: usize) -> (f32, f32) 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn remove_doubling(
     x: &[f32],
     maxperiod: usize,
