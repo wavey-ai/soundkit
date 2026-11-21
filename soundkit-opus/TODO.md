@@ -126,3 +126,19 @@ independently when a product requires it.
 - Port hybrid decoding and transition redundancy.
 - Port SILK encoding and mode selection.
 - Port DRED and later optional extensions as separate work.
+
+## Opus Custom (1-1.5 ms frames)
+
+- Make the WebAssembly encoder cheaper with libopus arithmetic. Its fused
+  multiply-adds in the pitch correlation run in software (`fmaf`); a
+  round-to-odd `f64` evaluation would give the same results faster.
+- Measure quality at 1, 1.33 and 1.5 ms before tuning decisions for them.
+  libopus's equivalent-rate formula assumes 2.5 ms short blocks, so at 1 ms
+  and 192 kb/s stereo it codes the top bands with intensity stereo and lowers
+  the allocation trim.
+- Decide whether the standard path should adopt the libopus fixes found by
+  the interop work (silence flag, `last` shared across channels in
+  dynalloc, trunk's pitch-doubling check, round-half-even output). Each one
+  changes standard packets or PCM, so each needs the quality gate.
+- Support a stereo stream into a mono custom decoder.
+

@@ -55,10 +55,199 @@ for the method, the changes, and the build configuration.
   `Encoder`/`Decoder` types for 2.5, 5, 10, and 20 ms fullband frames
   with CBR, constrained VBR, unconstrained VBR, or exact
   compressed-frame-byte controls
+- Opus Custom CELT modes at 48 kHz, including 1, 1.33 and 1.5 ms frames,
+  interoperable with libopus custom modes (see below)
+- packet-loss concealment
 - signed 24-bit PCM encode/decode APIs using sign-extended `i32` samples
 
 The codec is incomplete. The supported audio path is limited to CELT-only raw
 frames. Ogg Opus, SILK, and hybrid speech coding are not implemented.
+
+## Opus Custom Modes (1, 1.33 and 1.5 ms)
+
+Standard Opus (RFC 6716) stops at 2.5 ms frames. libopus's Opus Custom API
+(`opus_custom_mode_create`) builds CELT modes for other frame sizes at the
+same sample rate, and this crate now implements them:
+
+| Frame | Duration | Short block / MDCT overlap | Bands | Codec delay (frame + overlap) | Packets/s |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 48 | 1 ms | 48 | 15 | 96 samples (2 ms) | 1000 |
+| 64 | 1.33 ms | 64 | 17 | 128 samples (2.67 ms) | 750 |
+| 72 | 1.5 ms | 72 | 18 | 144 samples (3 ms) | 666.7 |
+| 120 | 2.5 ms | 120 | 21 | 240 samples (5 ms) | 400 |
+| 240 | 5 ms | 120 | 21 | 360 samples (7.5 ms) | 200 |
+
+The overlap is the look-ahead libopus reports through `OPUS_GET_LOOKAHEAD`.
+A custom mode's overlap equals its short block, so a 1 ms mode cuts the
+codec's own delay from 5 ms to 2 ms. The custom modes have a single short
+block (`LM = 0`): no transient short blocks, no dual stereo and no
+anti-collapse, as in libopus.
+
+`CeltMode::custom_48k_shared(frame_size)` returns the shared mode for any
+frame size libopus accepts at 48 kHz (even sizes from 48 to 1024 samples
+whose short blocks are at most 3.3 ms and whose quarter-MDCT FFT factors
+into 2, 3, 4 and 5). Sizes of 120, 240, 480 and 960 samples give the standard
+mode, as in libopus. `tests/opus_custom_modes.rs` checks the band layout,
+allocation table, `logN`, window bits and pulse cache against libopus for 19
+frame sizes.
+
+### API
+
+```rust
+use soundkit_opus::{Decoder, Encoder};
+
+let mut encoder = Encoder::new_custom(48_000, 2, 48)?; // 1 ms
+encoder.set_bitrate(256_000)?; // default: BITRATE_MAX (fill each packet)
+encoder.set_vbr(false)?; // CBR, as libopus; set_vbr(true) for constrained VBR
+let packet = encoder.encode_i16_vec(&pcm, 48)?;
+
+let mut decoder = Decoder::new_custom(48_000, 2, 48)?;
+let pcm = decoder.decode_i16_vec(&packet, false)?;
+let concealed = decoder.decode_i16_vec(&[], false)?; // a lost packet
+```
+
+- Packets use the `opus_custom_encode` format: one signalling byte
+  (`(effEBands - end) / 2 << 5 | LM << 3 | stereo << 2`) and the CELT frame,
+  with no Opus TOC. For the standard mode libopus writes that byte as an Opus
+  TOC, and so does this crate. `set_custom_signalling(false)` on both ends
+  drops the byte (`CELT_SET_SIGNALLING(0)`); the frame size and channel count
+  are then known out of band.
+- Rate control follows libopus's custom encoder: `BITRATE_MAX` by default
+  (each packet fills `set_max_packet_bytes`, 1275 bytes unless changed), the
+  CBR packet size `(bitrate * N + 4 * Fs) / (8 * Fs)` minus the signalling
+  byte, VBR targets from `bitrate_to_bits` less 8 bits of signalling,
+  constrained VBR by default once VBR is on, and libopus's silence flag for
+  digital silence.
+- There is no Opus layer in custom mode, as in libopus: no DC filter,
+  tonality analysis, stereo-width fade or mono downmix at low rates.
+- An empty packet, or one with at most one byte of CELT data, conceals a lost
+  frame with libopus's pitch-based concealment, falling back to noise after
+  40 short blocks, then folds the concealment into the next decoded frame.
+  Standard Opus decoders conceal the same way, one frame of the last decoded
+  size per empty packet.
+- The encoder always runs the analysis of libopus complexity 10.
+- Not implemented: a stereo stream into a mono decoder, `CELT_SET_END_BAND`
+  and `CELT_SET_START_BAND`, and libopus's QEXT extension.
+
+The WebAssembly API (`wasm` feature) has `Encoder.newCustom(channels,
+frameSize)` and `Decoder.newCustom(channels, frameSize)`, with
+`set_bitrate`, `set_custom_signalling`, `set_max_packet_bytes`,
+`set_libopus_decisions`, `enc_frame_f32`, `dec_frame_f32` and `dec_lost`.
+
+### Arithmetic and decision constants
+
+Custom encoders and decoders default to libopus arithmetic
+(`CeltMode::exact_math`): `celt_log2`/`celt_exp2` computed through
+double-precision `log`/`exp` as in a libopus build without
+`FLOAT_APPROX` (the default for libopus's autotools and CMake builds),
+libopus's x86-64 summation orders for inner products, correlations and the
+post-filter, trunk's radix-5 butterfly, `stereo_itheta` and pitch checks, the
+exact static tables for the standard mode, and integer output rounded half
+to even (`lrintf`). `src/celt/refkern.rs` holds those orders in portable
+scalar code, so they give the same results on every target.
+
+Custom encoders also default to libopus's decision constants
+(`tuning::Decisions::LIBOPUS`) instead of SoundKit's four tuned ones. The
+tuning report measured those constants at 5, 10 and 20 ms only; nothing
+shows they help at 1-1.5 ms, where there are no short blocks and the
+pre-filter period is long compared with the frame. libopus's constants make
+the Rust packets equal `opus_custom_encode`'s, which is the strongest
+interop evidence. `set_libopus_decisions(false)` selects SoundKit's
+constants, and the `tuning` feature's knobs still override either.
+
+Standard Opus encoders and decoders keep SoundKit's arithmetic and tuned
+constants, so their packets and decoded PCM do not change.
+`set_libopus_arithmetic(true)` and `set_libopus_decisions(true)` make them
+follow libopus as well.
+
+On x86-64 the encoder's PVQ search follows libopus's SSE2 search, whose
+`rcpps`/`rsqrtps` estimates come from the CPU and differ between vendors.
+`Encoder::set_portable_pvq(true)` uses libopus's generic C search instead;
+native and WebAssembly builds then produce the same packets.
+
+### Interop with libopus custom modes
+
+The harness compares the Rust codec with libopus built with
+`-DOPUS_CUSTOM_MODES=ON` (xiph/opus main at `316c675f`, 2026-11-20, a default
+x86-64 CMake Release build: no `FLOAT_APPROX`, SSE and AVX2 run-time
+dispatch, DRED, deep PLC and OSCE off). The libopus encoder ran at
+`OPUS_SET_COMPLEXITY(10)`. It runs four comparisons for every case:
+
+- (a) Rust packets decoded by `opus_custom_decode` and by the Rust decoder;
+- (b) libopus packets decoded by both decoders;
+- (c) Rust packets against `opus_custom_encode`'s, byte for byte;
+- (d) libopus packets with a fixed loss pattern (about 5% single losses and
+  bursts of 2, 3 and 50 frames, the last long enough to reach the noise
+  concealment) decoded by both decoders.
+
+Inputs were a 3 s synthetic signal (tones, a chirp, noise bursts, clicks, a
+quiet stretch and digital silence) and three 10 s excerpts of 24-bit studio
+masters, each in mono and stereo, through the s16, s24 and float APIs. Results
+on 2026-11-21, x86-64 (AMD EPYC 7713):
+
+| Matrix | Frames | Cases | (a) PCM identical | (b) PCM identical | (d) PCM identical | (c) identical packets |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 192, 256, 320 kb/s; CBR, constrained VBR; s16, s24, float; signalling on and off | 48, 64, 72, 120, 240 | 1440 | 1440 | 1440 | 1440 | 7,167,456 of 7,167,456 |
+| maximum, 64, 128, 510 kb/s; CBR, constrained and unconstrained VBR; s16; signalling on and off | 48, 64, 72, 120, 240 | 960 | 960 | 960 | 960 | 4,778,304 of 4,778,304 |
+| 192, 256, 320 kb/s; unconstrained VBR; s16, s24, float | 48, 64, 72, 120, 240 | 360 | 360 | 360 | 360 | 1,791,864 of 1,791,864 |
+
+Every decoded sample matched, in every PCM format, including concealment,
+and every packet matched. The 120 and 240-sample frames are the standard 2.5
+and 5 ms modes run through the custom API, whose packets are standard
+CELT-only Opus packets.
+
+As a control, the same harness ran today's standard 2.5 and 5 ms path, with
+SoundKit's arithmetic and tuned constants (192-320 kb/s, CBR and
+constrained VBR, the four inputs, 288 cases). No case decoded identically:
+21% of 16-bit samples differed by 1 to 3 LSB on libopus packets, float output
+differed in 99.7% of samples by up to 2.8/32768, and 1-4% of packets matched
+libopus's. The differences come from the approximate `log2`/`exp2`, the
+summation orders, the rounding of the static tables and of integer output,
+and the tuned constants; with libopus arithmetic and decisions the same
+frame sizes match exactly, as the table shows.
+
+The golden vectors in `tests/data/opus_custom/vectors` repeat checks (a),
+(b) and (d) for four synthetic cases without libopus, and check (c) on CPUs
+with the same `rcpps` estimates as the generating machine.
+
+WebAssembly (SIMD128 and scalar builds, in Node.js 26) decodes every packet
+to the same samples as the native build. With the portable PVQ search the
+WebAssembly encoder's packets equal the native encoder's. With the default
+x86-64 search, 78-98% of native packets match the WebAssembly ones on the
+excerpts tested; the rest differ where `rcpps`/`rsqrtps` change a PVQ
+decision, as they also do between x86-64 libopus builds on different CPUs.
+
+Rough CPU cost on the same shared host (milliseconds of one core per second
+of 48 kHz stereo audio at 256 kb/s CBR, minimum of three runs, including
+process start and file I/O; not a benchmark):
+
+| Frame | Rust encode | libopus encode | Rust decode | libopus decode | WebAssembly encode | WebAssembly decode |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 48 (1 ms) | 27.1 | 22.0 | 7.0 | 6.2 | 85.5 | 21.3 |
+| 64 (1.33 ms) | 24.5 | 20.5 | 6.5 | 6.0 | 82.6 | 21.1 |
+| 72 (1.5 ms) | 23.5 | 19.1 | 6.3 | 5.7 | 79.6 | 22.0 |
+| 120 (2.5 ms) | 19.3 | 15.8 | 5.7 | 5.2 | 74.8 | 20.0 |
+| 240 (5 ms) | 15.6 | 12.7 | 5.0 | 4.4 | 68.8 | 18.7 |
+
+The native build used the default x86-64 target (no `-C target-cpu`).
+
+Run the matrix with:
+
+```sh
+OPUS_SRC=/path/to/opus tools/run_opus_custom_interop.sh --jobs 6
+MUSIC=a.s32le,b.s32le OPUS_SRC=/path/to/opus tools/run_opus_custom_interop.sh \
+  --frames 48,64,72,120,240 --rates 192000,256000,320000 --modes cbr,cvbr,uvbr
+```
+
+`tools/opus_custom_interop.py run --rust-extra '--arith soundkit --decisions
+soundkit'` runs the control. `tools/run_wasm_custom_interop.mjs` runs the
+WebAssembly build (`examples/wasm_custom_interop.rs`) with the native tool's
+arguments. The live comparison in the crate tests runs with:
+
+```sh
+OPUS_CUSTOM_INTEROP_C=/path/to/opus_custom_interop_c \
+  cargo test --test opus_custom_vectors -- --ignored live_libopus_comparison
+```
 
 ## Codec Status
 

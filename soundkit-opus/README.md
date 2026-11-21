@@ -58,6 +58,19 @@ Before the encoder changes, the 2026-08-25 four-source test scored Rust at
 
 Read the [2026-08-25 perceptual quality report](quality-results/2026-08-25-soundkit-diverse-v1-5ms/README.md) for the complete results and limits.
 
+## Opus Custom: 1, 1.33 and 1.5 ms frames
+
+`Encoder::new_custom` and `Decoder::new_custom` add the Opus Custom CELT
+modes of libopus at 48 kHz, including 48, 64 and 72-sample frames (1, 1.33
+and 1.5 ms). A 1 ms mode cuts the codec delay (frame plus look-ahead) from
+5 ms at 2.5 ms frames to 2 ms. Packets use the `opus_custom_encode` format,
+and the decoder conceals lost packets. With their default libopus
+arithmetic and decision constants, the Rust packets and decoded PCM equal
+libopus's custom encoder and decoder byte for byte and sample for sample in
+2760 tested cases. Standard Opus streams keep SoundKit's tuned encoder and
+their output is unchanged. Read the Opus Custom section of
+[CODEC.md](CODEC.md).
+
 Read [CODEC.md](CODEC.md) for the codec API, support limits, and benchmark commands.
 
 ## Repository history
