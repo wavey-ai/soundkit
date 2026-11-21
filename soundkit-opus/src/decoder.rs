@@ -26,6 +26,11 @@ const PLC_PITCH_LAG_MIN: usize = 100;
 const CELT_LPC_ORDER: usize = 24;
 const MAX_PERIOD: usize = 1024;
 const ENERGY_FLOOR: f32 = -28.0;
+/// Storage per channel for the post-filter history. The history is a
+/// `DECODE_BUFFER_SIZE` window that slides forward by one frame per decoded
+/// frame and is moved back to the start only when it reaches the end, so a
+/// frame costs a copy of its own samples rather than of the whole history.
+const HISTORY_STORAGE: usize = 2 * DECODE_BUFFER_SIZE;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FrameType {
@@ -81,9 +86,13 @@ pub struct Decoder {
     /// frame (`decode_mem[DECODE_BUFFER_SIZE..]` in libopus).
     overlap_mem: Vec<Vec<f32>>,
     /// The last `DECODE_BUFFER_SIZE` post-filtered samples per channel
-    /// (`decode_mem[..DECODE_BUFFER_SIZE]` in libopus). While a frame is
-    /// filtered the buffer briefly holds the new frame after the history.
+    /// (`decode_mem[..DECODE_BUFFER_SIZE]` in libopus), at
+    /// `decode_mem[c][decode_head[c]..][..DECODE_BUFFER_SIZE]` in storage of
+    /// `HISTORY_STORAGE` samples. While a frame is filtered the new frame
+    /// follows the history. Channel 1's history is stale while
+    /// `channels_mirrored` is set.
     decode_mem: Vec<Vec<f32>>,
+    decode_head: [usize; 2],
     decode_scratch: CeltFrameDecodeScratch,
     synthesis_channels: Vec<Vec<f32>>,
     synthesis_scratch: SynthesisScratch,
@@ -108,8 +117,9 @@ pub struct Decoder {
     plc_scratch: PlcScratch,
     /// A stereo decoder whose two channels hold identical state: every
     /// frame so far was mono and nothing was concealed. A mono frame can
-    /// then be synthesised once and copied, with the same result as
-    /// libopus's per-channel synthesis.
+    /// then be synthesised and post-filtered once and copied, with the same
+    /// result as libopus's per-channel synthesis. Channel 1's post-filter
+    /// history is only brought up to date when the channels part.
     channels_mirrored: bool,
 }
 
@@ -182,7 +192,8 @@ impl Decoder {
             background_log_e: vec![0.0; 2 * nb],
             preemph_mem: vec![0.0; channels],
             overlap_mem: vec![vec![0.0; mode.overlap]; channels],
-            decode_mem: vec![vec![0.0; DECODE_BUFFER_SIZE]; channels],
+            decode_mem: vec![vec![0.0; HISTORY_STORAGE]; channels],
+            decode_head: [0; 2],
             decode_scratch: CeltFrameDecodeScratch::default(),
             synthesis_channels: vec![Vec::new(); channels],
             synthesis_scratch: SynthesisScratch::default(),
@@ -636,6 +647,9 @@ impl Decoder {
         // stereo stream a mono one. While a stereo decoder's channels are
         // still identical, one channel is computed and copied.
         let mirror = stream_channels == 1 && self.channels == 2 && self.channels_mirrored;
+        if !mirror {
+            self.unmirror();
+        }
         let output_channels = if mirror { 1 } else { self.channels };
         let y = (config.channels == 2).then(|| &self.decode_scratch.y[..decoded.samples]);
         celt_synthesis_channels_into(
@@ -662,16 +676,11 @@ impl Decoder {
                 right[0].clone_from(&left[0]);
             }
             {
-                let (left, right) = self.decode_mem.split_at_mut(1);
-                right[0].clone_from(&left[0]);
-            }
-            {
                 let (left, right) = self.synthesis_channels.split_at_mut(1);
                 right[0].clear();
                 right[0].extend_from_slice(&left[0]);
             }
         }
-        self.channels_mirrored = mirror;
         self.update_energy_history(stream_channels, decoded.is_transient, 1 << lm);
         self.loss_duration = 0;
         self.plc_duration = 0;
@@ -733,11 +742,16 @@ impl Decoder {
             || self.postfilter_gain != 0.0
             || (lm != 0 && postfilter_gain != 0.0);
         for c in 0..channels {
-            // The history buffer gains the new frame at its end, is filtered
-            // in place, and then drops its oldest `n` samples.
-            let memory = &mut self.decode_mem[c];
-            memory.truncate(DECODE_BUFFER_SIZE);
-            memory.extend_from_slice(&self.synthesis_channels[c][..n]);
+            // The new frame follows the history, is filtered in place, and the
+            // history window then moves forward by `n` samples.
+            let mut head = self.decode_head[c];
+            let storage = &mut self.decode_mem[c];
+            if head + DECODE_BUFFER_SIZE + n > storage.len() {
+                storage.copy_within(head..head + DECODE_BUFFER_SIZE, 0);
+                head = 0;
+            }
+            let memory = &mut storage[head..head + DECODE_BUFFER_SIZE + n];
+            memory[DECODE_BUFFER_SIZE..].copy_from_slice(&self.synthesis_channels[c][..n]);
             if filters_active {
                 comb_filter_in_place_mode(
                     exact,
@@ -769,11 +783,9 @@ impl Decoder {
                         self.mode.overlap,
                     );
                 }
-                self.synthesis_channels[c][..n]
-                    .copy_from_slice(&memory[DECODE_BUFFER_SIZE..DECODE_BUFFER_SIZE + n]);
+                self.synthesis_channels[c][..n].copy_from_slice(&memory[DECODE_BUFFER_SIZE..]);
             }
-            memory.copy_within(n..DECODE_BUFFER_SIZE + n, 0);
-            memory.truncate(DECODE_BUFFER_SIZE);
+            self.decode_head[c] = head + n;
         }
 
         self.postfilter_period_old = self.postfilter_period;
@@ -789,6 +801,25 @@ impl Decoder {
         }
     }
 
+    /// Channel `c`'s post-filter history (`DECODE_BUFFER_SIZE` samples).
+    fn history(&self, c: usize) -> &[f32] {
+        let head = self.decode_head[c];
+        &self.decode_mem[c][head..head + DECODE_BUFFER_SIZE]
+    }
+
+    /// Ends mirroring: brings channel 1's post-filter history up to date
+    /// with channel 0's, after which each channel keeps its own state.
+    fn unmirror(&mut self) {
+        if self.channels == 2 && self.channels_mirrored {
+            let head = self.decode_head[0];
+            let (left, right) = self.decode_mem.split_at_mut(1);
+            right[0][head..head + DECODE_BUFFER_SIZE]
+                .copy_from_slice(&left[0][head..head + DECODE_BUFFER_SIZE]);
+            self.decode_head[1] = head;
+            self.channels_mirrored = false;
+        }
+    }
+
     /// `prefilter_and_fold` on the next frame's MDCT overlap: undo the
     /// post-filter the concealment applied, then simulate TDAC so the
     /// concealed audio blends with the next decoded frame.
@@ -798,7 +829,10 @@ impl Decoder {
         for c in 0..self.channels {
             let fold = &mut self.plc_scratch.fold;
             fold.clear();
-            fold.extend_from_slice(&self.decode_mem[c][DECODE_BUFFER_SIZE - history..]);
+            let head = self.decode_head[c];
+            fold.extend_from_slice(
+                &self.decode_mem[c][head + DECODE_BUFFER_SIZE - history..head + DECODE_BUFFER_SIZE],
+            );
             fold.extend_from_slice(&self.overlap_mem[c]);
             let etmp = &mut self.plc_scratch.etmp;
             etmp.resize(overlap, 0.0);
@@ -826,12 +860,13 @@ impl Decoder {
         let cc = self.channels;
         let overlap = mode.overlap;
         let dbs = DECODE_BUFFER_SIZE;
+        self.unmirror();
         // Lay the state out as libopus's decode_mem: history, then overlap.
         let mut memory = std::mem::take(&mut self.plc_scratch.memory);
         memory.resize_with(cc, Vec::new);
         for c in 0..cc {
             memory[c].clear();
-            memory[c].extend_from_slice(&self.decode_mem[c]);
+            memory[c].extend_from_slice(self.history(c));
             memory[c].extend_from_slice(&self.overlap_mem[c]);
         }
 
@@ -845,14 +880,13 @@ impl Decoder {
         };
 
         for c in 0..cc {
-            self.decode_mem[c].clear();
-            self.decode_mem[c].extend_from_slice(&memory[c][..dbs]);
+            self.decode_mem[c][..dbs].copy_from_slice(&memory[c][..dbs]);
+            self.decode_head[c] = 0;
             self.overlap_mem[c].copy_from_slice(&memory[c][dbs..dbs + overlap]);
             self.synthesis_channels[c].clear();
             self.synthesis_channels[c].extend_from_slice(&memory[c][dbs - n..dbs]);
         }
         self.plc_scratch.memory = memory;
-        self.channels_mirrored = false;
         self.loss_duration = 10_000.min(self.loss_duration + (1 << lm));
         self.plc_duration = 10_000.min(self.plc_duration + (1 << lm));
         self.last_frame_type = frame_type;
