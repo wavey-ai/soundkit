@@ -117,7 +117,14 @@ let concealed = decoder.decode_i16_vec(&[], false)?; // a lost packet
   CBR packet size `(bitrate * N + 4 * Fs) / (8 * Fs)` minus the signalling
   byte, VBR targets from `bitrate_to_bits` less 8 bits of signalling,
   constrained VBR by default once VBR is on, and libopus's silence flag for
-  digital silence.
+  digital silence. At 1 ms frames the `BITRATE_MAX` default is about 10 Mb/s
+  per stream, so set a bitrate for any real link. `set_bitrate`, `set_vbr`
+  and `set_vbr_constraint` keep the VBR reservoir and drift, as libopus's
+  ctls do, so the rate can change between frames and the packets still match
+  `opus_custom_encode`'s (standard encoders restart them).
+- Input beyond 65536 times full scale, infinities included, makes the
+  encoder clip that frame to twice full scale, as libopus's `st->clip` does
+  (all encoders). NaN input is not sanitised, as in libopus.
 - There is no Opus layer in custom mode, as in libopus: no DC filter,
   tonality analysis, stereo-width fade or mono downmix at low rates.
 - An empty packet, or one with at most one byte of CELT data, conceals a lost
@@ -137,8 +144,12 @@ let concealed = decoder.decode_i16_vec(&[], false)?; // a lost packet
   uses. libopus's `OPUS_INTERNAL_ERROR` for a frame that reads past its end is
   not reproduced; no test has produced one.
 - A 2-byte packet limit with signalling leaves one byte of CELT data, which
-  both libopus and this crate encode; for digital silence both return an
-  internal error.
+  both libopus and this crate encode at `BITRATE_MAX`; for digital silence
+  both return an internal error. With a CBR bitrate libopus takes 2 bytes of
+  CELT data anyway and writes a 3-byte packet into the 2-byte buffer; this
+  crate keeps to the limit (1 byte of CELT data, so the packets differ).
+- i24 output saturates to the 24-bit range by default; see
+  `Decoder::set_libopus_i24_range` and the interop notes below.
 - Not implemented: `CELT_SET_END_BAND` and `CELT_SET_START_BAND`, and
   libopus's QEXT extension.
 
@@ -169,10 +180,17 @@ interop evidence. `set_libopus_decisions(false)` selects SoundKit's
 constants, and the `tuning` feature's knobs still override either.
 
 Standard Opus encoders and decoders keep SoundKit's arithmetic and tuned
-constants. Their packets do not change, nor does the PCM they decode from
-SoundKit's packets: a gate of 960 encode and decode configurations (2.5 to
-20 ms, 64 to 320 kb/s, CBR and both VBR modes, s16 and s24, synthetic and
-music inputs) and four libopus streams matches origin/main hash for hash.
+constants. Their packets do not change, nor, with one exception below, does
+the PCM they decode from SoundKit's packets: a gate of 960 encode and decode
+configurations (2.5 to 20 ms, 64 to 320 kb/s, CBR and both VBR modes, s16
+and s24, synthetic and music inputs) and four libopus streams matches
+origin/main hash for hash. The exception is a stereo stream with mono-coded
+packets, which SoundKit's stereo encoders produce at low bitrates (for
+example 32 kb/s at 2.5 or 5 ms): from the first switch back to mono coding
+the decode now follows libopus (in one such stream the largest error against
+libopus fell from 2684 to 1 LSB). The encoder's input clip also changes
+packets for input beyond 65536 times full scale, which before produced
+undefined energies.
 Decoding some other libopus streams changes, where the decoder now follows
 libopus: mono energy bookkeeping (one libopus `RESTRICTED_LOWDELAY` mono
 stream at 64 kb/s changed in 15 frames, its largest error against libopus
@@ -185,7 +203,13 @@ instead of an error). `set_libopus_arithmetic(true)` and
 On x86-64 the encoder's PVQ search follows libopus's SSE2 search, whose
 `rcpps`/`rsqrtps` estimates come from the CPU and differ between vendors.
 `Encoder::set_portable_pvq(true)` uses libopus's generic C search instead;
-native and WebAssembly builds then produce the same packets.
+native and WebAssembly builds then produce the same packets (384 of 384
+streams: 48, 64 and 72 samples, mono and stereo, s16 and float, CBR and
+constrained VBR, signalling on and off, a music excerpt, a hard-panned
+chirp, clicks and noise, in both WebAssembly builds). The libm functions the
+arithmetic uses (`log`, `exp`, `acos`, `cos` in double precision, rounded to
+`f32`) give the same `f32` results from glibc and from the WebAssembly
+target's libm for every `f32` input, checked exhaustively.
 
 Packet identity is with x86-64 libopus using its default run-time CPU
 dispatch. A libopus built without intrinsics (`OPUS_DISABLE_INTRINSICS`, or a
@@ -248,7 +272,9 @@ Edge cases, checked with separate tools against the same libopus build:
 - Packet limits from 2 to 1276 bytes at maximum bitrate and 2 Mb/s (8448
   cases): 15,650,216 of 15,650,216 packets and every decoded sample
   identical; in 72 cases (digital or near silence with a 2-byte limit and
-  signalling) both encoders return an internal error on the first frame.
+  signalling) both encoders return an internal error on the first frame. (Run before the CBR budget was capped at the limit: with a 2-byte limit,
+  signalling and the 2 Mb/s CBR rate, this crate now writes 2-byte packets
+  where libopus writes 3.)
 - Low and extreme rates, 501 b/s to 2 Mb/s, CBR and both VBR modes, at 48,
   64 and 72 samples (2352 cases): every packet (4,978,288) and every
   decoded sample identical. The 120 and 240-sample frames are the standard 2.5
@@ -271,8 +297,11 @@ with the same `rcpps` estimates as the generating machine (elsewhere the
 test prints a warning, and fails with `SOUNDKIT_OPUS_REQUIRE_NATIVE_VECTORS=1`).
 Further vectors check mono/stereo switches, downmixing and damaged packets
 against libopus's decodes (`f48-switch`, `f120-switch`, the latter also
-through the standard Opus decoder), and libopus's packets for 2 and 3-byte limits
-and 4 kb/s VBR (`budget-*`).
+through the standard Opus decoder), and libopus's packets for 2 and 3-byte
+limits and 4 kb/s VBR (`budget-*`), for constrained VBR on a hard-panned
+signal where the trim symbol often does not fit (`pan-*`), for float input
+with infinities (`clip-*`), for mid-stream rate changes (`rates-*`) and for
+the anti-collapse flag at 20 ms (`anticollapse-*`).
 
 WebAssembly (SIMD128 and scalar builds, in Node.js 26) decodes every packet
 to the same samples as the native build. With the portable PVQ search the
