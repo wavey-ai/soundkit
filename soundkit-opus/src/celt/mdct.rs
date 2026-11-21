@@ -1,6 +1,6 @@
 //! Floating-point CELT MDCT, ported from the official Opus `celt/mdct.c`.
 
-use crate::celt::kiss_fft::{opus_fft_impl, KissFftCpx, KissFftState};
+use crate::celt::kiss_fft::{opus_fft_impl, KissFftCpx, KissFftState, TwiddleTable};
 
 const PI: f64 = core::f64::consts::PI;
 
@@ -20,12 +20,32 @@ pub struct MdctScratch {
 }
 
 impl MdctLookup {
+    /// MDCT whose FFT and rotation twiddles carry the 8-digit rounding of
+    /// libopus's static 48 kHz tables.
     pub fn new(n: usize, maxshift: usize) -> Option<Self> {
+        Self::build(n, maxshift, TwiddleTable::Legacy)
+    }
+
+    /// MDCT whose twiddles equal libopus's static 48 kHz tables exactly
+    /// (8 significant digits of `-sin` and `cos`, read as `f32`).
+    pub fn new_static(n: usize, maxshift: usize) -> Option<Self> {
+        Self::build(n, maxshift, TwiddleTable::Static)
+    }
+
+    /// MDCT whose twiddles are computed in double precision and rounded once
+    /// to `f32`, as `clt_mdct_init` does for a custom mode: the cosine half
+    /// holds `cos(2*pi*(i + 1/8)/N)` and the sine half holds
+    /// `-sin(2*pi*(i + 1/8)/N)`.
+    pub fn new_exact(n: usize, maxshift: usize) -> Option<Self> {
+        Self::build(n, maxshift, TwiddleTable::Runtime)
+    }
+
+    fn build(n: usize, maxshift: usize, table: TwiddleTable) -> Option<Self> {
         if n < 4 || n % 4 != 0 {
             return None;
         }
 
-        let base = KissFftState::new(n >> 2)?;
+        let base = KissFftState::build(n >> 2, None, table)?;
         let mut kfft = vec![base];
         for shift in 1..=maxshift {
             let nfft = n >> 2 >> shift;
@@ -42,10 +62,17 @@ impl MdctLookup {
         let mut n2 = n >> 1;
         for _ in 0..=maxshift {
             trig_offset.push(trig.len());
-            for i in 0..n2 {
-                trig.push(round_static_float_phase(
-                    2.0 * PI * (i as f64 + 0.125) / cur_n as f64,
-                ));
+            if table != TwiddleTable::Legacy {
+                let n4 = n2 >> 1;
+                let phase = |i: usize| 2.0 * PI * (i as f64 + 0.125) / cur_n as f64;
+                trig.extend((0..n4).map(|i| table.round(phase(i).cos())));
+                trig.extend((0..n4).map(|i| table.round(-phase(i).sin())));
+            } else {
+                for i in 0..n2 {
+                    trig.push(round_static_float_phase(
+                        2.0 * PI * (i as f64 + 0.125) / cur_n as f64,
+                    ));
+                }
             }
             n2 >>= 1;
             cur_n >>= 1;

@@ -123,6 +123,58 @@ pub fn celt_log2_db(x: f32) -> f32 {
     celt_log2(x)
 }
 
+/// `celt_log2` of a libopus float build without `FLOAT_APPROX` (the default
+/// for both its autotools and CMake builds): `(float)(log(x) / ln 2)` in
+/// double precision.
+#[inline]
+pub fn celt_log2_exact(x: f32) -> f32 {
+    (core::f64::consts::LOG2_E * (x as f64).ln()) as f32
+}
+
+/// `celt_exp2` of a libopus float build without `FLOAT_APPROX`:
+/// `(float)exp(ln 2 * x)` in double precision.
+#[inline]
+pub fn celt_exp2_exact(x: f32) -> f32 {
+    (core::f64::consts::LN_2 * x as f64).exp() as f32
+}
+
+/// `celt_log2` for a mode: the exact definition when the mode selects
+/// libopus's default float arithmetic, else SoundKit's established
+/// approximation.
+#[inline]
+pub fn mode_log2(exact: bool, x: f32) -> f32 {
+    if exact {
+        celt_log2_exact(x)
+    } else {
+        celt_log2(x)
+    }
+}
+
+/// `celt_exp2` for a mode; see [`mode_log2`].
+#[inline]
+pub fn mode_exp2(exact: bool, x: f32) -> f32 {
+    if exact {
+        celt_exp2_exact(x)
+    } else {
+        celt_exp2(x)
+    }
+}
+
+/// libopus `FLOAT2INT16`: scale, clamp, then round half to even as
+/// `lrintf` and `cvtss2si` do.
+#[inline]
+pub fn float_to_i16_exact(x: f32) -> i16 {
+    let x = (x * 32768.0).clamp(-32768.0, 32767.0);
+    x.round_ties_even() as i16
+}
+
+/// libopus `FLOAT2INT24`: scale, clamp to +/-2^24, round half to even.
+#[inline]
+pub fn float_to_i24_exact(x: f32) -> i32 {
+    let x = (x * 8_388_608.0).clamp(-16_777_216.0, 16_777_216.0);
+    x.round_ties_even() as i32
+}
+
 /// Converts the floor of an `f32` to `i32` without a libm call.
 ///
 /// Rust float-to-integer casts truncate toward zero and saturate. Subtracting

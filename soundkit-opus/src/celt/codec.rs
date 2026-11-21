@@ -6,7 +6,7 @@ use crate::celt::bands::{
     quant_all_bands_stereo_with_scratch_and_coding, BandCoder, BandScratch, SPREAD_NORMAL,
 };
 use crate::celt::entropy::{RangeDecoder, RangeEncoder};
-use crate::celt::mathops::{celt_exp2, ec_ilog};
+use crate::celt::mathops::{ec_ilog, mode_exp2};
 use crate::celt::modes::CeltMode;
 use crate::celt::pitch::PrefilterDecision;
 use crate::celt::quant_bands::{
@@ -413,15 +413,16 @@ fn tf_analysis(
     lm: usize,
     tf_estimate: f32,
     importance: &[i32],
+    tf_bias_scale: f32,
     scratch: &mut TfAnalysisScratch,
 ) -> i32 {
     let transient_idx = usize::from(is_transient);
-    // Three times the libopus TF-change penalty. In PEAQ tests on 40 music
-    // tracks at 5, 10, and 20 ms frames, fewer resolution changes scored
-    // higher on every source.
+    // SoundKit scales the libopus TF-change penalty by three. In PEAQ tests
+    // on 40 music tracks at 5, 10, and 20 ms frames, fewer resolution changes
+    // scored higher on every source.
     let bias = 0.04
         * (-0.25f32).max(0.5 - tf_estimate)
-        * crate::tuning::get(crate::tuning::TF_BIAS_SCALE, 3.0);
+        * crate::tuning::get(crate::tuning::TF_BIAS_SCALE, tf_bias_scale);
     scratch.metric.resize(len, 0);
     scratch.path0.resize(len, 0);
     scratch.path1.resize(len, 0);
@@ -667,7 +668,8 @@ fn dynalloc_analysis_with_scratch(
         }
     }
     for i in start..end {
-        importance[i] = (0.5 + 13.0 * celt_exp2(follower[i].min(4.0))).floor() as i32;
+        importance[i] =
+            (0.5 + 13.0 * mode_exp2(mode.exact_math, follower[i].min(4.0))).floor() as i32;
     }
 
     if (!vbr || constrained_vbr) && !is_transient {
@@ -798,6 +800,14 @@ pub struct CeltFrameConfig {
     pub signal_bandwidth: usize,
     pub analysis_leak_boost: Option<[u8; 19]>,
     pub vbr_state: Option<CeltVbrConfig>,
+    /// Decoder: frames concealed since the last decoded packet, in units of
+    /// 2.5 ms short blocks (`st->loss_duration`). After a loss, an inter
+    /// frame's energy prediction is made safe as libopus does.
+    pub loss_duration: i32,
+    /// Encoder: code the frame as digital silence (libopus's silence flag).
+    pub silence: bool,
+    /// Encoder decision constants.
+    pub decisions: crate::tuning::Decisions,
     /// Selects the experimental direct-cubic band syntax.
     ///
     /// This syntax is not an Opus packet extension. The encoder and decoder
@@ -834,6 +844,9 @@ impl CeltFrameConfig {
             signal_bandwidth: mode.nb_ebands - 1,
             analysis_leak_boost: None,
             vbr_state: None,
+            loss_duration: 0,
+            silence: false,
+            decisions: crate::tuning::Decisions::SOUNDKIT,
             experimental_direct_cubic: false,
         })
     }
@@ -982,10 +995,12 @@ fn compute_vbr_target(
     let lm = config.lm as i32;
     let lm_diff = (mode.max_lm - config.lm) as i32;
     let mut base_target = vbr.vbr_rate - ((40 * channels + 20) << BITRES);
-    // Both VBR modes track the long-term rate through the drift offset.
-    // libopus leaves unconstrained VBR open-loop, so its average rate
-    // depends on the material; SoundKit keeps the requested average.
-    base_target += vbr.offset >> lm_diff;
+    // SoundKit tracks the long-term rate through the drift offset in both VBR
+    // modes. libopus leaves unconstrained VBR open-loop, so its average rate
+    // depends on the material.
+    if !config.decisions.libopus_float || config.constrained_vbr {
+        base_target += vbr.offset >> lm_diff;
+    }
 
     let coded_bands = if config.last_coded_bands != 0 {
         config.last_coded_bands
@@ -1013,7 +1028,11 @@ fn compute_vbr_target(
     }
 
     target += dynalloc.total_boost - (19 << config.lm);
-    target += (2.0 * (config.tf_estimate - 0.044) * target as f32) as i32;
+    if config.decisions.libopus_float {
+        target += ((config.tf_estimate - 0.044) * target as f32) as i32;
+    } else {
+        target += (2.0 * (config.tf_estimate - 0.044) * target as f32) as i32;
+    }
 
     if vbr.analysis_valid {
         let tonal = (vbr.tonality - 0.15).max(0.0) - 0.12;
@@ -1030,9 +1049,9 @@ fn compute_vbr_target(
     // libopus uses 0.67. At 5 ms frames, 0.4 scored higher in PEAQ tests:
     // smaller frame-to-frame swings suit the one-frame reservoir.
     let constrained_vbr_blend = if config.lm == 1 {
-        crate::tuning::get(crate::tuning::VBR_BLEND_LM1, 0.4)
+        crate::tuning::get(crate::tuning::VBR_BLEND_LM1, config.decisions.vbr_blend_lm1)
     } else {
-        0.50
+        config.decisions.vbr_blend
     };
     if config.constrained_vbr {
         target = base_target + (constrained_vbr_blend * (target - base_target) as f32) as i32;
@@ -1067,16 +1086,24 @@ fn apply_vbr_shrink(
         .max(min_allowed)
         .max(2)
         .min(max_packet_bytes as i32) as usize;
-    let delta = target - vbr.vbr_rate;
+    let mut delta = target - vbr.vbr_rate;
 
-    let quantized_target = (packet_bytes as i32) << (BITRES + 3);
+    let mut quantized_target = (packet_bytes as i32) << (BITRES + 3);
+    if config.silence {
+        // A silent frame takes the minimum and leaves the drift alone.
+        packet_bytes = 2;
+        quantized_target = 2 * 8 << BITRES;
+        delta = 0;
+    }
     let mut reservoir = vbr.reservoir;
     if config.constrained_vbr {
         reservoir += quantized_target - vbr.vbr_rate;
     }
     if config.constrained_vbr && reservoir < 0 {
         let adjust = (-reservoir) / (8 << BITRES);
-        packet_bytes = (packet_bytes + adjust as usize).min(max_packet_bytes);
+        if !config.silence {
+            packet_bytes = (packet_bytes + adjust as usize).min(max_packet_bytes);
+        }
         reservoir = 0;
     }
 
@@ -1092,8 +1119,11 @@ fn apply_vbr_shrink(
         0.001
     };
     let mut drift = vbr.drift;
-    drift += (alpha * (((delta << lm_diff) - vbr.offset - drift) as f32)) as i32;
-    let offset = -drift;
+    let mut offset = vbr.offset;
+    if !config.decisions.libopus_float || config.constrained_vbr {
+        drift += (alpha * (((delta << lm_diff) - vbr.offset - drift) as f32)) as i32;
+        offset = -drift;
+    }
 
     CeltVbrUpdate {
         packet_bytes,
@@ -1220,14 +1250,29 @@ fn encode_spectral_frame_with_scratch_inner(
 
     let mut total_bits = (config.packet_bytes * 8) as i32;
     let mut total_bits_frac = total_bits << BITRES;
-    let effective_bytes = config
-        .vbr_state
-        .map_or(config.packet_bytes, |vbr| vbr.effective_bytes);
+    let effective_bytes = if config.silence && config.vbr_state.is_some() {
+        config.packet_bytes.min(2)
+    } else {
+        config
+            .vbr_state
+            .map_or(config.packet_bytes, |vbr| vbr.effective_bytes)
+    };
     let eff_end = config.end.min(mode.eff_ebands);
     let mut enc = RangeEncoder::with_buffer(config.packet_bytes, 1, packet_buffer);
-    let silence = false;
+    let silence = config.silence;
     if enc.tell() == 1 && enc.tell() < total_bits {
         enc.encode_bit_logp(silence, 15);
+    }
+    if silence {
+        if config.vbr_state.is_some() {
+            // In VBR there is no need to send more than the minimum.
+            let bytes = config.packet_bytes.min(2);
+            enc.shrink(bytes);
+            total_bits = bytes as i32 * 8;
+            total_bits_frac = total_bits << BITRES;
+        }
+        // Pretend the remaining bits are filled with zeros.
+        enc.pretend_tell(total_bits);
     }
     let prefilter_symbol = encode_prefilter(config.start, total_bits, config.prefilter, &mut enc);
     let is_transient = encode_transient_flag(config.lm, total_bits, config.is_transient, &mut enc);
@@ -1295,7 +1340,11 @@ fn encode_spectral_frame_with_scratch_inner(
         &mut enc,
         config.channels,
         config.lm,
-        config.packet_bytes as i32,
+        if config.silence && config.vbr_state.is_some() {
+            2
+        } else {
+            config.packet_bytes as i32
+        },
         false,
         delayed_intra,
         true,
@@ -1323,6 +1372,7 @@ fn encode_spectral_frame_with_scratch_inner(
             config.lm,
             config.tf_estimate,
             &scratch.importance,
+            config.decisions.tf_bias_scale,
             &mut scratch.tf_analysis,
         );
         for i in eff_end..config.end {
@@ -1489,6 +1539,9 @@ fn encode_spectral_frame_with_scratch_inner(
             energy_error[idx] = scratch.error[idx].clamp(-0.5, 0.5);
         }
     }
+    if silence {
+        old_band_e[..config.channels * mode.nb_ebands].fill(ENERGY_FLOOR_DB);
+    }
     enc.finish();
     *seed = enc.final_range();
     if enc.error() != 0 {
@@ -1598,6 +1651,47 @@ pub(crate) fn decode_spectral_frame_into_with_anti_collapse(
     )
 }
 
+/// After packet loss, makes an inter frame's energy prediction safe, as
+/// `celt_decode_with_ec` does: falling energy keeps falling, other bands take
+/// the minimum of the last frames, and short frames lose a little more.
+fn recover_energy_after_loss(
+    mode: &CeltMode,
+    config: &CeltFrameConfig,
+    old_band_e: &mut [f32],
+    old_log_e: &[f32],
+    old_log_e2: &[f32],
+) {
+    let nb = mode.nb_ebands;
+    let channels =
+        if old_band_e.len() >= 2 * nb && old_log_e.len() >= 2 * nb && old_log_e2.len() >= 2 * nb {
+            2
+        } else {
+            config.channels
+        };
+    let missing = 10.min(config.loss_duration >> config.lm);
+    let safety = match config.lm {
+        0 => 1.5f32,
+        1 => 0.5,
+        _ => 0.0,
+    };
+    for c in 0..channels {
+        for i in config.start..config.end {
+            let idx = c * nb + i;
+            let e0 = old_band_e[idx];
+            let e1 = old_log_e[idx];
+            let e2 = old_log_e2[idx];
+            if e0 < e1.max(e2) {
+                let slope = (e1 - e0).max(0.5 * (e2 - e0)).min(2.0);
+                let e0 = e0 - 0.0f32.max((1 + missing) as f32 * slope);
+                old_band_e[idx] = (-20.0f32).max(e0);
+            } else {
+                old_band_e[idx] = old_band_e[idx].min(e1).min(e2);
+            }
+            old_band_e[idx] -= safety;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn decode_spectral_frame_into_impl(
     mode: &CeltMode,
@@ -1632,6 +1726,10 @@ fn decode_spectral_frame_into_impl(
     } else {
         false
     };
+    if silence {
+        // Pretend all the remaining bits have been read.
+        dec.pretend_tell(total_bits);
+    }
     let prefilter = decode_prefilter(config.start, total_bits, &mut dec);
     let is_transient = decode_transient_flag(config.lm, total_bits, &mut dec);
     let intra = if dec.tell() + 3 <= total_bits {
@@ -1639,6 +1737,15 @@ fn decode_spectral_frame_into_impl(
     } else {
         false
     };
+    if !intra && config.loss_duration != 0 && old_log_e.is_some() {
+        recover_energy_after_loss(
+            mode,
+            config,
+            old_band_e,
+            old_log_e.unwrap_or(&[]),
+            old_log_e2.unwrap_or(&[]),
+        );
+    }
     unquant_coarse_energy(
         mode,
         config.start,
@@ -1718,15 +1825,22 @@ fn decode_spectral_frame_into_impl(
         prefilter_pitch: prefilter.map_or(0, |p| p.pitch),
         transient: is_transient,
         intra,
-        tf_changes: scratch.tf_res[config.start..config.end].iter().filter(|&&v| v != 0).count(),
+        tf_changes: scratch.tf_res[config.start..config.end]
+            .iter()
+            .filter(|&&v| v != 0)
+            .count(),
         spread,
         total_boost,
         alloc_trim,
         coded_bands: allocation.coded_bands,
         intensity: allocation.intensity,
         dual_stereo: allocation.dual_stereo,
-        fine_bits: scratch.allocation.ebits[config.start..config.end].iter().sum(),
-        pulse_bits: scratch.allocation.pulses[config.start..config.end].iter().sum(),
+        fine_bits: scratch.allocation.ebits[config.start..config.end]
+            .iter()
+            .sum(),
+        pulse_bits: scratch.allocation.pulses[config.start..config.end]
+            .iter()
+            .sum(),
     });
 
     let short_blocks = is_transient;

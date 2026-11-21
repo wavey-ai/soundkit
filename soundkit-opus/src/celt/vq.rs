@@ -80,6 +80,20 @@ fn exp_rotation1(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
 }
 
 pub fn exp_rotation(x: &mut [f32], len: usize, dir: i32, stride: usize, k: usize, spread: i32) {
+    exp_rotation_mode(false, x, len, dir, stride, k, spread);
+}
+
+/// [`exp_rotation`]; `exact` computes the rotation's cosine and sine in
+/// double precision, as libopus's float `celt_cos_norm` does.
+pub fn exp_rotation_mode(
+    exact: bool,
+    x: &mut [f32],
+    len: usize,
+    dir: i32,
+    stride: usize,
+    k: usize,
+    spread: i32,
+) {
     const SPREAD_FACTOR: [i32; 3] = [15, 10, 5];
 
     assert!(x.len() >= len);
@@ -90,8 +104,15 @@ pub fn exp_rotation(x: &mut [f32], len: usize, dir: i32, stride: usize, k: usize
     let factor = SPREAD_FACTOR[(spread - 1) as usize] as f32;
     let gain = celt_div(len as f32, len as f32 + factor * k as f32);
     let theta = 0.5 * gain * gain;
-    let c = celt_cos_norm(theta);
-    let s = celt_cos_norm(1.0 - theta);
+    let (c, s) = if exact {
+        let half_pi = 0.5 * core::f64::consts::PI;
+        (
+            (half_pi * theta as f64).cos() as f32,
+            (half_pi * (1.0 - theta) as f64).cos() as f32,
+        )
+    } else {
+        (celt_cos_norm(theta), celt_cos_norm(1.0 - theta))
+    };
 
     let mut stride2 = 0usize;
     if len >= 8 * stride {
@@ -226,10 +247,7 @@ pub fn op_pvq_search_with_scratch(
         #[cfg(target_arch = "wasm32")]
         let best_id = crate::kernels::pvq_best_candidate(x, y, xy, yy, n);
 
-        #[cfg(not(any(
-            target_arch = "x86_64",
-            target_arch = "wasm32"
-        )))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "wasm32")))]
         let best_id = {
             let mut best_id = 0usize;
             let mut rxy = xy + x[0];
@@ -306,6 +324,144 @@ pub fn op_pvq_search_with_scratch(
     yy
 }
 
+/// `op_pvq_search` as a default libopus build runs it: the SSE2 version on
+/// x86-64 (`op_pvq_search_sse2`, whose `rcpps` and `rsqrtps` estimates come
+/// from the CPU), the generic C version elsewhere. `iy` needs `n + 3`
+/// entries. Returns `yy`.
+pub fn op_pvq_search_exact(
+    x: &mut [f32],
+    iy: &mut [i32],
+    k: usize,
+    n: usize,
+    y_scratch: &mut Vec<f32>,
+) -> f32 {
+    assert!(x.len() >= n && iy.len() >= n + 3);
+    let mut signx = [false; 256];
+    let mut signx_heap = Vec::new();
+    let signx: &mut [bool] = if n <= 256 {
+        &mut signx[..n]
+    } else {
+        signx_heap.resize(n, false);
+        &mut signx_heap
+    };
+    y_scratch.clear();
+    y_scratch.resize(n + 3, 0.0);
+    let y = &mut y_scratch[..];
+    for j in 0..n {
+        signx[j] = x[j] < 0.0;
+        x[j] = x[j].abs();
+    }
+    iy[..n + 3].fill(0);
+    let mut xy = 0.0f32;
+    let mut yy = 0.0f32;
+    let mut pulses_left = k as i32;
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        // Four lanes over x padded with zeros, as the SSE2 loop reads them.
+        let padded = |x: &[f32], j: usize| if j < n { x[j] } else { 0.0 };
+        let mut lanes = [0.0f32; 4];
+        let mut j = 0usize;
+        while j < n {
+            for (l, lane) in lanes.iter_mut().enumerate() {
+                *lane += padded(x, j + l);
+            }
+            j += 4;
+        }
+        let mut sum = (lanes[0] + lanes[2]) + (lanes[1] + lanes[3]);
+        if k > (n >> 1) {
+            if !(sum > 1e-15 && sum < 64.0) {
+                x[0] = 1.0;
+                x[1..n].fill(0.0);
+                sum = 1.0;
+            }
+            let rcp = ((k as f64 + 0.8) as f32) * crate::kernels::rcp_ps(sum);
+            let mut xy4 = [0.0f32; 4];
+            let mut yy4 = [0.0f32; 4];
+            let mut pulses = 0i32;
+            let mut j = 0usize;
+            while j < n {
+                for l in 0..4 {
+                    let xv = padded(x, j + l);
+                    let q = (xv * rcp) as i32;
+                    pulses += q;
+                    iy[j + l] = q;
+                    let yv = q as f32;
+                    xy4[l] += xv * yv;
+                    yy4[l] += yv * yv;
+                    y[j + l] = yv + yv;
+                }
+                j += 4;
+            }
+            pulses_left -= pulses;
+            xy = (xy4[0] + xy4[2]) + (xy4[1] + xy4[3]);
+            yy = (yy4[0] + yy4[2]) + (yy4[1] + yy4[3]);
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    if k > (n >> 1) {
+        let mut sum = 0.0f32;
+        for &value in x.iter().take(n) {
+            sum += value;
+        }
+        if !(sum > 1e-15 && sum < 64.0) {
+            x[0] = 1.0;
+            x[1..n].fill(0.0);
+            sum = 1.0;
+        }
+        let rcp = (k as f32 + 0.8) * (1.0 / sum);
+        for j in 0..n {
+            iy[j] = (rcp * x[j]).floor() as i32;
+            y[j] = iy[j] as f32;
+            yy += y[j] * y[j];
+            xy += x[j] * y[j];
+            y[j] *= 2.0;
+            pulses_left -= iy[j];
+        }
+    }
+
+    if pulses_left > n as i32 + 3 {
+        let tmp = pulses_left as f32;
+        yy += tmp * tmp;
+        yy += tmp * y[0];
+        iy[0] += pulses_left;
+        pulses_left = 0;
+    }
+    for _ in 0..pulses_left {
+        yy += 1.0;
+        #[cfg(target_arch = "x86_64")]
+        let best_id = crate::kernels::pvq_best_candidate_sse2(x, y, xy, yy, n);
+        #[cfg(not(target_arch = "x86_64"))]
+        let best_id = {
+            let mut best_id = 0usize;
+            let mut best_num = xy + x[0];
+            best_num *= best_num;
+            let mut best_den = yy + y[0];
+            for j in 1..n {
+                let mut rxy = xy + x[j];
+                let ryy = yy + y[j];
+                rxy *= rxy;
+                if best_den * rxy > ryy * best_num {
+                    best_den = ryy;
+                    best_num = rxy;
+                    best_id = j;
+                }
+            }
+            best_id
+        };
+        xy += x[best_id];
+        yy += y[best_id];
+        y[best_id] += 2.0;
+        iy[best_id] += 1;
+    }
+    for j in 0..n {
+        if signx[j] {
+            iy[j] = -iy[j];
+        }
+    }
+    yy
+}
+
 pub fn alg_quant(
     x: &mut [f32],
     n: usize,
@@ -342,6 +498,39 @@ pub fn alg_quant_with_scratch(
     y_scratch: &mut Vec<f32>,
     signx_scratch: &mut Vec<u8>,
 ) -> u32 {
+    alg_quant_with_scratch_mode(
+        x,
+        n,
+        k,
+        spread,
+        b,
+        enc,
+        gain,
+        resynth,
+        iy_scratch,
+        y_scratch,
+        signx_scratch,
+        false,
+    )
+}
+
+/// [`alg_quant_with_scratch`]; `exact` selects libopus arithmetic (see
+/// [`crate::celt::modes::CeltMode::exact_math`]).
+#[allow(clippy::too_many_arguments)]
+pub fn alg_quant_with_scratch_mode(
+    x: &mut [f32],
+    n: usize,
+    k: usize,
+    spread: i32,
+    b: usize,
+    enc: &mut RangeEncoder,
+    gain: f32,
+    resynth: bool,
+    iy_scratch: &mut Vec<i32>,
+    y_scratch: &mut Vec<f32>,
+    signx_scratch: &mut Vec<u8>,
+    exact: bool,
+) -> u32 {
     assert!(k > 0);
     assert!(n > 1);
     assert!(x.len() >= n);
@@ -350,13 +539,17 @@ pub fn alg_quant_with_scratch(
         iy_scratch.resize(n + 3, 0);
     }
     let iy = &mut iy_scratch[..n + 3];
-    exp_rotation(x, n, 1, b, k, spread);
-    let yy = op_pvq_search_with_scratch(x, iy, k, n, y_scratch, signx_scratch);
+    exp_rotation_mode(exact, x, n, 1, b, k, spread);
+    let yy = if exact {
+        op_pvq_search_exact(x, iy, k, n, y_scratch)
+    } else {
+        op_pvq_search_with_scratch(x, iy, k, n, y_scratch, signx_scratch)
+    };
     encode_pulses(iy, n, k, enc);
 
     if resynth {
         normalise_residual(iy, x, n, yy, gain);
-        exp_rotation(x, n, -1, b, k, spread);
+        exp_rotation_mode(exact, x, n, -1, b, k, spread);
     }
 
     extract_collapse_mask(iy, n, b)
@@ -402,6 +595,27 @@ pub fn alg_unquant_with_scratch(
     u_scratch: &mut Vec<u32>,
     row_cache: &mut CwrsDecodeCache,
 ) -> u32 {
+    alg_unquant_with_scratch_mode(
+        x, n, k, spread, b, dec, gain, iy_scratch, u_scratch, row_cache, false,
+    )
+}
+
+/// [`alg_unquant_with_scratch`]; `exact` selects libopus arithmetic (see
+/// [`crate::celt::modes::CeltMode::exact_math`]).
+#[allow(clippy::too_many_arguments)]
+pub fn alg_unquant_with_scratch_mode(
+    x: &mut [f32],
+    n: usize,
+    k: usize,
+    spread: i32,
+    b: usize,
+    dec: &mut RangeDecoder<'_>,
+    gain: f32,
+    iy_scratch: &mut Vec<i32>,
+    u_scratch: &mut Vec<u32>,
+    row_cache: &mut CwrsDecodeCache,
+    exact: bool,
+) -> u32 {
     assert!(k > 0);
     assert!(n > 1);
     assert!(x.len() >= n);
@@ -412,7 +626,7 @@ pub fn alg_unquant_with_scratch(
     let iy = &mut iy_scratch[..n];
     let ryy = decode_pulses_with_cache(iy, n, k, dec, u_scratch, row_cache) as f32;
     normalise_residual(iy, x, n, ryy, gain);
-    exp_rotation(x, n, -1, b, k, spread);
+    exp_rotation_mode(exact, x, n, -1, b, k, spread);
     extract_collapse_mask(iy, n, b)
 }
 
@@ -575,6 +789,27 @@ pub fn renormalise_vector(x: &mut [f32], n: usize, gain: f32) {
     let g = celt_rsqrt_norm(energy) * gain;
     for value in x.iter_mut().take(n) {
         *value *= g;
+    }
+}
+
+/// [`renormalise_vector`] with libopus's x86-64 summation order, for modes
+/// that select libopus arithmetic.
+pub fn renormalise_vector_exact(x: &mut [f32], n: usize, gain: f32) {
+    assert!(x.len() >= n);
+    let energy = 1e-15 + crate::celt::refkern::inner_prod(x, x, n);
+    let g = celt_rsqrt_norm(energy) * gain;
+    for value in x.iter_mut().take(n) {
+        *value *= g;
+    }
+}
+
+/// Selects [`renormalise_vector_exact`] or [`renormalise_vector`].
+#[inline]
+pub fn renormalise_vector_mode(exact: bool, x: &mut [f32], n: usize, gain: f32) {
+    if exact {
+        renormalise_vector_exact(x, n, gain);
+    } else {
+        renormalise_vector(x, n, gain);
     }
 }
 

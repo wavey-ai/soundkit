@@ -8,7 +8,7 @@ pub const COMBFILTER_MAXPERIOD: usize = 1024;
 pub const COMBFILTER_MINPERIOD: usize = 15;
 
 const SECOND_CHECK: [usize; 16] = [0, 0, 3, 2, 3, 2, 5, 2, 3, 2, 3, 2, 5, 2, 3, 2];
-const GAINS: [[f32; 3]; 3] = [
+pub(crate) const GAINS: [[f32; 3]; 3] = [
     [0.3066406250, 0.2170410156, 0.1296386719],
     [0.4638671875, 0.2680664062, 0.0],
     [0.7998046875, 0.1000976562, 0.0],
@@ -47,6 +47,7 @@ pub struct PrefilterScratch {
     y_lp4: Vec<f32>,
     xcorr: Vec<f32>,
     yy_lookup: Vec<f32>,
+    reference: crate::celt::refkern::PitchScratch,
 }
 
 fn tone_lpc(x: &[f32], delay: usize) -> Option<[f32; 2]> {
@@ -455,7 +456,23 @@ fn remove_doubling(
     prev_period: usize,
     prev_gain: f32,
     yy_lookup: &mut Vec<f32>,
+    exact: bool,
+    libopus_float: bool,
 ) -> f32 {
+    let dual_inner_prod = |x: &[f32], y01: &[f32], y02: &[f32], n: usize| {
+        if exact {
+            crate::celt::refkern::dual_inner_prod(x, y01, y02, n)
+        } else {
+            dual_inner_prod(x, y01, y02, n)
+        }
+    };
+    let inner_prod = |x: &[f32], y: &[f32], n: usize| {
+        if exact {
+            crate::celt::refkern::inner_prod(x, y, n)
+        } else {
+            inner_prod(x, y, n)
+        }
+    };
     let minperiod0 = minperiod;
     let maxperiod = maxperiod / 2;
     let minperiod = minperiod / 2;
@@ -522,6 +539,16 @@ fn remove_doubling(
         }
     }
 
+    if libopus_float && t < minperiod * 2 {
+        let t1 = t * 5 / 8;
+        let t2 = t * 6 / 8;
+        let (xy, xy2) = dual_inner_prod(&x[base..], &x[base - t1..], &x[base - t2..], n);
+        let g1 = compute_pitch_gain(xy, xx, yy_lookup[t1]);
+        let g2 = compute_pitch_gain(xy2, xx, yy_lookup[t2]);
+        if g1 >= g || g2 >= g {
+            g = 0.0;
+        }
+    }
     best_xy = best_xy.max(0.0);
     let mut pg = if best_yy <= best_xy {
         1.0
@@ -552,6 +579,30 @@ fn remove_doubling(
 }
 
 pub fn comb_filter(
+    y: &mut [f32],
+    y_base: usize,
+    x: &[f32],
+    x_base: usize,
+    t0: usize,
+    t1: usize,
+    n: usize,
+    g0: f32,
+    g1: f32,
+    tapset0: usize,
+    tapset1: usize,
+    window: Option<&[f32]>,
+    overlap: usize,
+) {
+    comb_filter_mode(
+        false, y, y_base, x, x_base, t0, t1, n, g0, g1, tapset0, tapset1, window, overlap,
+    );
+}
+
+/// [`comb_filter`]; `exact` runs the steady-state part in libopus's x86-64
+/// (`comb_filter_const_sse`) summation order.
+#[allow(clippy::too_many_arguments)]
+pub fn comb_filter_mode(
+    exact: bool,
     y: &mut [f32],
     y_base: usize,
     x: &[f32],
@@ -615,6 +666,19 @@ pub fn comb_filter(
         return;
     }
 
+    if exact {
+        crate::celt::refkern::comb_filter_no_window_gains(
+            x,
+            x_base + i,
+            &mut y[y_base + i..],
+            t1,
+            n - i,
+            g10,
+            g11,
+            g12,
+        );
+        return;
+    }
     x4 = x[x_base + i - t1 - 2];
     x3 = x[x_base + i - t1 - 1];
     x2 = x[x_base + i - t1];
@@ -631,6 +695,28 @@ pub fn comb_filter(
 }
 
 pub fn comb_filter_in_place(
+    y: &mut [f32],
+    base: usize,
+    t0: usize,
+    t1: usize,
+    n: usize,
+    g0: f32,
+    g1: f32,
+    tapset0: usize,
+    tapset1: usize,
+    window: Option<&[f32]>,
+    overlap: usize,
+) {
+    comb_filter_in_place_mode(
+        false, y, base, t0, t1, n, g0, g1, tapset0, tapset1, window, overlap,
+    );
+}
+
+/// [`comb_filter_in_place`]; `exact` runs the steady-state part in libopus's
+/// x86-64 (`comb_filter_const_sse`) summation order.
+#[allow(clippy::too_many_arguments)]
+pub fn comb_filter_in_place_mode(
+    exact: bool,
     y: &mut [f32],
     base: usize,
     t0: usize,
@@ -692,6 +778,10 @@ pub fn comb_filter_in_place(
         return;
     }
 
+    if exact {
+        crate::celt::refkern::comb_filter_const_in_place(y, base, i, n, t1, g10, g11, g12);
+        return;
+    }
     if crate::kernels::comb_filter_steady(y, base, i, n, t1, g10, g11, g12) {
         return;
     }
@@ -745,9 +835,11 @@ pub fn run_prefilter(
     packet_bytes: usize,
     channels: usize,
     n: usize,
+    decisions: &crate::tuning::Decisions,
     scratch: &mut PrefilterScratch,
 ) -> (PrefilterDecision, f32) {
     let overlap = mode.overlap;
+    let exact = mode.exact_math;
     scratch.pre.resize_with(channels, Vec::new);
     for c in 0..channels {
         scratch.pre[c].resize(n + COMBFILTER_MAXPERIOD, 0.0);
@@ -762,37 +854,67 @@ pub fn run_prefilter(
         let mut multiple = 1usize;
         // Keep this threshold slightly above PI for the 48 kHz path.
         if tone_frequency >= 3.1416 {
-            tone_frequency = core::f32::consts::PI - tone_frequency;
+            tone_frequency = if exact {
+                3.141_593 - tone_frequency
+            } else {
+                core::f32::consts::PI - tone_frequency
+            };
         }
         while tone_frequency >= multiple as f32 * 0.39 {
             multiple += 1;
         }
         if tone_frequency > 0.006_148 {
-            pitch_index = ((2.0 * core::f32::consts::PI * multiple as f32 / tone_frequency + 0.5)
-                .floor() as usize)
-                .min(COMBFILTER_MAXPERIOD - 2);
+            pitch_index = if exact {
+                // libopus evaluates this in double precision.
+                (0.5 + 2.0 * core::f64::consts::PI * multiple as f64 / tone_frequency as f64)
+                    .floor() as usize
+            } else {
+                (2.0 * core::f32::consts::PI * multiple as f32 / tone_frequency + 0.5).floor()
+                    as usize
+            }
+            .min(COMBFILTER_MAXPERIOD - 2);
         } else {
             pitch_index = COMBFILTER_MINPERIOD;
         }
         gain1 = 0.75;
     } else if enabled {
-        pitch_downsample(
-            &scratch.pre,
-            COMBFILTER_MAXPERIOD + n,
-            channels,
-            &mut scratch.pitch_buf,
-            &mut scratch.autocorr,
-            &mut scratch.lpc,
-        );
-        let pitch = pitch_search(
-            &scratch.pitch_buf[COMBFILTER_MAXPERIOD >> 1..],
-            &scratch.pitch_buf,
-            n,
-            COMBFILTER_MAXPERIOD - 3 * COMBFILTER_MINPERIOD,
-            &mut scratch.x_lp4,
-            &mut scratch.y_lp4,
-            &mut scratch.xcorr,
-        );
+        let pitch = if exact {
+            let half = (COMBFILTER_MAXPERIOD + n) >> 1;
+            scratch.pitch_buf.resize(half, 0.0);
+            let pre: Vec<&[f32]> = scratch.pre[..channels].iter().map(|c| &c[..]).collect();
+            crate::celt::refkern::pitch_downsample(
+                &pre,
+                &mut scratch.pitch_buf,
+                half,
+                2,
+                &mut scratch.reference,
+            );
+            crate::celt::refkern::pitch_search(
+                &scratch.pitch_buf[COMBFILTER_MAXPERIOD >> 1..],
+                &scratch.pitch_buf,
+                n,
+                COMBFILTER_MAXPERIOD - 3 * COMBFILTER_MINPERIOD,
+                &mut scratch.reference,
+            )
+        } else {
+            pitch_downsample(
+                &scratch.pre,
+                COMBFILTER_MAXPERIOD + n,
+                channels,
+                &mut scratch.pitch_buf,
+                &mut scratch.autocorr,
+                &mut scratch.lpc,
+            );
+            pitch_search(
+                &scratch.pitch_buf[COMBFILTER_MAXPERIOD >> 1..],
+                &scratch.pitch_buf,
+                n,
+                COMBFILTER_MAXPERIOD - 3 * COMBFILTER_MINPERIOD,
+                &mut scratch.x_lp4,
+                &mut scratch.y_lp4,
+                &mut scratch.xcorr,
+            )
+        };
         pitch_index = COMBFILTER_MAXPERIOD - pitch;
         gain1 = remove_doubling(
             &scratch.pitch_buf,
@@ -803,6 +925,8 @@ pub fn run_prefilter(
             prev_period,
             prev_gain,
             &mut scratch.yy_lookup,
+            exact,
+            decisions.libopus_float,
         );
         pitch_index = pitch_index.min(COMBFILTER_MAXPERIOD - 2);
         gain1 *= 0.7;
@@ -830,10 +954,15 @@ pub fn run_prefilter(
     if prev_gain > 0.55 {
         threshold -= 0.1;
     }
-    // A higher threshold and 0.8 times the libopus pitch gain. In PEAQ tests
-    // at music rates, the libopus comb filter was stronger than optimal.
-    threshold = threshold.max(0.2) + crate::tuning::get(crate::tuning::PF_THRESHOLD_OFFSET, 0.1);
-    gain1 *= crate::tuning::get(crate::tuning::PF_GAIN_SCALE, 0.8);
+    // SoundKit uses a higher threshold and 0.8 times the libopus pitch gain.
+    // In PEAQ tests at music rates, the libopus comb filter was stronger than
+    // optimal.
+    threshold = threshold.max(0.2)
+        + crate::tuning::get(
+            crate::tuning::PF_THRESHOLD_OFFSET,
+            decisions.pf_threshold_offset,
+        );
+    gain1 *= crate::tuning::get(crate::tuning::PF_GAIN_SCALE, decisions.pf_gain_scale);
 
     let (mut enabled, mut qgain) = if gain1 < threshold {
         gain1 = 0.0;
@@ -858,7 +987,8 @@ pub fn run_prefilter(
     for c in 0..channels {
         let period = prev_period.max(COMBFILTER_MINPERIOD);
         if offset > 0 {
-            comb_filter(
+            comb_filter_mode(
+                exact,
                 &mut input[c],
                 overlap,
                 &scratch.pre[c],
@@ -874,7 +1004,8 @@ pub fn run_prefilter(
                 0,
             );
         }
-        comb_filter(
+        comb_filter_mode(
+            exact,
             &mut input[c],
             overlap + offset,
             &scratch.pre[c],
@@ -904,7 +1035,8 @@ pub fn run_prefilter(
         for c in 0..channels {
             input[c][overlap..overlap + n]
                 .copy_from_slice(&scratch.pre[c][COMBFILTER_MAXPERIOD..COMBFILTER_MAXPERIOD + n]);
-            comb_filter(
+            comb_filter_mode(
+                exact,
                 &mut input[c],
                 overlap + offset,
                 &scratch.pre[c],

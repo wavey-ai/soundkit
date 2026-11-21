@@ -3,6 +3,7 @@
 mod analysis;
 pub mod celt;
 pub mod constants;
+mod custom;
 pub mod decoder;
 pub mod encoder;
 pub mod error;
@@ -10,22 +11,24 @@ mod kernels;
 mod packet;
 mod repacketizer;
 mod soft_clip;
-pub mod tuning;
 #[cfg(feature = "trace")]
 pub mod trace;
+pub mod tuning;
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod wasm;
 
 pub use constants::{PCM_I24_MAX, PCM_I24_MIN};
 pub use decoder::Decoder;
+pub use decoder::DECODE_BUFFER_SIZE;
 pub use encoder::{
-    Application, Encoder, CELT_FRAME_SIZES_48K, CELT_MAX_BITRATE, CELT_MAX_FRAME_BYTES,
-    CELT_MIN_BITRATE, CELT_MIN_FRAME_BYTES,
+    Application, Encoder, BITRATE_MAX, CELT_FRAME_SIZES_48K, CELT_MAX_BITRATE,
+    CELT_MAX_FRAME_BYTES, CELT_MIN_BITRATE, CELT_MIN_FRAME_BYTES,
 };
 pub use error::{Error, Result};
 pub use packet::*;
 pub use repacketizer::*;
 pub use soft_clip::*;
+pub use tuning::Decisions;
 
 use frame_header::{EncodingFlag, Endianness};
 use soundkit::audio_packet::Decoder as SoundkitDecoderTrait;

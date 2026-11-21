@@ -15,6 +15,9 @@ pub struct KissFftState {
     factors: [i16; 2 * MAX_FACTORS],
     bitrev: InRangeIndices,
     twiddles: Vec<KissFftCpx>,
+    /// Use libopus trunk's association of the radix-5 butterfly sums. Set
+    /// for the exact (libopus-arithmetic) tables, inherited by shifted FFTs.
+    trunk_order: bool,
     #[cfg(target_arch = "aarch64")]
     radix5_twiddles: Vec<KissFftCpx>,
     #[cfg(target_arch = "wasm32")]
@@ -22,11 +25,33 @@ pub struct KissFftState {
 }
 
 impl KissFftState {
+    /// FFT whose twiddles carry the 8-digit rounding of libopus's static
+    /// 48 kHz tables.
     pub fn new(nfft: usize) -> Option<Self> {
         Self::with_twiddles(nfft, None)
     }
 
+    /// FFT whose twiddles are computed in double precision and rounded once
+    /// to `f32`, as libopus does for a custom mode.
+    pub fn new_exact(nfft: usize) -> Option<Self> {
+        Self::build(nfft, None, TwiddleTable::Runtime)
+    }
+
+    /// FFT whose twiddles equal libopus's static 48 kHz table: each value
+    /// printed with 8 significant digits, then read back as `f32`.
+    pub fn new_static(nfft: usize) -> Option<Self> {
+        Self::build(nfft, None, TwiddleTable::Static)
+    }
+
     pub fn with_twiddles(nfft: usize, base: Option<&KissFftState>) -> Option<Self> {
+        Self::build(nfft, base, TwiddleTable::Legacy)
+    }
+
+    pub(crate) fn build(
+        nfft: usize,
+        base: Option<&KissFftState>,
+        table: TwiddleTable,
+    ) -> Option<Self> {
         if nfft == 0 {
             return None;
         }
@@ -44,8 +69,9 @@ impl KissFftState {
             }
             (base.twiddles.clone(), shift)
         } else {
-            (compute_twiddles(nfft), -1)
+            (compute_twiddles(nfft, table), -1)
         };
+        let trunk_order = base.map_or(table != TwiddleTable::Legacy, |base| base.trunk_order);
 
         let mut bitrev = vec![0usize; nfft];
         compute_bitrev_table(0, &mut bitrev, 0, 1, 1, &factors);
@@ -62,6 +88,7 @@ impl KissFftState {
             factors,
             bitrev,
             twiddles,
+            trunk_order,
             #[cfg(target_arch = "aarch64")]
             radix5_twiddles,
             #[cfg(target_arch = "wasm32")]
@@ -233,14 +260,40 @@ fn kf_factor(nfft: usize, facbuf: &mut [i16; 2 * MAX_FACTORS]) -> Option<()> {
     Some(())
 }
 
-fn compute_twiddles(nfft: usize) -> Vec<KissFftCpx> {
+/// How a twiddle table is rounded to `f32`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TwiddleTable {
+    /// SoundKit's established approximation of libopus's static tables.
+    Legacy,
+    /// libopus's static tables exactly: 8 significant digits, read as `f32`.
+    Static,
+    /// Computed at run time in double precision, as for a custom mode.
+    Runtime,
+}
+
+impl TwiddleTable {
+    pub(crate) fn round(self, value: f64) -> f32 {
+        match self {
+            Self::Legacy => round_static_float(value),
+            Self::Static => round_eight_digits(value),
+            Self::Runtime => value as f32,
+        }
+    }
+}
+
+/// `printf("%#0.8g")` of a double, read back as `f32`, as the C compiler
+/// reads libopus's static table literals.
+pub(crate) fn round_eight_digits(value: f64) -> f32 {
+    format!("{value:.7e}")
+        .parse::<f32>()
+        .expect("formatted float parses")
+}
+
+fn compute_twiddles(nfft: usize, table: TwiddleTable) -> Vec<KissFftCpx> {
     (0..nfft)
         .map(|i| {
             let phase = (-2.0 * PI / nfft as f64) * i as f64;
-            KissFftCpx::new(
-                round_static_float(phase.cos()),
-                round_static_float(phase.sin()),
-            )
+            KissFftCpx::new(table.round(phase.cos()), table.round(phase.sin()))
         })
         .collect()
 }
@@ -308,9 +361,11 @@ fn kf_bfly4(
     stage: usize,
 ) {
     #[cfg(target_arch = "wasm32")]
-    if m > 1 && simd_stage(fout, st, stage, 4, m, n, mm, |block, packed| {
-        crate::kernels::fft_radix4(block, packed, m)
-    }) {
+    if m > 1
+        && simd_stage(fout, st, stage, 4, m, n, mm, |block, packed| {
+            crate::kernels::fft_radix4(block, packed, m)
+        })
+    {
         return;
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -403,6 +458,60 @@ fn kf_bfly3(
     }
 }
 
+/// `kf_bfly5` with libopus trunk's association: `a + (b + c)` for each
+/// three-term sum.
+#[allow(clippy::too_many_arguments)]
+fn kf_bfly5_trunk(
+    fout: &mut [KissFftCpx],
+    fstride: usize,
+    st: &KissFftState,
+    m: usize,
+    n: usize,
+    mm: usize,
+    ya: KissFftCpx,
+    yb: KissFftCpx,
+) {
+    for i in 0..n {
+        let base = i * mm;
+        for u in 0..m {
+            let fout0 = base + u;
+            let fout1 = fout0 + m;
+            let fout2 = fout0 + 2 * m;
+            let fout3 = fout0 + 3 * m;
+            let fout4 = fout0 + 4 * m;
+
+            let s0 = fout[fout0];
+            let s1 = c_mul(fout[fout1], st.twiddles[u * fstride]);
+            let s2 = c_mul(fout[fout2], st.twiddles[2 * u * fstride]);
+            let s3 = c_mul(fout[fout3], st.twiddles[3 * u * fstride]);
+            let s4 = c_mul(fout[fout4], st.twiddles[4 * u * fstride]);
+
+            let s7 = c_add(s1, s4);
+            let s10 = c_sub(s1, s4);
+            let s8 = c_add(s2, s3);
+            let s9 = c_sub(s2, s3);
+
+            fout[fout0] = KissFftCpx::new(s0.r + (s7.r + s8.r), s0.i + (s7.i + s8.i));
+
+            let s5 = KissFftCpx::new(
+                s0.r + (s7.r * ya.r + s8.r * yb.r),
+                s0.i + (s7.i * ya.r + s8.i * yb.r),
+            );
+            let s6 = KissFftCpx::new(s10.i * ya.i + s9.i * yb.i, -(s10.r * ya.i + s9.r * yb.i));
+            fout[fout1] = c_sub(s5, s6);
+            fout[fout4] = c_add(s5, s6);
+
+            let s11 = KissFftCpx::new(
+                s0.r + (s7.r * yb.r + s8.r * ya.r),
+                s0.i + (s7.i * yb.r + s8.i * ya.r),
+            );
+            let s12 = KissFftCpx::new(s9.i * ya.i - s10.i * yb.i, s10.r * yb.i - s9.r * ya.i);
+            fout[fout2] = c_add(s11, s12);
+            fout[fout3] = c_sub(s11, s12);
+        }
+    }
+}
+
 fn kf_bfly5(
     fout: &mut [KissFftCpx],
     fstride: usize,
@@ -414,6 +523,11 @@ fn kf_bfly5(
 ) {
     let ya = st.twiddles[fstride * m];
     let yb = st.twiddles[fstride * 2 * m];
+
+    if st.trunk_order {
+        kf_bfly5_trunk(fout, fstride, st, m, n, mm, ya, yb);
+        return;
+    }
 
     #[cfg(target_arch = "wasm32")]
     if simd_stage(fout, st, stage, 5, m, n, mm, |block, packed| {
@@ -504,7 +618,8 @@ fn simd_stage(
     let block_len = radix * m;
     if packed.len() != (radix - 1) * m
         || (n > 1 && mm != block_len)
-        || n.checked_mul(block_len).map_or(true, |len| len > fout.len())
+        || n.checked_mul(block_len)
+            .map_or(true, |len| len > fout.len())
     {
         return false;
     }

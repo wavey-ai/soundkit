@@ -5,7 +5,7 @@ use crate::celt::bands::{
 use crate::celt::codec::{
     encode_spectral_frame_reusing_buffer, CeltFrameConfig, CeltFrameEncodeScratch, CeltVbrConfig,
 };
-use crate::celt::mathops::{celt_log2, celt_sqrt};
+use crate::celt::mathops::{celt_sqrt, mode_log2};
 use crate::celt::mdct::{clt_mdct_forward_with_scratch, MdctScratch};
 use crate::celt::modes::CeltMode;
 use crate::celt::pitch::{
@@ -24,6 +24,30 @@ pub const CELT_MIN_BITRATE: i32 = 500;
 pub const CELT_MAX_BITRATE: i32 = 512_000;
 pub const CELT_MIN_FRAME_BYTES: usize = 2;
 pub const CELT_MAX_FRAME_BYTES: usize = packet::MAX_FRAME_BYTES as usize - 1;
+/// `OPUS_BITRATE_MAX`: an Opus Custom encoder fills every packet to the
+/// maximum packet size (the libopus default for `opus_custom_encode`).
+pub const BITRATE_MAX: i32 = -1;
+
+/// How packets are framed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Framing {
+    /// Standard Opus packets with a TOC byte (RFC 6716).
+    Opus,
+    /// Opus Custom packets, as `opus_custom_encode` writes them.
+    Custom { signalling: bool, frame_size: usize },
+}
+
+/// The per-frame values `celt_encode_with_ec` derives for an Opus Custom
+/// encoder before it codes the frame.
+#[derive(Clone, Copy, Debug)]
+struct CustomControl {
+    header: Option<u8>,
+    silence: bool,
+    nb_available_bytes: usize,
+    effective_bytes: usize,
+    equiv_rate: i32,
+    vbr_rate: i32,
+}
 
 const INTENSITY_THRESHOLDS: [f32; 21] = [
     1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 16.0, 24.0, 36.0, 44.0, 50.0, 56.0, 62.0, 67.0, 72.0,
@@ -180,6 +204,15 @@ pub struct Encoder {
     transient_scratch: Vec<f32>,
     prefilter_scratch: PrefilterScratch,
     frame_scratch: EncoderFrameScratch,
+    framing: Framing,
+    /// Last coded band plus one (`st->end`).
+    end: usize,
+    /// Largest packet an Opus Custom encoder writes (the `nbCompressedBytes`
+    /// argument of `opus_custom_encode`), signalling byte included.
+    max_packet_bytes: usize,
+    decisions: crate::tuning::Decisions,
+    /// Peak of the last frame's overlap, for the silence check.
+    overlap_max: f32,
 }
 
 impl Encoder {
@@ -243,8 +276,151 @@ impl Encoder {
             transient_scratch: Vec::new(),
             prefilter_scratch: PrefilterScratch::default(),
             frame_scratch: EncoderFrameScratch::default(),
+            framing: Framing::Opus,
+            end: mode.nb_ebands,
+            max_packet_bytes: packet::MAX_FRAME_BYTES as usize,
+            decisions: crate::tuning::Decisions::SOUNDKIT,
+            overlap_max: 0.0,
             mode,
         })
+    }
+
+    /// Creates an Opus Custom encoder for `frame_size`-sample frames at
+    /// 48 kHz, as `opus_custom_encoder_create(opus_custom_mode_create(48000,
+    /// frame_size), channels)` does.
+    ///
+    /// 48, 64 and 72-sample frames give 1, 1.33 and 1.5 ms custom modes; 120
+    /// to 960 samples give the standard mode (see
+    /// [`CeltMode::custom_48k_shared`]). Packets are the `opus_custom_encode`
+    /// format: one signalling byte (see [`Encoder::set_custom_signalling`])
+    /// and the CELT frame, with no Opus TOC.
+    ///
+    /// The defaults are libopus's: [`BITRATE_MAX`] (each packet fills
+    /// [`Encoder::set_max_packet_bytes`], 1275 bytes unless changed), CBR,
+    /// constrained VBR once VBR is on. The encoder uses libopus's decision
+    /// constants and float arithmetic, so with `OPUS_SET_COMPLEXITY(10)` on
+    /// the libopus side its packets are meant to match `opus_custom_encode`;
+    /// see [`Encoder::set_libopus_decisions`]. There is no Opus-layer
+    /// processing: no DC filter, tonality analysis or stereo-width fade.
+    pub fn new_custom(sample_rate: i32, channels: usize, frame_size: usize) -> Result<Self> {
+        if sample_rate != 48_000 || !valid_channels(channels as i32) {
+            return Err(Error::BadArg);
+        }
+        let mode = CeltMode::custom_48k_shared(frame_size)?;
+        if mode.lm_for_frame_size(frame_size).is_none() {
+            return Err(Error::BadArg);
+        }
+        let mut encoder = Self::with_application(sample_rate, channels, Application::Audio)?;
+        encoder.mode = mode;
+        encoder.old_band_e = vec![0.0; channels * mode.nb_ebands];
+        encoder.energy_error = vec![0.0; channels * mode.nb_ebands];
+        encoder.overlap_mem = vec![vec![0.0; mode.overlap]; channels];
+        encoder.framing = Framing::Custom {
+            signalling: true,
+            frame_size,
+        };
+        encoder.end = mode.eff_ebands;
+        encoder.packet_frame_size = frame_size;
+        encoder.bitrate = BITRATE_MAX;
+        encoder.vbr = false;
+        encoder.vbr_constraint = true;
+        encoder.decisions = crate::tuning::Decisions::LIBOPUS;
+        Ok(encoder)
+    }
+
+    /// True for an Opus Custom encoder.
+    pub const fn is_custom(&self) -> bool {
+        matches!(self.framing, Framing::Custom { .. })
+    }
+
+    /// The CELT mode this encoder uses.
+    pub fn mode(&self) -> &'static CeltMode {
+        self.mode
+    }
+
+    /// Frame size of an Opus Custom encoder, or `None` for standard Opus.
+    pub const fn custom_frame_size(&self) -> Option<usize> {
+        match self.framing {
+            Framing::Custom { frame_size, .. } => Some(frame_size),
+            Framing::Opus => None,
+        }
+    }
+
+    /// Reports whether an Opus Custom encoder writes the signalling byte.
+    pub const fn custom_signalling(&self) -> bool {
+        matches!(
+            self.framing,
+            Framing::Custom {
+                signalling: true,
+                ..
+            }
+        )
+    }
+
+    /// Selects whether Opus Custom packets start with the signalling byte
+    /// (`CELT_SET_SIGNALLING`; on by default). With it off, the decoder must
+    /// know the frame size and channel count out of band. Returns `BadArg`
+    /// for a standard Opus encoder.
+    pub fn set_custom_signalling(&mut self, enabled: bool) -> Result<()> {
+        match &mut self.framing {
+            Framing::Custom { signalling, .. } => {
+                *signalling = enabled;
+                Ok(())
+            }
+            Framing::Opus => Err(Error::BadArg),
+        }
+    }
+
+    /// The largest packet an Opus Custom encoder writes, signalling byte
+    /// included (the `nbCompressedBytes` argument of `opus_custom_encode`).
+    pub const fn max_packet_bytes(&self) -> usize {
+        self.max_packet_bytes
+    }
+
+    /// Sets the largest packet an Opus Custom encoder writes, 2 to 1276
+    /// bytes. With [`BITRATE_MAX`] in CBR every packet has this size.
+    /// Standard Opus encoders take their sizes from the bitrate and ignore
+    /// this setting.
+    pub fn set_max_packet_bytes(&mut self, bytes: usize) -> Result<()> {
+        if !(2..=packet::MAX_FRAME_BYTES as usize + 1).contains(&bytes) {
+            return Err(Error::BadArg);
+        }
+        self.max_packet_bytes = bytes;
+        Ok(())
+    }
+
+    /// Reports whether the encoder uses libopus's decision constants
+    /// ([`crate::tuning::Decisions::LIBOPUS`]) rather than SoundKit's.
+    pub fn libopus_decisions(&self) -> bool {
+        self.decisions == crate::tuning::Decisions::LIBOPUS
+    }
+
+    /// Selects libopus's encoder decision constants (`true`) or SoundKit's
+    /// tuned ones (`false`); see [`crate::tuning::Decisions`]. Opus Custom
+    /// encoders start with libopus's, standard Opus encoders with SoundKit's.
+    pub fn set_libopus_decisions(&mut self, enabled: bool) {
+        self.decisions = if enabled {
+            crate::tuning::Decisions::LIBOPUS
+        } else {
+            crate::tuning::Decisions::SOUNDKIT
+        };
+    }
+
+    /// Reports whether the encoder uses libopus's default float arithmetic
+    /// (see [`CeltMode::exact_math`]).
+    pub fn libopus_arithmetic(&self) -> bool {
+        self.mode.exact_math
+    }
+
+    /// Selects libopus's default float arithmetic (`log2`/`exp2` in double
+    /// precision and libopus's x86-64 summation order). Opus Custom encoders
+    /// start with it on, standard Opus encoders with it off. Resets the
+    /// stream state, so call it before encoding.
+    pub fn set_libopus_arithmetic(&mut self, enabled: bool) -> Result<()> {
+        if enabled != self.mode.exact_math {
+            self.mode = CeltMode::custom_48k_shared_with_math(self.mode.frame_size(), enabled)?;
+        }
+        self.reset().map_err(|_| Error::BadArg)
     }
 
     /// Creates the production SoundKit Opus encoder.
@@ -300,14 +476,23 @@ impl Encoder {
     pub fn reset(&mut self) -> std::result::Result<(), String> {
         let mut encoder = Self::with_application(self.sample_rate, self.channels, self.application)
             .map_err(|error| error.to_string())?;
+        if self.is_custom() || !std::ptr::eq(self.mode, encoder.mode) {
+            let mode = self.mode;
+            encoder.mode = mode;
+            encoder.old_band_e = vec![0.0; self.channels * mode.nb_ebands];
+            encoder.energy_error = vec![0.0; self.channels * mode.nb_ebands];
+            encoder.overlap_mem = vec![vec![0.0; mode.overlap]; self.channels];
+            encoder.end = self.end;
+        }
+        encoder.framing = self.framing;
+        encoder.max_packet_bytes = self.max_packet_bytes;
+        encoder.decisions = self.decisions;
+        encoder.experimental_direct_cubic = self.experimental_direct_cubic;
+        encoder.vbr_constraint = self.vbr_constraint;
         encoder.bits_per_sample = self.bits_per_sample;
         encoder.packet_frame_size = self.packet_frame_size;
-        encoder
-            .set_bitrate(self.bitrate)
-            .map_err(|error| error.to_string())?;
-        encoder
-            .set_vbr(self.vbr)
-            .map_err(|error| error.to_string())?;
+        encoder.bitrate = self.bitrate;
+        encoder.vbr = self.vbr;
         *self = encoder;
         Ok(())
     }
@@ -345,10 +530,26 @@ impl Encoder {
         self.experimental_direct_cubic = enabled;
     }
 
+    /// Sets the bitrate in bits per second. Standard Opus encoders accept
+    /// [`CELT_MIN_BITRATE`] to [`CELT_MAX_BITRATE`]. Opus Custom encoders
+    /// accept what `OPUS_SET_BITRATE` accepts: above 500 b/s (capped at
+    /// 750 kb/s per channel), or [`BITRATE_MAX`].
     pub fn set_bitrate(&mut self, bitrate: i32) -> Result<()> {
-        if !(CELT_MIN_BITRATE..=CELT_MAX_BITRATE).contains(&bitrate) {
-            return Err(Error::BadArg);
-        }
+        let bitrate = if self.is_custom() {
+            if bitrate <= 500 && bitrate != BITRATE_MAX {
+                return Err(Error::BadArg);
+            }
+            if bitrate == BITRATE_MAX {
+                bitrate
+            } else {
+                bitrate.min(750_000 * self.channels as i32)
+            }
+        } else {
+            if !(CELT_MIN_BITRATE..=CELT_MAX_BITRATE).contains(&bitrate) {
+                return Err(Error::BadArg);
+            }
+            bitrate
+        };
         self.bitrate = bitrate;
         self.reset_vbr_state();
         Ok(())
@@ -808,9 +1009,17 @@ impl Encoder {
             for i in 0..8 {
                 let band_start = (mode.ebands[i] as usize) << lm;
                 let band_end = (mode.ebands[i + 1] as usize) << lm;
-                let partial = (band_start..band_end)
-                    .map(|j| norm[j] * norm[n + j])
-                    .sum::<f32>();
+                let partial = if mode.exact_math {
+                    crate::celt::refkern::inner_prod(
+                        &norm[band_start..band_end],
+                        &norm[n + band_start..n + band_end],
+                        band_end - band_start,
+                    )
+                } else {
+                    (band_start..band_end)
+                        .map(|j| norm[j] * norm[n + j])
+                        .sum::<f32>()
+                };
                 sum += partial;
             }
             sum = (0.125 * sum).abs().min(1.0);
@@ -818,14 +1027,22 @@ impl Encoder {
             for i in 8..intensity {
                 let band_start = (mode.ebands[i] as usize) << lm;
                 let band_end = (mode.ebands[i + 1] as usize) << lm;
-                let partial = (band_start..band_end)
-                    .map(|j| norm[j] * norm[n + j])
-                    .sum::<f32>();
+                let partial = if mode.exact_math {
+                    crate::celt::refkern::inner_prod(
+                        &norm[band_start..band_end],
+                        &norm[n + band_start..n + band_end],
+                        band_end - band_start,
+                    )
+                } else {
+                    (band_start..band_end)
+                        .map(|j| norm[j] * norm[n + j])
+                        .sum::<f32>()
+                };
                 min_xc = min_xc.min(partial.abs());
             }
             min_xc = min_xc.abs().min(1.0);
-            let log_xc = celt_log2(1.001 - sum * sum);
-            let log_xc2 = (0.5 * log_xc).max(celt_log2(1.001 - min_xc * min_xc));
+            let log_xc = mode_log2(mode.exact_math, 1.001 - sum * sum);
+            let log_xc2 = (0.5 * log_xc).max(mode_log2(mode.exact_math, 1.001 - min_xc * min_xc));
             trim += (-4.0f32).max(0.75 * log_xc);
             *stereo_saving = (*stereo_saving + 0.25).min(-0.5 * log_xc2);
         }
@@ -870,7 +1087,11 @@ impl Encoder {
             }
         }
         sum_ms *= core::f32::consts::FRAC_1_SQRT_2;
-        let thetas = if lm <= 1 { bands.saturating_sub(8) } else { bands };
+        let thetas = if lm <= 1 {
+            bands.saturating_sub(8)
+        } else {
+            bands
+        };
         let bins = ((mode.ebands[bands] as usize) << (lm + 1)) as f32;
         (bins + thetas as f32) * sum_ms > bins * sum_lr
     }
@@ -958,6 +1179,7 @@ impl Encoder {
         frame_size: usize,
         frame_bytes: usize,
         allow_vbr_shrink: bool,
+        custom: Option<CustomControl>,
         packet: &mut Vec<u8>,
     ) -> Result<usize> {
         let packet_buffer = std::mem::take(packet);
@@ -967,6 +1189,7 @@ impl Encoder {
             frame_size,
             frame_bytes,
             allow_vbr_shrink,
+            custom,
             &mut scratch,
             packet_buffer,
         );
@@ -986,13 +1209,29 @@ impl Encoder {
         frame_size: usize,
         frame_bytes: usize,
         allow_vbr_shrink: bool,
+        custom: Option<CustomControl>,
         scratch: &mut EncoderFrameScratch,
         packet_buffer: Vec<u8>,
     ) -> Result<Vec<u8>> {
-        let lm = self.frame_lm(frame_size)?;
+        let lm = match custom {
+            Some(_) => self
+                .mode
+                .lm_for_frame_size(frame_size)
+                .ok_or(Error::BadArg)?,
+            None => self.frame_lm(frame_size)?,
+        };
         Self::validate_frame_bytes(frame_bytes)?;
-        let stream_channels = self.choose_stream_channels(frame_size);
-        let mut config = CeltFrameConfig::new(&self.mode, lm, stream_channels, frame_bytes)?;
+        let stream_channels = if custom.is_some() {
+            self.channels
+        } else {
+            self.choose_stream_channels(frame_size)
+        };
+        let mut config = CeltFrameConfig::new(self.mode, lm, stream_channels, frame_bytes)?;
+        if custom.is_some() {
+            config.end = self.end;
+        }
+        config.decisions = self.decisions;
+        config.silence = custom.is_some_and(|control| control.silence);
         config.experimental_direct_cubic = self.experimental_direct_cubic;
         config.spread = SPREAD_NORMAL;
         config.last_coded_bands = self.last_coded_bands;
@@ -1002,7 +1241,10 @@ impl Encoder {
             .analysis_info
             .valid
             .then_some(self.analysis_info.tonality_slope);
-        let equiv_rate = self.equiv_rate(frame_bytes, lm, stream_channels);
+        let equiv_rate = match custom {
+            Some(control) => control.equiv_rate,
+            None => self.equiv_rate(frame_bytes, lm, stream_channels),
+        };
         config.signal_bandwidth = self.analysis_signal_bandwidth(equiv_rate, stream_channels);
         if self.analysis_info.valid {
             config.analysis_leak_boost = Some(self.analysis_info.leak_boost);
@@ -1013,7 +1255,8 @@ impl Encoder {
         let overlap = self.mode.overlap;
         let target_stereo_width_q14 = Self::target_stereo_width_q14(equiv_rate);
         let previous_stereo_width_q14 = self.hybrid_stereo_width_q14;
-        if self.channels == 2
+        if custom.is_none()
+            && self.channels == 2
             && (previous_stereo_width_q14 < (1 << 14) || target_stereo_width_q14 < (1 << 14))
         {
             Self::apply_stereo_width_fade(
@@ -1087,9 +1330,15 @@ impl Encoder {
             scratch.inputs[c][..overlap].copy_from_slice(&self.overlap_mem[c]);
         }
 
-        let prefilter_enabled = frame_bytes > 12 * stream_channels
-            && (frame_bytes * 8) as i32 >= 16
-            && crate::tuning::get(crate::tuning::PREFILTER_ENABLE, 1.0) != 0.0;
+        let prefilter_enabled = match custom {
+            Some(control) => {
+                control.nb_available_bytes > 12 * stream_channels
+                    && !control.silence
+                    && 1 + 16 <= (frame_bytes * 8) as i32
+            }
+            None => frame_bytes > 12 * stream_channels && (frame_bytes * 8) as i32 >= 16,
+        } && crate::tuning::get(crate::tuning::PREFILTER_ENABLE, 1.0)
+            != 0.0;
         let prefilter_tapset = self.tapset_decision as usize;
         let previous_prefilter_period = self.prefilter_period.max(COMBFILTER_MINPERIOD);
         let previous_prefilter_gain = self.prefilter_gain;
@@ -1111,6 +1360,7 @@ impl Encoder {
             frame_bytes,
             self.channels,
             n,
+            &self.decisions,
             &mut self.prefilter_scratch,
         );
         let pitch_change = (prefilter_gain > 0.4 || previous_prefilter_gain > 0.4)
@@ -1279,7 +1529,13 @@ impl Encoder {
             stream_channels,
             m,
         );
-        if !config.is_transient && frame_bytes >= 10 * stream_channels && stream_channels > 0 {
+        // A silent frame has no bits left for the spread symbol, so libopus
+        // neither runs nor updates the spreading analysis.
+        if !config.silence
+            && !config.is_transient
+            && frame_bytes >= 10 * stream_channels
+            && stream_channels > 0
+        {
             Self::spread_weights(
                 &self.mode,
                 &scratch.band_log_e,
@@ -1322,7 +1578,24 @@ impl Encoder {
             stream_channels,
         );
 
-        if stream_channels == 1 {
+        if config.silence {
+            // No bits for the trim symbol: libopus keeps the default trim and
+            // leaves the stereo saving alone.
+            config.alloc_trim = 5;
+            if stream_channels == 2 {
+                let (left, right) = scratch.norm.split_at_mut(n);
+                self.intensity = hysteresis_decision(
+                    (equiv_rate / 1000) as f32,
+                    &INTENSITY_THRESHOLDS,
+                    &INTENSITY_HYSTERESIS,
+                    INTENSITY_THRESHOLDS.len(),
+                    self.intensity,
+                )
+                .clamp(config.start, config.end);
+                config.intensity = self.intensity;
+                config.dual_stereo = lm != 0 && Self::stereo_analysis(&self.mode, left, right, lm);
+            }
+        } else if stream_channels == 1 {
             config.alloc_trim = Self::alloc_trim_analysis(
                 &self.mode,
                 &scratch.norm,
@@ -1354,7 +1627,8 @@ impl Encoder {
                     lm != 0 && Self::stereo_analysis(&self.mode, left, right, lm)
                 } else {
                     let ratio = Self::stereo_analysis_ratio(&self.mode, left, right, lm);
-                    self.dual_stereo_ratio = smooth * self.dual_stereo_ratio + (1.0 - smooth) * ratio;
+                    self.dual_stereo_ratio =
+                        smooth * self.dual_stereo_ratio + (1.0 - smooth) * ratio;
                     lm != 0
                         && self.dual_stereo_ratio
                             > crate::tuning::get(crate::tuning::DUAL_STEREO_BIAS, 1.0)
@@ -1376,11 +1650,17 @@ impl Encoder {
             );
         }
         if allow_vbr_shrink && self.vbr {
-            let vbr_rate = self.vbr_rate_frac(frame_size);
+            let (vbr_rate, effective_bytes) = match custom {
+                Some(control) => (control.vbr_rate, control.effective_bytes),
+                None => {
+                    let vbr_rate = self.vbr_rate_frac(frame_size);
+                    (vbr_rate, (vbr_rate >> (BITRES + 3)).max(2) as usize)
+                }
+            };
             config.vbr_state = Some(CeltVbrConfig {
                 equiv_rate,
                 vbr_rate,
-                effective_bytes: (vbr_rate >> (BITRES + 3)).max(2) as usize,
+                effective_bytes,
                 reservoir: self.vbr_reservoir,
                 drift: self.vbr_drift,
                 offset: self.vbr_offset,
@@ -1454,7 +1734,14 @@ impl Encoder {
         }
 
         let mut packet = encoded.data;
-        packet.insert(0, packet::make_celt_only_fullband_toc(lm, stream_channels)?);
+        match custom {
+            Some(control) => {
+                if let Some(header) = control.header {
+                    packet.insert(0, header);
+                }
+            }
+            None => packet.insert(0, packet::make_celt_only_fullband_toc(lm, stream_channels)?),
+        }
         Ok(packet)
     }
 
@@ -1640,6 +1927,9 @@ impl Encoder {
         if pcm.len() < frame_size * self.channels {
             return Err(Error::BadArg);
         }
+        if let Framing::Custom { signalling, .. } = self.framing {
+            return self.encode_custom_into(pcm, frame_size, signalling, packet);
+        }
         self.analysis_info = self.analysis.run(pcm, frame_size, self.channels);
         if crate::tuning::get(crate::tuning::ANALYSIS_OFF, 0.0) != 0.0 {
             self.analysis_info.valid = false;
@@ -1656,9 +1946,105 @@ impl Encoder {
             frame_size,
             frame_bytes,
             true,
+            None,
             packet,
         );
         self.filtered_scratch = filtered;
+        result
+    }
+
+    /// `celt_encode_with_ec` for an Opus Custom encoder (`enc == NULL`):
+    /// the signalling byte, the byte budget from the bitrate or the packet
+    /// limit, the silence check, then the CELT frame.
+    fn encode_custom_into(
+        &mut self,
+        pcm: &[f32],
+        frame_size: usize,
+        signalling: bool,
+        packet: &mut Vec<u8>,
+    ) -> Result<usize> {
+        let lm = self
+            .mode
+            .lm_for_frame_size(frame_size)
+            .ok_or(Error::BadArg)?;
+        let channels = self.channels as i32;
+        let mut nb_compressed = self.max_packet_bytes as i32;
+        if nb_compressed < 2 {
+            return Err(Error::BadArg);
+        }
+        let header = if signalling {
+            let (byte, end) =
+                crate::custom::signalling_byte(self.mode, self.end, lm, self.channels == 2)?;
+            self.end = end;
+            nb_compressed -= 1;
+            Some(byte)
+        } else {
+            None
+        };
+        nb_compressed = nb_compressed.min(packet::MAX_FRAME_BYTES);
+
+        let fs = self.mode.fs;
+        let (vbr_rate, effective_bytes) = if self.vbr && self.bitrate != BITRATE_MAX {
+            // bitrate_to_bits(), less the signalling byte.
+            let mut vbr_rate = (self.bitrate * 6 / (6 * fs / frame_size as i32)) << BITRES;
+            if signalling {
+                vbr_rate -= 8 << BITRES;
+            }
+            (vbr_rate, vbr_rate >> (3 + BITRES))
+        } else {
+            if self.bitrate != BITRATE_MAX {
+                let tmp = self.bitrate * frame_size as i32;
+                nb_compressed =
+                    2.max(nb_compressed.min((tmp + 4 * fs) / (8 * fs) - i32::from(signalling)));
+            }
+            (0, nb_compressed)
+        };
+        let mut nb_available = nb_compressed;
+        let overhead = (40 * channels + 20) * ((400 >> lm) - 50);
+        let mut equiv_rate = ((nb_compressed * 8 * 50) << (3 - lm)) - overhead;
+        if self.bitrate != BITRATE_MAX {
+            equiv_rate = equiv_rate.min(self.bitrate - overhead);
+        }
+        if vbr_rate > 0 && self.vbr_constrained() {
+            let max_allowed = 2
+                .max((vbr_rate + vbr_rate - self.vbr_reservoir) >> (BITRES + 3))
+                .min(nb_available);
+            if max_allowed < nb_available {
+                nb_compressed = max_allowed;
+                nb_available = max_allowed;
+            }
+        }
+
+        // Digital silence: every sample at or below 2^-24 of full scale.
+        let n = frame_size;
+        let split = self.channels * (n - self.mode.overlap.min(n));
+        let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+        let mut sample_max = self.overlap_max.max(peak(&pcm[..split]));
+        self.overlap_max = peak(&pcm[split..self.channels * n]);
+        sample_max = sample_max.max(self.overlap_max);
+        let silence = sample_max <= 1.0 / 16_777_216.0;
+
+        let control = CustomControl {
+            header,
+            silence,
+            nb_available_bytes: nb_available as usize,
+            effective_bytes: effective_bytes.max(0) as usize,
+            equiv_rate,
+            vbr_rate,
+        };
+        self.analysis_info = AnalysisInfo::default();
+        let mut input = std::mem::take(&mut self.filtered_scratch);
+        input.clear();
+        input.extend_from_slice(&pcm[..self.channels * n]);
+        let result = self.encode_filtered_f32_with_frame_bytes_into(
+            &mut input,
+            frame_size,
+            nb_compressed as usize,
+            vbr_rate > 0,
+            Some(control),
+            packet,
+        );
+        self.filtered_scratch = input;
         result
     }
 
@@ -1688,6 +2074,9 @@ impl Encoder {
         if pcm.len() < frame_size * self.channels {
             return Err(Error::BadArg);
         }
+        if self.is_custom() {
+            return Err(Error::Unimplemented);
+        }
         self.analysis_info = self.analysis.run(pcm, frame_size, self.channels);
         let mut filtered = std::mem::take(&mut self.filtered_scratch);
         self.dc_reject_frame_into(pcm, frame_size, &mut filtered);
@@ -1696,6 +2085,7 @@ impl Encoder {
             frame_size,
             frame_bytes,
             false,
+            None,
             packet,
         );
         self.filtered_scratch = filtered;

@@ -10,5 +10,6 @@ pub mod modes;
 pub mod pitch;
 pub mod quant_bands;
 pub mod rate;
+pub mod refkern;
 pub mod synthesis;
 pub mod vq;

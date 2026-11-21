@@ -1036,8 +1036,9 @@ mod x86_64 {
         _mm256_loadu_si256, _mm256_maskload_ps, _mm256_permute2f128_ps, _mm256_setzero_ps,
         _mm256_storeu_ps, _mm_add_epi32, _mm_add_ps, _mm_add_ss, _mm_and_si128, _mm_castps_si128,
         _mm_cmpeq_ps, _mm_cmpgt_ps, _mm_cvtsi128_si32, _mm_cvtss_f32, _mm_loadu_ps, _mm_max_epi16,
-        _mm_max_ps, _mm_movehl_ps, _mm_mul_ps, _mm_rsqrt_ps, _mm_set1_ps, _mm_set_epi32,
-        _mm_setzero_ps, _mm_setzero_si128, _mm_shuffle_ps, _mm_shufflelo_epi16, _mm_unpackhi_epi64,
+        _mm_max_ps, _mm_movehl_ps, _mm_mul_ps, _mm_rcp_ps, _mm_rsqrt_ps, _mm_set1_ps,
+        _mm_set_epi32, _mm_setzero_ps, _mm_setzero_si128, _mm_shuffle_ps, _mm_shufflelo_epi16,
+        _mm_unpackhi_epi64,
     };
 
     const SHUFFLE_SWAP_PAIRS: i32 = 0b01_00_11_10;
@@ -1207,6 +1208,15 @@ mod x86_64 {
         (scalar1, scalar2)
     }
 
+    /// The SSE `rcpps` approximate reciprocal of one value, as libopus's
+    /// SSE2 PVQ pre-search computes it. The result depends on the CPU.
+    #[inline]
+    pub fn rcp_ps(value: f32) -> f32 {
+        // SAFETY: SSE is part of the x86-64 baseline; the intrinsic only
+        // reads its register argument.
+        unsafe { _mm_cvtss_f32(_mm_rcp_ps(_mm_set1_ps(value))) }
+    }
+
     /// Finds the best CELT PVQ pulse candidate with trunk Opus's SSE2 score.
     ///
     /// The x86-64 ABI guarantees SSE2. The checked wrapper validates every
@@ -1302,7 +1312,7 @@ mod x86_64 {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub use x86_64::{dual_inner_prod_f32, pitch_xcorr_8, pvq_best_candidate_sse2};
+pub use x86_64::{dual_inner_prod_f32, pitch_xcorr_8, pvq_best_candidate_sse2, rcp_ps};
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 mod wasm32 {

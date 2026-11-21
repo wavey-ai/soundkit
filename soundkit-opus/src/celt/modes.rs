@@ -1,7 +1,8 @@
 //! CELT mode construction and pulse cache, ported from official
 //! `celt/modes.c` and `celt/rate.c`.
 
-use std::sync::OnceLock;
+use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 
 use crate::celt::cwrs::{get_pulses, get_required_bits, log2_frac, CELT_MAX_PULSES, MAX_PSEUDO};
 use crate::celt::mdct::MdctLookup;
@@ -188,10 +189,33 @@ pub struct CeltMode {
     pub window: Vec<f32>,
     pub mdct: MdctLookup,
     pub cache: PulseCache,
+    /// True for the one mode libopus ships as static tables (48 kHz, 960
+    /// samples). Its window, FFT twiddles and MDCT twiddles carry the static
+    /// tables' 8-digit rounding. Every other mode computes them at run time
+    /// in double precision, as `opus_custom_mode_create` does.
+    pub static_tables: bool,
+    /// Selects libopus's default float arithmetic for this mode instance:
+    /// `celt_log2`/`celt_exp2` through double-precision `log`/`exp` (a build
+    /// without `FLOAT_APPROX`), and integer PCM output rounded half to even
+    /// as `lrintf` does. When false, the codec keeps the approximations and
+    /// rounding that SoundKit's standard path has always used. The tables
+    /// are the same either way.
+    pub exact_math: bool,
 }
 
 impl CeltMode {
     pub fn new(fs: i32, frame_size: usize) -> Result<Self> {
+        Self::build(fs, frame_size, false)
+    }
+
+    /// Builds a mode; `exact_math` selects libopus's default float
+    /// arithmetic and, for the static 48 kHz mode, libopus's static tables
+    /// to the last bit.
+    pub fn new_with_math(fs: i32, frame_size: usize, exact_math: bool) -> Result<Self> {
+        Self::build(fs, frame_size, exact_math)
+    }
+
+    fn build(fs: i32, frame_size: usize, exact_math: bool) -> Result<Self> {
         if !(8_000..=96_000).contains(&fs) {
             return Err(Error::BadArg);
         }
@@ -201,6 +225,12 @@ impl CeltMode {
         if frame_size as i32 * 1000 < fs {
             return Err(Error::BadArg);
         }
+        // libopus returns its static 48 kHz mode for any frame size that is a
+        // power-of-two fraction of 960 samples.
+        if fs == 48_000 && (0..4).any(|shift| frame_size << shift == 960) && frame_size != 960 {
+            return Self::build(48_000, 960, exact_math);
+        }
+        let static_tables = fs == 48_000 && frame_size == 960;
 
         let max_lm = if frame_size as i32 * 75 >= fs && frame_size % 16 == 0 {
             3
@@ -231,6 +261,10 @@ impl CeltMode {
         let res = (fs + short_mdct_size as i32) / (2 * short_mdct_size as i32);
         let ebands = compute_ebands(fs, short_mdct_size, res);
         let nb_ebands = ebands.len() - 1;
+        // libopus rejects a mode whose last band exceeds its PVQ tables.
+        if ((ebands[nb_ebands] - ebands[nb_ebands - 1]) as usize) << max_lm > 208 {
+            return Err(Error::AllocFail);
+        }
 
         let mut eff_ebands = nb_ebands;
         while ebands[eff_ebands] as usize > short_mdct_size {
@@ -239,12 +273,23 @@ impl CeltMode {
 
         let overlap = (short_mdct_size >> 2) << 2;
         let alloc_vectors = compute_allocation_table(fs, short_mdct_size, &ebands);
-        let window = compute_window(overlap);
+        let window = if static_tables {
+            WINDOW_120.to_vec()
+        } else {
+            compute_window(overlap)
+        };
         let log_n = (0..nb_ebands)
             .map(|i| log2_frac((ebands[i + 1] - ebands[i]) as u32, BITRES) as i16)
             .collect::<Vec<_>>();
-        let mdct = MdctLookup::new(2 * short_mdct_size * nb_short_mdcts, max_lm)
-            .ok_or(Error::AllocFail)?;
+        let mdct_size = 2 * short_mdct_size * nb_short_mdcts;
+        let mdct = if !static_tables {
+            MdctLookup::new_exact(mdct_size, max_lm)
+        } else if exact_math {
+            MdctLookup::new_static(mdct_size, max_lm)
+        } else {
+            MdctLookup::new(mdct_size, max_lm)
+        }
+        .ok_or(Error::AllocFail)?;
 
         let mut mode = Self {
             fs,
@@ -267,8 +312,72 @@ impl CeltMode {
                 bits: Vec::new(),
                 caps: Vec::new(),
             },
+            static_tables,
+            exact_math,
         };
         mode.cache = compute_pulse_cache(&mode, mode.max_lm);
+        Ok(mode)
+    }
+
+    /// Frame size, in samples, of the longest frame this mode codes.
+    pub fn frame_size(&self) -> usize {
+        self.short_mdct_size << self.max_lm
+    }
+
+    /// Returns the `LM` (log2 of the short-block count) for a frame size, or
+    /// `None` when the mode cannot code that frame size.
+    pub fn lm_for_frame_size(&self, frame_size: usize) -> Option<usize> {
+        (0..=self.max_lm).find(|&lm| self.short_mdct_size << lm == frame_size)
+    }
+
+    /// The standard 48 kHz mode with libopus's default float arithmetic
+    /// (see [`CeltMode::exact_math`]).
+    pub fn standard_48k_exact_shared() -> &'static Self {
+        static STANDARD_48K_EXACT: OnceLock<CeltMode> = OnceLock::new();
+        STANDARD_48K_EXACT.get_or_init(|| {
+            Self::new_with_math(48_000, 960, true).expect("48 kHz CELT mode is valid")
+        })
+    }
+
+    /// Process-wide shared 48 kHz Opus Custom mode for `frame_size` samples,
+    /// with libopus's default float arithmetic.
+    ///
+    /// This mirrors `opus_custom_mode_create(48000, frame_size)`: frame sizes
+    /// of 120, 240, 480 and 960 samples give the standard mode, and other
+    /// sizes (48, 64 and 72 samples, for example) give a custom mode with its
+    /// own band layout, allocation table, window and MDCT. libopus accepts even
+    /// frame sizes from 48 to 1024 samples whose short blocks are no longer
+    /// than 3.3 ms. Each custom mode is built once and kept for the life of
+    /// the process.
+    pub fn custom_48k_shared(frame_size: usize) -> Result<&'static Self> {
+        Self::custom_48k_shared_with_math(frame_size, true)
+    }
+
+    /// [`CeltMode::custom_48k_shared`] with a choice of arithmetic (see
+    /// [`CeltMode::exact_math`]).
+    pub fn custom_48k_shared_with_math(
+        frame_size: usize,
+        exact_math: bool,
+    ) -> Result<&'static Self> {
+        if (0..4).any(|shift| frame_size << shift == 960) {
+            return Ok(if exact_math {
+                Self::standard_48k_exact_shared()
+            } else {
+                Self::standard_48k_shared()
+            });
+        }
+        type Cache = Mutex<BTreeMap<(usize, bool), &'static CeltMode>>;
+        static CUSTOM_48K: OnceLock<Cache> = OnceLock::new();
+        let modes = CUSTOM_48K.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let mut modes = modes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(mode) = modes.get(&(frame_size, exact_math)) {
+            return Ok(mode);
+        }
+        let mode = Self::new_with_math(48_000, frame_size, exact_math)?;
+        let mode: &'static CeltMode = Box::leak(Box::new(mode));
+        modes.insert((frame_size, exact_math), mode);
         Ok(mode)
     }
 
@@ -287,14 +396,14 @@ impl CeltMode {
     }
 }
 
+/// Computes the CELT window as `opus_custom_mode_create` does: in double
+/// precision, rounded once to `f32`.
 pub fn compute_window(overlap: usize) -> Vec<f32> {
-    if overlap == 120 {
-        return WINDOW_120.to_vec();
-    }
+    use core::f64::consts::PI;
     (0..overlap)
         .map(|i| {
-            let inner = (0.5 * core::f32::consts::PI * (i as f32 + 0.5) / overlap as f32).sin();
-            (0.5 * core::f32::consts::PI * inner * inner).sin()
+            let inner = (0.5 * PI * (i as f64 + 0.5) / overlap as f64).sin();
+            (0.5 * PI * inner * inner).sin() as f32
         })
         .collect()
 }

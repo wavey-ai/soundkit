@@ -2,7 +2,7 @@
 
 use crate::celt::entropy::{RangeDecoder, RangeEncoder};
 use crate::celt::laplace::{decode_laplace, encode_laplace};
-use crate::celt::mathops::celt_log2_db;
+use crate::celt::mathops::mode_log2;
 use crate::celt::modes::CeltMode;
 
 pub const E_MEANS: [f32; 25] = [
@@ -541,7 +541,7 @@ pub fn amp2_log2(
     for c in 0..channels {
         for i in 0..eff_end {
             let idx = i + c * mode.nb_ebands;
-            band_log_e[idx] = celt_log2_db(band_e[idx]) - E_MEANS[i];
+            band_log_e[idx] = mode_log2(mode.exact_math, band_e[idx]) - E_MEANS[i];
         }
         for i in eff_end..end {
             band_log_e[i + c * mode.nb_ebands] = -14.0;

@@ -4,14 +4,14 @@ use crate::celt::cwrs::get_pulses;
 use crate::celt::cwrs::CwrsDecodeCache;
 use crate::celt::entropy::{RangeDecoder, RangeEncoder, RangeEncoderSnapshot};
 use crate::celt::mathops::{
-    bitexact_cos, bitexact_log2tan, celt_cos_norm, celt_exp2, celt_exp2_db, celt_rsqrt_norm,
-    celt_sqrt, fast_atan2f, frac_mul16,
+    bitexact_cos, bitexact_log2tan, celt_cos_norm, celt_rsqrt_norm, celt_sqrt, fast_atan2f,
+    frac_mul16, mode_exp2,
 };
 use crate::celt::modes::{bits2pulses_signed, pulses2bits_signed, CeltMode};
 use crate::celt::quant_bands::E_MEANS;
 use crate::celt::vq::{
-    alg_quant_with_scratch, alg_unquant_with_scratch, cubic_quant_with_scratch,
-    cubic_unquant_with_scratch, renormalise_vector,
+    alg_quant_with_scratch_mode, alg_unquant_with_scratch_mode, cubic_quant_with_scratch,
+    cubic_unquant_with_scratch, renormalise_vector_mode,
 };
 
 pub const SPREAD_NONE: i32 = 0;
@@ -119,11 +119,12 @@ pub fn compute_band_energies(
             let band_start = (mode.ebands[i] as usize) << lm;
             let band_end = (mode.ebands[i + 1] as usize) << lm;
             let base = c * n;
-            let sum = 1e-27f32
-                + x[base + band_start..base + band_end]
-                    .iter()
-                    .map(|v| v * v)
-                    .sum::<f32>();
+            let band = &x[base + band_start..base + band_end];
+            let sum = if mode.exact_math {
+                1e-27f32 + crate::celt::refkern::inner_prod(band, band, band.len())
+            } else {
+                1e-27f32 + band.iter().map(|v| v * v).sum::<f32>()
+            };
             band_e[i + c * mode.nb_ebands] = celt_sqrt(sum);
         }
     }
@@ -188,8 +189,11 @@ pub fn denormalise_bands(
         let band_start = m * mode.ebands[i] as usize;
         let band_end = m * mode.ebands[i + 1] as usize;
         let lg = band_log_e[i] + E_MEANS[i];
-        let g = celt_exp2_db(lg.min(32.0));
-        for (out, &value) in freq[band_start..band_end].iter_mut().zip(&x[band_start..band_end]) {
+        let g = mode_exp2(mode.exact_math, lg.min(32.0));
+        for (out, &value) in freq[band_start..band_end]
+            .iter_mut()
+            .zip(&x[band_start..band_end])
+        {
             *out = value * g;
         }
     }
@@ -316,7 +320,7 @@ pub fn anti_collapse(
     for i in start..end {
         let n0 = mode.ebands[i + 1] as usize - mode.ebands[i] as usize;
         let depth = ((1 + pulses[i]) / n0 as i32) >> lm;
-        let thresh = 0.5 * celt_exp2(-0.125 * depth as f32);
+        let thresh = 0.5 * mode_exp2(mode.exact_math, -0.125 * depth as f32);
         let sqrt_1 = celt_rsqrt_norm((n0 << lm) as f32);
 
         for c in 0..channels {
@@ -327,7 +331,7 @@ pub fn anti_collapse(
                 prev2 = prev2.max(prev2_log_e[mode.nb_ebands + i]);
             }
             let ediff = (log_e[c * mode.nb_ebands + i] - prev1.min(prev2)).max(0.0);
-            let mut r = 2.0 * celt_exp2_db(-ediff);
+            let mut r = 2.0 * mode_exp2(mode.exact_math, -ediff);
             if lm == 3 {
                 r *= core::f32::consts::SQRT_2;
             }
@@ -346,7 +350,12 @@ pub fn anti_collapse(
                 }
             }
             if renormalize {
-                renormalise_vector(&mut x[base..base + band_len], band_len, 1.0);
+                renormalise_vector_mode(
+                    mode.exact_math,
+                    &mut x[base..base + band_len],
+                    band_len,
+                    1.0,
+                );
             }
         }
     }
@@ -366,15 +375,28 @@ pub fn stereo_split(x: &mut [f32], y: &mut [f32], n: usize) {
 }
 
 pub fn stereo_merge(x: &mut [f32], y: &mut [f32], mid: f32, n: usize) {
+    stereo_merge_mode(false, x, y, mid, n);
+}
+
+/// `stereo_merge`; `exact` selects libopus's x86-64 summation order.
+pub fn stereo_merge_mode(exact: bool, x: &mut [f32], y: &mut [f32], mid: f32, n: usize) {
     assert!(x.len() >= n);
     assert!(y.len() >= n);
 
-    let mut xp = 0.0f32;
-    let mut side = 0.0f32;
-    for j in 0..n {
-        xp += y[j] * x[j];
-        side += y[j] * y[j];
-    }
+    let (mut xp, side) = if exact {
+        (
+            crate::celt::refkern::inner_prod(y, x, n),
+            crate::celt::refkern::inner_prod(y, y, n),
+        )
+    } else {
+        let mut xp = 0.0f32;
+        let mut side = 0.0f32;
+        for j in 0..n {
+            xp += y[j] * x[j];
+            side += y[j] * y[j];
+        }
+        (xp, side)
+    };
 
     xp = mid * xp;
     let el = mid * mid + side - 2.0 * xp;
@@ -563,6 +585,63 @@ pub fn stereo_itheta(x: &[f32], y: &[f32], stereo: bool, n: usize) -> i32 {
     (0.5 + 16_384.0 * 0.63662 * fast_atan2f(side, mid)).floor() as i32
 }
 
+/// libopus trunk's `celt_atan_norm`: atan(x) * 2 / pi on [0, 1].
+#[allow(clippy::excessive_precision)]
+fn celt_atan_norm(x: f32) -> f32 {
+    // The literals of libopus's `celt/mathops.h`, rounded to f32 as C does.
+    const ATAN2_2_OVER_PI: f32 = 0.636619772367581;
+    const A03: f32 = -3.3331659436225891113281250000e-01;
+    const A05: f32 = 1.99627041816711425781250000000e-01;
+    const A07: f32 = -1.3976582884788513183593750000e-01;
+    const A09: f32 = 9.79423448443412780761718750000e-02;
+    const A11: f32 = -5.7773590087890625000000000000e-02;
+    const A13: f32 = 2.30401363223791122436523437500e-02;
+    const A15: f32 = -4.3554059229791164398193359375e-03;
+    let x_sq = x * x;
+    ATAN2_2_OVER_PI
+        * (x + x
+            * x_sq
+            * (A03
+                + x_sq
+                    * (A05
+                        + x_sq * (A07 + x_sq * (A09 + x_sq * (A11 + x_sq * (A13 + x_sq * A15)))))))
+}
+
+/// libopus trunk's `celt_atan2p_norm`: atan2(y, x) * 2 / pi for x, y >= 0.
+fn celt_atan2p_norm(y: f32, x: f32) -> f32 {
+    if x * x + y * y < 1e-18 {
+        return 0.0;
+    }
+    if y < x {
+        celt_atan_norm(y / x)
+    } else {
+        1.0 - celt_atan_norm(x / y)
+    }
+}
+
+/// libopus trunk's float `stereo_itheta`: the mid/side angle in Q30.
+pub fn stereo_itheta_q30(x: &[f32], y: &[f32], stereo: bool, n: usize) -> i32 {
+    let (emid, eside) = if stereo {
+        let mut emid = 0.0f32;
+        let mut eside = 0.0f32;
+        for i in 0..n {
+            let m = x[i] + y[i];
+            let s = x[i] - y[i];
+            emid += m * m;
+            eside += s * s;
+        }
+        (emid, eside)
+    } else {
+        (
+            crate::celt::refkern::inner_prod(x, x, n),
+            crate::celt::refkern::inner_prod(y, y, n),
+        )
+    };
+    let mid = emid.sqrt();
+    let side = eside.sqrt();
+    (0.5 + 65_536.0 * 16_384.0 * celt_atan2p_norm(side, mid)).floor() as i32
+}
+
 pub fn compute_qn(n: usize, b: i32, offset: i32, pulse_cap: i32, stereo: bool) -> i32 {
     const EXP2_TABLE8: [i32; 8] = [16384, 17866, 19483, 21247, 23170, 25267, 27554, 30048];
     let mut n2 = 2 * n as i32 - 1;
@@ -667,12 +746,13 @@ impl BandCoder<'_, '_> {
         pulse_cache: &mut CwrsDecodeCache,
         pvq_y: &mut Vec<f32>,
         pvq_signx: &mut Vec<u8>,
+        exact: bool,
     ) -> u32 {
         match self {
-            Self::Encode(enc) => alg_quant_with_scratch(
-                x, n, k, spread, b, enc, gain, resynth, pulse_y, pvq_y, pvq_signx,
+            Self::Encode(enc) => alg_quant_with_scratch_mode(
+                x, n, k, spread, b, enc, gain, resynth, pulse_y, pvq_y, pvq_signx, exact,
             ),
-            Self::Decode(dec) => alg_unquant_with_scratch(
+            Self::Decode(dec) => alg_unquant_with_scratch_mode(
                 x,
                 n,
                 k,
@@ -683,6 +763,7 @@ impl BandCoder<'_, '_> {
                 pulse_y,
                 pulse_u,
                 pulse_cache,
+                exact,
             ),
         }
     }
@@ -934,7 +1015,11 @@ fn compute_theta_impl<C: ThetaCoder + ?Sized>(
     let encode = C::ENCODE;
     let mut inv = false;
     let mut itheta = if encode {
-        stereo_itheta(x, y, stereo, n)
+        if ctx.mode.exact_math {
+            stereo_itheta_q30(x, y, stereo, n) >> 16
+        } else {
+            stereo_itheta(x, y, stereo, n)
+        }
     } else {
         0
     };
@@ -1095,6 +1180,15 @@ fn compute_theta_impl<C: ThetaCoder + ?Sized>(
         delta,
         itheta,
         qalloc,
+    }
+}
+
+/// The theta-RDO distortion product; `exact` uses libopus's x86-64 order.
+fn rdo_inner_prod(exact: bool, x: &[f32], y: &[f32], n: usize) -> f32 {
+    if exact {
+        crate::celt::refkern::inner_prod(x, y, n)
+    } else {
+        inner_prod(x, y, n)
     }
 }
 
@@ -1311,6 +1405,7 @@ fn quant_partition(
                 pulse_cache,
                 pvq_y,
                 pvq_signx,
+                ctx.mode.exact_math,
             )
         } else if ctx.resynth {
             let cm_mask = (1u32 << blocks) - 1;
@@ -1328,14 +1423,14 @@ fn quant_partition(
                     };
                     x[j] = lowband[j] + tmp;
                 }
-                renormalise_vector(x, n, gain);
+                renormalise_vector_mode(ctx.mode.exact_math, x, n, gain);
                 fill
             } else {
                 for value in x.iter_mut().take(n) {
                     ctx.seed = celt_lcg_rand(ctx.seed);
                     *value = (ctx.seed as i32 >> 20) as f32;
                 }
-                renormalise_vector(x, n, gain);
+                renormalise_vector_mode(ctx.mode.exact_math, x, n, gain);
                 cm_mask
             }
         } else {
@@ -1857,7 +1952,7 @@ fn quant_band_stereo(
 
     if ctx.resynth {
         if n != 2 {
-            stereo_merge(x, y, mid, n);
+            stereo_merge_mode(ctx.mode.exact_math, x, y, mid, n);
         }
         if sctx.inv {
             for value in y.iter_mut().take(n) {
@@ -2509,8 +2604,18 @@ pub(crate) fn quant_all_bands_stereo_with_scratch_and_coding(
                     cm,
                 );
                 let dist_down = w0
-                    * inner_prod(&scratch.rdo_x_save[..n], &x[band_start..band_end], n)
-                    + w1 * inner_prod(&scratch.rdo_y_save[..n], &y[band_start..band_end], n);
+                    * rdo_inner_prod(
+                        mode.exact_math,
+                        &scratch.rdo_x_save[..n],
+                        &x[band_start..band_end],
+                        n,
+                    )
+                    + w1 * rdo_inner_prod(
+                        mode.exact_math,
+                        &scratch.rdo_y_save[..n],
+                        &y[band_start..band_end],
+                        n,
+                    );
                 let enc_down = coder
                     .snapshot_encoder()
                     .expect("theta RDO only runs while encoding");
@@ -2558,8 +2663,18 @@ pub(crate) fn quant_all_bands_stereo_with_scratch_and_coding(
                     cm,
                 );
                 let dist_up = w0
-                    * inner_prod(&scratch.rdo_x_save[..n], &x[band_start..band_end], n)
-                    + w1 * inner_prod(&scratch.rdo_y_save[..n], &y[band_start..band_end], n);
+                    * rdo_inner_prod(
+                        mode.exact_math,
+                        &scratch.rdo_x_save[..n],
+                        &x[band_start..band_end],
+                        n,
+                    )
+                    + w1 * rdo_inner_prod(
+                        mode.exact_math,
+                        &scratch.rdo_y_save[..n],
+                        &y[band_start..band_end],
+                        n,
+                    );
 
                 if dist_down >= dist_up {
                     coder.restore_encoder(enc_down);

@@ -183,6 +183,12 @@ impl RangeEncoder {
         tell_frac(self.nbits_total, self.rng)
     }
 
+    /// Makes `tell()` report `bits` without coding anything, as CELT does
+    /// after a silence flag: `nbits_total += bits - ec_tell()`.
+    pub fn pretend_tell(&mut self, bits: i32) {
+        self.nbits_total += bits - self.tell();
+    }
+
     fn write_byte(&mut self, value: u32) -> i32 {
         if self.offs + self.end_offs >= self.storage {
             -1
@@ -475,6 +481,12 @@ impl<'a> RangeDecoder<'a> {
 
     pub fn tell_frac(&self) -> u32 {
         tell_frac(self.nbits_total, self.rng)
+    }
+
+    /// Makes `tell()` report `bits` without coding anything, as CELT does
+    /// after a silence flag: `nbits_total += bits - ec_tell()`.
+    pub fn pretend_tell(&mut self, bits: i32) {
+        self.nbits_total += bits - self.tell();
     }
 
     fn read_byte(&mut self) -> i32 {
