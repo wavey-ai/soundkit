@@ -59,6 +59,11 @@ fn maximum_bitrate_fills_the_packet_limit() {
     let packet = encoder.encode_i16_vec(&tone(48, 1, 1), 48).unwrap();
     assert_eq!(packet.len(), 100);
     assert!(encoder.set_max_packet_bytes(1).is_err());
+    // Without the signalling byte a frame may use all 1275 bytes.
+    encoder.set_custom_signalling(false).unwrap();
+    encoder.set_max_packet_bytes(1275).unwrap();
+    let packet = encoder.encode_i16_vec(&tone(48, 1, 1), 48).unwrap();
+    assert_eq!(packet.len(), 1275);
     assert!(encoder.set_bitrate(400).is_err());
 }
 

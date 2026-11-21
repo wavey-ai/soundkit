@@ -1271,7 +1271,15 @@ impl Encoder {
                 .ok_or(Error::BadArg)?,
             None => self.frame_lm(frame_size)?,
         };
-        Self::validate_frame_bytes(frame_bytes)?;
+        if custom.is_some() {
+            // An Opus Custom frame without a signalling byte may use all
+            // 1275 bytes.
+            if !(CELT_MIN_FRAME_BYTES..=packet::MAX_FRAME_BYTES as usize).contains(&frame_bytes) {
+                return Err(Error::BadArg);
+            }
+        } else {
+            Self::validate_frame_bytes(frame_bytes)?;
+        }
         let stream_channels = if custom.is_some() {
             self.channels
         } else {

@@ -569,6 +569,7 @@ fn dynalloc_analysis_with_scratch(
     analysis_leak_boost: Option<&[u8; 19]>,
     tone_frequency: f32,
     toneishness: f32,
+    libopus_float: bool,
     offsets: &mut [i32],
     importance: &mut [i32],
     scratch: &mut DynallocAnalysisScratch,
@@ -686,7 +687,12 @@ fn dynalloc_analysis_with_scratch(
         }
     }
     if toneishness > 0.98 {
-        let frequency_bin = (0.5 + tone_frequency * 120.0 / core::f32::consts::PI).floor() as i32;
+        let frequency_bin = if mode.exact_math {
+            // libopus divides by a double-precision pi.
+            (0.5 + (tone_frequency * 120.0) as f64 / core::f64::consts::PI).floor() as i32
+        } else {
+            (0.5 + tone_frequency * 120.0 / core::f32::consts::PI).floor() as i32
+        };
         for (i, value) in follower.iter_mut().enumerate().take(end).skip(start) {
             let band_start = mode.ebands[i] as i32;
             let band_end = mode.ebands[i + 1] as i32;
@@ -714,6 +720,10 @@ fn dynalloc_analysis_with_scratch(
         }
     }
 
+    if libopus_float && packet_bytes > 320 && end > start {
+        // libopus trunk: more for the first band in very large frames.
+        follower[0] += 1.5f32.min(1e-3 * (packet_bytes - 320) as f32);
+    }
     let mut total_boost = 0;
     let dynalloc_scale = crate::tuning::get(crate::tuning::DYNALLOC_SCALE, 1.0);
     for i in start..end {
@@ -735,6 +745,9 @@ fn dynalloc_analysis_with_scratch(
         {
             let cap = (2 * packet_bytes as i32 / 3) << BITRES << 3;
             offsets[i] = cap - total_boost;
+            if libopus_float {
+                total_boost = cap;
+            }
             break;
         }
 
@@ -1313,6 +1326,7 @@ fn encode_spectral_frame_with_scratch_inner(
             config.analysis_leak_boost.as_ref(),
             config.tone_frequency,
             config.toneishness,
+            config.decisions.libopus_float,
             &mut scratch.offsets,
             &mut scratch.importance,
             &mut scratch.dynalloc,
