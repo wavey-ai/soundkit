@@ -57,6 +57,7 @@ struct PlcScratch {
     window: Vec<f32>,
     noise: Vec<f32>,
     fold: Vec<f32>,
+    overlap: Vec<Vec<f32>>,
 }
 
 #[derive(Clone, Debug)]
@@ -921,8 +922,10 @@ impl Decoder {
         self.seed = seed;
 
         // Synthesise into the frame slot, overlapping with the moved tail.
-        let mut overlap_mem = vec![Vec::new(); cc];
+        let mut overlap_mem = std::mem::take(&mut self.plc_scratch.overlap);
+        overlap_mem.resize_with(cc, Vec::new);
         for c in 0..cc {
+            overlap_mem[c].clear();
             overlap_mem[c].extend_from_slice(&memory[c][dbs - n..dbs - n + overlap]);
         }
         let (x, y) = noise.split_at(n);
@@ -946,6 +949,7 @@ impl Decoder {
             memory[c][dbs - n..dbs].copy_from_slice(&self.synthesis_channels[c][..n]);
             memory[c][dbs..dbs + overlap].copy_from_slice(&overlap_mem[c]);
         }
+        self.plc_scratch.overlap = overlap_mem;
 
         self.postfilter_period = self.postfilter_period.max(COMBFILTER_MINPERIOD);
         self.postfilter_period_old = self.postfilter_period_old.max(COMBFILTER_MINPERIOD);
@@ -995,9 +999,9 @@ impl Decoder {
         let scratch = &mut self.plc_scratch;
         scratch.lp_pitch.clear();
         scratch.lp_pitch.resize(half, 0.0);
-        let channels: Vec<&[f32]> = memory.iter().map(|buffer| &buffer[..]).collect();
+        let channels: [&[f32]; 2] = [&memory[0], memory.get(1).map_or(&[][..], |m| &m[..])];
         refkern::pitch_downsample(
-            &channels,
+            &channels[..memory.len()],
             &mut scratch.lp_pitch,
             half,
             2,
