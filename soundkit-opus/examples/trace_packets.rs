@@ -13,7 +13,9 @@ fn main() {
         while pos + 2 <= data.len() {
             let len = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
             pos += 2;
-            decoder.decode_i24_into_slice(&data[pos..pos + len], false, &mut pcm).expect("decode");
+            decoder
+                .decode_i24_into_slice(&data[pos..pos + len], false, &mut pcm)
+                .expect("decode");
             pos += len;
         }
         let frames = trace::take();
