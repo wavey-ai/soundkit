@@ -109,6 +109,31 @@ pub fn tone_detect(
     sample_rate: usize,
     scratch: &mut Vec<f32>,
 ) -> ToneAnalysis {
+    tone_detect_mode(false, input, channels, len, sample_rate, scratch)
+}
+
+/// The tone frequency in radians per sample from the first LPC coefficient.
+fn tone_frequency(exact: bool, lpc0: f32, delay: usize) -> f32 {
+    if exact {
+        (f64::from(0.5 * lpc0).acos() / delay as f64) as f32
+    } else {
+        (0.5 * lpc0).acos() / delay as f32
+    }
+}
+
+/// [`tone_detect`]. With `exact`, the frequency is computed as libopus's
+/// float build does, `acos` and the division in double precision; `acosf`
+/// differs from it in the last bit for some inputs, and differs between
+/// libms (glibc and the WebAssembly target's), while the double-precision
+/// result rounded to `f32` is the same for every `f32` input in both.
+pub fn tone_detect_mode(
+    exact: bool,
+    input: &[Vec<f32>],
+    channels: usize,
+    len: usize,
+    sample_rate: usize,
+    scratch: &mut Vec<f32>,
+) -> ToneAnalysis {
     assert!((1..=2).contains(&channels));
     assert!(input.len() >= channels);
     assert!(input
@@ -147,7 +172,7 @@ pub fn tone_detect(
     }
 
     ToneAnalysis {
-        frequency: (0.5 * lpc0).acos() / delay as f32,
+        frequency: tone_frequency(exact, lpc0, delay),
         toneishness: -lpc1,
     }
 }
@@ -1086,7 +1111,25 @@ pub fn run_prefilter(
 
 #[cfg(test)]
 mod tests {
-    use super::{should_cancel_pitch_filter, tone_detect};
+    use super::{should_cancel_pitch_filter, tone_detect, tone_frequency};
+
+    #[test]
+    fn exact_tone_frequency_follows_libopus_double_precision_acos() {
+        // `freq = acos(.5f*lpc[0])/delay` in libopus. glibc's `acosf`
+        // rounds the first two inputs differently, and the WebAssembly
+        // libm's `acosf` the last two (and most others); the expected values
+        // are libopus's.
+        for (half_lpc0, delay, expected) in [
+            (0x3288_85a3u32, 1usize, 1.570_796_3f32),
+            (0x3982_6222, 2, 1.570_547_6 / 2.0),
+            (0x3f00_0009, 4, 1.047_197 / 4.0),
+            (0x3f00_0023, 1, 1.047_195_2),
+        ] {
+            // Keep the compiler from folding the call at build time.
+            let lpc0 = std::hint::black_box(2.0 * f32::from_bits(half_lpc0));
+            assert_eq!(tone_frequency(true, lpc0, delay), expected, "{half_lpc0:#x}");
+        }
+    }
 
     #[test]
     fn pitch_filter_requires_a_material_channel_benefit() {

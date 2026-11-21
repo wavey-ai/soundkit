@@ -9,7 +9,7 @@ use crate::celt::mathops::{celt_sqrt, mode_log2};
 use crate::celt::mdct::{clt_mdct_forward_with_scratch, MdctScratch};
 use crate::celt::modes::CeltMode;
 use crate::celt::pitch::{
-    run_prefilter, tone_detect, PrefilterScratch, ToneAnalysis, COMBFILTER_MAXPERIOD,
+    run_prefilter, tone_detect_mode, PrefilterScratch, ToneAnalysis, COMBFILTER_MAXPERIOD,
     COMBFILTER_MINPERIOD,
 };
 use crate::celt::quant_bands::{amp2_log2, E_MEANS};
@@ -1391,7 +1391,8 @@ impl Encoder {
             }
         }
 
-        let tone = tone_detect(
+        let tone = tone_detect_mode(
+            self.mode.exact_math,
             &scratch.inputs,
             self.channels,
             n + overlap,
