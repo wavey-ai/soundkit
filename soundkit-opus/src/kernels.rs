@@ -555,7 +555,9 @@ pub fn mdct_backward_pre_rotate(
     let start = 0usize;
 
     let mut xp1 = start * step;
-    let mut xp2 = last_input - start * step;
+    // When the SIMD head handled every value (`start == n4`) the loop below
+    // is empty, and `start * step` exceeds `last_input`.
+    let mut xp2 = last_input.saturating_sub(start * step);
     for i in start..n4 {
         // SAFETY: `InRangeIndices::new` checked every output index against
         // `bound`, and `output.len() >= bound`. The length and overflow checks
