@@ -12,7 +12,7 @@ use crate::celt::synthesis::{
     deemphasis_interleaved_i24_slice, deemphasis_interleaved_into, SynthesisScratch,
 };
 use crate::celt::vq::renormalise_vector_mode;
-use crate::constants::{valid_channels, valid_sample_rate, Bandwidth};
+use crate::constants::{valid_channels, valid_sample_rate, Bandwidth, PCM_I24_MAX, PCM_I24_MIN};
 use crate::custom;
 use crate::packet;
 use crate::{Error, Result};
@@ -70,6 +70,9 @@ pub struct Decoder {
     sample_rate: i32,
     channels: usize,
     experimental_direct_cubic: bool,
+    /// Keep libopus's `FLOAT2INT24` range (+/-2^24) in i24 output instead of
+    /// saturating to `PCM_I24_MIN..=PCM_I24_MAX`.
+    libopus_i24_range: bool,
     mode: &'static CeltMode,
     framing: Framing,
     /// Last coded band plus one (`st->end`); a signalled custom packet can
@@ -185,6 +188,7 @@ impl Decoder {
             sample_rate,
             channels,
             experimental_direct_cubic: false,
+            libopus_i24_range: false,
             end: mode.eff_ebands,
             old_band_e: vec![0.0; 2 * nb],
             old_log_e: vec![ENERGY_FLOOR; 2 * nb],
@@ -301,15 +305,54 @@ impl Decoder {
     }
 
     /// Resets the packet decoder while retaining the selected stream format.
+    ///
+    /// Like libopus's `OPUS_RESET_STATE`, this keeps the end band that the
+    /// last signalled Opus Custom packet set.
     pub fn reset(&mut self) -> Result<()> {
+        let end = self.end;
         self.reset_state();
+        if matches!(self.framing, Framing::Custom { .. }) {
+            self.end = end;
+        }
         Ok(())
     }
 
     fn reset_state(&mut self) {
         let experimental_direct_cubic = self.experimental_direct_cubic;
+        let libopus_i24_range = self.libopus_i24_range;
         *self = Self::with_mode(self.sample_rate, self.channels, self.mode, self.framing);
         self.experimental_direct_cubic = experimental_direct_cubic;
+        self.libopus_i24_range = libopus_i24_range;
+    }
+
+    /// Reports whether i24 output keeps libopus's wider range; see
+    /// [`Decoder::set_libopus_i24_range`].
+    pub const fn libopus_i24_range(&self) -> bool {
+        self.libopus_i24_range
+    }
+
+    /// Selects the range of i24 output with libopus arithmetic.
+    ///
+    /// libopus's `FLOAT2INT24` clamps at +/-2^24, twice 24-bit full scale, so
+    /// `opus_custom_decode24` can return samples outside the 24-bit range
+    /// when the decoded signal overshoots full scale. By default the decoder
+    /// saturates those samples to `PCM_I24_MIN..=PCM_I24_MAX`, the range that
+    /// SoundKit's i24 encoders accept and that fits three bytes; every other
+    /// sample equals libopus's. With this on, i24 output equals libopus's in
+    /// every sample, and callers must clamp before packing three-byte PCM or
+    /// re-encoding. Without libopus arithmetic the output always saturates.
+    pub fn set_libopus_i24_range(&mut self, enabled: bool) {
+        self.libopus_i24_range = enabled;
+    }
+
+    #[inline]
+    fn i24_sample(libopus_range: bool, sample: f32) -> i32 {
+        let value = float_to_i24_exact(sample);
+        if libopus_range {
+            value
+        } else {
+            value.clamp(PCM_I24_MIN, PCM_I24_MAX)
+        }
     }
 
     /// Reports whether this decoder accepts the experimental direct-cubic packet syntax.
@@ -413,7 +456,8 @@ impl Decoder {
     /// Decodes into signed 24-bit PCM stored sign-extended in `i32` samples.
     ///
     /// With libopus arithmetic the samples follow libopus `FLOAT2INT24`,
-    /// which clamps to +/-2^24 rather than to the 24-bit range.
+    /// saturated to the 24-bit range unless
+    /// [`Decoder::set_libopus_i24_range`] keeps libopus's +/-2^24.
     pub fn decode_i24_into(
         &mut self,
         packet: &[u8],
@@ -429,10 +473,11 @@ impl Decoder {
                 &mut self.pcm_f32_scratch,
             )?;
             pcm.clear();
+            let libopus_range = self.libopus_i24_range;
             pcm.extend(
                 self.pcm_f32_scratch
                     .iter()
-                    .map(|&sample| float_to_i24_exact(sample)),
+                    .map(|&sample| Self::i24_sample(libopus_range, sample)),
             );
             return Ok(pcm.len() / channels);
         }
@@ -463,7 +508,7 @@ impl Decoder {
             let count = self.pcm_f32_scratch.len();
             let pcm = pcm.get_mut(..count).ok_or(Error::BufferTooSmall)?;
             for (output, &sample) in pcm.iter_mut().zip(&self.pcm_f32_scratch) {
-                *output = float_to_i24_exact(sample);
+                *output = Self::i24_sample(self.libopus_i24_range, sample);
             }
             return Ok(count / channels);
         }

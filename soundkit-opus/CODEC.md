@@ -227,6 +227,14 @@ round:
 Every decoded sample matched, in every PCM format, including concealment,
 and every packet matched.
 
+The s24 comparisons use `Decoder::set_libopus_i24_range(true)`. libopus's
+`FLOAT2INT24` clamps at +/-2^24, twice 24-bit full scale, so
+`opus_custom_decode24` returns samples beyond the 24-bit range where the
+decoded signal overshoots full scale (a full-scale square wave does). By
+default SoundKit saturates those samples to `PCM_I24_MIN..=PCM_I24_MAX`, the
+range its i24 encoders accept and three-byte PCM can hold; every other
+sample is libopus's. Float output is never clamped.
+
 Edge cases, checked with separate tools against the same libopus build:
 
 - Streams that switch between mono and stereo packets (runs of 37 and

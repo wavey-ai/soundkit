@@ -148,6 +148,7 @@ pub unsafe extern "C" fn ci_decode(
     {
         return -1;
     }
+    decoder.set_libopus_i24_range(true);
     let mut s16 = Vec::new();
     let mut s32 = Vec::new();
     let mut f32s = Vec::new();

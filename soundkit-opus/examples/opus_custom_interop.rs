@@ -207,6 +207,9 @@ fn decode(args: &Args) {
     decoder
         .set_libopus_arithmetic(args.libopus_arith)
         .unwrap_or_else(|e| fail(format!("arith: {e}")));
+    // Compare s24 with opus_custom_decode24 in every sample, including the
+    // ones libopus returns beyond the 24-bit range.
+    decoder.set_libopus_i24_range(true);
     let mut out = Vec::new();
     let mut pos = 0usize;
     let mut index = 0usize;

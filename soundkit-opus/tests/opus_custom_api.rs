@@ -179,3 +179,53 @@ fn settings_survive_reset() {
     assert!(decoder.is_custom() && !decoder.custom_signalling());
     assert_eq!(decoder.decode_i16_vec(&first[0], false).unwrap(), a);
 }
+
+/// A full-scale square wave decodes with overshoot beyond 24-bit full scale.
+fn overshoot_packets() -> Vec<Vec<u8>> {
+    let mut encoder = Encoder::new_custom(48_000, 1, 48).unwrap();
+    encoder.set_bitrate(256_000).unwrap();
+    let pcm: Vec<i32> = (0..48 * 400)
+        .map(|i| {
+            if (i / 37) % 2 == 0 {
+                soundkit_opus::PCM_I24_MAX
+            } else {
+                soundkit_opus::PCM_I24_MIN
+            }
+        })
+        .collect();
+    pcm.chunks_exact(48)
+        .map(|frame| encoder.encode_i24_vec(frame, 48).unwrap())
+        .collect()
+}
+
+#[test]
+fn i24_output_stays_in_the_24_bit_range_unless_libopus_range_is_asked_for() {
+    use soundkit_opus::{PCM_I24_MAX, PCM_I24_MIN};
+    let packets = overshoot_packets();
+    let mut saturating = Decoder::new_custom(48_000, 1, 48).unwrap();
+    let mut libopus = Decoder::new_custom(48_000, 1, 48).unwrap();
+    assert!(!saturating.libopus_i24_range());
+    libopus.set_libopus_i24_range(true);
+    let mut relay = Encoder::new_custom(48_000, 1, 48).unwrap();
+    relay.set_bitrate(256_000).unwrap();
+    let mut beyond = 0;
+    let mut slice = vec![0i32; 48];
+    let mut slice_decoder = Decoder::new_custom(48_000, 1, 48).unwrap();
+    for packet in &packets {
+        let clamped = saturating.decode_i24_vec(packet, false).unwrap();
+        let wide = libopus.decode_i24_vec(packet, false).unwrap();
+        slice_decoder
+            .decode_i24_into_slice(packet, false, &mut slice)
+            .unwrap();
+        assert_eq!(slice, clamped);
+        for (&c, &w) in clamped.iter().zip(&wide) {
+            assert_eq!(c, w.clamp(PCM_I24_MIN, PCM_I24_MAX));
+            beyond += usize::from(w != c);
+        }
+        // SoundKit's own i24 encoders accept the decoder's default output.
+        relay.encode_i24_vec(&clamped, 48).unwrap();
+    }
+    assert!(beyond > 0, "the signal should overshoot 24-bit full scale");
+    libopus.reset().unwrap();
+    assert!(libopus.libopus_i24_range(), "the setting survives a reset");
+}
