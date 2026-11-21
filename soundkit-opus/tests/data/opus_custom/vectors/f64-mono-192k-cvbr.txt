@@ -1,0 +1,13 @@
+frame = 64
+channels = 1
+bitrate = 192000
+vbr = 1
+signalling = 1
+libopus_decode_s16 = 85df2ec3d3a92c4b
+libopus_decode_s24 = 47a4cf28006677bc
+libopus_decode_f32 = 0afbc929c2d8a243
+libopus_plc_s16 = f638ecaf8529acea
+rust_portable_packets = f23fad7d79afa800
+libopus_decode_rust_s16 = 934464d445a84713
+rcp_fingerprint = e79382fe61aef3db
+native_identical = 1
