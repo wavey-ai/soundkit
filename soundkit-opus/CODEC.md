@@ -279,6 +279,29 @@ rejected); damaged packets (decoded instead of rejected); and empty or
 and `set_libopus_decisions(true)` make them follow libopus's arithmetic as
 well.
 
+The standard path costs what origin/main's does. Measured in one process
+on the same x86-64 core (AMD EPYC 7713 VM, `taskset`, interleaved
+origin/main and branch runs, 90 pairs per case; i16 PCM, VBR, 128 kb/s
+mono and 256 kb/s stereo), branch against origin/main:
+
+| Case | Retired instructions | Time, median | Time, interquartile range |
+| --- | ---: | ---: | ---: |
+| Encode 2.5 ms mono | -0.37% | -2.3% | -2.6% to -1.9% |
+| Encode 5 ms mono | -0.74% | -3.4% | -3.7% to -3.0% |
+| Encode 2.5 ms stereo | -0.24% | -2.3% | -2.8% to -1.8% |
+| Encode 5 ms stereo | -0.54% | -3.1% | -3.7% to -2.3% |
+| Decode 2.5 ms mono | -0.23% | +0.8% | +0.3% to +1.1% |
+| Decode 5 ms mono | 0.00% | +1.3% | +0.5% to +2.3% |
+| Decode 2.5 ms stereo | -0.03% | -0.7% | -1.3% to +0.1% |
+| Decode 5 ms stereo | +0.15% | +0.1% | -0.4% to +0.9% |
+
+The input-clip scan runs only for floating-point input, and the
+pre-emphasis loop no longer stores its state per sample. The mono
+decoders run the same instructions as origin/main; their time difference
+is within this shared machine's run-to-run spread, and shrinking the
+decoder's history storage from 4096 to 3072 samples per channel did not
+change it.
+
 On x86-64 the encoder's PVQ search follows libopus's SSE2 search, whose
 `rcpps`/`rsqrtps` estimates come from the CPU and differ between vendors.
 `Encoder::set_portable_pvq(true)` uses libopus's generic C search instead;
