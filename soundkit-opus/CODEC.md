@@ -130,18 +130,23 @@ let concealed = decoder.decode_i16_vec(&[], false)?; // a lost packet
 - An empty packet, or one with at most one byte of CELT data, conceals a lost
   frame with libopus's pitch-based concealment, falling back to noise after
   40 short blocks, then folds the concealment into the next decoded frame.
-  Standard Opus decoders conceal the same way, one frame of the last decoded
-  size per empty packet.
+  `decode_lost_i16_into`, `decode_lost_i24_into` and `decode_lost_f32_into`
+  conceal a frame explicitly. Standard Opus decoders conceal the same way,
+  one frame of the last decoded size, but only through `decode_lost_*` or
+  after `set_conceal_errors(true)`; by default they keep their old results
+  (see "Standard decoders" below).
 - The encoder always runs the analysis of libopus complexity 10.
 - With signalling on, the channel count may change from packet to packet, as
   libopus allows. A stereo decoder synthesises and post-filters each channel
   of a mono packet from that channel's own state, and a mono decoder
   downmixes stereo packets; mono decoders turn off intensity-stereo phase
-  inversion, as libopus's do. Standard Opus decoders do the same.
+  inversion, as libopus's do. Standard Opus decoders do the same after
+  `set_conceal_errors(true)`.
 - Damaged packets decode as in libopus: a frame whose range decoding fails is
-  still decoded (libopus only records the error), and a packet rejected after
-  its signalling byte still sets the end band that the next concealed frame
-  uses. libopus's `OPUS_INTERNAL_ERROR` for a frame that reads past its end is
+  still decoded (libopus only records the error), a silence frame skips its
+  remaining bits, and a packet rejected after its signalling byte still sets
+  the end band that the next concealed frame uses. Standard decoders do this
+  only after `set_conceal_errors(true)`. libopus's `OPUS_INTERNAL_ERROR` for a frame that reads past its end is
   not reproduced; no test has produced one.
 - A 2-byte packet limit with signalling leaves one byte of CELT data, which
   both libopus and this crate encode at `BITRATE_MAX`; for digital silence
@@ -156,7 +161,30 @@ let concealed = decoder.decode_i16_vec(&[], false)?; // a lost packet
 The WebAssembly API (`wasm` feature) has `Encoder.newCustom(channels,
 frameSize)` and `Decoder.newCustom(channels, frameSize)`, with
 `set_bitrate`, `set_custom_signalling`, `set_max_packet_bytes`,
-`set_libopus_decisions`, `enc_frame_f32`, `dec_frame_f32` and `dec_lost`.
+`set_libopus_decisions`, `enc_frame_f32`, `dec_frame_f32` and `dec_lost`
+(which conceals for standard decoders too), plus `set_conceal_errors` for
+standard decoders.
+
+### Standard decoders
+
+Standard Opus decoders (`Decoder::new`) return what origin/main returns for
+every input: the same `Ok` or `Err` and the same samples. An empty packet, a
+packet with at most one byte of CELT data, a stereo packet into a mono
+decoder and a frame whose range decoding fails are errors, as they always
+were, so callers that treat a decode error as corruption (Needletail's probe,
+for example) see no change; a silence flag does not skip the frame's
+remaining bits, and a mono packet into a stereo decoder continues both
+channels from the first channel's state. A differential fuzz (see below)
+checks this against an origin/main build.
+
+`Decoder::set_conceal_errors(true)` selects libopus's handling instead:
+concealment of empty and short packets, damaged frames decoded, silence
+frames skipped, stereo packets downmixed in a mono decoder, and per-channel
+state for mono packets in a stereo decoder. With `set_libopus_arithmetic(true)`
+as well, a standard decoder then matches libopus's CELT decoder on the
+channel-switch vectors. `decode_lost_*` conceals a frame whichever setting is
+chosen. Opus Custom decoders always use libopus's handling, and
+`set_conceal_errors(false)` returns `BadArg` for them.
 
 ### Arithmetic and decision constants
 
@@ -180,25 +208,30 @@ interop evidence. `set_libopus_decisions(false)` selects SoundKit's
 constants, and the `tuning` feature's knobs still override either.
 
 Standard Opus encoders and decoders keep SoundKit's arithmetic and tuned
-constants. Their packets do not change, nor, with one exception below, does
-the PCM they decode from SoundKit's packets: a gate of 960 encode and decode
-configurations (2.5 to 20 ms, 64 to 320 kb/s, CBR and both VBR modes, s16
-and s24, synthetic and music inputs) and four libopus streams matches
-origin/main hash for hash. The exception is a stereo stream with mono-coded
-packets, which SoundKit's stereo encoders produce at low bitrates (for
-example 32 kb/s at 2.5 or 5 ms): from the first switch back to mono coding
-the decode now follows libopus (in one such stream the largest error against
-libopus fell from 2684 to 1 LSB). The encoder's input clip also changes
-packets for input beyond 65536 times full scale, which before produced
-undefined energies.
-Decoding some other libopus streams changes, where the decoder now follows
-libopus: mono energy bookkeeping (one libopus `RESTRICTED_LOWDELAY` mono
-stream at 64 kb/s changed in 15 frames, its largest error against libopus
-falling from 7.9e-4 to 1.2e-4), stereo packets in a mono decoder and streams
-that switch channel count (decoded instead of rejected), damaged packets
-(decoded instead of rejected), and empty or 1-byte packets (concealed
-instead of an error). `set_libopus_arithmetic(true)` and
-`set_libopus_decisions(true)` make them follow libopus as well.
+constants. Their packets do not change, nor does the PCM they decode: a gate
+of 960 encode and decode configurations (2.5 to 20 ms, 64 to 320 kb/s, CBR
+and both VBR modes, s16 and s24, synthetic and music inputs) and four
+libopus streams matches origin/main hash for hash, and a differential fuzz
+of over a million corrupted, truncated, empty, channel-switching and random
+packets gives the same `Ok`/`Err` results and samples as an origin/main
+build (see "Standard decoders" above). The encoder's input clip changes
+packets only for floating-point input beyond 65536 times full scale, which
+before produced undefined energies.
+
+With `set_conceal_errors(true)` a standard decoder follows libopus where
+origin/main did not: a stereo stream with mono-coded packets, which
+SoundKit's stereo encoders produce at low bitrates (for example 32 kb/s at
+2.5 or 5 ms), decodes each channel from its own state after the first
+switch back to mono coding (in one such stream the largest error against
+libopus fell from 2684 to 1 LSB); some libopus streams (phase one measured
+one libopus `RESTRICTED_LOWDELAY` mono stream at 64 kb/s changing in 15
+frames, its largest error against libopus falling from 7.9e-4 to 1.2e-4),
+with silence frames now skipping their remaining bits; stereo packets
+in a mono decoder and streams that switch channel count (decoded instead of
+rejected); damaged packets (decoded instead of rejected); and empty or
+1-byte packets (concealed instead of an error). `set_libopus_arithmetic(true)`
+and `set_libopus_decisions(true)` make them follow libopus's arithmetic as
+well.
 
 On x86-64 the encoder's PVQ search follows libopus's SSE2 search, whose
 `rcpps`/`rsqrtps` estimates come from the CPU and differ between vendors.

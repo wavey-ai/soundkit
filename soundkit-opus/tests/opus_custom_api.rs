@@ -124,12 +124,22 @@ fn empty_packets_conceal_a_frame() {
     // A one-byte packet holds no CELT data after the signalling byte.
     assert_eq!(decoder.decode_i16_vec(&[0], false).unwrap().len(), 48);
 
-    // Standard Opus decoders conceal frames of the last decoded size.
+    // Custom decoders always handle packets as libopus does.
+    assert!(decoder.conceal_errors());
+    assert_eq!(decoder.set_conceal_errors(false), Err(Error::BadArg));
+
+    // Standard Opus decoders conceal frames of the last decoded size once
+    // asked to; by default an empty packet stays an error.
     let mut encoder = Encoder::try_new(48_000, 16, 2, 240, 128_000).unwrap();
     let mut decoder = Decoder::new(48_000, 2).unwrap();
     let pcm = tone(240, 2, 2);
     let packet = encoder.encode_i16_vec(&pcm[..480], 240).unwrap();
     decoder.decode_i16_vec(&packet, false).unwrap();
+    assert!(decoder.decode_i16_vec(&[], false).is_err());
+    let mut lost = Vec::new();
+    assert_eq!(decoder.decode_lost_i16_into(&mut lost).unwrap(), 240);
+    assert_eq!(lost.len(), 480);
+    decoder.set_conceal_errors(true).unwrap();
     assert_eq!(decoder.decode_i16_vec(&[], false).unwrap().len(), 480);
 }
 

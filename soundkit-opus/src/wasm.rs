@@ -284,10 +284,25 @@ impl Decoder {
     }
 
     /// Conceals one lost frame (packet-loss concealment) into the i16
-    /// output.
+    /// output, for standard and Opus Custom decoders alike.
     #[wasm_bindgen(js_name = dec_lost)]
     pub fn dec_lost(&mut self) -> Result<DecodeResult, JsValue> {
-        self.dec_frame(&[])
+        self.decoded_size = self
+            .inner
+            .decode_lost_i16_into(&mut self.output)
+            .map_err(opus_error)?;
+        Ok(DecodeResult {
+            output: self.output.clone(),
+            decoded_size: self.decoded_size,
+        })
+    }
+
+    /// Selects libopus's handling of empty, short and damaged packets for a
+    /// standard decoder (off by default: such packets are errors, as they
+    /// always were). Opus Custom decoders always conceal.
+    #[wasm_bindgen(js_name = set_conceal_errors)]
+    pub fn set_conceal_errors(&mut self, enabled: bool) -> Result<(), JsValue> {
+        self.inner.set_conceal_errors(enabled).map_err(opus_error)
     }
 
     /// Decodes to interleaved floating-point samples.

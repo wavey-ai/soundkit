@@ -124,6 +124,16 @@ pub struct Decoder {
     /// result as libopus's per-channel synthesis. Channel 1's post-filter
     /// history is only brought up to date when the channels part.
     channels_mirrored: bool,
+    /// A mono decoder whose second-channel energy state (libopus keeps two
+    /// channels of it in every decoder) still equals the first channel's:
+    /// no stereo packet and no noise concealment so far. The second
+    /// channel's bookkeeping is then skipped, and copied from the first when
+    /// the two part. Always false for a stereo decoder.
+    energy_mirrored: bool,
+    /// Lost, short, damaged and channel-switching packets are handled as
+    /// libopus handles them (see [`Decoder::set_conceal_errors`]). Always on
+    /// for Opus Custom decoders; an opt-in for standard decoders.
+    conceal_errors: bool,
 }
 
 impl Decoder {
@@ -220,6 +230,8 @@ impl Decoder {
             lpc: [[0.0; CELT_LPC_ORDER]; 2],
             plc_scratch: PlcScratch::default(),
             channels_mirrored: true,
+            energy_mirrored: channels == 1,
+            conceal_errors: matches!(framing, Framing::Custom { .. }),
             mode,
             framing,
         }
@@ -276,6 +288,41 @@ impl Decoder {
         }
     }
 
+    /// Reports whether lost, short and damaged packets are handled as
+    /// libopus handles them; see [`Decoder::set_conceal_errors`].
+    pub const fn conceal_errors(&self) -> bool {
+        self.conceal_errors
+    }
+
+    /// Selects libopus's handling of lost, short and damaged packets for a
+    /// standard Opus decoder. Off by default, and always on for Opus Custom
+    /// decoders.
+    ///
+    /// Off, a standard decoder returns the results SoundKit has always
+    /// returned: an error for an empty packet, a packet with at most one
+    /// byte of CELT data, a stereo packet into a mono decoder, and a frame
+    /// whose range decoding fails; a mono packet into a stereo decoder
+    /// continues both channels from the first channel's state. Callers that
+    /// treat decode errors as corruption keep seeing them.
+    ///
+    /// On, the decoder behaves as libopus's CELT decoder: an empty packet or
+    /// one with at most one byte of CELT data conceals one frame of the last
+    /// decoded size (pitch-based concealment, then noise), a damaged frame is
+    /// decoded anyway, a silence frame skips its remaining bits, a stereo
+    /// packet into a mono decoder is downmixed, and a mono packet into a
+    /// stereo decoder synthesises each channel from its own state. Turning it
+    /// off on an Opus Custom decoder returns `BadArg`.
+    ///
+    /// [`Decoder::decode_lost_i16_into`] and its siblings conceal a lost frame
+    /// whichever setting is chosen.
+    pub fn set_conceal_errors(&mut self, enabled: bool) -> Result<()> {
+        if !enabled && self.is_custom() {
+            return Err(Error::BadArg);
+        }
+        self.conceal_errors = enabled;
+        Ok(())
+    }
+
     /// Reports whether the decoder uses libopus's default float arithmetic
     /// (see [`CeltMode::exact_math`]).
     pub fn libopus_arithmetic(&self) -> bool {
@@ -320,9 +367,11 @@ impl Decoder {
     fn reset_state(&mut self) {
         let experimental_direct_cubic = self.experimental_direct_cubic;
         let libopus_i24_range = self.libopus_i24_range;
+        let conceal_errors = self.conceal_errors;
         *self = Self::with_mode(self.sample_rate, self.channels, self.mode, self.framing);
         self.experimental_direct_cubic = experimental_direct_cubic;
         self.libopus_i24_range = libopus_i24_range;
+        self.conceal_errors = conceal_errors;
     }
 
     /// Reports whether i24 output keeps libopus's wider range; see
@@ -404,6 +453,36 @@ impl Decoder {
         pcm: &mut Vec<i16>,
     ) -> Result<usize> {
         let channels = self.decode_channels(packet, decode_fec)?;
+        self.output_i16_into(channels, pcm)
+    }
+
+    /// Conceals one lost frame (libopus's packet-loss concealment) into
+    /// signed 16-bit PCM and returns the samples per channel.
+    ///
+    /// A standard Opus decoder conceals one frame of the last decoded size
+    /// (2.5 ms before the first packet), an Opus Custom decoder one frame of
+    /// its frame size. The next decoded packet blends with the concealed
+    /// audio as in libopus. This works whatever
+    /// [`Decoder::set_conceal_errors`] selects.
+    pub fn decode_lost_i16_into(&mut self, pcm: &mut Vec<i16>) -> Result<usize> {
+        let channels = self.conceal_lost()?;
+        self.output_i16_into(channels, pcm)
+    }
+
+    /// [`Decoder::decode_lost_i16_into`] into signed 24-bit PCM stored
+    /// sign-extended in `i32` samples.
+    pub fn decode_lost_i24_into(&mut self, pcm: &mut Vec<i32>) -> Result<usize> {
+        let channels = self.conceal_lost()?;
+        self.output_i24_into(channels, pcm)
+    }
+
+    /// [`Decoder::decode_lost_i16_into`] into floating-point PCM.
+    pub fn decode_lost_f32_into(&mut self, pcm: &mut Vec<f32>) -> Result<usize> {
+        let channels = self.conceal_lost()?;
+        self.output_f32_into(channels, pcm)
+    }
+
+    fn output_i16_into(&mut self, channels: usize, pcm: &mut Vec<i16>) -> Result<usize> {
         deemphasis_interleaved_into(
             self.mode,
             &self.synthesis_channels[..channels],
@@ -416,13 +495,15 @@ impl Decoder {
     }
 
     fn convert_i16(&self, pcm: &mut [i16]) {
-        let exact = self.mode.exact_math;
-        for (output, &sample) in pcm.iter_mut().zip(&self.pcm_f32_scratch) {
-            *output = if exact {
-                float_to_i16_exact(sample)
-            } else {
-                float_to_i16(sample)
-            };
+        let samples = pcm.iter_mut().zip(&self.pcm_f32_scratch);
+        if self.mode.exact_math {
+            for (output, &sample) in samples {
+                *output = float_to_i16_exact(sample);
+            }
+        } else {
+            for (output, &sample) in samples {
+                *output = float_to_i16(sample);
+            }
         }
     }
 
@@ -465,6 +546,10 @@ impl Decoder {
         pcm: &mut Vec<i32>,
     ) -> Result<usize> {
         let channels = self.decode_channels(packet, decode_fec)?;
+        self.output_i24_into(channels, pcm)
+    }
+
+    fn output_i24_into(&mut self, channels: usize, pcm: &mut Vec<i32>) -> Result<usize> {
         if self.mode.exact_math {
             deemphasis_interleaved_into(
                 self.mode,
@@ -533,6 +618,10 @@ impl Decoder {
         pcm: &mut Vec<f32>,
     ) -> Result<usize> {
         let channels = self.decode_channels(packet, decode_fec)?;
+        self.output_f32_into(channels, pcm)
+    }
+
+    fn output_f32_into(&mut self, channels: usize, pcm: &mut Vec<f32>) -> Result<usize> {
         deemphasis_interleaved_into(
             self.mode,
             &self.synthesis_channels[..channels],
@@ -558,8 +647,22 @@ impl Decoder {
         )
     }
 
+    /// Conceals one lost frame into `synthesis_channels`.
+    fn conceal_lost(&mut self) -> Result<usize> {
+        if self.sample_rate != 48_000 {
+            return Err(Error::Unimplemented);
+        }
+        let n = match self.framing {
+            Framing::Opus => self.last_frame_size,
+            Framing::Custom { frame_size, .. } => frame_size,
+        };
+        let lm = self.mode.lm_for_frame_size(n).ok_or(Error::BadArg)?;
+        self.conceal(n, lm)
+    }
+
     /// Decodes one packet into `synthesis_channels` and returns the number of
-    /// output channels. An empty packet conceals a lost frame.
+    /// output channels. With [`Decoder::conceal_errors`] an empty packet
+    /// conceals a lost frame.
     fn decode_channels(&mut self, packet: &[u8], decode_fec: bool) -> Result<usize> {
         if decode_fec {
             return Err(Error::Unimplemented);
@@ -577,10 +680,9 @@ impl Decoder {
     }
 
     fn decode_opus(&mut self, packet: &[u8]) -> Result<usize> {
-        if packet.is_empty() {
-            let n = self.last_frame_size;
-            let lm = self.mode.lm_for_frame_size(n).ok_or(Error::BadArg)?;
-            return self.conceal(n, lm);
+        let libopus = self.conceal_errors;
+        if packet.is_empty() && libopus {
+            return self.conceal_lost();
         }
         let parsed = packet::parse_packet_slice(packet, false)?;
         let samples_per_frame =
@@ -594,6 +696,7 @@ impl Decoder {
         if parsed.count != 1
             || !packet::is_celt_only(parsed.toc)
             || packet::bandwidth(packet)? != Bandwidth::Fullband
+            || (!libopus && stream_channels > self.channels)
         {
             return Err(Error::Unimplemented);
         }
@@ -607,9 +710,11 @@ impl Decoder {
         let frame_offset = parsed.frame_offsets[0];
         let frame_size = parsed.sizes[0] as usize;
         let frame = &packet[frame_offset..frame_offset + frame_size];
-        if frame.len() <= 1 {
+        if frame.len() <= 1 && libopus {
             return self.conceal(expected_frame_size, lm);
         }
+        // Without libopus's handling, a frame of at most one byte reaches the
+        // frame decoder, which rejects it as SoundKit always has.
         self.decode_frame(frame, lm, stream_channels)
     }
 
@@ -657,10 +762,17 @@ impl Decoder {
         let mode = self.mode;
         let nb = mode.nb_ebands;
         let n = mode.short_mdct_size << lm;
+        let libopus = self.conceal_errors;
         if self.loss_duration == 0 {
             self.skip_plc = false;
         }
-        if stream_channels == 1 {
+        if stream_channels == 2 {
+            self.unmirror_energy();
+        }
+        // A mono decoder whose two energy channels are still equal skips the
+        // second; see `energy_mirrored`.
+        let energy_len = self.energy_len();
+        if stream_channels == 1 && energy_len == 2 * nb {
             for i in 0..nb {
                 self.old_band_e[i] = self.old_band_e[i].max(self.old_band_e[nb + i]);
             }
@@ -678,11 +790,12 @@ impl Decoder {
             mode,
             &config,
             frame,
-            &mut self.old_band_e,
-            &self.old_log_e,
-            &self.old_log_e2,
+            &mut self.old_band_e[..energy_len],
+            &self.old_log_e[..energy_len],
+            &self.old_log_e2[..energy_len],
             &mut self.seed,
             &mut self.decode_scratch,
+            libopus,
         )?;
         if self.prefilter_and_fold {
             self.fold_overlap(n);
@@ -690,9 +803,14 @@ impl Decoder {
         // libopus synthesises and post-filters every output channel from its
         // own state, also when a mono stream feeds a stereo decoder or a
         // stereo stream a mono one. While a stereo decoder's channels are
-        // still identical, one channel is computed and copied.
-        let mirror = stream_channels == 1 && self.channels == 2 && self.channels_mirrored;
-        if !mirror {
+        // still identical, one channel is computed and copied. Without
+        // libopus's handling, a mono packet always continues both channels
+        // from the first channel's state, as SoundKit always has.
+        let mirror =
+            stream_channels == 1 && self.channels == 2 && (self.channels_mirrored || !libopus);
+        if mirror {
+            self.channels_mirrored = true;
+        } else {
             self.unmirror();
         }
         let output_channels = if mirror { 1 } else { self.channels };
@@ -735,25 +853,52 @@ impl Decoder {
         Ok(self.channels)
     }
 
+    /// Energy values per decoder state array that are kept up to date: both
+    /// channels, or only the first while a mono decoder's second channel
+    /// mirrors it.
+    fn energy_len(&self) -> usize {
+        let nb = self.mode.nb_ebands;
+        if self.channels == 1 && self.energy_mirrored {
+            nb
+        } else {
+            2 * nb
+        }
+    }
+
+    /// Ends a mono decoder's energy mirroring: the second channel's energy
+    /// state takes the first channel's values, after which both are kept.
+    fn unmirror_energy(&mut self) {
+        if self.energy_mirrored {
+            let nb = self.mode.nb_ebands;
+            self.old_band_e.copy_within(0..nb, nb);
+            self.old_log_e.copy_within(0..nb, nb);
+            self.old_log_e2.copy_within(0..nb, nb);
+            self.background_log_e.copy_within(0..nb, nb);
+            self.energy_mirrored = false;
+        }
+    }
+
     /// The energy bookkeeping at the end of `celt_decode_with_ec`.
     fn update_energy_history(&mut self, stream_channels: usize, is_transient: bool, m: i32) {
         let nb = self.mode.nb_ebands;
-        if stream_channels == 1 {
+        let len = self.energy_len();
+        if stream_channels == 1 && len == 2 * nb {
             self.old_band_e.copy_within(0..nb, nb);
         }
+        let old_band_e = &self.old_band_e[..len];
         if is_transient {
-            for (history, &energy) in self.old_log_e.iter_mut().zip(&self.old_band_e) {
+            for (history, &energy) in self.old_log_e[..len].iter_mut().zip(old_band_e) {
                 *history = history.min(energy);
             }
         } else {
-            self.old_log_e2.copy_from_slice(&self.old_log_e);
-            self.old_log_e.copy_from_slice(&self.old_band_e);
+            self.old_log_e2[..len].copy_from_slice(&self.old_log_e[..len]);
+            self.old_log_e[..len].copy_from_slice(old_band_e);
         }
         let max_background_increase = (160.min(self.loss_duration + m)) as f32 * 0.001;
-        for (background, &energy) in self.background_log_e.iter_mut().zip(&self.old_band_e) {
+        for (background, &energy) in self.background_log_e[..len].iter_mut().zip(old_band_e) {
             *background = (*background + max_background_increase).min(energy);
         }
-        for c in 0..2 {
+        for c in 0..len / nb {
             for i in self.end..nb {
                 self.old_band_e[c * nb + i] = 0.0;
                 self.old_log_e[c * nb + i] = ENERGY_FLOOR;
@@ -948,6 +1093,9 @@ impl Decoder {
         let start = 0usize;
         let end = self.end;
         let eff_end = start.max(end.min(mode.eff_ebands));
+        // The energy decay below touches only the decoded channels, so a mono
+        // decoder's second energy channel parts from the first.
+        self.unmirror_energy();
         for buffer in memory.iter_mut() {
             buffer.copy_within(n..dbs + overlap, 0);
         }

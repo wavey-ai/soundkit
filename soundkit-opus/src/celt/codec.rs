@@ -1676,7 +1676,7 @@ pub fn decode_spectral_frame_into(
     scratch: &mut CeltFrameDecodeScratch,
 ) -> Result<CeltFrameDecodeInfo> {
     decode_spectral_frame_into_impl(
-        mode, config, data, old_band_e, None, None, seed, scratch, true,
+        mode, config, data, old_band_e, None, None, seed, scratch, false,
     )
 }
 
@@ -1690,6 +1690,7 @@ pub(crate) fn decode_spectral_frame_into_with_anti_collapse(
     old_log_e2: &[f32],
     seed: &mut u32,
     scratch: &mut CeltFrameDecodeScratch,
+    libopus_errors: bool,
 ) -> Result<CeltFrameDecodeInfo> {
     decode_spectral_frame_into_impl(
         mode,
@@ -1700,7 +1701,7 @@ pub(crate) fn decode_spectral_frame_into_with_anti_collapse(
         Some(old_log_e2),
         seed,
         scratch,
-        false,
+        libopus_errors,
     )
 }
 
@@ -1755,7 +1756,11 @@ fn decode_spectral_frame_into_impl(
     old_log_e2: Option<&[f32]>,
     seed: &mut u32,
     scratch: &mut CeltFrameDecodeScratch,
-    reject_range_errors: bool,
+    // libopus's handling of silence frames and damaged frames. Without it the
+    // frame decoder keeps SoundKit's original behaviour: a silence flag does
+    // not skip the remaining bits, and a range decoder error rejects the
+    // frame.
+    libopus_errors: bool,
 ) -> Result<CeltFrameDecodeInfo> {
     if config.packet_bytes < 2 {
         return Err(Error::BadArg);
@@ -1783,7 +1788,7 @@ fn decode_spectral_frame_into_impl(
     } else {
         false
     };
-    if silence {
+    if silence && libopus_errors {
         // Pretend all the remaining bits have been read.
         dec.pretend_tell(total_bits);
     }
@@ -2031,9 +2036,8 @@ fn decode_spectral_frame_into_impl(
     }
     *seed = dec.final_range();
     // libopus only records a range decoder error (`st->error`) and still
-    // outputs the frame; the stream decoder does the same. The standalone
-    // frame decoders reject such a frame.
-    if reject_range_errors && dec.error() != 0 {
+    // outputs the frame; with its handling the stream decoder does the same.
+    if !libopus_errors && dec.error() != 0 {
         return Err(Error::InvalidPacket);
     }
 

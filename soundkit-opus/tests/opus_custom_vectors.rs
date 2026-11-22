@@ -627,8 +627,9 @@ fn rust_decoder_matches_libopus_across_channel_switches_and_damage() {
 
 /// The 120-sample custom packets carry libopus's TOC form of the signalling
 /// byte, so they are also CELT-only Opus packets. A standard decoder with
-/// libopus arithmetic must decode them as `opus_custom_decode` does,
-/// including stereo packets in a mono decoder.
+/// libopus arithmetic and libopus's packet handling
+/// ([`Decoder::set_conceal_errors`]) must decode them as `opus_custom_decode`
+/// does, including stereo packets in a mono decoder.
 #[test]
 fn standard_decoder_matches_libopus_across_channel_switches() {
     let case = &SWITCH_CASES[1];
@@ -640,6 +641,7 @@ fn standard_decoder_matches_libopus_across_channel_switches() {
         for channels in [2, 1] {
             let mut decoder = Decoder::new(48_000, channels).unwrap();
             decoder.set_libopus_arithmetic(true).unwrap();
+            decoder.set_conceal_errors(true).unwrap();
             let mut hash = FNV_START;
             for packet in &input {
                 for v in decoder.decode_i16_vec(packet, false).unwrap() {
