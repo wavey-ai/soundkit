@@ -37,11 +37,22 @@ enum Framing {
     Custom { signalling: bool, frame_size: usize },
 }
 
+/// Where the PCM of a frame came from. Integer PCM converted to float is
+/// within full scale, so it never reaches libopus's input clip threshold.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputKind {
+    Integer,
+    Float,
+}
+
 /// The per-frame values `celt_encode_with_ec` derives for an Opus Custom
 /// encoder before it codes the frame.
 #[derive(Clone, Copy, Debug)]
 struct CustomControl {
     header: Option<u8>,
+    /// Peak of the frame and the previous overlap, for the silence check and
+    /// the input clip.
+    sample_max: f32,
     silence: bool,
     nb_available_bytes: usize,
     effective_bytes: usize,
@@ -216,7 +227,8 @@ pub struct Encoder {
     decisions: crate::tuning::Decisions,
     /// Peak of the last frame's overlap, for the silence check.
     overlap_max: f32,
-    /// Peak of the last frame's overlap, for the input clip.
+    /// Peak of the last floating-point frame's overlap, for a standard
+    /// encoder's input clip (custom encoders use `overlap_max`).
     clip_overlap_max: f32,
     /// The portable PVQ search was asked for. It applies whenever libopus
     /// arithmetic is on, whichever setter was called first.
@@ -1259,6 +1271,7 @@ impl Encoder {
         frame_bytes: usize,
         allow_vbr_shrink: bool,
         custom: Option<CustomControl>,
+        input: InputKind,
         packet: &mut Vec<u8>,
     ) -> Result<usize> {
         let packet_buffer = std::mem::take(packet);
@@ -1269,6 +1282,7 @@ impl Encoder {
             frame_bytes,
             allow_vbr_shrink,
             custom,
+            input,
             &mut scratch,
             packet_buffer,
         );
@@ -1290,6 +1304,7 @@ impl Encoder {
         frame_bytes: usize,
         allow_vbr_shrink: bool,
         custom: Option<CustomControl>,
+        input: InputKind,
         scratch: &mut EncoderFrameScratch,
         packet_buffer: Vec<u8>,
     ) -> Result<Vec<u8>> {
@@ -1364,14 +1379,25 @@ impl Encoder {
 
         // libopus clips the input to twice full scale when any sample of the
         // frame or the previous overlap exceeds 65536 times full scale
-        // (`st->clip`), so infinities stay finite.
-        let need_clip = {
-            let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
-            let split = self.channels * (n - overlap.min(n));
-            let tail = peak(&pcm[split..self.channels * n]);
-            let sample_max = self.clip_overlap_max.max(peak(&pcm[..split])).max(tail);
-            self.clip_overlap_max = tail;
-            sample_max > 65_536.0
+        // (`st->clip`), so infinities stay finite. Integer PCM (and the DC
+        // filter's output for it) stays within a few times full scale, so
+        // only floating-point input is scanned; the overlap peak of an
+        // integer frame is below the threshold either way.
+        let need_clip = match (custom, input) {
+            // The custom path measured the same peak for its silence check.
+            (Some(control), _) => control.sample_max > 65_536.0,
+            (None, InputKind::Integer) => {
+                self.clip_overlap_max = 0.0;
+                false
+            }
+            (None, InputKind::Float) => {
+                let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+                let split = self.channels * (n - overlap.min(n));
+                let tail = peak(&pcm[split..self.channels * n]);
+                let sample_max = self.clip_overlap_max.max(peak(&pcm[..split])).max(tail);
+                self.clip_overlap_max = tail;
+                sample_max > 65_536.0
+            }
         };
         scratch.inputs.resize_with(self.channels, Vec::new);
         for c in 0..self.channels {
@@ -1387,14 +1413,24 @@ impl Encoder {
             // in libopus. `run_prefilter` gets the filtered overlap below.
             input[..overlap]
                 .copy_from_slice(&self.prefilter_mem[c][COMBFILTER_MAXPERIOD - overlap..]);
-            for i in 0..n {
-                let mut sample = pcm[i * self.channels + c] * CELT_SIG_SCALE;
-                if need_clip {
-                    sample = sample.clamp(-65_536.0, 65_536.0);
+            let coef = self.mode.preemph[0];
+            let mut mem = self.preemph_mem[c];
+            let samples = pcm[c..self.channels * n].iter().step_by(self.channels);
+            // Two loops, so the common unclipped case has no per-sample test.
+            if need_clip {
+                for (out, &value) in input[overlap..overlap + n].iter_mut().zip(samples) {
+                    let sample = (value * CELT_SIG_SCALE).clamp(-65_536.0, 65_536.0);
+                    *out = sample - mem;
+                    mem = coef * sample;
                 }
-                input[overlap + i] = sample - self.preemph_mem[c];
-                self.preemph_mem[c] = self.mode.preemph[0] * sample;
+            } else {
+                for (out, &value) in input[overlap..overlap + n].iter_mut().zip(samples) {
+                    let sample = value * CELT_SIG_SCALE;
+                    *out = sample - mem;
+                    mem = coef * sample;
+                }
             }
+            self.preemph_mem[c] = mem;
         }
 
         let tone = tone_detect_mode(
@@ -1918,7 +1954,7 @@ impl Encoder {
         for (dst, src) in pcm_f32.iter_mut().zip(pcm.iter().take(required)) {
             *dst = *src as f32 / 32768.0;
         }
-        let result = self.encode_f32_into(&pcm_f32, frame_size, packet);
+        let result = self.encode_f32_into_kind(&pcm_f32, frame_size, packet, InputKind::Integer);
         self.pcm_f32_scratch = pcm_f32;
         result
     }
@@ -1951,8 +1987,13 @@ impl Encoder {
         for (dst, src) in pcm_f32.iter_mut().zip(pcm.iter().take(required)) {
             *dst = *src as f32 / 32768.0;
         }
-        let result =
-            self.encode_f32_with_frame_bytes_into(&pcm_f32, frame_size, frame_bytes, packet);
+        let result = self.encode_f32_with_frame_bytes_into_kind(
+            &pcm_f32,
+            frame_size,
+            frame_bytes,
+            packet,
+            InputKind::Integer,
+        );
         self.pcm_f32_scratch = pcm_f32;
         result
     }
@@ -1986,7 +2027,7 @@ impl Encoder {
             self.pcm_f32_scratch = pcm_f32;
             return Err(Error::BadArg);
         }
-        let result = self.encode_f32_into(&pcm_f32, frame_size, packet);
+        let result = self.encode_f32_into_kind(&pcm_f32, frame_size, packet, InputKind::Integer);
         self.pcm_f32_scratch = pcm_f32;
         result
     }
@@ -2028,8 +2069,13 @@ impl Encoder {
             self.pcm_f32_scratch = pcm_f32;
             return Err(Error::BadArg);
         }
-        let result =
-            self.encode_f32_with_frame_bytes_into(&pcm_f32, frame_size, frame_bytes, packet);
+        let result = self.encode_f32_with_frame_bytes_into_kind(
+            &pcm_f32,
+            frame_size,
+            frame_bytes,
+            packet,
+            InputKind::Integer,
+        );
         self.pcm_f32_scratch = pcm_f32;
         result
     }
@@ -2047,6 +2093,16 @@ impl Encoder {
         frame_size: usize,
         packet: &mut Vec<u8>,
     ) -> Result<usize> {
+        self.encode_f32_into_kind(pcm, frame_size, packet, InputKind::Float)
+    }
+
+    fn encode_f32_into_kind(
+        &mut self,
+        pcm: &[f32],
+        frame_size: usize,
+        packet: &mut Vec<u8>,
+        input: InputKind,
+    ) -> Result<usize> {
         if self.sample_rate != 48_000 {
             return Err(Error::Unimplemented);
         }
@@ -2054,7 +2110,7 @@ impl Encoder {
             return Err(Error::BadArg);
         }
         if let Framing::Custom { signalling, .. } = self.framing {
-            return self.encode_custom_into(pcm, frame_size, signalling, packet);
+            return self.encode_custom_into(pcm, frame_size, signalling, input, packet);
         }
         self.analysis_info = self.analysis.run(pcm, frame_size, self.channels);
         if crate::tuning::get(crate::tuning::ANALYSIS_OFF, 0.0) != 0.0 {
@@ -2073,6 +2129,7 @@ impl Encoder {
             frame_bytes,
             true,
             None,
+            input,
             packet,
         );
         self.filtered_scratch = filtered;
@@ -2087,6 +2144,7 @@ impl Encoder {
         pcm: &[f32],
         frame_size: usize,
         signalling: bool,
+        input: InputKind,
         packet: &mut Vec<u8>,
     ) -> Result<usize> {
         let lm = self
@@ -2156,6 +2214,7 @@ impl Encoder {
 
         let control = CustomControl {
             header,
+            sample_max,
             silence,
             nb_available_bytes: nb_available as usize,
             effective_bytes: effective_bytes.max(0) as usize,
@@ -2163,18 +2222,19 @@ impl Encoder {
             vbr_rate,
         };
         self.analysis_info = AnalysisInfo::default();
-        let mut input = std::mem::take(&mut self.filtered_scratch);
-        input.clear();
-        input.extend_from_slice(&pcm[..self.channels * n]);
+        let mut frame = std::mem::take(&mut self.filtered_scratch);
+        frame.clear();
+        frame.extend_from_slice(&pcm[..self.channels * n]);
         let result = self.encode_filtered_f32_with_frame_bytes_into(
-            &mut input,
+            &mut frame,
             frame_size,
             nb_compressed as usize,
             vbr_rate > 0,
             Some(control),
+            input,
             packet,
         );
-        self.filtered_scratch = input;
+        self.filtered_scratch = frame;
         // A range coder that runs out of room is `OPUS_INTERNAL_ERROR` in
         // libopus (`ec_get_error` after `ec_enc_done`). It happens when a
         // 2-byte packet limit with signalling leaves 1 byte for silence.
@@ -2204,6 +2264,23 @@ impl Encoder {
         frame_bytes: usize,
         packet: &mut Vec<u8>,
     ) -> Result<usize> {
+        self.encode_f32_with_frame_bytes_into_kind(
+            pcm,
+            frame_size,
+            frame_bytes,
+            packet,
+            InputKind::Float,
+        )
+    }
+
+    fn encode_f32_with_frame_bytes_into_kind(
+        &mut self,
+        pcm: &[f32],
+        frame_size: usize,
+        frame_bytes: usize,
+        packet: &mut Vec<u8>,
+        input: InputKind,
+    ) -> Result<usize> {
         if self.sample_rate != 48_000 {
             return Err(Error::Unimplemented);
         }
@@ -2222,6 +2299,7 @@ impl Encoder {
             frame_bytes,
             false,
             None,
+            input,
             packet,
         );
         self.filtered_scratch = filtered;

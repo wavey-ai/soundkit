@@ -173,3 +173,32 @@ fn damaged_frames_are_errors_by_default_and_decoded_with_the_opt_in() {
     }
     assert!(found > 0, "no damaged frame failed range decoding");
 }
+
+#[test]
+fn integer_and_float_input_encode_alike() {
+    // Integer input skips the input-clip scan; packets must not change.
+    let pcm = tone(240, 2, 30);
+    let pcm_f32: Vec<f32> = pcm.iter().map(|&v| v as f32 / 32768.0).collect();
+    for custom in [false, true] {
+        let make = || {
+            if custom {
+                let mut encoder = Encoder::new_custom(48_000, 2, 64).unwrap();
+                encoder.set_bitrate(256_000).unwrap();
+                encoder
+            } else {
+                Encoder::try_new(48_000, 16, 2, 240, 256_000).unwrap()
+            }
+        };
+        let frame = if custom { 64 } else { 240 };
+        let (mut a, mut b) = (make(), make());
+        for (chunk, chunk_f32) in pcm
+            .chunks_exact(2 * frame)
+            .zip(pcm_f32.chunks_exact(2 * frame))
+        {
+            assert_eq!(
+                a.encode_i16_vec(chunk, frame).unwrap(),
+                b.encode_f32_vec(chunk_f32, frame).unwrap()
+            );
+        }
+    }
+}

@@ -124,7 +124,9 @@ let concealed = decoder.decode_i16_vec(&[], false)?; // a lost packet
   `opus_custom_encode`'s (standard encoders restart them).
 - Input beyond 65536 times full scale, infinities included, makes the
   encoder clip that frame to twice full scale, as libopus's `st->clip` does
-  (all encoders). NaN input is not sanitised, as in libopus.
+  (all encoders). Only floating-point input is scanned for it: integer PCM
+  cannot reach the threshold, and custom encoders reuse the peak of their
+  silence check. NaN input is not sanitised, as in libopus.
 - There is no Opus layer in custom mode, as in libopus: no DC filter,
   tonality analysis, stereo-width fade or mono downmix at low rates.
 - An empty packet, or one with at most one byte of CELT data, conceals a lost
