@@ -444,6 +444,15 @@ OPUS_CUSTOM_INTEROP_C=/path/to/opus_custom_interop_c \
   cargo test --test opus_custom_vectors -- --ignored live_libopus_comparison
 ```
 
+### Quality, CPU and bytes
+
+The [Opus Custom frames report](quality-results/2026-11-21-opus-custom-frames/README.md)
+measures delay, PEAQ and ViSQOL quality, native and WebAssembly CPU, and
+bytes per second for 1, 1.33, 1.5, 2.5 and 5 ms frames at 96 to 384 kb/s.
+1 ms frames at 320 kb/s CBR scored at least as well as 5 ms frames at
+192 kb/s CBR, and are the recommended low-latency setting. The report's CPU
+figures are more careful than the rough table above.
+
 ## Codec Status
 
 The encoder is experimental. CELT-only CBR and constrained VBR are suitable for

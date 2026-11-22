@@ -60,16 +60,28 @@ Read the [2026-08-25 perceptual quality report](quality-results/2026-08-25-sound
 
 ## Opus Custom: 1, 1.33 and 1.5 ms frames
 
-`Encoder::new_custom` and `Decoder::new_custom` add the Opus Custom CELT
-modes of libopus at 48 kHz, including 48, 64 and 72-sample frames (1, 1.33
-and 1.5 ms). A 1 ms mode cuts the codec delay (frame plus look-ahead) from
-5 ms at 2.5 ms frames to 2 ms. Packets use the `opus_custom_encode` format,
-and the decoder conceals lost packets. With their default libopus
-arithmetic and decision constants, the Rust packets and decoded PCM equal
-libopus's custom encoder and decoder byte for byte and sample for sample in
-2760 tested cases. Standard Opus streams keep SoundKit's tuned encoder and
-their output is unchanged. Read the Opus Custom section of
-[CODEC.md](CODEC.md).
+Opus Custom is libopus's API for CELT modes with frame sizes that standard
+Opus does not have. `Encoder::new_custom` and `Decoder::new_custom` add the
+48, 64 and 72-sample modes at 48 kHz (1, 1.33 and 1.5 ms). The SoundKit
+constructors and `Decoder::new_for_frame_count` choose a custom mode from
+the frame size, so `OpusEncoder::new(48000, 16, 2, 48, 320000)` builds a
+1 ms encoder.
+
+A 1 ms frame cuts the frame plus codec delay from 5 ms at 2.5 ms frames to
+2 ms. Packets use the `opus_custom_encode` format, and the decoder conceals
+lost packets. With their default libopus arithmetic and decision constants,
+the Rust packets and decoded PCM equal libopus's custom encoder and decoder
+byte for byte and sample for sample in 3480 interop cases. Standard Opus
+streams keep SoundKit's tuned encoder and their output is unchanged.
+
+For a low-latency lane, use 1 ms frames at 320 kb/s CBR with the signalling
+byte on. That setting scored at least as well as the 5 ms, 192 kb/s CBR
+production setting on PEAQ advanced and ViSQOL. 1 ms at 256 kb/s scored
+about as well as 2.5 ms at 192 kb/s and is the lower-bandwidth option.
+Standard 2.5 ms Opus stays the setting for fMP4, Ogg, WebRTC and other
+players. Read the
+[Opus Custom frames report](quality-results/2026-11-21-opus-custom-frames/README.md)
+and the Opus Custom section of [CODEC.md](CODEC.md).
 
 Read [CODEC.md](CODEC.md) for the codec API, support limits, and benchmark commands.
 
