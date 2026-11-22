@@ -430,11 +430,7 @@ pub fn op_pvq_search_exact(
     }
     for _ in 0..pulses_left {
         yy += 1.0;
-        #[cfg(target_arch = "x86_64")]
-        let simd_best = sse2.then(|| crate::kernels::pvq_best_candidate_sse2(x, y, xy, yy, n));
-        #[cfg(not(target_arch = "x86_64"))]
-        let simd_best: Option<usize> = None;
-        let best_id = simd_best.unwrap_or_else(|| {
+        let generic_best = || {
             let mut best_id = 0usize;
             let mut best_num = xy + x[0];
             best_num *= best_num;
@@ -450,7 +446,15 @@ pub fn op_pvq_search_exact(
                 }
             }
             best_id
-        });
+        };
+        #[cfg(target_arch = "x86_64")]
+        let best_id = if sse2 {
+            crate::kernels::pvq_best_candidate_sse2(x, y, xy, yy, n)
+        } else {
+            generic_best()
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        let best_id = generic_best();
         xy += x[best_id];
         yy += y[best_id];
         y[best_id] += 2.0;
