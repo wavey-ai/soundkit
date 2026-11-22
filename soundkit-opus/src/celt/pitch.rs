@@ -1121,13 +1121,15 @@ mod tests {
         // `freq = acos(.5f*lpc[0])/delay` in libopus. glibc's `acosf`
         // rounds the first two inputs differently, and the WebAssembly
         // libm's `acosf` the last two (and most others); the expected values
-        // are libopus's.
-        for (half_lpc0, delay, expected) in [
-            (0x3288_85a3u32, 1usize, 1.570_796_3f32),
-            (0x3982_6222, 2, 1.570_547_6 / 2.0),
-            (0x3f00_0009, 4, 1.047_197 / 4.0),
-            (0x3f00_0023, 1, 1.047_195_2),
+        // are libopus's, as bit patterns because they sit next to pi/2 and
+        // pi/3: 1.5707963, 1.5705476 / 2, 1.047197 / 4 and 1.0471952.
+        for (half_lpc0, delay, expected_bits) in [
+            (0x3288_85a3u32, 1usize, 0x3fc9_0fdau32),
+            (0x3982_6222, 2, 0x3f49_07b4),
+            (0x3f00_0009, 4, 0x3e86_0a8d),
+            (0x3f00_0023, 1, 0x3f86_0a7e),
         ] {
+            let expected = f32::from_bits(expected_bits);
             // Keep the compiler from folding the call at build time.
             let lpc0 = std::hint::black_box(2.0 * f32::from_bits(half_lpc0));
             assert_eq!(
