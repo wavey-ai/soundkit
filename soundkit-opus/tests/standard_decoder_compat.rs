@@ -1,7 +1,10 @@
 //! Standard Opus decoders keep SoundKit's established results for lost,
-//! short and damaged packets unless libopus's handling is asked for.
+//! short and damaged packets unless libopus's handling is asked for, and the
+//! frame-count helpers choose between standard and Opus Custom codecs.
 
-use soundkit_opus::{Decoder, Encoder, Error};
+use soundkit::audio_packet::Encoder as SoundkitEncoder;
+use soundkit_opus::celt::modes::CeltMode;
+use soundkit_opus::{custom_frame_size, Decoder, Encoder, Error, OpusEncoder, OpusStreamEncoder};
 
 fn tone(frame: usize, channels: usize, frames: usize) -> Vec<i16> {
     (0..frame * frames)
@@ -172,6 +175,102 @@ fn damaged_frames_are_errors_by_default_and_decoded_with_the_opt_in() {
         }
     }
     assert!(found > 0, "no damaged frame failed range decoding");
+}
+
+#[test]
+fn custom_frame_size_names_custom_only_counts() {
+    for frame in [48, 64, 72, 96, 100, 144, 160, 200] {
+        assert_eq!(custom_frame_size(48_000, frame), Some(frame), "{frame}");
+    }
+    for frame in [
+        0, 1, 40, 46, 47, 98, 120, 240, 360, 480, 600, 720, 960, 1000, 1920, 5760,
+    ] {
+        assert_eq!(custom_frame_size(48_000, frame), None, "{frame}");
+    }
+    for rate in [8_000, 16_000, 24_000, 44_100, 96_000] {
+        assert_eq!(custom_frame_size(rate, 48), None, "{rate}");
+    }
+}
+
+#[test]
+fn custom_frame_size_agrees_with_mode_construction() {
+    // The helper validates without building modes; check it against
+    // building one for every candidate size (odd and out-of-range sizes
+    // are rejected before any table is built).
+    for frame in 0..=1100 {
+        let builds = CeltMode::new(48_000, frame).is_ok();
+        assert_eq!(
+            CeltMode::valid_48k_frame_size(frame),
+            builds,
+            "frame size {frame}"
+        );
+        assert_eq!(
+            custom_frame_size(48_000, frame).is_some(),
+            builds && frame % 120 != 0,
+            "frame size {frame}"
+        );
+    }
+}
+
+#[test]
+fn soundkit_constructors_build_custom_encoders_for_custom_frame_sizes() {
+    for (frame, channels) in [(48usize, 2u32), (64, 1), (72, 2)] {
+        // daw-nexus: OpusEncoder::new(48000, 16, ch, frame, 96000) then init().
+        let mut encoder = OpusEncoder::new(48_000, 16, channels, frame as u32, 96_000);
+        encoder.init().unwrap();
+        assert!(encoder.is_custom());
+        assert_eq!(encoder.custom_frame_size(), Some(frame));
+        assert!(encoder.custom_signalling() && !encoder.vbr());
+        assert_eq!(encoder.bitrate(), 96_000);
+
+        let mut reference = Encoder::new_custom(48_000, channels as usize, frame).unwrap();
+        reference.set_bitrate(96_000).unwrap();
+        reference.set_vbr(false).unwrap();
+
+        let mut decoder = Decoder::new_for_frame_count(48_000, channels as usize, frame).unwrap();
+        assert_eq!(decoder.custom_frame_size(), Some(frame));
+        let mut reference_decoder = Decoder::new_custom(48_000, channels as usize, frame).unwrap();
+
+        let pcm = tone(frame, channels as usize, 50);
+        let mut output = vec![0u8; 1500];
+        for chunk in pcm.chunks_exact(frame * channels as usize) {
+            // The SoundKit encoder trait path.
+            let len = SoundkitEncoder::encode_i16(&mut encoder, chunk, &mut output).unwrap();
+            let packet = &output[..len];
+            assert_eq!(packet, reference.encode_i16_vec(chunk, frame).unwrap());
+            // libopus CBR size: (96000 * N + 4 * 48000) / (8 * 48000) bytes,
+            // the signalling byte included.
+            assert_eq!(len, (96_000 * frame + 4 * 48_000) / (8 * 48_000));
+            assert_eq!(
+                decoder.decode_i16_vec(packet, false),
+                reference_decoder.decode_i16_vec(packet, false)
+            );
+        }
+    }
+}
+
+#[test]
+fn standard_frame_sizes_keep_standard_codecs() {
+    for frame in [120u32, 240, 480, 960] {
+        let encoder = Encoder::try_new(48_000, 16, 2, frame, 96_000).unwrap();
+        assert!(!encoder.is_custom());
+        let decoder = Decoder::new_for_frame_count(48_000, 2, frame as usize).unwrap();
+        assert!(!decoder.is_custom() && !decoder.conceal_errors());
+    }
+    for frame in [0usize, 47, 5760] {
+        let decoder = Decoder::new_for_frame_count(48_000, 2, frame).unwrap();
+        assert!(!decoder.is_custom(), "{frame}");
+    }
+    // Sizes neither standard nor custom stay errors, with the old message.
+    let error = Encoder::try_new(48_000, 16, 2, 47, 96_000).unwrap_err();
+    assert!(
+        error.contains("unsupported 48 kHz CELT frame size 47"),
+        "{error}"
+    );
+    assert!(Encoder::try_new(48_000, 8, 2, 48, 96_000).is_err());
+    // The raw OpusHead stream is standard Opus only.
+    assert!(OpusStreamEncoder::new(48_000, 16, 2, 48, 96_000).is_err());
+    assert!(OpusStreamEncoder::new(48_000, 16, 2, 240, 96_000).is_ok());
 }
 
 #[test]

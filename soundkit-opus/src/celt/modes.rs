@@ -237,15 +237,7 @@ impl CeltMode {
         }
         let static_tables = fs == 48_000 && frame_size == 960;
 
-        let max_lm = if frame_size as i32 * 75 >= fs && frame_size % 16 == 0 {
-            3
-        } else if frame_size as i32 * 150 >= fs && frame_size % 8 == 0 {
-            2
-        } else if frame_size as i32 * 300 >= fs && frame_size % 4 == 0 {
-            1
-        } else {
-            0
-        };
+        let max_lm = max_lm_for(fs, frame_size);
 
         if ((frame_size >> max_lm) as i32) * 300 > fs {
             return Err(Error::BadArg);
@@ -323,6 +315,37 @@ impl CeltMode {
         };
         mode.cache = compute_pulse_cache(&mode, mode.max_lm);
         Ok(mode)
+    }
+
+    /// Reports whether `opus_custom_mode_create(48000, frame_size)` accepts
+    /// `frame_size`, that is whether [`CeltMode::custom_48k_shared`] succeeds
+    /// for it, without building (and caching) the mode.
+    pub fn valid_48k_frame_size(frame_size: usize) -> bool {
+        const FS: i32 = 48_000;
+        if !(40..=1024).contains(&frame_size) || !frame_size.is_multiple_of(2) {
+            return false;
+        }
+        if (frame_size as i32) * 1000 < FS {
+            return false;
+        }
+        if (0..4).any(|shift| frame_size << shift == 960) {
+            return true;
+        }
+        let max_lm = max_lm_for(FS, frame_size);
+        let short_mdct_size = frame_size >> max_lm;
+        if short_mdct_size as i32 * 300 > FS {
+            return false;
+        }
+        let res = (FS + short_mdct_size as i32) / (2 * short_mdct_size as i32);
+        let ebands = compute_ebands(FS, short_mdct_size, res);
+        let nb_ebands = ebands.len() - 1;
+        if ((ebands[nb_ebands] - ebands[nb_ebands - 1]) as usize) << max_lm > 208 {
+            return false;
+        }
+        // The MDCT of 2 * frame_size samples runs FFTs of a quarter of that
+        // size, and of that size halved once per extra block size.
+        let nfft = 2 * frame_size / 4;
+        (0..=max_lm).all(|shift| crate::celt::kiss_fft::fft_size_supported(nfft >> shift))
     }
 
     /// Frame size, in samples, of the longest frame this mode codes.
@@ -413,6 +436,20 @@ impl CeltMode {
     pub fn standard_48k_shared() -> &'static Self {
         static STANDARD_48K: OnceLock<CeltMode> = OnceLock::new();
         STANDARD_48K.get_or_init(|| Self::new(48_000, 960).expect("48 kHz CELT mode is valid"))
+    }
+}
+
+/// The largest `LM` (log2 of the short blocks per frame) that
+/// `opus_custom_mode_create` gives a mode of `frame_size` samples at `fs`.
+fn max_lm_for(fs: i32, frame_size: usize) -> usize {
+    if frame_size as i32 * 75 >= fs && frame_size.is_multiple_of(16) {
+        3
+    } else if frame_size as i32 * 150 >= fs && frame_size.is_multiple_of(8) {
+        2
+    } else if frame_size as i32 * 300 >= fs && frame_size.is_multiple_of(4) {
+        1
+    } else {
+        0
     }
 }
 

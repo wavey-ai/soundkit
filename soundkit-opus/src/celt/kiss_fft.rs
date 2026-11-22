@@ -215,6 +215,13 @@ fn compute_bitrev_table(
     }
 }
 
+/// Reports whether an `nfft`-point FFT factors into the radices 2, 3, 4
+/// and 5 that KISS FFT implements, as `opus_fft_alloc` requires.
+pub(crate) fn fft_size_supported(nfft: usize) -> bool {
+    let mut factors = [0i16; 2 * MAX_FACTORS];
+    nfft != 0 && kf_factor(nfft, &mut factors).is_some()
+}
+
 fn kf_factor(nfft: usize, facbuf: &mut [i16; 2 * MAX_FACTORS]) -> Option<()> {
     let mut p = 4usize;
     let mut n = nfft;

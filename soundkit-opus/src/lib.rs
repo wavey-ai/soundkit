@@ -37,6 +37,39 @@ use tracing::debug;
 
 type AdapterResult<T> = std::result::Result<T, String>;
 
+/// Returns `Some(frame_count)` when `frame_count` samples per channel at
+/// `sample_rate` is an Opus Custom frame size that standard Opus cannot
+/// carry, and `None` otherwise.
+///
+/// Use it to choose the codec for a SoundKit v2 packet from its
+/// `frame_count`: `Some` means an Opus Custom stream (see
+/// [`Decoder::new_custom`], or [`Decoder::new_for_frame_count`], which makes
+/// the choice), `None` a standard Opus stream ([`Decoder::new`]) or an invalid
+/// count. Only 48 kHz has custom modes here. A count is custom when libopus's
+/// `opus_custom_mode_create(48000, frame_count)` accepts it (even sizes from
+/// 48 to 1024 samples whose short blocks are at most 3.3 ms and whose MDCT
+/// sizes KISS FFT supports; 48, 64 and 72 samples give 1, 1.33 and 1.5 ms)
+/// and it is not a multiple of 120 samples. Every multiple of 120 up to 5760
+/// is the duration of some standard Opus packet (one or more 2.5 ms frames),
+/// so those counts stay standard even when a custom mode exists for them.
+///
+/// ```
+/// use soundkit_opus::custom_frame_size;
+///
+/// assert_eq!(custom_frame_size(48_000, 48), Some(48));
+/// assert_eq!(custom_frame_size(48_000, 64), Some(64));
+/// assert_eq!(custom_frame_size(48_000, 72), Some(72));
+/// assert_eq!(custom_frame_size(48_000, 240), None); // standard 5 ms
+/// assert_eq!(custom_frame_size(48_000, 47), None); // not a valid mode
+/// assert_eq!(custom_frame_size(44_100, 64), None);
+/// ```
+pub fn custom_frame_size(sample_rate: u32, frame_count: usize) -> Option<usize> {
+    (sample_rate == 48_000
+        && !frame_count.is_multiple_of(120)
+        && celt::modes::CeltMode::valid_48k_frame_size(frame_count))
+    .then_some(frame_count)
+}
+
 /// Backwards-compatible names for the authored codec types. These are aliases,
 /// not adapter structs, so calls execute directly on the codec state.
 pub type OpusEncoder = Encoder;
@@ -71,6 +104,11 @@ impl OpusStreamEncoder {
     ) -> AdapterResult<Self> {
         let encoder =
             Encoder::try_new(sample_rate, bits_per_sample, channels, frame_size, bitrate)?;
+        // The raw stream is standard Opus (`OpusHead`), which cannot carry
+        // Opus Custom packets, so custom frame sizes stay unsupported here.
+        if encoder.is_custom() {
+            return Err(encoder::unsupported_frame_size(frame_size));
+        }
         Ok(Self {
             encoder,
             sample_rate,

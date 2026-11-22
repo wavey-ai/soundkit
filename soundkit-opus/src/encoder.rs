@@ -486,6 +486,10 @@ impl Encoder {
     /// This is the same authored codec used by the low-level API. The stored
     /// frame size lets callers use the drop-in SoundKit packet interface
     /// without an adapter object around the codec.
+    ///
+    /// A frame size that [`crate::custom_frame_size`] reports as Opus Custom
+    /// (48, 64 or 72 samples at 48 kHz, for example) builds an Opus Custom
+    /// encoder; see [`Encoder::try_new`]. Panics where `try_new` fails.
     pub fn new(
         sample_rate: u32,
         bits_per_sample: u32,
@@ -497,6 +501,20 @@ impl Encoder {
             .expect("failed to create SoundKit Opus encoder")
     }
 
+    /// Creates the production SoundKit Opus encoder, or explains why not.
+    ///
+    /// Frame sizes of 120, 240, 480 and 960 samples give a standard Opus
+    /// encoder (CELT-only packets with an Opus TOC). A frame size that
+    /// [`crate::custom_frame_size`] reports as Opus Custom (48, 64 and 72
+    /// samples at 48 kHz give 1, 1.33 and 1.5 ms) gives an Opus Custom
+    /// encoder, as [`Encoder::new_custom`] builds it, at `bitrate` in CBR:
+    /// each packet is the libopus signalling byte and a CELT frame of
+    /// `(bitrate * frame_size + 4 * 48000) / (8 * 48000) - 1` bytes, as
+    /// `opus_custom_encode` writes it. Decode those packets with
+    /// [`Decoder::new_custom`](crate::Decoder::new_custom) or
+    /// [`Decoder::new_for_frame_count`](crate::Decoder::new_for_frame_count),
+    /// not with a standard Opus decoder. `set_vbr` and the other rate setters
+    /// apply as for any custom encoder.
     pub fn try_new(
         sample_rate: u32,
         bits_per_sample: u32,
@@ -509,10 +527,19 @@ impl Encoder {
                 "unsupported Opus PCM precision {bits_per_sample}; expected 16 or 24 bits"
             ));
         }
+        if crate::custom_frame_size(sample_rate, frame_size as usize).is_some() {
+            let mut encoder =
+                Self::new_custom(sample_rate as i32, channels as usize, frame_size as usize)
+                    .map_err(|error| error.to_string())?;
+            encoder.bits_per_sample = bits_per_sample;
+            encoder
+                .set_bitrate(bitrate as i32)
+                .map_err(|error| error.to_string())?;
+            encoder.set_vbr(false).map_err(|error| error.to_string())?;
+            return Ok(encoder);
+        }
         if !CELT_FRAME_SIZES_48K.contains(&(frame_size as usize)) {
-            return Err(format!(
-                "unsupported 48 kHz CELT frame size {frame_size}; expected 120, 240, 480, or 960 samples"
-            ));
+            return Err(unsupported_frame_size(frame_size));
         }
 
         let mut encoder =
@@ -2374,6 +2401,13 @@ fn copy_packet_to_output(
     }
     output[..encoded_len].copy_from_slice(&packet[..encoded_len]);
     Ok(encoded_len)
+}
+
+/// The error [`Encoder::try_new`] returns for a frame size it cannot encode.
+pub(crate) fn unsupported_frame_size(frame_size: u32) -> String {
+    format!(
+        "unsupported 48 kHz CELT frame size {frame_size}; expected 120, 240, 480, or 960 samples"
+    )
 }
 
 impl SoundkitEncoder for Encoder {

@@ -1,4 +1,6 @@
-use crate::{Application, Decoder as RustDecoder, Encoder as RustEncoder, Error};
+use crate::{
+    custom_frame_size, Application, Decoder as RustDecoder, Encoder as RustEncoder, Error,
+};
 use wasm_bindgen::prelude::*;
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {
@@ -21,6 +23,12 @@ pub struct Encoder {
 
 #[wasm_bindgen]
 impl Encoder {
+    /// Creates an encoder for `frame_size`-sample frames. A frame size that
+    /// standard Opus cannot carry but Opus Custom can (48, 64 and 72 samples
+    /// for 1, 1.33 and 1.5 ms; see `custom_frame_size` in the Rust API) gives
+    /// an Opus Custom encoder, as `newCustom` does, at `bitrate` in CBR; its
+    /// packets need a custom decoder of the same frame size. Other frame
+    /// sizes give the standard encoder.
     #[wasm_bindgen(constructor)]
     pub fn new(
         channels: usize,
@@ -33,8 +41,12 @@ impl Encoder {
                 "soundkit-opus wasm currently supports 48 kHz CELT-only Opus",
             ));
         }
-        let mut inner = RustEncoder::with_application(sample_rate, channels, Application::Audio)
-            .map_err(opus_error)?;
+        let mut inner = if custom_frame_size(48_000, frame_size).is_some() {
+            RustEncoder::new_custom(sample_rate, channels, frame_size).map_err(opus_error)?
+        } else {
+            RustEncoder::with_application(sample_rate, channels, Application::Audio)
+                .map_err(opus_error)?
+        };
         inner.set_bitrate(bitrate).map_err(opus_error)?;
         inner.set_vbr(false).map_err(opus_error)?;
         Ok(Self {
@@ -239,14 +251,20 @@ pub struct Decoder {
 
 #[wasm_bindgen]
 impl Decoder {
+    /// Creates a decoder. A `frame_size` that standard Opus cannot carry but
+    /// Opus Custom can (48, 64 and 72 samples; see `custom_frame_size` in the
+    /// Rust API) gives an Opus Custom decoder, as `newCustom` does. Any other
+    /// value gives the standard decoder, which reads every standard frame
+    /// duration whatever `frame_size` says.
     #[wasm_bindgen(constructor)]
-    pub fn new(channels: usize, sample_rate: i32, _frame_size: usize) -> Result<Decoder, JsValue> {
+    pub fn new(channels: usize, sample_rate: i32, frame_size: usize) -> Result<Decoder, JsValue> {
         if sample_rate != 48_000 {
             return Err(js_error(
                 "soundkit-opus wasm currently supports 48 kHz CELT-only Opus",
             ));
         }
-        let inner = RustDecoder::new(sample_rate, channels).map_err(opus_error)?;
+        let inner = RustDecoder::new_for_frame_count(sample_rate, channels, frame_size)
+            .map_err(opus_error)?;
         Ok(Self {
             inner,
             output: Vec::new(),

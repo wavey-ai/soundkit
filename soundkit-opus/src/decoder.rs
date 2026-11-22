@@ -183,6 +183,29 @@ impl Decoder {
         ))
     }
 
+    /// Creates the decoder for packets of `frame_count` samples per channel,
+    /// the `frame_count` of a SoundKit v2 packet header.
+    ///
+    /// When [`crate::custom_frame_size`] reports an Opus Custom frame size
+    /// (48, 64 or 72 samples at 48 kHz, for example), this is
+    /// [`Decoder::new_custom`] with the signalling byte on, the packet format
+    /// [`Encoder::new`](crate::Encoder::new) writes for that frame size. Any
+    /// other count gives the standard decoder of [`Decoder::new`], which reads
+    /// every standard Opus frame duration.
+    pub fn new_for_frame_count(
+        sample_rate: i32,
+        channels: usize,
+        frame_count: usize,
+    ) -> Result<Self> {
+        let custom = u32::try_from(sample_rate)
+            .ok()
+            .and_then(|rate| crate::custom_frame_size(rate, frame_count));
+        match custom {
+            Some(frame_size) => Self::new_custom(sample_rate, channels, frame_size),
+            None => Self::new(sample_rate, channels),
+        }
+    }
+
     fn with_mode(
         sample_rate: i32,
         channels: usize,

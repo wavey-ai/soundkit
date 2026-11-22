@@ -106,6 +106,49 @@ let pcm = decoder.decode_i16_vec(&packet, false)?;
 let concealed = decoder.decode_i16_vec(&[], false)?; // a lost packet
 ```
 
+The SoundKit constructors choose the mode from the frame size, so code that
+carries a SoundKit v2 `frame_count` needs no other change:
+
+```rust
+use soundkit_opus::{custom_frame_size, Decoder, OpusEncoder};
+
+// daw-nexus style: 1 ms frames at 96 kb/s, CBR (12-byte packets in stereo).
+let mut encoder = OpusEncoder::new(48_000, 16, 2, 48, 96_000);
+encoder.init()?;
+assert!(encoder.is_custom());
+
+// Reader side: choose the decoder from the packet header's frame_count.
+assert_eq!(custom_frame_size(48_000, 48), Some(48));
+assert_eq!(custom_frame_size(48_000, 240), None); // standard 5 ms
+let mut decoder = Decoder::new_for_frame_count(48_000, 2, frame_count)?;
+```
+
+- `custom_frame_size(sample_rate, frame_count)` returns `Some(frame_count)`
+  for a 48 kHz frame size that libopus's `opus_custom_mode_create` accepts
+  and that is not a multiple of 120 samples, and `None` otherwise. Every
+  multiple of 120 up to 5760 is the duration of some standard Opus packet, so
+  those counts stay standard. It checks the mode's limits without building
+  the mode; `tests/standard_decoder_compat.rs` checks it against mode
+  construction for every size from 0 to 1100.
+- `Encoder::new` and `Encoder::try_new` (and the SoundKit `Encoder` trait's
+  `new`) build an Opus Custom encoder for such a frame size, with the
+  signalling byte, libopus decisions and arithmetic, the given bitrate and
+  CBR: `OpusEncoder::new(48000, 16, 2, 48, 96000)` writes the same 12-byte
+  packets as `Encoder::new_custom(48000, 2, 48)` with `set_bitrate(96000)`
+  and `set_vbr(false)`, which are `opus_custom_encode`'s. Frame sizes of 120
+  to 960 samples build the standard encoder as before, and sizes that are
+  neither stay errors with the same message. `OpusStreamEncoder` writes
+  standard Opus (`OpusHead`) streams and still rejects custom sizes.
+- `Decoder::new_for_frame_count(sample_rate, channels, frame_count)` is
+  `Decoder::new_custom` for a custom frame count and `Decoder::new`
+  otherwise. The SoundKit `Decoder` trait has no constructor, so this is the
+  decoder-side counterpart.
+- The WebAssembly constructors `new Encoder(channels, sampleRate, bitrate,
+  frameSize)` and `new Decoder(channels, sampleRate, frameSize)` choose the
+  custom mode for a custom frame size in the same way, and the standard codec
+  for every other value, so existing callers that pass 120 to 960 (or any
+  other value to the decoder) are unaffected.
+
 - Packets use the `opus_custom_encode` format: one signalling byte
   (`(effEBands - end) / 2 << 5 | LM << 3 | stereo << 2`) and the CELT frame,
   with no Opus TOC. For the standard mode libopus writes that byte as an Opus
@@ -165,7 +208,8 @@ frameSize)` and `Decoder.newCustom(channels, frameSize)`, with
 `set_bitrate`, `set_custom_signalling`, `set_max_packet_bytes`,
 `set_libopus_decisions`, `enc_frame_f32`, `dec_frame_f32` and `dec_lost`
 (which conceals for standard decoders too), plus `set_conceal_errors` for
-standard decoders.
+standard decoders. The `new Encoder(...)` and `new Decoder(...)`
+constructors pick the custom mode from the frame size, as above.
 
 ### Standard decoders
 
