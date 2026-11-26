@@ -95,6 +95,12 @@ included burst loss, signalling-off and channel switches. It matched
 and C Custom at frame sizes 48, 64, 72 and 120.
 [Paired instruction counts and output hashes](second-candidate-instruction-counts.csv)
 
+The release suite passed, including the new bitwise overlap check and the
+separately enabled live libopus comparison. The rebuilt SIMD128 package
+matched the previous package across 128,320 encoded packets and 12,318,720
+decoded i24 samples, including 5,872 concealed frames. The package check
+covered the eight excerpts at 256 and 320 kb/s in the 48-sample mode.
+
 At 312 and 344 kb/s with the trim patch, the second candidate uses
 23.8–24.3% fewer encode instructions and 10.4–11.3% fewer decode
 instructions than `d0259d8` at 320 and 368 kb/s, respectively. The
