@@ -828,6 +828,18 @@ pub fn comb_filter_in_place_mode(
         overlap = 0;
     }
     let window = window.unwrap_or(&[]);
+    if exact && n == 48 && overlap == n {
+        crate::celt::refkern::comb_filter_overlap_48(
+            y,
+            base,
+            t0,
+            t1,
+            [g00, g01, g02],
+            [g10, g11, g12],
+            window,
+        );
+        return;
+    }
 
     let mut i = 0usize;
     let mut x1 = y[base + 1 - t1];

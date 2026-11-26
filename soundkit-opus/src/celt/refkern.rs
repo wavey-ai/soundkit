@@ -14,6 +14,7 @@
 //! (`CeltMode::exact_math`).
 
 use crate::celt::pitch::COMBFILTER_MINPERIOD;
+use wide::f32x4;
 
 /// `celt_inner_prod_sse`: four lanes, `(l0 + l2) + (l1 + l3)`, then the tail.
 #[inline]
@@ -24,8 +25,6 @@ pub fn inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        use wide::f32x4;
-
         let (x, x_tail) = x[..n].as_chunks::<4>();
         let (y, y_tail) = y[..n].as_chunks::<4>();
         let mut lanes = f32x4::ZERO;
@@ -474,6 +473,45 @@ pub fn pitch_search(
         0
     };
     (2 * best[0] as isize - offset) as usize
+}
+
+#[inline]
+fn comb_taps4(samples: &[f32], index: usize, period: usize) -> [f32x4; 3] {
+    let start = index - period - 2;
+    let taps = &samples[start..start + 8];
+    let load = |offset| f32x4::new(taps[offset..offset + 4].try_into().unwrap());
+    [load(2), load(3) + load(1), load(4) + load(0)]
+}
+
+/// The 48-sample decoder cross-fade in libopus's scalar addition order.
+/// With a pitch of at least 15, a group of four reads only earlier samples.
+pub(crate) fn comb_filter_overlap_48(
+    samples: &mut [f32],
+    base: usize,
+    t0: usize,
+    t1: usize,
+    g0: [f32; 3],
+    g1: [f32; 3],
+    window: &[f32],
+) {
+    let [g00, g01, g02] = g0.map(f32x4::splat);
+    let [g10, g11, g12] = g1.map(f32x4::splat);
+    for (block, &window) in window[..48].as_chunks::<4>().0.iter().enumerate() {
+        let k = base + block * 4;
+        let window = f32x4::new(window);
+        let f = window * window;
+        let fade = f32x4::ONE - f;
+        let [old_center, old_near, old_far] = comb_taps4(samples, k, t0);
+        let [new_center, new_near, new_far] = comb_taps4(samples, k, t1);
+        let output = f32x4::new(samples[k..k + 4].try_into().unwrap())
+            + fade * g00 * old_center
+            + fade * g01 * old_near
+            + fade * g02 * old_far
+            + f * g10 * new_center
+            + f * g11 * new_near
+            + f * g12 * new_far;
+        samples[k..k + 4].copy_from_slice(&output.to_array());
+    }
 }
 
 /// The steady-state part of `comb_filter` (`comb_filter_const_sse` and its
