@@ -317,20 +317,41 @@ pub fn pitch_downsample(
     factor: usize,
     scratch: &mut PitchScratch,
 ) {
-    let offset = factor / 2;
-    for i in 1..len {
-        x_lp[i] = 0.25 * x[0][factor * i - offset]
-            + 0.25 * x[0][factor * i + offset]
-            + 0.5 * x[0][factor * i];
-    }
-    x_lp[0] = 0.25 * x[0][offset] + 0.5 * x[0][0];
-    if x.len() == 2 {
-        for i in 1..len {
-            x_lp[i] += 0.25 * x[1][factor * i - offset]
-                + 0.25 * x[1][factor * i + offset]
-                + 0.5 * x[1][factor * i];
+    if factor == 2 && x.len() == 2 && len > 0 {
+        // Reuse each odd sample in the next window. Keep each channel's
+        // floating-point sum in libopus order before adding the channels.
+        let left = &x[0][..2 * len];
+        let right = &x[1][..2 * len];
+        let mut previous_left = left[1];
+        let mut previous_right = right[1];
+        x_lp[0] = (0.25 * previous_left + 0.5 * left[0]) + (0.25 * previous_right + 0.5 * right[0]);
+        let left = left[2..].as_chunks::<2>().0;
+        let right = right[2..].as_chunks::<2>().0;
+        for ((sample, &[center_left, next_left]), &[center_right, next_right]) in
+            x_lp[1..len].iter_mut().zip(left).zip(right)
+        {
+            let low_left = 0.25 * previous_left + 0.25 * next_left + 0.5 * center_left;
+            let low_right = 0.25 * previous_right + 0.25 * next_right + 0.5 * center_right;
+            *sample = low_left + low_right;
+            previous_left = next_left;
+            previous_right = next_right;
         }
-        x_lp[0] += 0.25 * x[1][offset] + 0.5 * x[1][0];
+    } else {
+        let offset = factor / 2;
+        for i in 1..len {
+            x_lp[i] = 0.25 * x[0][factor * i - offset]
+                + 0.25 * x[0][factor * i + offset]
+                + 0.5 * x[0][factor * i];
+        }
+        x_lp[0] = 0.25 * x[0][offset] + 0.5 * x[0][0];
+        if x.len() == 2 {
+            for i in 1..len {
+                x_lp[i] += 0.25 * x[1][factor * i - offset]
+                    + 0.25 * x[1][factor * i + offset]
+                    + 0.5 * x[1][factor * i];
+            }
+            x_lp[0] += 0.25 * x[1][offset] + 0.5 * x[1][0];
+        }
     }
     let mut ac = [0.0f32; 5];
     autocorr(x_lp, &mut ac, None, 0, 4, len, &mut scratch.window);
@@ -373,9 +394,15 @@ fn find_best_pitch(xcorr: &[f32], y: &[f32], len: usize, max_pitch: usize) -> [u
     for &value in &y[..len] {
         syy += value * value;
     }
-    for i in 0..max_pitch {
-        if xcorr[i] > 0.0 {
-            let xcorr16 = xcorr[i] * 1e-12;
+    let departing = &y[..max_pitch];
+    let arriving = &y[len..len + max_pitch];
+    for (i, (&correlation, (&outgoing, &incoming))) in xcorr[..max_pitch]
+        .iter()
+        .zip(departing.iter().zip(arriving))
+        .enumerate()
+    {
+        if correlation > 0.0 {
+            let xcorr16 = correlation * 1e-12;
             let num = xcorr16 * xcorr16;
             if num * best_den[1] > best_num[1] * syy {
                 if num * best_den[0] > best_num[0] * syy {
@@ -392,7 +419,7 @@ fn find_best_pitch(xcorr: &[f32], y: &[f32], len: usize, max_pitch: usize) -> [u
                 }
             }
         }
-        syy += y[i + len] * y[i + len] - y[i] * y[i];
+        syy += incoming * incoming - outgoing * outgoing;
         syy = syy.max(1.0);
     }
     best_pitch

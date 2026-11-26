@@ -77,15 +77,17 @@ Use the Linode archive's C binary and Rust build flags for the next run.
 Replay the archive's four-second mixed fixture for the primary comparison.
 Build `raw_celt_bench` from this candidate, and build it again with the
 [trim experiment patch](../../quality-results/2026-11-26-opus-1ms-trim/trim4-experiment.patch)
-applied in a separate checkout. Use the signed 24-bit corpus prepared by
-the [quality report](../../quality-results/2026-11-26-opus-1ms-vs-libopus/README.md#reproduce).
-Link the prepared `.s32le` files into the timing corpus with names ending
-`-48k-s24.s32le`. Set `CPU` to the allowed vCPU used for both binaries.
+applied in a separate checkout. For the primary comparison, put the archived
+fixture in `CORPUS` and set `SECONDS_PER_EXCERPT=4`. To collect timings per
+excerpt, use the signed 24-bit corpus prepared by the
+[quality report](../../quality-results/2026-11-26-opus-1ms-vs-libopus/README.md#reproduce)
+and set `SECONDS_PER_EXCERPT=8`. The input filenames must end in
+`-48k-s24.s32le`. Set `CPU` to the vCPU used for both binaries.
 
 ```sh
 timing() {
   python3 soundkit-opus/tools/run_native_celt_ab.py "$C_BENCH" "$1" \
-    --corpus "$CORPUS" --cpu "$CPU" --seconds 8 --warmup-seconds 4 \
+    --corpus "$CORPUS" --cpu "$CPU" --seconds "$SECONDS_PER_EXCERPT" --warmup-seconds 4 \
     --rounds 21 --repeats 1 --mode cbr --pcm-bits 24 \
     --application restricted-lowdelay --baseline-decode-api c \
     --frame-size 120 --bitrate 256000 --candidate-frame-size 48 \
@@ -101,6 +103,9 @@ timing "$TRIM_BENCH" 344000 trim-both-means.json
 | Configuration | Payload | Packets/s | With 16-byte SoundKit header | With SoundKit header and IPv4/UDP |
 |---|---:|---:|---:|---:|
 | C 2.5 ms reference | 256 kb/s | 400 | 307.2 kb/s | 396.8 kb/s |
+| Rust 1 ms, equal payload | 256 kb/s | 1,000 | 384 kb/s | 608 kb/s |
+| Rust 1 ms default, mean advanced PEAQ | 320 kb/s | 1,000 | 448 kb/s | 672 kb/s |
+| Rust 1 ms default, both PEAQ means | 368 kb/s | 1,000 | 496 kb/s | 720 kb/s |
 | Rust 1 ms trim, mean advanced PEAQ | 312 kb/s | 1,000 | 440 kb/s | 664 kb/s |
 | Rust 1 ms trim, both PEAQ means | 344 kb/s | 1,000 | 472 kb/s | 696 kb/s |
 
