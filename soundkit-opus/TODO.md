@@ -132,10 +132,12 @@ independently when a product requires it.
 - Make the WebAssembly encoder cheaper with libopus arithmetic. Its fused
   multiply-adds in the pitch correlation run in software (`fmaf`); a
   round-to-odd `f64` evaluation would give the same results faster.
-- Measure quality at 1, 1.33 and 1.5 ms before tuning decisions for them.
-  libopus's equivalent-rate formula assumes 2.5 ms short blocks, so at 1 ms
-  and 192 kb/s stereo it codes the top bands with intensity stereo and lowers
-  the allocation trim.
+- Use the [frame-size study](quality-results/2026-11-21-opus-custom-frames/README.md)
+  and [direct C comparison](quality-results/2026-11-26-opus-1ms-vs-libopus/README.md)
+  to evaluate encoder tuning. At 1 ms and 192 kb/s stereo, libopus's
+  equivalent-rate formula codes the top bands with intensity stereo and
+  lowers the allocation trim. Cover these clips in a listening test before
+  changing the default.
 - Decide whether the standard path should adopt the libopus fixes found by
   the interop work (silence flag, `last` shared across channels in
   dynalloc, trunk's pitch-doubling check, round-half-even output). Each one
@@ -146,4 +148,3 @@ independently when a product requires it.
 - Check packet identity against a libopus built without intrinsics (ARM,
   `OPUS_DISABLE_INTRINSICS`): it sums in a different order, so its packets
   and last decoded bits differ from x86-64 libopus's.
-

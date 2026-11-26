@@ -1,0 +1,14 @@
+--- a/soundkit-opus/src/encoder.rs
++++ b/soundkit-opus/src/encoder.rs
+@@ -2215,8 +2215,9 @@
+             (0, nb_compressed)
+         };
+         let mut nb_available = nb_compressed;
+-        let overhead = (40 * channels + 20) * ((400 >> lm) - 50);
+-        let mut equiv_rate = ((nb_compressed * 8 * 50) << (3 - lm)) - overhead;
++        let frame_rate = fs / frame_size as i32;
++        let overhead = (40 * channels + 20) * (frame_rate - 50);
++        let mut equiv_rate = nb_compressed * 8 * fs / frame_size as i32 - overhead;
+         if self.bitrate != BITRATE_MAX {
+             equiv_rate = equiv_rate.min(self.bitrate - overhead);
+         }

@@ -74,14 +74,12 @@ the Rust packets and decoded PCM equal libopus's custom encoder and decoder
 byte for byte and sample for sample in 3480 interop cases. Standard Opus
 streams keep SoundKit's tuned encoder and their output is unchanged.
 
-For a low-latency lane, use 1 ms frames at 320 kb/s CBR with the signalling
-byte on. That setting scored at least as well as the 5 ms, 192 kb/s CBR
-production setting on PEAQ advanced and ViSQOL. 1 ms at 256 kb/s scored
-about as well as 2.5 ms at 192 kb/s and is the lower-bandwidth option.
-Standard 2.5 ms Opus stays the setting for fMP4, Ogg, WebRTC and other
-players. Read the
-[Opus Custom frames report](quality-results/2026-11-21-opus-custom-frames/README.md)
-and the Opus Custom section of [CODEC.md](CODEC.md).
+For the low-latency lane, the [SoundKit frame-size study](quality-results/2026-11-21-opus-custom-frames/README.md)
+selected 1 ms at 320 kb/s CBR with signalling enabled. In a separate
+[comparison against standard C Opus 2.5 ms](quality-results/2026-11-26-opus-1ms-vs-libopus/README.md),
+Rust at 1 ms needed 64–72 kb/s more to match the mean advanced PEAQ score.
+Basic PEAQ still favoured C at those rates. Standard 2.5 ms Opus is the
+setting for fMP4, Ogg, WebRTC and other standard Opus players.
 
 Read [CODEC.md](CODEC.md) for the codec API, support limits, and benchmark commands.
 

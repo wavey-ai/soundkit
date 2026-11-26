@@ -172,4 +172,39 @@ fn steady_state_soundkit_opus_reuses_caller_storage() {
         0,
         "steady-state 24-bit Opus decode allocated"
     );
+
+    const CUSTOM_FRAME_SIZE: u32 = 48;
+    let mut seed = 1u32;
+    // Broadband PCM above the pitch-search bitrate threshold exercises the custom search.
+    let pcm: [i32; CUSTOM_FRAME_SIZE as usize * 2] = std::array::from_fn(|_| {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (seed >> 10) as i32 - (1 << 21)
+    });
+    for channels in [1, 2] {
+        let mut encoder = OpusEncoder::new(
+            SAMPLE_RATE,
+            24,
+            channels,
+            CUSTOM_FRAME_SIZE,
+            160_000 * channels,
+        );
+        encoder.init().unwrap();
+        let pcm = &pcm[..(CUSTOM_FRAME_SIZE * channels) as usize];
+        for _ in 0..32 {
+            encoder.encode_i32(pcm, &mut packet).unwrap();
+        }
+
+        ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+        COUNT_ALLOCATIONS.store(true, Ordering::Relaxed);
+        for _ in 0..100 {
+            assert!(encoder.encode_i32(pcm, &mut packet).unwrap() > 0);
+        }
+        COUNT_ALLOCATIONS.store(false, Ordering::Relaxed);
+
+        assert_eq!(
+            ALLOCATION_COUNT.load(Ordering::Relaxed),
+            0,
+            "steady-state {channels}-channel Opus Custom encode allocated"
+        );
+    }
 }

@@ -73,6 +73,12 @@ export class DecodeResultI24 {
 if (Symbol.dispose) DecodeResultI24.prototype[Symbol.dispose] = DecodeResultI24.prototype.free;
 
 export class Decoder {
+    static __wrap(ptr) {
+        const obj = Object.create(Decoder.prototype);
+        obj.__wbg_ptr = ptr;
+        DecoderFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -84,7 +90,7 @@ export class Decoder {
         wasm.__wbg_decoder_free(ptr, 0);
     }
     /**
-     * @param {Uint8Array} packet
+     * @param {Uint8Array | number[]} packet
      * @returns {DecodeResult}
      */
     dec_frame(packet) {
@@ -97,7 +103,23 @@ export class Decoder {
         return DecodeResult.__wrap(ret[0]);
     }
     /**
-     * @param {Uint8Array} packet
+     * Decodes to interleaved floating-point samples.
+     * @param {Uint8Array | number[]} packet
+     * @returns {Float32Array}
+     */
+    dec_frame_f32(packet) {
+        const ptr0 = passArray8ToWasm0(packet, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.decoder_dec_frame_f32(this.__wbg_ptr, ptr0, len0);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v2 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v2;
+    }
+    /**
+     * @param {Uint8Array | number[]} packet
      * @returns {DecodeResultI24}
      */
     dec_frame_i24(packet) {
@@ -110,7 +132,7 @@ export class Decoder {
         return DecodeResultI24.__wrap(ret[0]);
     }
     /**
-     * @param {Uint8Array} packet
+     * @param {Uint8Array | number[]} packet
      * @returns {number}
      */
     dec_frame_i24_reuse(packet) {
@@ -123,7 +145,7 @@ export class Decoder {
         return ret[0] >>> 0;
     }
     /**
-     * @param {Uint8Array} packet
+     * @param {Uint8Array | number[]} packet
      * @returns {number}
      */
     dec_frame_reuse(packet) {
@@ -134,6 +156,18 @@ export class Decoder {
             throw takeFromExternrefTable0(ret[1]);
         }
         return ret[0] >>> 0;
+    }
+    /**
+     * Conceals one lost frame (packet-loss concealment) into the i16
+     * output, for standard and Opus Custom decoders alike.
+     * @returns {DecodeResult}
+     */
+    dec_lost() {
+        const ret = wasm.decoder_dec_lost(this.__wbg_ptr);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return DecodeResult.__wrap(ret[0]);
     }
     /**
      * @returns {number}
@@ -147,12 +181,39 @@ export class Decoder {
         wasm.decoder_destroy(ptr);
     }
     /**
+     * @returns {boolean}
+     */
+    get isCustom() {
+        const ret = wasm.decoder_isCustom(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Creates an Opus Custom decoder at 48 kHz for `frame_size`-sample
+     * frames (48, 64, 72 for 1, 1.33, 1.5 ms). An empty packet conceals a
+     * lost frame.
+     * @param {number} channels
+     * @param {number} frame_size
+     * @returns {Decoder}
+     */
+    static newCustom(channels, frame_size) {
+        const ret = wasm.decoder_newCustom(channels, frame_size);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return Decoder.__wrap(ret[0]);
+    }
+    /**
+     * Creates a decoder. A `frame_size` that standard Opus cannot carry but
+     * Opus Custom can (48, 64 and 72 samples; see `custom_frame_size` in the
+     * Rust API) gives an Opus Custom decoder, as `newCustom` does. Any other
+     * value gives the standard decoder, which reads every standard frame
+     * duration whatever `frame_size` says.
      * @param {number} channels
      * @param {number} sample_rate
-     * @param {number} _frame_size
+     * @param {number} frame_size
      */
-    constructor(channels, sample_rate, _frame_size) {
-        const ret = wasm.decoder_new(channels, sample_rate, _frame_size);
+    constructor(channels, sample_rate, frame_size) {
+        const ret = wasm.decoder_new(channels, sample_rate, frame_size);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -187,6 +248,29 @@ export class Decoder {
     get outputPtr() {
         const ret = wasm.decoder_outputPtr(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * Selects libopus's handling of empty, short and damaged packets for a
+     * standard decoder (off by default: such packets are errors, as they
+     * always were). Opus Custom decoders always conceal.
+     * @param {boolean} enabled
+     */
+    set_conceal_errors(enabled) {
+        const ret = wasm.decoder_set_conceal_errors(this.__wbg_ptr, enabled);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Opus Custom: expects (`true`, the default) or omits the signalling
+     * byte.
+     * @param {boolean} enabled
+     */
+    set_custom_signalling(enabled) {
+        const ret = wasm.decoder_set_custom_signalling(this.__wbg_ptr, enabled);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
     }
 }
 if (Symbol.dispose) Decoder.prototype[Symbol.dispose] = Decoder.prototype.free;
@@ -228,6 +312,12 @@ export class EncodeResult {
 if (Symbol.dispose) EncodeResult.prototype[Symbol.dispose] = EncodeResult.prototype.free;
 
 export class Encoder {
+    static __wrap(ptr) {
+        const obj = Object.create(Encoder.prototype);
+        obj.__wbg_ptr = ptr;
+        EncoderFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -243,7 +333,7 @@ export class Encoder {
         wasm.encoder_destroy(ptr);
     }
     /**
-     * @param {Int16Array} input
+     * @param {Int16Array | number[]} input
      * @returns {EncodeResult}
      */
     enc_frame(input) {
@@ -256,7 +346,20 @@ export class Encoder {
         return EncodeResult.__wrap(ret[0]);
     }
     /**
-     * @param {Int32Array} input
+     * @param {Float32Array | number[]} input
+     * @returns {EncodeResult}
+     */
+    enc_frame_f32(input) {
+        const ptr0 = passArrayF32ToWasm0(input, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.encoder_enc_frame_f32(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return EncodeResult.__wrap(ret[0]);
+    }
+    /**
+     * @param {Int32Array | number[]} input
      * @returns {EncodeResult}
      */
     enc_frame_i24(input) {
@@ -323,6 +426,36 @@ export class Encoder {
         return ret >>> 0;
     }
     /**
+     * @returns {boolean}
+     */
+    get isCustom() {
+        const ret = wasm.encoder_isCustom(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Creates an Opus Custom encoder at 48 kHz for `frame_size`-sample
+     * frames: 48, 64 and 72 give 1, 1.33 and 1.5 ms frames. Packets are
+     * the `opus_custom_encode` format (one signalling byte, no TOC).
+     * Defaults follow libopus: the maximum bitrate (every packet fills the
+     * maximum packet size) and CBR; call `set_bitrate` for a target rate.
+     * @param {number} channels
+     * @param {number} frame_size
+     * @returns {Encoder}
+     */
+    static newCustom(channels, frame_size) {
+        const ret = wasm.encoder_newCustom(channels, frame_size);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return Encoder.__wrap(ret[0]);
+    }
+    /**
+     * Creates an encoder for `frame_size`-sample frames. A frame size that
+     * standard Opus cannot carry but Opus Custom can (48, 64 and 72 samples
+     * for 1, 1.33 and 1.5 ms; see `custom_frame_size` in the Rust API) gives
+     * an Opus Custom encoder, as `newCustom` does, at `bitrate` in CBR; its
+     * packets need a custom decoder of the same frame size. Other frame
+     * sizes give the standard encoder.
      * @param {number} channels
      * @param {number} sample_rate
      * @param {number} bitrate
@@ -352,10 +485,58 @@ export class Encoder {
         return ret >>> 0;
     }
     /**
+     * Sets the bitrate in bits per second; -1 selects the maximum (Opus
+     * Custom only).
+     * @param {number} bitrate
+     */
+    set_bitrate(bitrate) {
+        const ret = wasm.encoder_set_bitrate(this.__wbg_ptr, bitrate);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Opus Custom: writes (`true`, the default) or omits the signalling byte.
+     * @param {boolean} enabled
+     */
+    set_custom_signalling(enabled) {
+        const ret = wasm.encoder_set_custom_signalling(this.__wbg_ptr, enabled);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Selects libopus's encoder decision constants (`true`) or SoundKit's.
+     * @param {boolean} enabled
+     */
+    set_libopus_decisions(enabled) {
+        wasm.encoder_set_libopus_decisions(this.__wbg_ptr, enabled);
+    }
+    /**
+     * Opus Custom: the largest packet, signalling byte included (2-1276).
+     * @param {number} bytes
+     */
+    set_max_packet_bytes(bytes) {
+        const ret = wasm.encoder_set_max_packet_bytes(this.__wbg_ptr, bytes);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * @param {boolean} enabled
      */
     set_vbr(enabled) {
         const ret = wasm.encoder_set_vbr(this.__wbg_ptr, enabled);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Selects constrained VBR (`true`, the default) or unconstrained VBR.
+     * @param {boolean} constrained
+     */
+    set_vbr_constraint(constrained) {
+        const ret = wasm.encoder_set_vbr_constraint(this.__wbg_ptr, constrained);
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
@@ -365,22 +546,21 @@ if (Symbol.dispose) Encoder.prototype[Symbol.dispose] = Encoder.prototype.free;
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
-        __wbg___wbindgen_throw_bb96b2010945f0bc: function(arg0, arg1) {
+        __wbg___wbindgen_throw_4c88d8bf264fd984: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
-        __wbindgen_cast_0000000000000001: function(arg0, arg1) {
+        __wbindgen_generic_0000000000000001: function(arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
             return ret;
         },
         __wbindgen_init_externref_table: function() {
             const table = wasm.__wbindgen_externrefs;
-            const offset = table.grow(4);
             table.set(0, undefined);
-            table.set(offset + 0, undefined);
-            table.set(offset + 1, null);
-            table.set(offset + 2, true);
-            table.set(offset + 3, false);
+            table.set(1024, undefined);
+            table.set(1025, null);
+            table.set(1026, true);
+            table.set(1027, false);
         },
     };
     return {
@@ -405,6 +585,11 @@ const EncoderFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_encoder_free(ptr, 1));
 
+function getArrayF32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
 function getArrayI16FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getInt16ArrayMemory0().subarray(ptr / 2, ptr / 2 + len);
@@ -418,6 +603,14 @@ function getArrayI32FromWasm0(ptr, len) {
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
+
+let cachedFloat32ArrayMemory0 = null;
+function getFloat32ArrayMemory0() {
+    if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
+        cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
+    }
+    return cachedFloat32ArrayMemory0;
 }
 
 let cachedInt16ArrayMemory0 = null;
@@ -437,7 +630,8 @@ function getInt32ArrayMemory0() {
 }
 
 function getStringFromWasm0(ptr, len) {
-    return decodeText(ptr >>> 0, len);
+    ptr = ptr >>> 0;
+    return decodeText(getUint8ArrayMemory0().subarray(ptr, ptr + len));
 }
 
 let cachedUint16ArrayMemory0 = null;
@@ -485,24 +679,31 @@ function passArray8ToWasm0(arg, malloc) {
     return ptr;
 }
 
+function passArrayF32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getFloat32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
 function takeFromExternrefTable0(idx) {
     const value = wasm.__wbindgen_externrefs.get(idx);
     wasm.__externref_table_dealloc(idx);
     return value;
 }
 
-let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
+let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
 cachedTextDecoder.decode();
 const MAX_SAFARI_DECODE_BYTES = 2146435072;
 let numBytesDecoded = 0;
-function decodeText(ptr, len) {
-    numBytesDecoded += len;
+function decodeText(bytes) {
+    numBytesDecoded += bytes.length;
     if (numBytesDecoded >= MAX_SAFARI_DECODE_BYTES) {
-        cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
+        cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true });
         cachedTextDecoder.decode();
-        numBytesDecoded = len;
+        numBytesDecoded = bytes.length;
     }
-    return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
+    return cachedTextDecoder.decode(bytes);
 }
 
 let WASM_VECTOR_LEN = 0;
@@ -512,6 +713,7 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedFloat32ArrayMemory0 = null;
     cachedInt16ArrayMemory0 = null;
     cachedInt32ArrayMemory0 = null;
     cachedUint16ArrayMemory0 = null;
@@ -580,9 +782,17 @@ function initSync(module) {
     return __wbg_finalize_init(instance, module);
 }
 
+let __wbg_init_promise;
 async function __wbg_init(module_or_path) {
     if (wasm !== undefined) return wasm;
+    if (__wbg_init_promise === undefined) {
+        __wbg_init_promise = __wbg_init_once(module_or_path);
+        __wbg_init_promise.catch(() => { __wbg_init_promise = undefined; });
+    }
+    return __wbg_init_promise;
+}
 
+async function __wbg_init_once(module_or_path) {
 
     if (module_or_path !== undefined) {
         if (Object.getPrototypeOf(module_or_path) === Object.prototype) {

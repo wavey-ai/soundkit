@@ -1,0 +1,50 @@
+[
+  {
+    "source": "27_castanets_single_tone_rhythm_stereo",
+    "offset_seconds": 6,
+    "file_sha256": "198527b5a137b2b2ee37837cee6c4cc959ce142408fb5c55bf22984eab8921bb",
+    "pcm_sha256": "17eceb199b32e754c6bb2b7e42ed5b1944b2b4d4568e3f152183040d38e7f350"
+  },
+  {
+    "source": "31_cymbal",
+    "offset_seconds": 3,
+    "file_sha256": "f9b363e0fdbd60dd719111e083f322ec43c63d27402c37fb3c383d21c6638111",
+    "pcm_sha256": "d55fb7e47acd924106f4a8abda54a2d03cce69f03589212944985a9f1b506af0"
+  },
+  {
+    "source": "49_female_speech_english_mono",
+    "offset_seconds": 5,
+    "file_sha256": "6f338a58fb447bd2a84dbdee13c788724f6e3c609cc97bd4502b667b7b35417e",
+    "pcm_sha256": "4152074c60a5c39a3228811f8917ef65e80ded6e3bc05ee9e0c66c2267f75cd0"
+  },
+  {
+    "source": "59_violin_ravel_stereo",
+    "offset_seconds": 4,
+    "file_sha256": "6d3a1453906b8883e99a2f8b4163f9200bcb5c29a8f57aef3e9ff8c323916451",
+    "pcm_sha256": "997c60013bc67ac6d0623cc58e5b6e4632ba49c1e195ad7836216b63ac35694d"
+  },
+  {
+    "source": "65_orchestra_strauss_stereo",
+    "offset_seconds": 20,
+    "file_sha256": "5f5a74fd65dc9cb7d2fc6ce35d2ba78bb01231f16d02befe8a7930276baee400",
+    "pcm_sha256": "40bcd0db5812a8057f7c3681995f56427afa3098bc65b07de662da242444f9c8"
+  },
+  {
+    "source": "allegaeon-beasts-and-worms",
+    "offset_seconds": 22,
+    "file_sha256": "b30aeb43046a18871a9eb6f75e166735da7de37132ccd9f5d60d50baf91ab4f8",
+    "pcm_sha256": "36cf7afae1091000427b802f4226e639844edf47afb43e33be28303aa5607ffc"
+  },
+  {
+    "source": "four_tet_baby",
+    "offset_seconds": 20,
+    "file_sha256": "337792a2fd90d59fec46d43c3cd1e90d67449d12c48256ecb25590f73da9f14f",
+    "pcm_sha256": "b2863d1fde827cb1aa94ab2cbaa8ce313c4a511a31333599866d4449f947f3f9"
+  },
+  {
+    "source": "julien_baker_sprained_ankle",
+    "offset_seconds": 12,
+    "file_sha256": "f048300b1bac44f29b03f81898b56268cd44bcb9c65427a77557bfc142d52586",
+    "pcm_sha256": "42edbd4033399c3657416395bca97e33c72c1facc7d398a9017ae01fcb778a7e"
+  }
+]

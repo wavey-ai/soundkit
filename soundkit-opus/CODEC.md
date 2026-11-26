@@ -453,6 +453,11 @@ bytes per second for 1, 1.33, 1.5, 2.5 and 5 ms frames at 96 to 384 kb/s.
 192 kb/s CBR, and are the recommended low-latency setting. The report's CPU
 figures are more careful than the rough table above.
 
+The [direct C Opus 2.5 ms comparison](quality-results/2026-11-26-opus-1ms-vs-libopus/README.md)
+records paired quality scores, bitrate and signalling measurements, and the
+same-frame C Opus Custom control. It also links the reproduction steps and
+[change verification](quality-results/2026-11-26-opus-1ms-vs-libopus/verification.md).
+
 ## Codec Status
 
 The encoder is experimental. CELT-only CBR and constrained VBR are suitable for
@@ -625,6 +630,18 @@ faster. Record the libopus build configuration with performance results. Use
 isolate low-delay application behavior on both implementations. Architecture
 intrinsics and `--enable-float-approx` materially affect the C
 baseline.
+
+On the [SoundKit CPU performance host](../AGENTS.md), compare Rust Opus
+Custom at 1 ms with standard C Opus at 2.5 ms using the same PCM and bitrate:
+
+```sh
+tools/run_raw_celt_bench.sh --frame-size 120 --rust-frame-size 48 \
+  --application restricted-lowdelay --pcm-bits 24 --mode cbr --bitrate 256000
+```
+
+The application setting selects the standard C encoder mode in this comparison.
+Opus Custom uses CELT directly. Add `--rust-bitrate` to compare operating
+points with different bitrates. The benchmark's aligned SNR is a diagnostic.
 
 Positive deltas mean Rust took longer than C. Negative deltas mean Rust
 was faster. Byte counts are raw Opus packet bytes, not wrapper/container bytes.

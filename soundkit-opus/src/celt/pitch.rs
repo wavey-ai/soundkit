@@ -915,9 +915,12 @@ pub fn run_prefilter(
         let pitch = if exact {
             let half = (COMBFILTER_MAXPERIOD + n) >> 1;
             scratch.pitch_buf.resize(half, 0.0);
-            let pre: Vec<&[f32]> = scratch.pre[..channels].iter().map(|c| &c[..]).collect();
+            let pre: [&[f32]; 2] = [
+                &scratch.pre[0],
+                scratch.pre.get(1).map_or(&[], |samples| &samples[..]),
+            ];
             crate::celt::refkern::pitch_downsample(
-                &pre,
+                &pre[..channels],
                 &mut scratch.pitch_buf,
                 half,
                 2,

@@ -1,5 +1,8 @@
 use soundkit::audio_packet::Decoder as SoundkitDecoderTrait;
-use soundkit_opus::{Application, Decoder, Encoder, CELT_FRAME_SIZES_48K, CELT_MAX_FRAME_BYTES};
+use soundkit_opus::{
+    custom_frame_size, Application, Decoder, Encoder, CELT_FRAME_SIZES_48K, CELT_MAX_BITRATE,
+    CELT_MAX_FRAME_BYTES, CELT_MIN_BITRATE,
+};
 use std::env;
 use std::fs;
 use std::hint::black_box;
@@ -7,9 +10,6 @@ use std::time::Instant;
 
 const SAMPLE_RATE: usize = 48_000;
 const CHANNELS: usize = 2;
-const BITRATES: [i32; 9] = [
-    48_000, 96_000, 128_000, 160_000, 192_000, 256_000, 320_000, 384_000, 512_000,
-];
 const TARGET_BITRATES: [i32; 3] = [192_000, 256_000, 320_000];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,6 +92,20 @@ struct Options {
 
 struct EncodeResult {
     packets: Vec<Vec<u8>>,
+}
+
+impl Options {
+    fn frame_sizes(&self) -> &[usize] {
+        self.frame_size
+            .as_ref()
+            .map_or(&CELT_FRAME_SIZES_48K, std::slice::from_ref)
+    }
+
+    fn bitrates(&self) -> &[i32] {
+        self.bitrate
+            .as_ref()
+            .map_or(&TARGET_BITRATES, std::slice::from_ref)
+    }
 }
 
 fn usage() -> ! {
@@ -178,7 +192,9 @@ fn parse_options() -> Options {
                     .get(i)
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_else(|| usage());
-                if !CELT_FRAME_SIZES_48K.contains(&frame_size) {
+                if !CELT_FRAME_SIZES_48K.contains(&frame_size)
+                    && custom_frame_size(SAMPLE_RATE as u32, frame_size).is_none()
+                {
                     usage();
                 }
                 options.frame_size = Some(frame_size);
@@ -189,9 +205,6 @@ fn parse_options() -> Options {
                     .get(i)
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_else(|| usage());
-                if !BITRATES.contains(&bitrate) {
-                    usage();
-                }
                 options.bitrate = Some(bitrate);
             }
             "--fixture" => {
@@ -230,6 +243,20 @@ fn parse_options() -> Options {
     if options.repeats == 0 || options.seconds == 0 || options.dump_packets == Some(0) {
         usage();
     }
+    if let Some(bitrate) = options.bitrate {
+        let min_bitrate = if options
+            .frame_size
+            .and_then(|size| custom_frame_size(SAMPLE_RATE as u32, size))
+            .is_some()
+        {
+            CELT_MIN_BITRATE + 1
+        } else {
+            CELT_MIN_BITRATE
+        };
+        if !(min_bitrate..=CELT_MAX_BITRATE).contains(&bitrate) {
+            usage();
+        }
+    }
     options
 }
 
@@ -239,14 +266,6 @@ fn modes(options: &Options) -> &'static [BenchMode] {
         Some(BenchMode::Vbr) => &[BenchMode::Vbr],
         None => &[BenchMode::Cbr, BenchMode::Vbr],
     }
-}
-
-fn bitrate_enabled(options: &Options, bitrate: i32) -> bool {
-    options
-        .bitrate
-        .map_or(TARGET_BITRATES.contains(&bitrate), |selected| {
-            selected == bitrate
-        })
 }
 
 fn generate_mixed_fixture(seconds: usize) -> Vec<f32> {
@@ -408,7 +427,7 @@ fn decode_packets_core(
     format: PcmFormat,
     direct_cubic: bool,
 ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    let mut decoder = Decoder::new(SAMPLE_RATE as i32, CHANNELS)?;
+    let mut decoder = Decoder::new_for_frame_count(SAMPLE_RATE as i32, CHANNELS, frame_size)?;
     decoder.set_experimental_direct_cubic(direct_cubic);
     let mut decoded = Vec::with_capacity(packets.len() * frame_size * CHANNELS);
     match format {
@@ -455,7 +474,7 @@ fn decode_packets_soundkit(
     format: PcmFormat,
     direct_cubic: bool,
 ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    let mut decoder = Decoder::new(SAMPLE_RATE as i32, CHANNELS)?;
+    let mut decoder = Decoder::new_for_frame_count(SAMPLE_RATE as i32, CHANNELS, frame_size)?;
     decoder.set_experimental_direct_cubic(direct_cubic);
     let mut decoded = Vec::with_capacity(packets.len() * frame_size * CHANNELS);
     match format {
@@ -612,11 +631,26 @@ fn encode_packets(
     application: Application,
     direct_cubic: bool,
 ) -> Result<EncodeResult, Box<dyn std::error::Error>> {
-    let mut encoder = Encoder::with_application(SAMPLE_RATE as i32, CHANNELS, application)?;
+    let mut encoder = bench_encoder(frame_size, bitrate, mode, application, direct_cubic)?;
+    encode_with_encoder(&mut encoder, pcm, frame_size)
+}
+
+fn bench_encoder(
+    frame_size: usize,
+    bitrate: i32,
+    mode: BenchMode,
+    application: Application,
+    direct_cubic: bool,
+) -> soundkit_opus::Result<Encoder> {
+    let mut encoder = if custom_frame_size(SAMPLE_RATE as u32, frame_size).is_some() {
+        Encoder::new_custom(SAMPLE_RATE as i32, CHANNELS, frame_size)?
+    } else {
+        Encoder::with_application(SAMPLE_RATE as i32, CHANNELS, application)?
+    };
     encoder.set_experimental_direct_cubic(direct_cubic);
     encoder.set_bitrate(bitrate)?;
     encoder.set_vbr(mode == BenchMode::Vbr)?;
-    encode_with_encoder(&mut encoder, pcm, frame_size)
+    Ok(encoder)
 }
 
 fn encoded_stats(encoded: &EncodeResult) -> (usize, usize, usize, u64) {
@@ -652,10 +686,7 @@ fn time_encode(
         .map(|_| Vec::with_capacity(CELT_MAX_FRAME_BYTES + 1))
         .collect::<Vec<_>>();
     for _ in 0..repeats {
-        let mut encoder = Encoder::with_application(SAMPLE_RATE as i32, CHANNELS, application)?;
-        encoder.set_experimental_direct_cubic(direct_cubic);
-        encoder.set_bitrate(bitrate)?;
-        encoder.set_vbr(mode == BenchMode::Vbr)?;
+        let mut encoder = bench_encoder(frame_size, bitrate, mode, application, direct_cubic)?;
         let start = Instant::now();
         let (bytes, min_packet, max_packet, checksum) =
             encode_with_encoder_into(&mut encoder, pcm, frame_size, &mut packets)?;
@@ -702,7 +733,7 @@ fn time_decode_core(
     let mut times = Vec::with_capacity(repeats);
     let mut last_checksum = 0u64;
     for _ in 0..repeats {
-        let mut decoder = Decoder::new(SAMPLE_RATE as i32, CHANNELS)?;
+        let mut decoder = Decoder::new_for_frame_count(SAMPLE_RATE as i32, CHANNELS, frame_size)?;
         decoder.set_experimental_direct_cubic(direct_cubic);
         let mut decoded_i16 = Vec::with_capacity(frame_size * CHANNELS);
         let mut decoded_i24 = Vec::with_capacity(frame_size * CHANNELS);
@@ -772,7 +803,7 @@ fn time_decode_soundkit(
     let mut times = Vec::with_capacity(repeats);
     let mut last_checksum = 0_u64;
     for _ in 0..repeats {
-        let mut decoder = Decoder::new(SAMPLE_RATE as i32, CHANNELS)?;
+        let mut decoder = Decoder::new_for_frame_count(SAMPLE_RATE as i32, CHANNELS, frame_size)?;
         decoder.set_experimental_direct_cubic(direct_cubic);
         let mut decoded_i16 = vec![0_i16; frame_size * CHANNELS];
         let mut decoded_i24 = vec![0_i32; frame_size * CHANNELS];
@@ -846,16 +877,8 @@ fn dump_packets(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("impl\tmode\tframe_size\tframe_ms\tbitrate\tframe\tlen\thex");
     for &mode in modes(options) {
-        for &frame_size in &CELT_FRAME_SIZES_48K {
-            if let Some(selected) = options.frame_size {
-                if selected != frame_size {
-                    continue;
-                }
-            }
-            for &bitrate in &BITRATES {
-                if !bitrate_enabled(options, bitrate) {
-                    continue;
-                }
+        for &frame_size in options.frame_sizes() {
+            for &bitrate in options.bitrates() {
                 let encoded = encode_packets(
                     pcm,
                     frame_size,
@@ -925,16 +948,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("impl\tmode\tframe_size\tframe_ms\tbitrate\tencode_ms\tdecode_ms\tbytes\tmin_packet\tmax_packet\tchecksum\tquality_lag\tquality_snr_db");
     for &mode in modes(&options) {
-        for &frame_size in &CELT_FRAME_SIZES_48K {
-            if let Some(selected) = options.frame_size {
-                if selected != frame_size {
-                    continue;
-                }
-            }
-            for &bitrate in &BITRATES {
-                if !bitrate_enabled(&options, bitrate) {
-                    continue;
-                }
+        for &frame_size in options.frame_sizes() {
+            for &bitrate in options.bitrates() {
                 let (encode_ms, bytes, min_packet, max_packet, encode_checksum, encoded) =
                     if options.decode_only {
                         let encoded = encode_packets(
