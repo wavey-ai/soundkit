@@ -1,6 +1,7 @@
 use crate::analysis::{AnalysisInfo, TonalityAnalysisState};
 use crate::celt::bands::{
-    compute_band_energies, hysteresis_decision, normalise_bands, spreading_decision, SPREAD_NORMAL,
+    compute_band_energies, hysteresis_decision, normalise_bands, spreading_decision,
+    spreading_needs_weights, SPREAD_NONE, SPREAD_NORMAL,
 };
 use crate::celt::codec::{
     encode_spectral_frame_reusing_buffer, CeltFrameConfig, CeltFrameEncodeScratch, CeltVbrConfig,
@@ -9,10 +10,10 @@ use crate::celt::mathops::{celt_sqrt, mode_log2};
 use crate::celt::mdct::{clt_mdct_forward_with_scratch, MdctScratch};
 use crate::celt::modes::CeltMode;
 use crate::celt::pitch::{
-    run_prefilter, tone_detect_mode, PrefilterScratch, ToneAnalysis, COMBFILTER_MAXPERIOD,
+    run_prefilter_with_history, tone_detect_mode, PrefilterHistory, PrefilterScratch, ToneAnalysis,
     COMBFILTER_MINPERIOD,
 };
-use crate::celt::quant_bands::{amp2_log2, E_MEANS};
+use crate::celt::quant_bands::{amp2_log2, log_energy_with_feedback, E_MEANS};
 use crate::constants::{valid_channels, valid_sample_rate, PCM_I24_MAX, PCM_I24_MIN};
 use crate::packet;
 use crate::{Error, Result};
@@ -179,7 +180,7 @@ pub struct Encoder {
     preemph_mem: Vec<f32>,
     hp_mem: Vec<f32>,
     overlap_mem: Vec<Vec<f32>>,
-    prefilter_mem: Vec<Vec<f32>>,
+    prefilter_history: PrefilterHistory,
     prefilter_period: usize,
     prefilter_gain: f32,
     prefilter_tapset: usize,
@@ -260,7 +261,7 @@ impl Encoder {
             preemph_mem: vec![0.0; channels],
             hp_mem: vec![0.0; channels * 2],
             overlap_mem: vec![vec![0.0; mode.overlap]; channels],
-            prefilter_mem: vec![vec![0.0; COMBFILTER_MAXPERIOD]; channels],
+            prefilter_history: PrefilterHistory::new(channels),
             prefilter_period: 0,
             prefilter_gain: 0.0,
             prefilter_tapset: 0,
@@ -1080,29 +1081,12 @@ impl Encoder {
         }
     }
 
-    fn apply_energy_error_feedback(
-        mode: &CeltMode,
-        band_log_e: &mut [f32],
-        old_band_e: &[f32],
-        energy_error: &[f32],
-        start: usize,
-        end: usize,
-        channels: usize,
-    ) {
-        for c in 0..channels {
-            for i in start..end {
-                let idx = i + c * mode.nb_ebands;
-                if (band_log_e[idx] - old_band_e[idx]).abs() < 2.0 {
-                    band_log_e[idx] -= 0.25 * energy_error[idx];
-                }
-            }
-        }
-    }
-
     fn alloc_trim_analysis(
         mode: &CeltMode,
         norm: &[f32],
         band_log_e: &[f32],
+        old_band_e: &[f32],
+        energy_error: &[f32],
         end: usize,
         lm: usize,
         channels: usize,
@@ -1167,7 +1151,12 @@ impl Encoder {
         let mut diff = 0.0f32;
         for c in 0..channels {
             for i in 0..end.saturating_sub(1) {
-                diff += band_log_e[i + c * mode.nb_ebands] * (2 + 2 * i as i32 - end as i32) as f32;
+                // The trim uses feedback-corrected energies. Keep the raw
+                // energies for spectral allocation and coarse energy coding.
+                let idx = i + c * mode.nb_ebands;
+                let energy =
+                    log_energy_with_feedback(band_log_e[idx], old_band_e[idx], energy_error[idx]);
+                diff += energy * (2 + 2 * i as i32 - end as i32) as f32;
             }
         }
         if end > 1 {
@@ -1437,9 +1426,8 @@ impl Encoder {
                 input[..2 * n].fill(0.0);
             }
             // The tone and transient analyses see the unfiltered history, as
-            // in libopus. `run_prefilter` gets the filtered overlap below.
-            input[..overlap]
-                .copy_from_slice(&self.prefilter_mem[c][COMBFILTER_MAXPERIOD - overlap..]);
+            // in libopus. The prefilter gets the filtered overlap below.
+            input[..overlap].copy_from_slice(self.prefilter_history.tail(c, overlap));
             let coef = self.mode.preemph[0];
             let mut mem = self.preemph_mem[c];
             let samples = pcm[c..self.channels * n].iter().step_by(self.channels);
@@ -1515,10 +1503,11 @@ impl Encoder {
         let prefilter_tapset = self.tapset_decision as usize;
         let previous_prefilter_period = self.prefilter_period.max(COMBFILTER_MINPERIOD);
         let previous_prefilter_gain = self.prefilter_gain;
-        let (prefilter, prefilter_gain) = run_prefilter(
+        let prefilter_history = self.prefilter_history.append(&scratch.inputs, overlap, n);
+        let (prefilter, prefilter_gain) = run_prefilter_with_history(
             &self.mode,
             &mut scratch.inputs,
-            &mut self.prefilter_mem,
+            &prefilter_history[..self.channels],
             self.prefilter_period,
             self.prefilter_gain,
             self.prefilter_tapset,
@@ -1531,7 +1520,6 @@ impl Encoder {
                 .valid
                 .then_some(self.analysis_info.max_pitch_ratio),
             frame_bytes,
-            self.channels,
             n,
             &self.decisions,
             &mut self.prefilter_scratch,
@@ -1709,26 +1697,30 @@ impl Encoder {
             && frame_bytes >= 10 * stream_channels
             && stream_channels > 0
         {
-            Self::spread_weights(
-                &self.mode,
-                &scratch.band_log_e,
-                eff_end,
-                stream_channels,
-                &mut scratch.spread,
-            );
-            config.spread = spreading_decision(
-                &self.mode,
-                &scratch.norm,
-                &mut self.tonal_average,
-                self.spread_decision,
-                &mut self.hf_average,
-                &mut self.tapset_decision,
-                prefilter.enabled,
-                eff_end,
-                stream_channels,
-                m,
-                &scratch.spread.weights,
-            );
+            config.spread = if spreading_needs_weights(&self.mode, eff_end, m) {
+                Self::spread_weights(
+                    &self.mode,
+                    &scratch.band_log_e,
+                    eff_end,
+                    stream_channels,
+                    &mut scratch.spread,
+                );
+                spreading_decision(
+                    &self.mode,
+                    &scratch.norm,
+                    &mut self.tonal_average,
+                    self.spread_decision,
+                    &mut self.hf_average,
+                    &mut self.tapset_decision,
+                    prefilter.enabled,
+                    eff_end,
+                    stream_channels,
+                    m,
+                    &scratch.spread.weights,
+                )
+            } else {
+                SPREAD_NONE
+            };
             self.spread_decision = config.spread;
             let forced = crate::tuning::get(crate::tuning::SPREAD_FORCE, -1.0);
             if forced >= 0.0 {
@@ -1738,18 +1730,6 @@ impl Encoder {
             config.spread = SPREAD_NORMAL;
             self.spread_decision = config.spread;
         }
-
-        // libopus applies this feedback to bandLogE before trim analysis. The
-        // spectral encoder recomputes its own copy, so mirror it here too.
-        Self::apply_energy_error_feedback(
-            &self.mode,
-            &mut scratch.band_log_e,
-            &self.old_band_e,
-            &self.energy_error,
-            config.start,
-            config.end,
-            stream_channels,
-        );
 
         // libopus runs alloc_trim_analysis, the only place that updates
         // stereo_saving, only when the trim symbol fits in the frame. The
@@ -1778,6 +1758,8 @@ impl Encoder {
                 &self.mode,
                 &scratch.norm,
                 &scratch.band_log_e,
+                &self.old_band_e,
+                &self.energy_error,
                 config.end,
                 lm,
                 stream_channels,
@@ -1816,6 +1798,8 @@ impl Encoder {
                 &self.mode,
                 &scratch.norm,
                 &scratch.band_log_e,
+                &self.old_band_e,
+                &self.energy_error,
                 config.end,
                 lm,
                 stream_channels,
@@ -1860,6 +1844,7 @@ impl Encoder {
                 &mut scratch.norm,
                 None,
                 &scratch.band_e,
+                &scratch.band_log_e,
                 &mut self.old_band_e[..self.mode.nb_ebands],
                 &mut self.energy_error[..self.mode.nb_ebands],
                 &mut self.delayed_intra,
@@ -1875,6 +1860,7 @@ impl Encoder {
                 left,
                 Some(right),
                 &scratch.band_e,
+                &scratch.band_log_e,
                 &mut self.old_band_e,
                 &mut self.energy_error,
                 &mut self.delayed_intra,

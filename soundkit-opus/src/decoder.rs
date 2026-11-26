@@ -418,6 +418,51 @@ impl Decoder {
     }
 
     #[inline]
+    fn round_pcm_lanes(samples: [f32; 8], scale: f32, min: f32, max: f32) -> wide::i32x8 {
+        use wide::{f32x8, i32x8, CmpEq, CmpGt};
+        let samples = f32x8::new(samples) * f32x8::splat(scale);
+        let clamped = samples
+            .fast_max(f32x8::splat(min))
+            .fast_min(f32x8::splat(max));
+        let bounded = samples.is_nan().blend(f32x8::ZERO, clamped);
+        // The bounds are integers within +/-2^24, so conversion back to f32
+        // is exact. Apply the tie correction without using the host rounding mode.
+        let truncated = bounded.fast_trunc_int();
+        let remainder = bounded - truncated.round_float();
+        let magnitude = remainder.abs();
+        let half = f32x8::splat(0.5);
+        let odd = (truncated & i32x8::ONE).round_float().cmp_eq(f32x8::ONE);
+        let adjust = magnitude.cmp_gt(half) | (magnitude.cmp_eq(half) & odd);
+        truncated
+            + adjust
+                .blend(f32x8::ONE.copysign(remainder), f32x8::ZERO)
+                .fast_trunc_int()
+    }
+
+    fn convert_i24_exact(&self, pcm: &mut [i32]) {
+        if !cfg!(target_arch = "x86_64") {
+            for (out, &sample) in pcm.iter_mut().zip(&self.pcm_f32_scratch) {
+                *out = Self::i24_sample(self.libopus_i24_range, sample);
+            }
+            return;
+        }
+        // Clipping at an integer bound commutes with rounding to an integer.
+        let (lo, hi) = if self.libopus_i24_range {
+            (-16_777_216.0, 16_777_216.0)
+        } else {
+            (PCM_I24_MIN as f32, PCM_I24_MAX as f32)
+        };
+        let (input, input_tail) = self.pcm_f32_scratch.as_chunks::<8>();
+        let (output, output_tail) = pcm.as_chunks_mut::<8>();
+        for (out, &samples) in output.iter_mut().zip(input) {
+            *out = Self::round_pcm_lanes(samples, 8_388_608.0, lo, hi).to_array();
+        }
+        for (out, &sample) in output_tail.iter_mut().zip(input_tail) {
+            *out = Self::i24_sample(self.libopus_i24_range, sample);
+        }
+    }
+
+    #[inline]
     fn i24_sample(libopus_range: bool, sample: f32) -> i32 {
         let value = float_to_i24_exact(sample);
         if libopus_range {
@@ -518,13 +563,22 @@ impl Decoder {
     }
 
     fn convert_i16(&self, pcm: &mut [i16]) {
-        let samples = pcm.iter_mut().zip(&self.pcm_f32_scratch);
-        if self.mode.exact_math {
-            for (output, &sample) in samples {
-                *output = float_to_i16_exact(sample);
+        if cfg!(target_arch = "x86_64") && self.mode.exact_math {
+            let (input, input_tail) = self.pcm_f32_scratch.as_chunks::<8>();
+            let (output, output_tail) = pcm.as_chunks_mut::<8>();
+            for (out, &samples) in output.iter_mut().zip(input) {
+                let int = Self::round_pcm_lanes(samples, 32_768.0, -32_768.0, 32_767.0);
+                *out = wide::i16x8::from_i32x8_saturate(int).to_array();
+            }
+            for (out, &sample) in output_tail.iter_mut().zip(input_tail) {
+                *out = float_to_i16_exact(sample);
+            }
+        } else if self.mode.exact_math {
+            for (out, &sample) in pcm.iter_mut().zip(&self.pcm_f32_scratch) {
+                *out = float_to_i16_exact(sample);
             }
         } else {
-            for (output, &sample) in samples {
+            for (output, &sample) in pcm.iter_mut().zip(&self.pcm_f32_scratch) {
                 *output = float_to_i16(sample);
             }
         }
@@ -580,13 +634,17 @@ impl Decoder {
                 &mut self.preemph_mem,
                 &mut self.pcm_f32_scratch,
             )?;
-            pcm.clear();
-            let libopus_range = self.libopus_i24_range;
-            pcm.extend(
-                self.pcm_f32_scratch
-                    .iter()
-                    .map(|&sample| Self::i24_sample(libopus_range, sample)),
-            );
+            if cfg!(target_arch = "x86_64") {
+                pcm.resize(self.pcm_f32_scratch.len(), 0);
+                self.convert_i24_exact(pcm);
+            } else {
+                pcm.clear();
+                pcm.extend(
+                    self.pcm_f32_scratch
+                        .iter()
+                        .map(|&sample| Self::i24_sample(self.libopus_i24_range, sample)),
+                );
+            }
             return Ok(pcm.len() / channels);
         }
         deemphasis_interleaved_i24_into(
@@ -615,9 +673,7 @@ impl Decoder {
             )?;
             let count = self.pcm_f32_scratch.len();
             let pcm = pcm.get_mut(..count).ok_or(Error::BufferTooSmall)?;
-            for (output, &sample) in pcm.iter_mut().zip(&self.pcm_f32_scratch) {
-                *output = Self::i24_sample(self.libopus_i24_range, sample);
-            }
+            self.convert_i24_exact(pcm);
             return Ok(count / channels);
         }
         deemphasis_interleaved_i24_slice(
@@ -1482,5 +1538,67 @@ impl SoundkitDecoder for Decoder {
     ) -> std::result::Result<usize, String> {
         self.decode_f32_into_slice(input, fec, output)
             .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batched_exact_pcm_matches_scalar_on_rounding_and_range_edges() {
+        let mut decoder = Decoder::new_custom(48_000, 2, 48).unwrap();
+        let samples = &mut decoder.pcm_f32_scratch;
+        samples.extend([
+            0.0,
+            -0.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            f32::MAX,
+            f32::MIN,
+            1.0,
+            -1.0,
+        ]);
+        for scale in [32_768.0, 8_388_608.0] {
+            for scaled in [
+                -16_777_216.0,
+                -8_388_607.5,
+                -32_768.0,
+                -32_767.5,
+                -2.5,
+                -1.5,
+                -0.5,
+                0.5,
+                1.5,
+                2.5,
+                32_766.5,
+                32_767.5,
+                8_388_606.5,
+                8_388_607.5,
+                16_777_216.0,
+            ] {
+                let value: f32 = scaled / scale;
+                samples.extend([value.next_down(), value, value.next_up()]);
+            }
+        }
+        assert_ne!(samples.len() % 8, 0);
+
+        let mut pcm_i16 = vec![0; samples.len()];
+        let mut pcm_i24 = vec![0; samples.len()];
+        let expected_i16: Vec<_> = samples.iter().copied().map(float_to_i16_exact).collect();
+        decoder.convert_i16(&mut pcm_i16);
+        assert_eq!(pcm_i16, expected_i16);
+
+        for libopus_range in [false, true] {
+            decoder.set_libopus_i24_range(libopus_range);
+            let expected_i24: Vec<_> = decoder
+                .pcm_f32_scratch
+                .iter()
+                .map(|&sample| Decoder::i24_sample(libopus_range, sample))
+                .collect();
+            decoder.convert_i24_exact(&mut pcm_i24);
+            assert_eq!(pcm_i24, expected_i24);
+        }
     }
 }

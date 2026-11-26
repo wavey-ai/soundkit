@@ -200,6 +200,10 @@ pub fn denormalise_bands(
     freq[bound..n].fill(0.0);
 }
 
+pub(crate) fn spreading_needs_weights(mode: &CeltMode, end: usize, m: usize) -> bool {
+    m * (mode.ebands[end] as usize - mode.ebands[end - 1] as usize) > 8
+}
+
 pub fn spreading_decision(
     mode: &CeltMode,
     x: &[f32],
@@ -219,7 +223,7 @@ pub fn spreading_decision(
     assert!(x.len() >= channels * n0);
     assert!(spread_weight.len() >= end);
 
-    if m * (mode.ebands[end] as usize - mode.ebands[end - 1] as usize) <= 8 {
+    if !spreading_needs_weights(mode, end, m) {
         return SPREAD_NONE;
     }
 

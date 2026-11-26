@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run paired native CELT timing checks between two Rust builds."""
+"""Run paired native CELT timing checks for Rust and C benchmark binaries."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from pathlib import Path
 import statistics
 import subprocess
 from typing import Any
+
+SAMPLE_RATE = 48_000
 
 
 def positive_int(value: str) -> int:
@@ -39,11 +41,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=("cbr", "vbr"), default="vbr")
     parser.add_argument("--bitrate", type=positive_int, default=256_000)
     parser.add_argument("--frame-size", type=positive_int, default=240)
+    parser.add_argument("--candidate-bitrate", type=positive_int)
+    parser.add_argument("--candidate-frame-size", type=positive_int)
     parser.add_argument(
         "--application", choices=("audio", "restricted-lowdelay"), default="audio"
     )
     parser.add_argument(
-        "--baseline-decode-api", choices=("core", "soundkit"), default="core"
+        "--baseline-decode-api", choices=("core", "soundkit", "c"), default="core",
+        help="Choose a Rust decoder API, or c for raw_celt_bench.c",
     )
     parser.add_argument(
         "--candidate-decode-api", choices=("core", "soundkit"), default="soundkit"
@@ -70,16 +75,21 @@ def discover_sources(corpus: Path, filters: list[str]) -> list[tuple[str, Path]]
 
 
 def run_once(
-    binary: Path,
+    implementation: str,
     source: Path,
     args: argparse.Namespace,
     *,
     seconds: int,
     repeats: int,
-    decode_api: str,
 ) -> dict[str, Any]:
+    bitrate = args.bitrate
+    frame_size = args.frame_size
+    if implementation == "candidate":
+        bitrate = args.candidate_bitrate or bitrate
+        frame_size = args.candidate_frame_size or frame_size
+    decode_api = getattr(args, f"{implementation}_decode_api")
     command = [
-        str(binary),
+        str(getattr(args, implementation)),
         "--repeats",
         str(repeats),
         "--seconds",
@@ -89,17 +99,17 @@ def run_once(
         "--application",
         args.application,
         "--frame-size",
-        str(args.frame_size),
+        str(frame_size),
         "--bitrate",
-        str(args.bitrate),
+        str(bitrate),
         "--input-s32le",
         str(source),
         "--pcm-bits",
         str(args.pcm_bits),
         "--skip-quality",
-        "--decode-api",
-        decode_api,
     ]
+    if decode_api != "c":
+        command.extend(["--decode-api", decode_api])
     if args.cpu is not None:
         command = ["taskset", "-c", str(args.cpu), *command]
     result = subprocess.run(
@@ -110,6 +120,7 @@ def run_once(
         raise RuntimeError(f"expected one benchmark row, received {len(rows)}")
     row = rows[0]
     return {
+        "audio_seconds": ((seconds * SAMPLE_RATE) // frame_size) * frame_size / SAMPLE_RATE,
         "encode_ms": float(row["encode_ms"]),
         "decode_ms": float(row["decode_ms"]),
         "bytes": int(row["bytes"]),
@@ -134,6 +145,9 @@ def summarize(
 
     summary: dict[str, Any] = {}
     for metric in ("encode_ms", "decode_ms"):
+        def ms_per_second(row: dict[str, Any]) -> float:
+            return row[metric] / row["audio_seconds"]
+
         baseline_total = sum(
             statistics.median(row[metric] for row in pairs[name]["baseline"])
             for name, _ in sources
@@ -142,10 +156,18 @@ def summarize(
             statistics.median(row[metric] for row in pairs[name]["candidate"])
             for name, _ in sources
         )
+        baseline_per_second = statistics.mean(
+            statistics.median(ms_per_second(row) for row in pairs[name]["baseline"])
+            for name, _ in sources
+        )
+        candidate_per_second = statistics.mean(
+            statistics.median(ms_per_second(row) for row in pairs[name]["candidate"])
+            for name, _ in sources
+        )
         paired = []
         for name, _ in sources:
             paired.extend(
-                delta(candidate[metric], baseline[metric])
+                delta(ms_per_second(candidate), ms_per_second(baseline))
                 for baseline, candidate in zip(
                     pairs[name]["baseline"], pairs[name]["candidate"], strict=True
                 )
@@ -153,7 +175,9 @@ def summarize(
         summary[metric] = {
             "baseline_corpus_median_sum_ms": baseline_total,
             "candidate_corpus_median_sum_ms": candidate_total,
-            "corpus_delta_percent": delta(candidate_total, baseline_total),
+            "baseline_ms_per_audio_second": baseline_per_second,
+            "candidate_ms_per_audio_second": candidate_per_second,
+            "corpus_delta_percent": delta(candidate_per_second, baseline_per_second),
             "paired_median_percent": statistics.median(paired),
             "paired_mean_percent": statistics.fmean(paired),
             "faster_pairs": sum(value < 0.0 for value in paired),
@@ -195,12 +219,11 @@ def main() -> None:
         print(f"Warm-up {source_index + 1}/{len(sources)}: {name}", flush=True)
         for implementation in order:
             run_once(
-                getattr(args, implementation),
+                implementation,
                 path,
                 args,
                 seconds=warmup_seconds,
                 repeats=1,
-                decode_api=getattr(args, f"{implementation}_decode_api"),
             )
 
     for round_index in range(args.rounds):
@@ -213,12 +236,11 @@ def main() -> None:
             )
             for implementation in order:
                 row = run_once(
-                    getattr(args, implementation),
+                    implementation,
                     path,
                     args,
                     seconds=args.seconds,
                     repeats=args.repeats,
-                    decode_api=getattr(args, f"{implementation}_decode_api"),
                 )
                 results.append(
                     {"source": name, "implementation": implementation, "row": row}
@@ -226,12 +248,13 @@ def main() -> None:
 
     summary = summarize(sources, results)
     print()
-    print("| Metric | Corpus delta | Paired median | Paired mean | Faster pairs |")
-    print("| --- | ---: | ---: | ---: | ---: |")
+    print("| Metric | Baseline ms/s | Candidate ms/s | Corpus delta | Paired median | Paired mean | Faster pairs |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
     for metric, label in (("encode_ms", "Encode"), ("decode_ms", "Decode")):
         row = summary[metric]
         print(
-            f"| {label} | {row['corpus_delta_percent']:+.4f}% | "
+            f"| {label} | {row['baseline_ms_per_audio_second']:.3f} | "
+            f"{row['candidate_ms_per_audio_second']:.3f} | {row['corpus_delta_percent']:+.4f}% | "
             f"{row['paired_median_percent']:+.4f}% | "
             f"{row['paired_mean_percent']:+.4f}% | "
             f"{row['faster_pairs']}/{row['pair_count']} |"
@@ -254,6 +277,8 @@ def main() -> None:
                         "mode": args.mode,
                         "bitrate": args.bitrate,
                         "frame_size": args.frame_size,
+                        "candidate_bitrate": args.candidate_bitrate or args.bitrate,
+                        "candidate_frame_size": args.candidate_frame_size or args.frame_size,
                         "application": args.application,
                         "baseline_decode_api": args.baseline_decode_api,
                         "candidate_decode_api": args.candidate_decode_api,

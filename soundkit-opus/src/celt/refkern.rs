@@ -6,9 +6,8 @@
 //! `comb_filter_const_sse`) and, through run-time CPU detection on a CPU with
 //! AVX2 and FMA, `celt_pitch_xcorr_avx2`. Floating-point addition is not
 //! associative, so matching libopus sample for sample needs the same order of
-//! operations, not only the same formula. These functions keep that order in
-//! plain scalar code (fused multiply-adds through `f32::mul_add`), so they
-//! give the same result on every target, WebAssembly included.
+//! operations, so these kernels keep the same reduction order on every
+//! target, WebAssembly included.
 //!
 //! They serve the paths that must match libopus exactly: packet-loss
 //! concealment, and the codec when a mode selects libopus arithmetic
@@ -19,20 +18,27 @@ use crate::celt::pitch::COMBFILTER_MINPERIOD;
 /// `celt_inner_prod_sse`: four lanes, `(l0 + l2) + (l1 + l3)`, then the tail.
 #[inline]
 pub fn inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
-    let mut lanes = [0.0f32; 4];
-    let mut i = 0usize;
-    while i + 3 < n {
-        for l in 0..4 {
-            lanes[l] += x[i + l] * y[i + l];
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::kernels::inner_prod_pairwise_f32(x, y, n)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use wide::f32x4;
+
+        let (x, x_tail) = x[..n].as_chunks::<4>();
+        let (y, y_tail) = y[..n].as_chunks::<4>();
+        let mut lanes = f32x4::ZERO;
+        for (&x, &y) in x.iter().zip(y) {
+            lanes += f32x4::new(x) * f32x4::new(y);
         }
-        i += 4;
+        let [l0, l1, l2, l3] = lanes.to_array();
+        let mut sum = (l0 + l2) + (l1 + l3);
+        for (&x, &y) in x_tail.iter().zip(y_tail) {
+            sum += x * y;
+        }
+        sum
     }
-    let mut sum = (lanes[0] + lanes[2]) + (lanes[1] + lanes[3]);
-    while i < n {
-        sum += x[i] * y[i];
-        i += 1;
-    }
-    sum
 }
 
 /// `dual_inner_prod_sse`.

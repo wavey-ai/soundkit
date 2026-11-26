@@ -526,6 +526,15 @@ pub fn unquant_energy_finalise(
     }
 }
 
+#[inline]
+pub(crate) fn log_energy_with_feedback(log_energy: f32, old_energy: f32, error: f32) -> f32 {
+    if (log_energy - old_energy).abs() < 2.0 {
+        log_energy - 0.25 * error
+    } else {
+        log_energy
+    }
+}
+
 pub fn amp2_log2(
     mode: &CeltMode,
     eff_end: usize,

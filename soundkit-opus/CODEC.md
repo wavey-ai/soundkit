@@ -458,6 +458,11 @@ records paired quality scores, bitrate and signalling measurements, and the
 same-frame C Opus Custom control. It also links the reproduction steps and
 [change verification](quality-results/2026-11-26-opus-1ms-vs-libopus/verification.md).
 
+The [native profile and Linode baseline](performance-results/2026-11-26-opus-1ms-profile/README.md)
+show where the 1 ms path spends CPU time and how to run the paired timing
+comparison. The [allocation trim experiment](quality-results/2026-11-26-opus-1ms-trim/README.md)
+records per-excerpt results from the bitrate sweep.
+
 ## Codec Status
 
 The encoder is experimental. CELT-only CBR and constrained VBR are suitable for
