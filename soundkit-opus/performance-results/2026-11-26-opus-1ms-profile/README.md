@@ -1,8 +1,10 @@
 # Opus Custom 1 ms native profiling
 
-The encoder and decoder changes reduce instruction counts while preserving
-packets and decoded PCM. The separate allocation trim experiment reduces
-the payload needed to reach the mean PEAQ scores of C Opus at 2.5 ms.
+The second candidate `27da89b` uses 23.1–24.3% fewer encode instructions and
+9.2–10.7% fewer decode instructions than `d0259d8` across the six profiled
+cases, with identical packets and decoded PCM. The separate allocation
+trim experiment reduces the payload needed to reach the mean PEAQ scores
+of C Opus at 2.5 ms.
 The production encoder keeps its libopus-compatible allocation decisions.
 [Trim experiment and per-excerpt scores](../../quality-results/2026-11-26-opus-1ms-trim/README.md)
 
@@ -27,7 +29,7 @@ on the original eight-excerpt study. Individual basic PEAQ deficits remain.
 The raw timing archive is `~/needletail-data/soundkit-opus-quality-adjusted-d0259d8-20261126T222431Z/`
 on the Linode. [Original quality study](../../quality-results/2026-11-26-opus-1ms-vs-libopus/README.md)
 
-## Profiling and verification
+## First candidate profiling and verification
 
 Callgrind 3.24 attributed 43.5% of the reference encoder's instructions to
 pitch prefiltering on the orchestra excerpt at 256 kb/s. The overlapping
@@ -71,7 +73,7 @@ from the eight excerpts at 192, 256, 312, 320 and 344 kb/s matched the
 isolated trim experiment's packets. C Custom and Rust decoded those
 packets to identical i24 samples.
 
-## Stereo pitch fast path
+## Second candidate profiling and verification
 
 SoundKit `a59cd20` fuses the two channel passes through the factor-two
 pitch downsampler and avoids per-sample range checks in the best-pitch
@@ -82,11 +84,31 @@ byte-identical to the first candidate. Golden vectors, allocation checks
 and live C Custom parity, including packet-loss cases, passed.
 [Incremental pitch counts](pitch-instruction-counts.csv)
 
+SoundKit `27da89b` also vectorizes the decoder's exact 48-sample overlap
+filter. Each group reads earlier samples and sums in the scalar libopus
+order. Across the same six cases, the second candidate uses 4.3–6.3%
+fewer decode instructions than `f49e3e8` and 9.2–10.7% fewer than
+`d0259d8`. The 128-stream test repeated the byte-for-byte match for all
+772,048 packets and 98,548,224 i24 samples. An independent filter check
+included burst loss, signalling-off and channel switches. It matched
+28,580,832 i16, i24 and floating-point samples against the first candidate
+and C Custom at frame sizes 48, 64, 72 and 120.
+[Paired instruction counts and output hashes](second-candidate-instruction-counts.csv)
+
+At 312 and 344 kb/s with the trim patch, the second candidate uses
+23.8–24.3% fewer encode instructions and 10.4–11.3% fewer decode
+instructions than `d0259d8` at 320 and 368 kb/s, respectively. The
+second candidate reproduces the isolated trim experiment's packets at
+248, 312, 344 and 368 kb/s across all eight excerpts. C Custom and Rust
+decoded the same i24 PCM. Implicit signalling preserved that PCM at all
+four rates.
+[Quality-adjusted counts](second-candidate-quality-adjusted-instruction-counts.csv)
+
 ## Equal-rate and quality-adjusted timing runs
 
 Use the Linode archive's C binary and Rust build flags for the next run.
 Replay the archive's four-second mixed fixture for the primary comparison.
-Build `raw_celt_bench` from this candidate, and build it again with the
+Build `raw_celt_bench` from `27da89b`, and build it again with the
 [trim experiment patch](../../quality-results/2026-11-26-opus-1ms-trim/trim4-experiment.patch)
 applied in a separate checkout. For the primary comparison, put the archived
 fixture in `CORPUS` and set `SECONDS_PER_EXCERPT=4`. To collect timings per
