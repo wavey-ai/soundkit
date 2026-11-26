@@ -52,12 +52,24 @@ instructions across these six comparisons. These are instruction counts
 from the development VM. Linode wall-time comparisons for the candidate
 are pending. [Counts and output hashes](instruction-counts.csv)
 
+With the trim experiment applied to the optimized build, the 312 and
+344 kb/s points used 13.7–14.0% fewer encode instructions and 5.3–6.2%
+fewer decode instructions than the original 320 and 368 kb/s encoder
+and decoder on these two excerpts. Those rates match the mean advanced
+score and both mean scores, respectively, against C at 256 kb/s.
+[Quality-adjusted counts](quality-adjusted-instruction-counts.csv)
+
 The paired Rust builds produced 772,048 identical packets and 98,548,224
 identical decoded i24 samples in 128 comparisons. The matrix covered eight
 excerpts, CBR and constrained VBR, 48-, 64-, 72-, 120- and 240-sample Custom
 modes, and 192–368 kb/s for the 48-sample mode. The release crate suite and
 live C Custom comparison passed in the same two-crate workspace used for
 the original report. [Crate test procedure](../../quality-results/2026-11-26-opus-1ms-vs-libopus/verification.md)
+
+With both the optimization and trim patch applied, the 320,800 packets
+from the eight excerpts at 192, 256, 312, 320 and 344 kb/s matched the
+isolated trim experiment's packets. C Custom and Rust decoded those
+packets to identical i24 samples.
 
 ## Equal-rate and quality-adjusted timing runs
 
@@ -86,10 +98,15 @@ timing "$TRIM_BENCH" 312000 trim-advanced-mean.json
 timing "$TRIM_BENCH" 344000 trim-both-means.json
 ```
 
-At a 16-byte application header per datagram, C at 256 kb/s uses 307.2 kb/s
-with 400 packets/s. The trim variant at 312 and 344 kb/s uses 440 and
-472 kb/s with 1,000 packets/s. When the endpoints agree on the Custom
-mode out of band, implicit signalling saves 8 kb/s at both tested rates
-with identical decoded audio. These totals exclude network headers and
-FEC. The mean scores and ViSQOL corroboration still leave controlled
-stereo listening as the gate for perceptual equivalence.
+| Configuration | Payload | Packets/s | With 16-byte SoundKit header | With SoundKit header and IPv4/UDP |
+|---|---:|---:|---:|---:|
+| C 2.5 ms reference | 256 kb/s | 400 | 307.2 kb/s | 396.8 kb/s |
+| Rust 1 ms trim, mean advanced PEAQ | 312 kb/s | 1,000 | 440 kb/s | 664 kb/s |
+| Rust 1 ms trim, both PEAQ means | 344 kb/s | 1,000 | 472 kb/s | 696 kb/s |
+
+The IPv4/UDP column assumes one packet per datagram, a 20-byte IPv4
+header and an 8-byte UDP header. It excludes AEP1, link-layer headers
+and FEC. When the endpoints agree on the Custom mode out of band,
+implicit signalling saves 8 kb/s at both tested rates with identical
+decoded audio. Controlled stereo listening remains the gate for
+perceptual equivalence.
