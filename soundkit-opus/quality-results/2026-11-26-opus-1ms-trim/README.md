@@ -50,6 +50,16 @@ four held back until validation. Perceptual equivalence calls for a
 controlled listening test. The objective ViSQOL measurement downmixes
 stereo to mono.
 
+## Pitch prefilter check
+
+Disabling the pitch prefilter with trim +4 lowered mean advanced DI by
+0.018 at 256 kb/s and 0.021 at 344 kb/s. Mean basic DI fell by 0.036 at
+256 kb/s and rose by 0.016 at 344 kb/s. The violin excerpt lost 0.362
+advanced DI and 0.418 basic DI at 256 kb/s. At 344 kb/s, the speech
+excerpt slipped 0.018 below C 256 kb/s on advanced DI, breaking the
+all-excerpt advanced PEAQ match. Both optimization candidates keep the
+prefilter enabled. [Per-excerpt prefilter-off scores](prefilter-off.csv)
+
 ## Compatibility and signalling
 
 C Custom decoded all 192,480 equal-rate test packets to the same i24

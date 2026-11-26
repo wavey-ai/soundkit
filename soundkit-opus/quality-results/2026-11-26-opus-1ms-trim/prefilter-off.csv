@@ -1,0 +1,17 @@
+label,track,mode,target_kbps,frame,delay_samples,xcorr_delay_samples,kbps,packets_per_s,min_bytes,max_bytes,advanced_di,advanced_odg,basic_di,basic_odg,snr_db
+trim4_prefilter_off,27_castanets_single_tone_rhythm_stereo,cbr,256.0,48,48,48,256.0,1000.0,32,32,2.301,-0.163,1.842,-0.355,12.90349006652832
+trim4_prefilter_off,31_cymbal,cbr,256.0,48,48,48,256.0,1000.0,32,32,2.741,-0.035,2.743,-0.034,19.611780166625977
+trim4_prefilter_off,49_female_speech_english_mono,cbr,256.0,48,48,48,256.0,1000.0,32,32,2.343,-0.148,2.34,-0.149,24.557018280029297
+trim4_prefilter_off,59_violin_ravel_stereo,cbr,256.0,48,48,48,256.0,1000.0,32,32,1.07,-0.852,1.465,-0.568,30.223390579223633
+trim4_prefilter_off,65_orchestra_strauss_stereo,cbr,256.0,48,48,48,256.0,1000.0,32,32,2.831,-0.014,2.751,-0.032,37.69220733642578
+trim4_prefilter_off,allegaeon-beasts-and-worms,cbr,256.0,48,48,48,256.0,1000.0,32,32,2.262,-0.176,2.526,-0.091,30.28713607788086
+trim4_prefilter_off,four_tet_baby,cbr,256.0,48,48,48,256.0,1000.0,32,32,2.284,-0.168,2.574,-0.078,33.85072326660156
+trim4_prefilter_off,julien_baker_sprained_ankle,cbr,256.0,48,48,48,256.0,1000.0,32,32,2.193,-0.202,2.561,-0.081,29.792688369750977
+trim4_prefilter_off,27_castanets_single_tone_rhythm_stereo,cbr,344.0,48,48,48,344.0,1000.0,43,43,2.939,0.009,2.381,-0.136,19.766035079956055
+trim4_prefilter_off,31_cymbal,cbr,344.0,48,48,48,344.0,1000.0,43,43,3.101,0.039,3.019,0.024,26.287540435791016
+trim4_prefilter_off,49_female_speech_english_mono,cbr,344.0,48,48,48,344.0,1000.0,43,43,3.014,0.023,2.801,-0.021,31.017114639282227
+trim4_prefilter_off,59_violin_ravel_stereo,cbr,344.0,48,48,48,344.0,1000.0,43,43,2.475,-0.106,2.158,-0.215,36.2023811340332
+trim4_prefilter_off,65_orchestra_strauss_stereo,cbr,344.0,48,48,48,344.0,1000.0,43,43,3.123,0.043,3.273,0.067,39.23542785644531
+trim4_prefilter_off,allegaeon-beasts-and-worms,cbr,344.0,48,48,48,344.0,1000.0,43,43,2.973,0.016,3.596,0.108,36.020751953125
+trim4_prefilter_off,four_tet_baby,cbr,344.0,48,48,48,344.0,1000.0,43,43,3.02,0.025,3.278,0.067,37.45779037475586
+trim4_prefilter_off,julien_baker_sprained_ankle,cbr,344.0,48,48,48,344.0,1000.0,43,43,2.976,0.016,3.282,0.068,34.500144958496094
