@@ -1,0 +1,72 @@
+{
+  "documented_21_repeat_comparison": {
+    "rust_encode_rtf": "35.51x",
+    "encode_delta_pct": "+52.8%",
+    "rust_decode_rtf": "156.42x",
+    "decode_delta_pct": "+38.6%",
+    "c_encode_rtf": "54.26x",
+    "c_decode_rtf": "216.76x",
+    "rust_bytes": "128000",
+    "c_bytes": "128000",
+    "rust_packet_bytes": "32-32",
+    "c_packet_bytes": "80-80",
+    "rust_aligned_snr_db": "27.27 dB",
+    "c_aligned_snr_db": "32.49 dB",
+    "rust_alignment_samples": "-48",
+    "c_alignment_samples": "-120"
+  },
+  "alternating_21_pair_comparison": {
+    "encode": {
+      "rust_elapsed_ms": {
+        "min": 106.096,
+        "p25": 112.4579,
+        "median": 117.5195,
+        "p75": 124.4942,
+        "max": 152.3504
+      },
+      "c_elapsed_ms": {
+        "min": 71.1559,
+        "p25": 74.9655,
+        "median": 78.1165,
+        "p75": 81.7528,
+        "max": 98.3686
+      },
+      "rust_realtime_factor": 34.036904513719,
+      "c_realtime_factor": 51.205571166142875,
+      "rust_elapsed_delta_pct_from_medians": 50.44132801648817,
+      "paired_rust_elapsed_delta_pct": {
+        "min": 17.031654410045483,
+        "p25": 46.34193440709973,
+        "median": 53.92914060055354,
+        "p75": 55.25521399611335,
+        "max": 80.46633278212376
+      }
+    },
+    "decode": {
+      "rust_elapsed_ms": {
+        "min": 23.586,
+        "p25": 24.4667,
+        "median": 26.2478,
+        "p75": 27.2343,
+        "max": 28.4325
+      },
+      "c_elapsed_ms": {
+        "min": 17.6994,
+        "p25": 19.6635,
+        "median": 20.5689,
+        "p75": 21.3393,
+        "max": 22.6876
+      },
+      "rust_realtime_factor": 152.39372442642812,
+      "c_realtime_factor": 194.4683478455338,
+      "rust_elapsed_delta_pct_from_medians": 27.609157514500062,
+      "paired_rust_elapsed_delta_pct": {
+        "min": 11.012623635818674,
+        "p25": 23.972554290160588,
+        "median": 26.99696769940674,
+        "p75": 32.37409736997705,
+        "max": 39.65607087024492
+      }
+    }
+  }
+}
