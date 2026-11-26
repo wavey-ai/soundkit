@@ -71,6 +71,17 @@ from the eight excerpts at 192, 256, 312, 320 and 344 kb/s matched the
 isolated trim experiment's packets. C Custom and Rust decoded those
 packets to identical i24 samples.
 
+## Stereo pitch fast path
+
+SoundKit `a59cd20` fuses the two channel passes through the factor-two
+pitch downsampler and avoids per-sample range checks in the best-pitch
+search. The arithmetic matches the first candidate `f49e3e8` in libopus
+order. Its six encode profiles used 11.6–12.4% fewer instructions than
+`f49e3e8`, and 23.1–24.3% fewer than `d0259d8`. All 48,120 packets were
+byte-identical to the first candidate. Golden vectors, allocation checks
+and live C Custom parity, including packet-loss cases, passed.
+[Incremental pitch counts](pitch-instruction-counts.csv)
+
 ## Equal-rate and quality-adjusted timing runs
 
 Use the Linode archive's C binary and Rust build flags for the next run.
