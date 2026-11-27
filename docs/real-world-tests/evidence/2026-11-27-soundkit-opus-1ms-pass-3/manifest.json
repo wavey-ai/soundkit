@@ -1,0 +1,63 @@
+{
+  "run_id": "soundkit-opus-1ms-pass3-65e776f-20261127T020526Z",
+  "started_at_utc": "2026-11-27T02:05:26Z",
+  "finished_at_utc": "2026-11-27T02:06:44Z",
+  "source": {
+    "native_candidate": "65e776f7b965cc2bc3e9e836dec55e94be9c7b87",
+    "reviewed_pr_head": "99a38b6667905686cc866623abfad97d3afb62ff",
+    "direct_rust_baseline": "27da89b9735df0a78c5f367ee7c38216262b0630",
+    "xiph_opus": "316c675fa1c9982d76e9cdcba7231076f75047da"
+  },
+  "host": {
+    "alias": "wavey-linode-codex",
+    "cpu": "AMD EPYC 7713",
+    "pinned_vcpu": 6
+  },
+  "fixture": {
+    "previous_run": "soundkit-opus-1ms-candidate-27da89b-20261127T013930Z",
+    "filename": "mixed-48k-s24.s32le",
+    "sha256": "c2003bafa11eaf2c510980a9e93bf7af1f96073be2b49af17f9960fe3c85df1c",
+    "audio_seconds": 4
+  },
+  "settings": {
+    "CBR": true,
+    "rounds": 21,
+    "warmups_per_configuration": 1,
+    "rust_flags": "-C target-cpu=native -C target-feature=+avx2",
+    "timing": "wall-clock milliseconds per audio second",
+    "decode_api_vs_c": "soundkit",
+    "direct_rust_comparison_decode_api": "core",
+    "experimental_variant": "adaptive +4 allocation trim; separate build"
+  },
+  "additional_linode_instance_cost_usd": 0,
+  "files": [
+    "adaptive-trim.patch",
+    "build-adaptive.log",
+    "build-default.log",
+    "candidate-binary-sha256.txt",
+    "cpu-samples.json",
+    "environment.txt",
+    "exit-code.txt",
+    "finished-at.txt",
+    "fixture-packet-verification.txt",
+    "manifest.json",
+    "pass3-adaptive-advanced-mean.json",
+    "pass3-adaptive-advanced-mean.log",
+    "pass3-adaptive-both-means.json",
+    "pass3-adaptive-both-means.log",
+    "pass3-default-advanced-mean.json",
+    "pass3-default-advanced-mean.log",
+    "pass3-default-both-means.json",
+    "pass3-default-both-means.log",
+    "pass3-equal-rate.json",
+    "pass3-equal-rate.log",
+    "pass3-vs-pr2-320-core.json",
+    "pass3-vs-pr2-320-core.log",
+    "run.log",
+    "run.sh",
+    "run_native_celt_ab.py",
+    "started-at.txt",
+    "summary.json",
+    "verify-results.py"
+  ]
+}

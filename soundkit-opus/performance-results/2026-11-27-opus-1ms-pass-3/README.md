@@ -5,6 +5,11 @@ This pass uses the native source from `27da89b`, merged in PR #2 at
 offset at 48 kHz. Nominal frame-plus-codec delay is 2 ms for Rust and 5 ms
 for C. The default encode decisions and packet format are preserved.
 
+Paired Linode runs at 320 kb/s measured 10.0% less encode time and 5.8%
+less decode time than PR #2 with the core decoder API. At equal payload
+of 256 kb/s, pass 3 took 17.9% more encode time and 15.1% more decode time
+than its paired C reference. [Linode results and samples](../../../docs/real-world-tests/evidence/2026-11-27-soundkit-opus-1ms-pass-3/README.md)
+
 ## Pinned Linode reference
 
 PR #2 measured the four-second mixed signed-24 stereo fixture in 21 paired
@@ -171,7 +176,7 @@ replay() {
   python3 soundkit-opus/tools/run_native_celt_ab.py "$C_BENCH" "$1" \
     --corpus "$LINODE_FIXTURE" --cpu "$CPU" --seconds 4 --warmup-seconds 4 \
     --rounds 21 --repeats 1 --mode cbr --pcm-bits 24 \
-    --application restricted-lowdelay --baseline-decode-api c \
+    --application restricted-lowdelay --baseline-decode-api c --candidate-decode-api soundkit \
     --frame-size 120 --bitrate 256000 --candidate-frame-size 48 \
     --candidate-bitrate "$2" --json "$3"
 }
@@ -184,6 +189,6 @@ replay "$PASS3_ADAPTIVE_BENCH" 344000 pass3-adaptive-both-means.json
 
 The quality variant uses an independently built target directory and must
 have a distinct executable hash and different packets. Use the same Rust
-decoder API in direct PR #2 versus pass 3 pairs. The native development
-profiles count instructions. The pass 3 wall-clock results and controlled
-stereo listening remain pending.
+decoder API in direct PR #2 versus pass 3 pairs. The archived direct
+comparison uses the core API on both builds. Controlled stereo listening
+remains pending.

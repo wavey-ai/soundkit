@@ -1,0 +1,152 @@
+{
+  "pass3-equal-rate": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 71.3833,
+      "candidate_corpus_median_sum_ms": 84.1852,
+      "baseline_ms_per_audio_second": 17.845825,
+      "candidate_ms_per_audio_second": 21.0463,
+      "corpus_delta_percent": 17.934026586050223,
+      "paired_median_percent": 19.464175243237165,
+      "paired_mean_percent": 18.026441830147196,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 18.4974,
+      "candidate_corpus_median_sum_ms": 21.2916,
+      "baseline_ms_per_audio_second": 4.62435,
+      "candidate_ms_per_audio_second": 5.3229,
+      "corpus_delta_percent": 15.105906776087451,
+      "paired_median_percent": 15.43155211888201,
+      "paired_mean_percent": 15.32701664214451,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "identity_changes": 21
+  },
+  "pass3-default-advanced-mean": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 72.1188,
+      "candidate_corpus_median_sum_ms": 85.5232,
+      "baseline_ms_per_audio_second": 18.0297,
+      "candidate_ms_per_audio_second": 21.3808,
+      "corpus_delta_percent": 18.586554407449945,
+      "paired_median_percent": 19.20310567904739,
+      "paired_mean_percent": 18.389644627146772,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 18.4333,
+      "candidate_corpus_median_sum_ms": 22.0974,
+      "baseline_ms_per_audio_second": 4.608325,
+      "candidate_ms_per_audio_second": 5.52435,
+      "corpus_delta_percent": 19.877612798576497,
+      "paired_median_percent": 20.123087377789474,
+      "paired_mean_percent": 20.39924480367964,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "identity_changes": 21
+  },
+  "pass3-default-both-means": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 71.8997,
+      "candidate_corpus_median_sum_ms": 85.7774,
+      "baseline_ms_per_audio_second": 17.974925,
+      "candidate_ms_per_audio_second": 21.44435,
+      "corpus_delta_percent": 19.301471355235147,
+      "paired_median_percent": 20.24516950370629,
+      "paired_mean_percent": 19.72832959536646,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 18.3735,
+      "candidate_corpus_median_sum_ms": 22.3754,
+      "baseline_ms_per_audio_second": 4.593375,
+      "candidate_ms_per_audio_second": 5.59385,
+      "corpus_delta_percent": 21.780825645630934,
+      "paired_median_percent": 21.854964241784316,
+      "paired_mean_percent": 22.04915686790678,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "identity_changes": 21
+  },
+  "pass3-adaptive-advanced-mean": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 71.6172,
+      "candidate_corpus_median_sum_ms": 84.9808,
+      "baseline_ms_per_audio_second": 17.9043,
+      "candidate_ms_per_audio_second": 21.2452,
+      "corpus_delta_percent": 18.659763297085068,
+      "paired_median_percent": 18.08328651156695,
+      "paired_mean_percent": 18.476012620580807,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 18.6201,
+      "candidate_corpus_median_sum_ms": 21.5186,
+      "baseline_ms_per_audio_second": 4.655025,
+      "candidate_ms_per_audio_second": 5.37965,
+      "corpus_delta_percent": 15.566511458048014,
+      "paired_median_percent": 15.273585104810971,
+      "paired_mean_percent": 16.62093711430895,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "identity_changes": 21
+  },
+  "pass3-adaptive-both-means": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 71.4832,
+      "candidate_corpus_median_sum_ms": 85.7536,
+      "baseline_ms_per_audio_second": 17.8708,
+      "candidate_ms_per_audio_second": 21.4384,
+      "corpus_delta_percent": 19.96329207422165,
+      "paired_median_percent": 19.776022078064134,
+      "paired_mean_percent": 19.78872417629869,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 18.2869,
+      "candidate_corpus_median_sum_ms": 21.9316,
+      "baseline_ms_per_audio_second": 4.571725,
+      "candidate_ms_per_audio_second": 5.4829,
+      "corpus_delta_percent": 19.93066074621724,
+      "paired_median_percent": 20.47445392683936,
+      "paired_mean_percent": 20.18623091750357,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "identity_changes": 21
+  },
+  "pass3-vs-pr2-320-core": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 94.8274,
+      "candidate_corpus_median_sum_ms": 85.3495,
+      "baseline_ms_per_audio_second": 23.70685,
+      "candidate_ms_per_audio_second": 21.337375,
+      "corpus_delta_percent": -9.99489598997757,
+      "paired_median_percent": -8.768412813622241,
+      "paired_mean_percent": -9.32132628299569,
+      "faster_pairs": 21,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 23.4779,
+      "candidate_corpus_median_sum_ms": 22.1152,
+      "baseline_ms_per_audio_second": 5.869475,
+      "candidate_ms_per_audio_second": 5.5288,
+      "corpus_delta_percent": -5.804181805016634,
+      "paired_median_percent": -6.029483051140891,
+      "paired_mean_percent": -5.381049275592296,
+      "faster_pairs": 20,
+      "pair_count": 21
+    },
+    "identity_changes": 0
+  }
+}
