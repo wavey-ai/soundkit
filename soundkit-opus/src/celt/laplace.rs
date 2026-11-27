@@ -4,9 +4,26 @@ const LAPLACE_LOG_MINP: i32 = 0;
 const LAPLACE_MINP: u32 = 1 << LAPLACE_LOG_MINP;
 const LAPLACE_NMIN: u32 = 16;
 
-fn get_freq1(fs0: u32, decay: i32) -> u32 {
+const fn get_freq1(fs0: u32, decay: i32) -> u32 {
     let ft = 32768 - LAPLACE_MINP * (2 * LAPLACE_NMIN) - fs0;
     ((ft as i32 * (16384 - decay)) >> 15) as u32
+}
+
+/// Inverse CDF boundaries for the first five Laplace symbols (0, ±1, ±2).
+pub(crate) const fn laplace_icdf_prefix(zero_freq: u32, decay: i32) -> [u16; 5] {
+    let first = get_freq1(zero_freq, decay) + LAPLACE_MINP;
+    let second = (((2 * (first - LAPLACE_MINP)) as i32 * decay) >> 15) as u32 + LAPLACE_MINP;
+    let zero = 32768 - zero_freq;
+    let neg_one = zero - first;
+    let pos_one = neg_one - first;
+    let neg_two = pos_one - second;
+    [
+        zero as u16,
+        neg_one as u16,
+        pos_one as u16,
+        neg_two as u16,
+        (neg_two - second) as u16,
+    ]
 }
 
 pub fn get_start_freq(decay: i32) -> u32 {
