@@ -1,0 +1,202 @@
+{
+  "equal-rate": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 72.5471,
+      "candidate_corpus_median_sum_ms": 93.1178,
+      "baseline_ms_per_audio_second": 18.136775,
+      "candidate_ms_per_audio_second": 23.27945,
+      "corpus_delta_percent": 28.354958364979442,
+      "paired_median_percent": 28.836196555206527,
+      "paired_mean_percent": 28.21582520272808,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 19.2108,
+      "candidate_corpus_median_sum_ms": 22.5345,
+      "baseline_ms_per_audio_second": 4.8027,
+      "candidate_ms_per_audio_second": 5.633625,
+      "corpus_delta_percent": 17.30120557186584,
+      "paired_median_percent": 19.641896892286887,
+      "paired_mean_percent": 20.10808812121072,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "identity_changes": 21
+  },
+  "default-advanced-mean": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 72.1245,
+      "candidate_corpus_median_sum_ms": 94.5153,
+      "baseline_ms_per_audio_second": 18.031125,
+      "candidate_ms_per_audio_second": 23.628825,
+      "corpus_delta_percent": 31.044651955992762,
+      "paired_median_percent": 31.30545638577016,
+      "paired_mean_percent": 31.69688465387879,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 18.2793,
+      "candidate_corpus_median_sum_ms": 23.2834,
+      "baseline_ms_per_audio_second": 4.569825,
+      "candidate_ms_per_audio_second": 5.82085,
+      "corpus_delta_percent": 27.37577478349828,
+      "paired_median_percent": 27.40341221794165,
+      "paired_mean_percent": 27.771068230068863,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "identity_changes": 21
+  },
+  "default-both-means": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 71.4502,
+      "candidate_corpus_median_sum_ms": 94.9222,
+      "baseline_ms_per_audio_second": 17.86255,
+      "candidate_ms_per_audio_second": 23.73055,
+      "corpus_delta_percent": 32.85085276178374,
+      "paired_median_percent": 32.53886985448366,
+      "paired_mean_percent": 32.54866636925932,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 18.3028,
+      "candidate_corpus_median_sum_ms": 23.6368,
+      "baseline_ms_per_audio_second": 4.5757,
+      "candidate_ms_per_audio_second": 5.9092,
+      "corpus_delta_percent": 29.14308193281902,
+      "paired_median_percent": 29.96258778742861,
+      "paired_mean_percent": 29.433170249071424,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "identity_changes": 21
+  },
+  "trim-advanced-mean": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 71.7673,
+      "candidate_corpus_median_sum_ms": 94.2583,
+      "baseline_ms_per_audio_second": 17.941825,
+      "candidate_ms_per_audio_second": 23.564575,
+      "corpus_delta_percent": 31.338785212764027,
+      "paired_median_percent": 31.37010758482545,
+      "paired_mean_percent": 31.316005975169485,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 18.178,
+      "candidate_corpus_median_sum_ms": 22.9751,
+      "baseline_ms_per_audio_second": 4.5445,
+      "candidate_ms_per_audio_second": 5.743775,
+      "corpus_delta_percent": 26.389591814281,
+      "paired_median_percent": 27.11327392380341,
+      "paired_mean_percent": 26.345151327395715,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "identity_changes": 21
+  },
+  "trim-both-means": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 71.9378,
+      "candidate_corpus_median_sum_ms": 94.3421,
+      "baseline_ms_per_audio_second": 17.98445,
+      "candidate_ms_per_audio_second": 23.585525,
+      "corpus_delta_percent": 31.143988278763054,
+      "paired_median_percent": 30.77533471253386,
+      "paired_mean_percent": 30.813897880027973,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 18.3952,
+      "candidate_corpus_median_sum_ms": 23.4821,
+      "baseline_ms_per_audio_second": 4.5988,
+      "candidate_ms_per_audio_second": 5.870525,
+      "corpus_delta_percent": 27.65340958510916,
+      "paired_median_percent": 28.18100433160401,
+      "paired_mean_percent": 28.152727676650372,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "identity_changes": 21
+  },
+  "default-advanced-mean-core": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 71.7393,
+      "candidate_corpus_median_sum_ms": 94.1478,
+      "baseline_ms_per_audio_second": 17.934825,
+      "candidate_ms_per_audio_second": 23.53695,
+      "corpus_delta_percent": 31.236017078505093,
+      "paired_median_percent": 30.562487839129655,
+      "paired_mean_percent": 30.853531498301304,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 18.2069,
+      "candidate_corpus_median_sum_ms": 23.1888,
+      "baseline_ms_per_audio_second": 4.551725,
+      "candidate_ms_per_audio_second": 5.7972,
+      "corpus_delta_percent": 27.362703151003185,
+      "paired_median_percent": 27.83585556883047,
+      "paired_mean_percent": 27.67203486924236,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "identity_changes": 21
+  },
+  "original-advanced-mean-core": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 71.4439,
+      "candidate_corpus_median_sum_ms": 108.5838,
+      "baseline_ms_per_audio_second": 17.860975,
+      "candidate_ms_per_audio_second": 27.14595,
+      "corpus_delta_percent": 51.98470408250389,
+      "paired_median_percent": 52.41855075212347,
+      "paired_mean_percent": 52.172720277741625,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 18.4701,
+      "candidate_corpus_median_sum_ms": 24.3734,
+      "baseline_ms_per_audio_second": 4.617525,
+      "candidate_ms_per_audio_second": 6.09335,
+      "corpus_delta_percent": 31.96138624046433,
+      "paired_median_percent": 33.15849462249424,
+      "paired_mean_percent": 32.9628744391251,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "identity_changes": 21
+  },
+  "rust-320-ab-core": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 107.2552,
+      "candidate_corpus_median_sum_ms": 94.4191,
+      "baseline_ms_per_audio_second": 26.8138,
+      "candidate_ms_per_audio_second": 23.604775,
+      "corpus_delta_percent": -11.967811350871568,
+      "paired_median_percent": -11.810490257705347,
+      "paired_mean_percent": -12.438518904845239,
+      "faster_pairs": 21,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 24.535,
+      "candidate_corpus_median_sum_ms": 23.0822,
+      "baseline_ms_per_audio_second": 6.13375,
+      "candidate_ms_per_audio_second": 5.77055,
+      "corpus_delta_percent": -5.921336865702057,
+      "paired_median_percent": -5.339714451630995,
+      "paired_mean_percent": -5.448381970886131,
+      "faster_pairs": 21,
+      "pair_count": 21
+    },
+    "identity_changes": 0
+  }
+}

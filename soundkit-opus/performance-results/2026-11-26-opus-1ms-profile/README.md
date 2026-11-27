@@ -8,6 +8,11 @@ of C Opus at 2.5 ms.
 The production encoder keeps its libopus-compatible allocation decisions.
 [Trim experiment and per-excerpt scores](../../quality-results/2026-11-26-opus-1ms-trim/README.md)
 
+Paired Linode timings at 320 kb/s showed 12.0% lower encode time and
+5.9% lower decode time than `d0259d8` with the core decoder API. C libopus
+at 2.5 ms still used less encode and decode time at all five tested Rust
+operating points. [Linode timing report and raw samples](../../../docs/real-world-tests/evidence/2026-11-27-soundkit-opus-1ms-candidate/README.md)
+
 ## Linode reference
 
 SoundKit `d0259d8` and xiph/opus `316c675f` ran on one pinned AMD EPYC 7713
@@ -51,8 +56,7 @@ encode or decode process. All cases used matching 8.020-second excerpts,
 binaries used Rust 1.100.0 and the workspace release profile. The candidate
 used 12.9–13.6% fewer encode instructions and 4.7–5.1% fewer decode
 instructions across these six comparisons. These are instruction counts
-from the development VM. Linode wall-time comparisons for the candidate
-are pending. [Counts and output hashes](instruction-counts.csv)
+from the development VM. [Counts and output hashes](instruction-counts.csv)
 
 With the trim experiment applied to the optimized build, the 312 and
 344 kb/s points used 13.7–14.0% fewer encode instructions and 5.3–6.2%
@@ -112,11 +116,12 @@ four rates.
 
 ## Equal-rate and quality-adjusted timing runs
 
-Use the Linode archive's C binary and Rust build flags for the next run.
-Replay the archive's four-second mixed fixture for the primary comparison.
+Reuse the Linode archive's C binary, Rust build flags, and four-second
+mixed fixture to reproduce the primary comparison.
 Build `raw_celt_bench` from `27da89b`, and build it again with the
 [trim experiment patch](../../quality-results/2026-11-26-opus-1ms-trim/trim4-experiment.patch)
-applied in a separate checkout. For the primary comparison, put the archived
+applied in a separate checkout with its own Cargo target directory.
+Verify that the default and trim executable hashes differ. Put the archived
 fixture in `CORPUS` and set `SECONDS_PER_EXCERPT=4`. To collect timings per
 excerpt, use the signed 24-bit corpus prepared by the
 [quality report](../../quality-results/2026-11-26-opus-1ms-vs-libopus/README.md#reproduce)
@@ -128,7 +133,7 @@ timing() {
   python3 soundkit-opus/tools/run_native_celt_ab.py "$C_BENCH" "$1" \
     --corpus "$CORPUS" --cpu "$CPU" --seconds "$SECONDS_PER_EXCERPT" --warmup-seconds 4 \
     --rounds 21 --repeats 1 --mode cbr --pcm-bits 24 \
-    --application restricted-lowdelay --baseline-decode-api c \
+    --application restricted-lowdelay --baseline-decode-api c --candidate-decode-api soundkit \
     --frame-size 120 --bitrate 256000 --candidate-frame-size 48 \
     --candidate-bitrate "$2" --json "$3"
 }
@@ -138,6 +143,11 @@ timing "$RUST_BENCH" 368000 default-both-means.json
 timing "$TRIM_BENCH" 312000 trim-advanced-mean.json
 timing "$TRIM_BENCH" 344000 trim-both-means.json
 ```
+
+Use `--candidate-decode-api core` when comparing with the original
+`d0259d8` Rust timings. The direct paired Rust comparison at 320 kb/s
+uses `--baseline-decode-api core --candidate-decode-api core`, a 48-sample
+frame for both builds, and the same fixture. [Direct paired results](../../../docs/real-world-tests/evidence/2026-11-27-soundkit-opus-1ms-candidate/rust-320-ab-core.json)
 
 | Configuration | Payload | Packets/s | With 16-byte SoundKit header | With SoundKit header and IPv4/UDP |
 |---|---:|---:|---:|---:|
