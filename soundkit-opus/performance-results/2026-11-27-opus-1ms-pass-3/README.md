@@ -113,6 +113,9 @@ concurrent run the existing allocation test counted four allocations.
 The serial release suite, a full default rerun, and 24 isolated default
 runs of that test passed.
 
+The release build passed an AArch64 Linux compile check. Clippy completed
+with `clippy::approx_constant` allowed for the existing reference constants.
+
 The adaptive +4 pass 3 build reproduced the previous trial packets, C
 Custom decode, and implicit-signalling results across eight excerpts at
 248, 312, 344, and 368 kb/s. At 320 and 400 kb/s the fixed trim build
