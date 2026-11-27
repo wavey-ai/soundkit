@@ -313,6 +313,7 @@ fn round_static_float(value: f64) -> f32 {
     (value * scale).round() as f32 / scale as f32
 }
 
+#[inline]
 fn kf_bfly2(fout: &mut [KissFftCpx], m: usize, n: usize) {
     #[cfg(target_arch = "wasm32")]
     if m == 4 {
@@ -320,44 +321,34 @@ fn kf_bfly2(fout: &mut [KissFftCpx], m: usize, n: usize) {
         return;
     }
     if m == 1 {
-        for i in 0..n {
-            let base = 2 * i;
-            let t = fout[base + 1];
-            fout[base + 1] = c_sub(fout[base], t);
-            fout[base] = c_add(fout[base], t);
+        for [left, right] in fout[..2 * n].as_chunks_mut::<2>().0 {
+            let delta = c_sub(*left, *right);
+            *left = c_add(*left, *right);
+            *right = delta;
         }
     } else {
         debug_assert_eq!(m, 4);
         let tw = 0.707_106_77f32;
-        for i in 0..n {
-            let base = 8 * i;
-            let fout2 = base + 4;
-
-            let mut t = fout[fout2];
-            fout[fout2] = c_sub(fout[base], t);
-            fout[base] = c_add(fout[base], t);
-
-            t = KissFftCpx::new(
-                (fout[fout2 + 1].r + fout[fout2 + 1].i) * tw,
-                (fout[fout2 + 1].i - fout[fout2 + 1].r) * tw,
-            );
-            fout[fout2 + 1] = c_sub(fout[base + 1], t);
-            fout[base + 1] = c_add(fout[base + 1], t);
-
-            t = KissFftCpx::new(fout[fout2 + 2].i, -fout[fout2 + 2].r);
-            fout[fout2 + 2] = c_sub(fout[base + 2], t);
-            fout[base + 2] = c_add(fout[base + 2], t);
-
-            t = KissFftCpx::new(
-                (fout[fout2 + 3].i - fout[fout2 + 3].r) * tw,
-                -(fout[fout2 + 3].i + fout[fout2 + 3].r) * tw,
-            );
-            fout[fout2 + 3] = c_sub(fout[base + 3], t);
-            fout[base + 3] = c_add(fout[base + 3], t);
+        for block in fout[..8 * n].as_chunks_mut::<8>().0 {
+            let [a, b, c, d, e, f, g, h] = *block;
+            let t1 = KissFftCpx::new((f.r + f.i) * tw, (f.i - f.r) * tw);
+            let t2 = KissFftCpx::new(g.i, -g.r);
+            let t3 = KissFftCpx::new((h.i - h.r) * tw, -(h.i + h.r) * tw);
+            *block = [
+                c_add(a, e),
+                c_add(b, t1),
+                c_add(c, t2),
+                c_add(d, t3),
+                c_sub(a, e),
+                c_sub(b, t1),
+                c_sub(c, t2),
+                c_sub(d, t3),
+            ];
         }
     }
 }
 
+#[inline]
 fn kf_bfly4(
     fout: &mut [KissFftCpx],
     fstride: usize,
@@ -384,16 +375,18 @@ fn kf_bfly4(
         return;
     }
     if m == 1 {
-        for i in 0..n {
-            let base = 4 * i;
-            let scratch0 = c_sub(fout[base], fout[base + 2]);
-            fout[base] = c_add(fout[base], fout[base + 2]);
-            let mut scratch1 = c_add(fout[base + 1], fout[base + 3]);
-            fout[base + 2] = c_sub(fout[base], scratch1);
-            fout[base] = c_add(fout[base], scratch1);
-            scratch1 = c_sub(fout[base + 1], fout[base + 3]);
-            fout[base + 1] = KissFftCpx::new(scratch0.r + scratch1.i, scratch0.i - scratch1.r);
-            fout[base + 3] = KissFftCpx::new(scratch0.r - scratch1.i, scratch0.i + scratch1.r);
+        for block in fout[..4 * n].as_chunks_mut::<4>().0 {
+            let [a, b, c, d] = *block;
+            let even_sum = c_add(a, c);
+            let odd_sum = c_add(b, d);
+            let even_diff = c_sub(a, c);
+            let odd_diff = c_sub(b, d);
+            *block = [
+                c_add(even_sum, odd_sum),
+                KissFftCpx::new(even_diff.r + odd_diff.i, even_diff.i - odd_diff.r),
+                c_sub(even_sum, odd_sum),
+                KissFftCpx::new(even_diff.r - odd_diff.i, even_diff.i + odd_diff.r),
+            ];
         }
     } else {
         let m2 = 2 * m;
@@ -420,6 +413,7 @@ fn kf_bfly4(
     }
 }
 
+#[inline]
 fn kf_bfly3(
     fout: &mut [KissFftCpx],
     fstride: usize,
@@ -429,7 +423,6 @@ fn kf_bfly3(
     mm: usize,
     stage: usize,
 ) {
-    let m2 = 2 * m;
     let epi3 = st.twiddles[fstride * m];
 
     #[cfg(target_arch = "wasm32")]
@@ -441,26 +434,26 @@ fn kf_bfly3(
     #[cfg(not(target_arch = "wasm32"))]
     let _ = stage;
 
-    for i in 0..n {
-        let base = i * mm;
-        for k in 0..m {
-            let idx = base + k;
-            let scratch1 = c_mul(fout[idx + m], st.twiddles[k * fstride]);
-            let scratch2 = c_mul(fout[idx + m2], st.twiddles[2 * k * fstride]);
-            let scratch3 = c_add(scratch1, scratch2);
-            let mut scratch0 = c_sub(scratch1, scratch2);
-
-            fout[idx + m] = KissFftCpx::new(
-                fout[idx].r - scratch3.r * 0.5,
-                fout[idx].i - scratch3.i * 0.5,
-            );
-            scratch0 = c_mul_scalar(scratch0, epi3.i);
-            fout[idx] = c_add(fout[idx], scratch3);
-
-            fout[idx + m2] =
-                KissFftCpx::new(fout[idx + m].r + scratch0.i, fout[idx + m].i - scratch0.r);
-            fout[idx + m] =
-                KissFftCpx::new(fout[idx + m].r - scratch0.i, fout[idx + m].i + scratch0.r);
+    let block_size = 3 * m;
+    debug_assert!(n == 1 || mm == block_size);
+    for block in fout[..n * block_size].chunks_exact_mut(block_size) {
+        let (left, other) = block.split_at_mut(m);
+        let (mid, right) = other.split_at_mut(m);
+        let twiddles = &st.twiddles;
+        for (((left, mid), right), (&tw1, &tw2)) in left.iter_mut().zip(mid).zip(right).zip(
+            twiddles
+                .iter()
+                .step_by(fstride)
+                .zip(twiddles.iter().step_by(2 * fstride)),
+        ) {
+            let a = c_mul(*mid, tw1);
+            let b = c_mul(*right, tw2);
+            let sum = c_add(a, b);
+            let delta = c_mul_scalar(c_sub(a, b), epi3.i);
+            let center = KissFftCpx::new(left.r - sum.r * 0.5, left.i - sum.i * 0.5);
+            *left = c_add(*left, sum);
+            *right = KissFftCpx::new(center.r + delta.i, center.i - delta.r);
+            *mid = KissFftCpx::new(center.r - delta.i, center.i + delta.r);
         }
     }
 }
@@ -640,6 +633,16 @@ fn simd_stage(
 pub fn opus_fft_impl(st: &KissFftState, fout: &mut [KissFftCpx]) {
     assert!(fout.len() >= st.nfft);
     let shift = st.shift.max(0) as usize;
+    // A 48-sample CELT frame uses these three fixed FFT stages.
+    #[cfg(not(target_arch = "wasm32"))]
+    if st.nfft == 24 {
+        debug_assert_eq!(&st.factors[..6], &[3, 8, 2, 4, 4, 1]);
+        let f = &mut fout[..24];
+        kf_bfly4(f, 6 << shift, st, 1, 6, 4, 2);
+        kf_bfly2(f, 4, 3);
+        kf_bfly3(f, 1 << shift, st, 8, 1, 1, 0);
+        return;
+    }
     let mut fstride = [0usize; MAX_FACTORS + 1];
     fstride[0] = 1;
 
