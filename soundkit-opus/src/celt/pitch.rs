@@ -100,10 +100,15 @@ fn tone_lpc(x: &[f32], delay: usize) -> Option<[f32; 2]> {
     let mut r00 = 0.0f32;
     let mut r01 = 0.0f32;
     let mut r02 = 0.0f32;
-    for i in 0..len - 2 * delay {
-        r00 += x[i] * x[i];
-        r01 += x[i] * x[i + delay];
-        r02 += x[i] * x[i + 2 * delay];
+    let count = len - 2 * delay;
+    for ((&current, &first_delay), &second_delay) in x[..count]
+        .iter()
+        .zip(&x[delay..delay + count])
+        .zip(&x[2 * delay..])
+    {
+        r00 += current * current;
+        r01 += current * first_delay;
+        r02 += current * second_delay;
     }
 
     let mut edges = 0.0f32;
@@ -559,16 +564,20 @@ fn remove_doubling(
     yy_lookup.resize(maxperiod + 1, 0.0);
     yy_lookup[0] = xx;
     let mut yy = xx;
+    let powers = yy_lookup[1..]
+        .iter_mut()
+        .zip(x[..base].iter().rev())
+        .zip(x[n..base + n].iter().rev());
     if exact {
-        for i in 1..=maxperiod {
+        for ((power, &entering), &leaving) in powers {
             // libopus: yy = yy + x[-i]^2 - x[N-i]^2, left to right.
-            yy = yy + x[base - i] * x[base - i] - x[base + n - i] * x[base + n - i];
-            yy_lookup[i] = yy.max(0.0);
+            yy = yy + entering * entering - leaving * leaving;
+            *power = yy.max(0.0);
         }
     } else {
-        for i in 1..=maxperiod {
-            yy += x[base - i] * x[base - i] - x[base + n - i] * x[base + n - i];
-            yy_lookup[i] = yy.max(0.0);
+        for ((power, &entering), &leaving) in powers {
+            yy += entering * entering - leaving * leaving;
+            *power = yy.max(0.0);
         }
     }
 
