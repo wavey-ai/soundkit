@@ -10,9 +10,9 @@ use crate::celt::mathops::{ec_ilog, mode_exp2};
 use crate::celt::modes::CeltMode;
 use crate::celt::pitch::PrefilterDecision;
 use crate::celt::quant_bands::{
-    amp2_log2, quant_coarse_energy_with_scratch, quant_energy_finalise, quant_fine_energy,
-    unquant_coarse_energy, unquant_energy_finalise, unquant_fine_energy, CoarseEnergyScratch,
-    E_MEANS,
+    amp2_log2, log_energy_with_feedback, quant_coarse_energy_with_scratch, quant_energy_finalise,
+    quant_fine_energy, unquant_coarse_energy, unquant_energy_finalise, unquant_fine_energy,
+    CoarseEnergyScratch, E_MEANS,
 };
 use crate::celt::rate::{
     clt_compute_allocation_with_scratch, Allocation, AllocationCoder, AllocationInfo,
@@ -474,27 +474,33 @@ fn tf_analysis(
         }
     }
 
-    let mut selcost = [0i32; 2];
-    for sel in 0..2 {
-        let mut cost0 = importance[0]
-            * (metric[0] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * sel]).abs();
-        let mut cost1 = importance[0]
-            * (metric[0] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * sel + 1]).abs()
-            + if is_transient { 0 } else { lambda };
-        for i in 1..len {
-            let curr0 = cost0.min(cost1 + lambda);
-            let curr1 = (cost0 + lambda).min(cost1);
-            cost0 = curr0
-                + importance[i]
-                    * (metric[i] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * sel]).abs();
-            cost1 = curr1
-                + importance[i]
-                    * (metric[i] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * sel + 1]).abs();
+    // Non-transient frames always use selection zero. They only need the
+    // final path calculation, including the single-block Custom modes.
+    let tf_select = if is_transient {
+        let mut selcost = [0i32; 2];
+        for sel in 0..2 {
+            let mut cost0 = importance[0]
+                * (metric[0] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * sel]).abs();
+            let mut cost1 = importance[0]
+                * (metric[0] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * sel + 1]).abs();
+            for i in 1..len {
+                let curr0 = cost0.min(cost1 + lambda);
+                let curr1 = (cost0 + lambda).min(cost1);
+                cost0 = curr0
+                    + importance[i]
+                        * (metric[i] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * sel]).abs();
+                cost1 = curr1
+                    + importance[i]
+                        * (metric[i] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * sel + 1])
+                            .abs();
+            }
+            selcost[sel] = cost0.min(cost1);
         }
-        selcost[sel] = cost0.min(cost1);
-    }
+        i32::from(selcost[1] < selcost[0])
+    } else {
+        0
+    };
 
-    let tf_select = i32::from(selcost[1] < selcost[0] && is_transient);
     let select_idx = tf_select as usize;
     let mut cost0 = importance[0]
         * (metric[0] - 2 * TF_SELECT_TABLE[lm][4 * transient_idx + 2 * select_idx]).abs();
@@ -1221,6 +1227,7 @@ pub fn encode_spectral_frame_with_scratch(
         x,
         y,
         band_e,
+        None,
         old_band_e,
         energy_error,
         delayed_intra,
@@ -1238,6 +1245,7 @@ pub(crate) fn encode_spectral_frame_reusing_buffer(
     x: &mut [f32],
     y: Option<&mut [f32]>,
     band_e: &[f32],
+    band_log_e: &[f32],
     old_band_e: &mut [f32],
     energy_error: &mut [f32],
     delayed_intra: &mut f32,
@@ -1251,6 +1259,7 @@ pub(crate) fn encode_spectral_frame_reusing_buffer(
         x,
         y,
         band_e,
+        Some(band_log_e),
         old_band_e,
         energy_error,
         delayed_intra,
@@ -1268,6 +1277,7 @@ fn encode_spectral_frame_with_scratch_inner(
     x: &mut [f32],
     mut y: Option<&mut [f32]>,
     band_e: &[f32],
+    analyzed_band_log_e: Option<&[f32]>,
     old_band_e: &mut [f32],
     energy_error: &mut [f32],
     delayed_intra: &mut f32,
@@ -1322,16 +1332,30 @@ fn encode_spectral_frame_with_scratch_inner(
 
     let band_count = config.channels * mode.nb_ebands;
     scratch.band_log_e.resize(band_count, 0.0);
-    scratch.band_log_e[..band_count].fill(0.0);
     let band_log_e = &mut scratch.band_log_e[..band_count];
-    amp2_log2(
-        mode,
-        eff_end,
-        config.end,
-        band_e,
-        band_log_e,
-        config.channels,
-    );
+    match analyzed_band_log_e {
+        None => {
+            band_log_e.fill(0.0);
+            amp2_log2(
+                mode,
+                eff_end,
+                config.end,
+                band_e,
+                band_log_e,
+                config.channels,
+            );
+        }
+        Some(analyzed) => {
+            band_log_e.copy_from_slice(&analyzed[..band_count]);
+            if config.end < mode.eff_ebands {
+                // Analysis includes all effective bands, even when the
+                // encoder is configured to transmit fewer of them.
+                for channel in band_log_e.chunks_exact_mut(mode.nb_ebands) {
+                    channel[config.end..].fill(0.0);
+                }
+            }
+        }
+    }
     scratch.offsets.resize(mode.nb_ebands, 0);
     scratch.importance.resize(mode.nb_ebands, 13);
     let dynalloc = {
@@ -1365,9 +1389,8 @@ fn encode_spectral_frame_with_scratch_inner(
     for c in 0..config.channels {
         for i in config.start..config.end {
             let idx = i + c * mode.nb_ebands;
-            if (band_log_e[idx] - old_band_e[idx]).abs() < 2.0 {
-                band_log_e[idx] -= 0.25 * energy_error[idx];
-            }
+            band_log_e[idx] =
+                log_energy_with_feedback(band_log_e[idx], old_band_e[idx], energy_error[idx]);
         }
     }
     scratch.error.resize(band_count, 0.0);

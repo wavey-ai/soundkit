@@ -1,0 +1,192 @@
+{
+  "timing_results": {
+    "rust-256": {
+      "encode": {
+        "elapsed_ms": {
+          "median": 114.3457,
+          "p25": 112.0696,
+          "p75": 116.7868
+        },
+        "realtime_factor": 34.98163901222346,
+        "elapsed_delta_pct_from_c256_medians": 50.794751855168286,
+        "paired_elapsed_delta_pct_from_c256": {
+          "median": 50.50040873375057,
+          "p25": 46.5689473420009,
+          "p75": 56.93910340467705
+        },
+        "elapsed_delta_pct_from_rust256_medians": 0.0
+      },
+      "decode": {
+        "elapsed_ms": {
+          "median": 24.7899,
+          "p25": 24.6216,
+          "p75": 25.2272
+        },
+        "realtime_factor": 161.3560361276165,
+        "elapsed_delta_pct_from_c256_medians": 24.222790138304262,
+        "paired_elapsed_delta_pct_from_c256": {
+          "median": 24.085829918293577,
+          "p25": 21.7885978123997,
+          "p75": 26.677170411552776
+        },
+        "elapsed_delta_pct_from_rust256_medians": 0.0
+      }
+    },
+    "rust-320": {
+      "encode": {
+        "elapsed_ms": {
+          "median": 116.4299,
+          "p25": 115.0414,
+          "p75": 118.8451
+        },
+        "realtime_factor": 34.35543618950115,
+        "elapsed_delta_pct_from_c256_medians": 53.54331539377573,
+        "paired_elapsed_delta_pct_from_c256": {
+          "median": 54.68971510786813,
+          "p25": 50.9146268338508,
+          "p75": 57.01524306046706
+        },
+        "elapsed_delta_pct_from_rust256_medians": 1.822718300731907
+      },
+      "decode": {
+        "elapsed_ms": {
+          "median": 26.1244,
+          "p25": 25.8658,
+          "p75": 26.5174
+        },
+        "realtime_factor": 153.11356433066405,
+        "elapsed_delta_pct_from_c256_medians": 30.91000200440972,
+        "paired_elapsed_delta_pct_from_c256": {
+          "median": 30.816523048813615,
+          "p25": 28.20991355135667,
+          "p75": 32.65627665659778
+        },
+        "elapsed_delta_pct_from_rust256_medians": 5.383240755307606
+      }
+    },
+    "rust-368": {
+      "encode": {
+        "elapsed_ms": {
+          "median": 116.965,
+          "p25": 114.4167,
+          "p75": 120.2677
+        },
+        "realtime_factor": 34.19826443807977,
+        "elapsed_delta_pct_from_c256_medians": 54.24898488303243,
+        "paired_elapsed_delta_pct_from_c256": {
+          "median": 54.13704609291328,
+          "p25": 51.05019020544299,
+          "p75": 59.87696597276737
+        },
+        "elapsed_delta_pct_from_rust256_medians": 2.2906851766179237
+      },
+      "decode": {
+        "elapsed_ms": {
+          "median": 26.6701,
+          "p25": 26.2192,
+          "p75": 27.123
+        },
+        "realtime_factor": 149.98068998616426,
+        "elapsed_delta_pct_from_c256_medians": 33.64451793946684,
+        "paired_elapsed_delta_pct_from_c256": {
+          "median": 31.678411752711643,
+          "p25": 30.255266304847762,
+          "p75": 35.914010823812404
+        },
+        "elapsed_delta_pct_from_rust256_medians": 7.584540478178625
+      }
+    },
+    "c-256": {
+      "encode": {
+        "elapsed_ms": {
+          "median": 75.8287,
+          "p25": 73.5659,
+          "p75": 77.5566
+        },
+        "realtime_factor": 52.750475743353114,
+        "elapsed_delta_pct_from_c256_medians": 0.0,
+        "paired_elapsed_delta_pct_from_c256": {
+          "median": 0.0,
+          "p25": 0.0,
+          "p75": 0.0
+        }
+      },
+      "decode": {
+        "elapsed_ms": {
+          "median": 19.956,
+          "p25": 19.5746,
+          "p75": 20.6828
+        },
+        "realtime_factor": 200.44097013429547,
+        "elapsed_delta_pct_from_c256_medians": 0.0,
+        "paired_elapsed_delta_pct_from_c256": {
+          "median": 0.0,
+          "p25": 0.0,
+          "p75": 0.0
+        }
+      }
+    }
+  },
+  "warmup_quality_diagnostics": {
+    "rust-256": {
+      "impl": "rust",
+      "mode": "cbr",
+      "frame_size": "48",
+      "frame_ms": "1.0",
+      "bitrate": "256000",
+      "encode_ms": "109.4059",
+      "decode_ms": "24.5239",
+      "bytes": "128000",
+      "min_packet": "32",
+      "max_packet": "32",
+      "checksum": "8411903305",
+      "quality_lag": "-48",
+      "quality_snr_db": "27.27"
+    },
+    "rust-320": {
+      "impl": "rust",
+      "mode": "cbr",
+      "frame_size": "48",
+      "frame_ms": "1.0",
+      "bitrate": "320000",
+      "encode_ms": "113.2574",
+      "decode_ms": "25.2795",
+      "bytes": "160000",
+      "min_packet": "40",
+      "max_packet": "40",
+      "checksum": "10484646667",
+      "quality_lag": "-48",
+      "quality_snr_db": "32.24"
+    },
+    "rust-368": {
+      "impl": "rust",
+      "mode": "cbr",
+      "frame_size": "48",
+      "frame_ms": "1.0",
+      "bitrate": "368000",
+      "encode_ms": "113.5684",
+      "decode_ms": "25.9959",
+      "bytes": "184000",
+      "min_packet": "46",
+      "max_packet": "46",
+      "checksum": "12061462731",
+      "quality_lag": "-48",
+      "quality_snr_db": "33.97"
+    },
+    "c-256": {
+      "impl": "c",
+      "mode": "cbr",
+      "frame_size": "120",
+      "frame_ms": "2.5",
+      "bitrate": "256000",
+      "encode_ms": "74.3062",
+      "decode_ms": "19.6076",
+      "bytes": "128000",
+      "min_packet": "80",
+      "max_packet": "80",
+      "checksum": "18446744065224891498",
+      "quality_lag": "-120",
+      "quality_snr_db": "32.49"
+    }
+  }
+}

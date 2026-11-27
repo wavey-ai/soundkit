@@ -1,0 +1,596 @@
+{
+  "configuration": {
+    "sources": [
+      "mixed"
+    ],
+    "seconds": 4,
+    "warmup_seconds": 4,
+    "rounds": 21,
+    "repeats": 1,
+    "pcm_bits": 24,
+    "mode": "cbr",
+    "bitrate": 256000,
+    "frame_size": 120,
+    "candidate_bitrate": 344000,
+    "candidate_frame_size": 48,
+    "application": "restricted-lowdelay",
+    "baseline_decode_api": "c",
+    "candidate_decode_api": "soundkit",
+    "cpu": 6
+  },
+  "baseline": "/tmp/soundkit-linode-opus.CWEE4NFx/bench-bins/raw_celt_bench_c",
+  "candidate": "/tmp/soundkit-candidate.SjYR5d41/trim-target/release/examples/raw_celt_bench",
+  "summary": {
+    "encode_ms": {
+      "baseline_corpus_median_sum_ms": 71.9378,
+      "candidate_corpus_median_sum_ms": 94.3421,
+      "baseline_ms_per_audio_second": 17.98445,
+      "candidate_ms_per_audio_second": 23.585525,
+      "corpus_delta_percent": 31.143988278763054,
+      "paired_median_percent": 30.77533471253386,
+      "paired_mean_percent": 30.813897880027973,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "decode_ms": {
+      "baseline_corpus_median_sum_ms": 18.3952,
+      "candidate_corpus_median_sum_ms": 23.4821,
+      "baseline_ms_per_audio_second": 4.5988,
+      "candidate_ms_per_audio_second": 5.870525,
+      "corpus_delta_percent": 27.65340958510916,
+      "paired_median_percent": 28.18100433160401,
+      "paired_mean_percent": 28.152727676650372,
+      "faster_pairs": 0,
+      "pair_count": 21
+    },
+    "identity_changes": 21
+  },
+  "results": [
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 71.7803,
+        "decode_ms": 18.6726,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 97.121,
+        "decode_ms": 23.3578,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 95.083,
+        "decode_ms": 23.5141,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 75.3015,
+        "decode_ms": 18.7973,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 72.0086,
+        "decode_ms": 18.1735,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 95.9706,
+        "decode_ms": 25.0006,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 99.1136,
+        "decode_ms": 24.0685,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 76.1821,
+        "decode_ms": 20.1196,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 74.1009,
+        "decode_ms": 18.7768,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 96.9057,
+        "decode_ms": 25.6235,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 100.1724,
+        "decode_ms": 23.9995,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 76.1157,
+        "decode_ms": 19.4475,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 74.7354,
+        "decode_ms": 18.6058,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 100.9225,
+        "decode_ms": 25.082,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 95.9853,
+        "decode_ms": 24.3316,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 75.5353,
+        "decode_ms": 18.9077,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 75.8045,
+        "decode_ms": 19.8889,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 98.4703,
+        "decode_ms": 24.3975,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 99.8461,
+        "decode_ms": 23.6482,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 74.5827,
+        "decode_ms": 18.2508,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 70.3556,
+        "decode_ms": 17.8385,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 93.6528,
+        "decode_ms": 23.0997,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 92.2425,
+        "decode_ms": 23.4821,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 70.0851,
+        "decode_ms": 17.9653,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 71.9378,
+        "decode_ms": 18.1901,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 93.4759,
+        "decode_ms": 23.0077,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 92.4794,
+        "decode_ms": 23.2539,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 72.5075,
+        "decode_ms": 18.3778,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 71.8484,
+        "decode_ms": 18.2551,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 92.9962,
+        "decode_ms": 23.4251,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 90.6938,
+        "decode_ms": 23.4462,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 71.7678,
+        "decode_ms": 18.5565,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 70.5742,
+        "decode_ms": 18.7468,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 93.4265,
+        "decode_ms": 23.0393,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 92.4598,
+        "decode_ms": 23.2988,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 71.6689,
+        "decode_ms": 18.3952,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 71.4957,
+        "decode_ms": 17.982,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 93.6187,
+        "decode_ms": 23.4124,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 94.3421,
+        "decode_ms": 23.5183,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 69.3095,
+        "decode_ms": 17.7632,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "baseline",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 71.908,
+        "decode_ms": 17.9841,
+        "bytes": 128000,
+        "min_packet": 80,
+        "max_packet": 80,
+        "checksum": 18446744065224891498
+      }
+    },
+    {
+      "source": "mixed",
+      "implementation": "candidate",
+      "row": {
+        "audio_seconds": 4.0,
+        "encode_ms": 91.6149,
+        "decode_ms": 23.0522,
+        "bytes": 172000,
+        "min_packet": 43,
+        "max_packet": 43,
+        "checksum": 11299457493
+      }
+    }
+  ]
+}

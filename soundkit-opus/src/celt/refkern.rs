@@ -6,33 +6,38 @@
 //! `comb_filter_const_sse`) and, through run-time CPU detection on a CPU with
 //! AVX2 and FMA, `celt_pitch_xcorr_avx2`. Floating-point addition is not
 //! associative, so matching libopus sample for sample needs the same order of
-//! operations, not only the same formula. These functions keep that order in
-//! plain scalar code (fused multiply-adds through `f32::mul_add`), so they
-//! give the same result on every target, WebAssembly included.
+//! operations, so these kernels keep the same reduction order on every
+//! target, WebAssembly included.
 //!
 //! They serve the paths that must match libopus exactly: packet-loss
 //! concealment, and the codec when a mode selects libopus arithmetic
 //! (`CeltMode::exact_math`).
 
 use crate::celt::pitch::COMBFILTER_MINPERIOD;
+use wide::f32x4;
 
 /// `celt_inner_prod_sse`: four lanes, `(l0 + l2) + (l1 + l3)`, then the tail.
 #[inline]
 pub fn inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
-    let mut lanes = [0.0f32; 4];
-    let mut i = 0usize;
-    while i + 3 < n {
-        for l in 0..4 {
-            lanes[l] += x[i + l] * y[i + l];
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::kernels::inner_prod_pairwise_f32(x, y, n)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (x, x_tail) = x[..n].as_chunks::<4>();
+        let (y, y_tail) = y[..n].as_chunks::<4>();
+        let mut lanes = f32x4::ZERO;
+        for (&x, &y) in x.iter().zip(y) {
+            lanes += f32x4::new(x) * f32x4::new(y);
         }
-        i += 4;
+        let [l0, l1, l2, l3] = lanes.to_array();
+        let mut sum = (l0 + l2) + (l1 + l3);
+        for (&x, &y) in x_tail.iter().zip(y_tail) {
+            sum += x * y;
+        }
+        sum
     }
-    let mut sum = (lanes[0] + lanes[2]) + (lanes[1] + lanes[3]);
-    while i < n {
-        sum += x[i] * y[i];
-        i += 1;
-    }
-    sum
 }
 
 /// `dual_inner_prod_sse`.
@@ -311,20 +316,41 @@ pub fn pitch_downsample(
     factor: usize,
     scratch: &mut PitchScratch,
 ) {
-    let offset = factor / 2;
-    for i in 1..len {
-        x_lp[i] = 0.25 * x[0][factor * i - offset]
-            + 0.25 * x[0][factor * i + offset]
-            + 0.5 * x[0][factor * i];
-    }
-    x_lp[0] = 0.25 * x[0][offset] + 0.5 * x[0][0];
-    if x.len() == 2 {
-        for i in 1..len {
-            x_lp[i] += 0.25 * x[1][factor * i - offset]
-                + 0.25 * x[1][factor * i + offset]
-                + 0.5 * x[1][factor * i];
+    if factor == 2 && x.len() == 2 && len > 0 {
+        // Reuse each odd sample in the next window. Keep each channel's
+        // floating-point sum in libopus order before adding the channels.
+        let left = &x[0][..2 * len];
+        let right = &x[1][..2 * len];
+        let mut previous_left = left[1];
+        let mut previous_right = right[1];
+        x_lp[0] = (0.25 * previous_left + 0.5 * left[0]) + (0.25 * previous_right + 0.5 * right[0]);
+        let left = left[2..].as_chunks::<2>().0;
+        let right = right[2..].as_chunks::<2>().0;
+        for ((sample, &[center_left, next_left]), &[center_right, next_right]) in
+            x_lp[1..len].iter_mut().zip(left).zip(right)
+        {
+            let low_left = 0.25 * previous_left + 0.25 * next_left + 0.5 * center_left;
+            let low_right = 0.25 * previous_right + 0.25 * next_right + 0.5 * center_right;
+            *sample = low_left + low_right;
+            previous_left = next_left;
+            previous_right = next_right;
         }
-        x_lp[0] += 0.25 * x[1][offset] + 0.5 * x[1][0];
+    } else {
+        let offset = factor / 2;
+        for i in 1..len {
+            x_lp[i] = 0.25 * x[0][factor * i - offset]
+                + 0.25 * x[0][factor * i + offset]
+                + 0.5 * x[0][factor * i];
+        }
+        x_lp[0] = 0.25 * x[0][offset] + 0.5 * x[0][0];
+        if x.len() == 2 {
+            for i in 1..len {
+                x_lp[i] += 0.25 * x[1][factor * i - offset]
+                    + 0.25 * x[1][factor * i + offset]
+                    + 0.5 * x[1][factor * i];
+            }
+            x_lp[0] += 0.25 * x[1][offset] + 0.5 * x[1][0];
+        }
     }
     let mut ac = [0.0f32; 5];
     autocorr(x_lp, &mut ac, None, 0, 4, len, &mut scratch.window);
@@ -367,9 +393,15 @@ fn find_best_pitch(xcorr: &[f32], y: &[f32], len: usize, max_pitch: usize) -> [u
     for &value in &y[..len] {
         syy += value * value;
     }
-    for i in 0..max_pitch {
-        if xcorr[i] > 0.0 {
-            let xcorr16 = xcorr[i] * 1e-12;
+    let departing = &y[..max_pitch];
+    let arriving = &y[len..len + max_pitch];
+    for (i, (&correlation, (&outgoing, &incoming))) in xcorr[..max_pitch]
+        .iter()
+        .zip(departing.iter().zip(arriving))
+        .enumerate()
+    {
+        if correlation > 0.0 {
+            let xcorr16 = correlation * 1e-12;
             let num = xcorr16 * xcorr16;
             if num * best_den[1] > best_num[1] * syy {
                 if num * best_den[0] > best_num[0] * syy {
@@ -386,7 +418,7 @@ fn find_best_pitch(xcorr: &[f32], y: &[f32], len: usize, max_pitch: usize) -> [u
                 }
             }
         }
-        syy += y[i + len] * y[i + len] - y[i] * y[i];
+        syy += incoming * incoming - outgoing * outgoing;
         syy = syy.max(1.0);
     }
     best_pitch
@@ -441,6 +473,45 @@ pub fn pitch_search(
         0
     };
     (2 * best[0] as isize - offset) as usize
+}
+
+#[inline]
+fn comb_taps4(samples: &[f32], index: usize, period: usize) -> [f32x4; 3] {
+    let start = index - period - 2;
+    let taps = &samples[start..start + 8];
+    let load = |offset| f32x4::new(taps[offset..offset + 4].try_into().unwrap());
+    [load(2), load(3) + load(1), load(4) + load(0)]
+}
+
+/// The 48-sample decoder cross-fade in libopus's scalar addition order.
+/// With a pitch of at least 15, a group of four reads only earlier samples.
+pub(crate) fn comb_filter_overlap_48(
+    samples: &mut [f32],
+    base: usize,
+    t0: usize,
+    t1: usize,
+    g0: [f32; 3],
+    g1: [f32; 3],
+    window: &[f32],
+) {
+    let [g00, g01, g02] = g0.map(f32x4::splat);
+    let [g10, g11, g12] = g1.map(f32x4::splat);
+    for (block, &window) in window[..48].as_chunks::<4>().0.iter().enumerate() {
+        let k = base + block * 4;
+        let window = f32x4::new(window);
+        let f = window * window;
+        let fade = f32x4::ONE - f;
+        let [old_center, old_near, old_far] = comb_taps4(samples, k, t0);
+        let [new_center, new_near, new_far] = comb_taps4(samples, k, t1);
+        let output = f32x4::new(samples[k..k + 4].try_into().unwrap())
+            + fade * g00 * old_center
+            + fade * g01 * old_near
+            + fade * g02 * old_far
+            + f * g10 * new_center
+            + f * g11 * new_near
+            + f * g12 * new_far;
+        samples[k..k + 4].copy_from_slice(&output.to_array());
+    }
 }
 
 /// The steady-state part of `comb_filter` (`comb_filter_const_sse` and its

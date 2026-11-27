@@ -50,6 +50,50 @@ pub struct PrefilterScratch {
     reference: crate::celt::refkern::PitchScratch,
 }
 
+/// A contiguous history window that slides forward as the encoder appends samples.
+#[derive(Clone, Debug)]
+pub(crate) struct PrefilterHistory {
+    samples: Vec<Vec<f32>>,
+    head: usize,
+}
+
+impl PrefilterHistory {
+    pub(crate) fn new(channels: usize) -> Self {
+        Self {
+            samples: vec![vec![0.0; 2 * COMBFILTER_MAXPERIOD]; channels],
+            head: 0,
+        }
+    }
+
+    pub(crate) fn tail(&self, channel: usize, len: usize) -> &[f32] {
+        let end = self.head + COMBFILTER_MAXPERIOD;
+        &self.samples[channel][end - len..end]
+    }
+
+    pub(crate) fn append(&mut self, input: &[Vec<f32>], overlap: usize, n: usize) -> [&[f32]; 2] {
+        debug_assert!(n <= COMBFILTER_MAXPERIOD);
+        if self.head + n > COMBFILTER_MAXPERIOD {
+            for samples in &mut self.samples {
+                samples.copy_within(self.head..self.head + COMBFILTER_MAXPERIOD, 0);
+            }
+            self.head = 0;
+        }
+        let start = self.head;
+        let frame_start = start + COMBFILTER_MAXPERIOD;
+        let end = frame_start + n;
+        for (samples, input) in self.samples.iter_mut().zip(input) {
+            samples[frame_start..end].copy_from_slice(&input[overlap..overlap + n]);
+        }
+        self.head += n;
+        prefilter_channels(&self.samples, start, end)
+    }
+}
+
+fn prefilter_channels(samples: &[Vec<f32>], start: usize, end: usize) -> [&[f32]; 2] {
+    let channel = |c: usize| samples.get(c).map_or(&[][..], |s| &s[start..end]);
+    [channel(0), channel(1)]
+}
+
 fn tone_lpc(x: &[f32], delay: usize) -> Option<[f32; 2]> {
     debug_assert!(x.len() > 2 * delay);
     let len = x.len();
@@ -259,9 +303,8 @@ fn celt_fir5(x: &mut [f32], num: &[f32; 5]) {
 }
 
 fn pitch_downsample(
-    pre: &[Vec<f32>],
+    pre: &[&[f32]],
     len: usize,
-    channels: usize,
     x_lp: &mut Vec<f32>,
     ac: &mut Vec<f32>,
     lpc: &mut Vec<f32>,
@@ -272,7 +315,7 @@ fn pitch_downsample(
         x_lp[i] = 0.25 * pre[0][2 * i - 1] + 0.25 * pre[0][2 * i + 1] + 0.5 * pre[0][2 * i];
     }
     x_lp[0] = 0.25 * pre[0][1] + 0.5 * pre[0][0];
-    if channels == 2 {
+    if pre.len() == 2 {
         for i in 1..half_len {
             x_lp[i] += 0.25 * pre[1][2 * i - 1] + 0.25 * pre[1][2 * i + 1] + 0.5 * pre[1][2 * i];
         }
@@ -785,6 +828,18 @@ pub fn comb_filter_in_place_mode(
         overlap = 0;
     }
     let window = window.unwrap_or(&[]);
+    if exact && n == 48 && overlap == n {
+        crate::celt::refkern::comb_filter_overlap_48(
+            y,
+            base,
+            t0,
+            t1,
+            [g00, g01, g02],
+            [g10, g11, g12],
+            window,
+        );
+        return;
+    }
 
     let mut i = 0usize;
     let mut x1 = y[base + 1 - t1];
@@ -852,7 +907,7 @@ fn should_cancel_pitch_filter(
         || (before[0] - after[0] < threshold0 && before[1] - after[1] < threshold1)
 }
 
-#[allow(clippy::approx_constant, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn run_prefilter(
     mode: &CeltMode,
     input: &mut [Vec<f32>],
@@ -863,7 +918,7 @@ pub fn run_prefilter(
     prefilter_tapset: usize,
     enabled: bool,
     tf_estimate: f32,
-    mut tone_frequency: f32,
+    tone_frequency: f32,
     toneishness: f32,
     max_pitch_ratio: Option<f32>,
     packet_bytes: usize,
@@ -873,15 +928,62 @@ pub fn run_prefilter(
     scratch: &mut PrefilterScratch,
 ) -> (PrefilterDecision, f32) {
     let overlap = mode.overlap;
-    let exact = mode.exact_math;
-    scratch.pre.resize_with(channels, Vec::new);
+    let mut pre = std::mem::take(&mut scratch.pre);
+    let end = n + COMBFILTER_MAXPERIOD;
+    pre.resize_with(channels, Vec::new);
     for c in 0..channels {
-        scratch.pre[c].resize(n + COMBFILTER_MAXPERIOD, 0.0);
-        scratch.pre[c][..COMBFILTER_MAXPERIOD].copy_from_slice(&prefilter_mem[c]);
-        scratch.pre[c][COMBFILTER_MAXPERIOD..COMBFILTER_MAXPERIOD + n]
-            .copy_from_slice(&input[c][overlap..overlap + n]);
+        pre[c].resize(end, 0.0);
+        pre[c][..COMBFILTER_MAXPERIOD].copy_from_slice(&prefilter_mem[c]);
+        pre[c][COMBFILTER_MAXPERIOD..end].copy_from_slice(&input[c][overlap..overlap + n]);
     }
+    let history = prefilter_channels(&pre, 0, end);
+    let decision = run_prefilter_with_history(
+        mode,
+        input,
+        &history[..channels],
+        prev_period,
+        prev_gain,
+        prev_tapset,
+        prefilter_tapset,
+        enabled,
+        tf_estimate,
+        tone_frequency,
+        toneishness,
+        max_pitch_ratio,
+        packet_bytes,
+        n,
+        decisions,
+        scratch,
+    );
+    for (memory, samples) in prefilter_mem.iter_mut().zip(&pre) {
+        memory.copy_from_slice(&samples[n..end]);
+    }
+    scratch.pre = pre;
+    decision
+}
 
+#[allow(clippy::approx_constant, clippy::too_many_arguments)]
+pub(crate) fn run_prefilter_with_history(
+    mode: &CeltMode,
+    input: &mut [Vec<f32>],
+    history: &[&[f32]],
+    prev_period: usize,
+    prev_gain: f32,
+    prev_tapset: usize,
+    prefilter_tapset: usize,
+    enabled: bool,
+    tf_estimate: f32,
+    mut tone_frequency: f32,
+    toneishness: f32,
+    max_pitch_ratio: Option<f32>,
+    packet_bytes: usize,
+    n: usize,
+    decisions: &crate::tuning::Decisions,
+    scratch: &mut PrefilterScratch,
+) -> (PrefilterDecision, f32) {
+    let overlap = mode.overlap;
+    let exact = mode.exact_math;
+    let channels = history.len();
     let mut pitch_index = COMBFILTER_MINPERIOD;
     let mut gain1 = 0.0f32;
     if enabled && toneishness > 0.99 {
@@ -915,12 +1017,8 @@ pub fn run_prefilter(
         let pitch = if exact {
             let half = (COMBFILTER_MAXPERIOD + n) >> 1;
             scratch.pitch_buf.resize(half, 0.0);
-            let pre: [&[f32]; 2] = [
-                &scratch.pre[0],
-                scratch.pre.get(1).map_or(&[], |samples| &samples[..]),
-            ];
             crate::celt::refkern::pitch_downsample(
-                &pre[..channels],
+                history,
                 &mut scratch.pitch_buf,
                 half,
                 2,
@@ -935,9 +1033,8 @@ pub fn run_prefilter(
             )
         } else {
             pitch_downsample(
-                &scratch.pre,
+                history,
                 COMBFILTER_MAXPERIOD + n,
-                channels,
                 &mut scratch.pitch_buf,
                 &mut scratch.autocorr,
                 &mut scratch.lpc,
@@ -1028,7 +1125,7 @@ pub fn run_prefilter(
                 exact,
                 &mut input[c],
                 overlap,
-                &scratch.pre[c],
+                history[c],
                 COMBFILTER_MAXPERIOD,
                 period,
                 period,
@@ -1045,7 +1142,7 @@ pub fn run_prefilter(
             exact,
             &mut input[c],
             overlap + offset,
-            &scratch.pre[c],
+            history[c],
             COMBFILTER_MAXPERIOD + offset,
             period,
             pitch_index,
@@ -1071,12 +1168,12 @@ pub fn run_prefilter(
     if cancel_pitch {
         for c in 0..channels {
             input[c][overlap..overlap + n]
-                .copy_from_slice(&scratch.pre[c][COMBFILTER_MAXPERIOD..COMBFILTER_MAXPERIOD + n]);
+                .copy_from_slice(&history[c][COMBFILTER_MAXPERIOD..COMBFILTER_MAXPERIOD + n]);
             comb_filter_mode(
                 exact,
                 &mut input[c],
                 overlap + offset,
-                &scratch.pre[c],
+                history[c],
                 COMBFILTER_MAXPERIOD + offset,
                 prev_period.max(COMBFILTER_MINPERIOD),
                 pitch_index,
@@ -1094,16 +1191,6 @@ pub fn run_prefilter(
         qgain = 0;
     }
 
-    for c in 0..channels {
-        if n > COMBFILTER_MAXPERIOD {
-            prefilter_mem[c].copy_from_slice(&scratch.pre[c][n..n + COMBFILTER_MAXPERIOD]);
-        } else {
-            prefilter_mem[c].copy_within(n..COMBFILTER_MAXPERIOD, 0);
-            prefilter_mem[c][COMBFILTER_MAXPERIOD - n..COMBFILTER_MAXPERIOD]
-                .copy_from_slice(&scratch.pre[c][COMBFILTER_MAXPERIOD..COMBFILTER_MAXPERIOD + n]);
-        }
-    }
-
     (
         PrefilterDecision {
             enabled,
@@ -1117,7 +1204,40 @@ pub fn run_prefilter(
 
 #[cfg(test)]
 mod tests {
-    use super::{should_cancel_pitch_filter, tone_detect, tone_frequency};
+    use super::{
+        should_cancel_pitch_filter, tone_detect, tone_frequency, PrefilterHistory,
+        COMBFILTER_MAXPERIOD,
+    };
+
+    #[test]
+    fn prefilter_history_tracks_samples_across_compaction_and_frame_size_changes() {
+        const OVERLAP: usize = 48;
+        let mut history = PrefilterHistory::new(2);
+        let mut expected = [
+            vec![0.0; COMBFILTER_MAXPERIOD],
+            vec![0.0; COMBFILTER_MAXPERIOD],
+        ];
+        let sizes = std::iter::repeat_n(48, 64).chain([120, 240, 480, 960, COMBFILTER_MAXPERIOD]);
+        for (frame, n) in sizes.enumerate() {
+            let input: [Vec<f32>; 2] = std::array::from_fn(|channel| {
+                (0..OVERLAP + n)
+                    .map(|sample| (channel * 100_000 + frame * 2_000 + sample) as f32)
+                    .collect()
+            });
+            for (channel, samples) in expected.iter_mut().enumerate() {
+                assert_eq!(
+                    history.tail(channel, OVERLAP),
+                    &samples[COMBFILTER_MAXPERIOD - OVERLAP..]
+                );
+                samples.extend_from_slice(&input[channel][OVERLAP..]);
+            }
+            let window = history.append(&input, OVERLAP, n);
+            for (channel, samples) in expected.iter_mut().enumerate() {
+                assert_eq!(window[channel], samples.as_slice());
+                samples.drain(..n);
+            }
+        }
+    }
 
     #[test]
     fn exact_tone_frequency_follows_libopus_double_precision_acos() {

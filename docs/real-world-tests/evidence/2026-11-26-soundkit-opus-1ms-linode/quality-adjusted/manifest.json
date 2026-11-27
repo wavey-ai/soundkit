@@ -1,0 +1,60 @@
+{
+  "run_id": "soundkit-opus-quality-adjusted-d0259d8-20261126T222431Z",
+  "reference_run_id": "soundkit-opus-1ms-linode-d0259d8-20261126T201120Z",
+  "started_at_utc": "2026-11-26T22:24:31+00:00",
+  "finished_at_utc": "2026-11-26T22:24:56+00:00",
+  "source": {
+    "wavey-ai/soundkit": "d0259d8675a5c6887934215236ffaf641f7be436",
+    "xiph/opus": "316c675fa1c9982d76e9cdcba7231076f75047da"
+  },
+  "host": {
+    "ssh_alias": "wavey-linode-codex",
+    "linode": "arch-us-east",
+    "cpu": "AMD EPYC 7713",
+    "benchmark_vcpu": 6,
+    "topology": "existing Linode dev box; single-process in-memory codec calls"
+  },
+  "settings": {
+    "same_build_as_reference_run": true,
+    "sample_rate_hz": 48000,
+    "channels": 2,
+    "pcm_bits": 24,
+    "fixture": "generated mixed stereo",
+    "seconds_per_repeat": 4,
+    "repeats_per_configuration": 21,
+    "application": "restricted-lowdelay",
+    "rate_control": "CBR",
+    "bitrate_kbps_by_impl": {
+      "rust": [
+        256,
+        320,
+        368
+      ],
+      "c": [
+        256
+      ]
+    },
+    "frame_samples_by_impl": {
+      "rust": 48,
+      "c": 120
+    },
+    "ordering": "one warmup per configuration, then shuffled within each round",
+    "quality_basis": "SoundKit published eight-excerpt PEAQ study"
+  },
+  "additional_linode_instance_cost_usd": 0,
+  "files": [
+    "binary-sha256.txt",
+    "binary-verification.log",
+    "cpu-samples.json",
+    "environment.txt",
+    "manifest.json",
+    "measure.py",
+    "measurement.log",
+    "summary.json",
+    "timings.tsv",
+    "warmup-c-256.tsv",
+    "warmup-rust-256.tsv",
+    "warmup-rust-320.tsv",
+    "warmup-rust-368.tsv"
+  ]
+}
