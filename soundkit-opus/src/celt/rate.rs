@@ -116,22 +116,25 @@ fn interp_bits2pulses(
     for _ in 0..ALLOC_STEPS {
         let mid = (lo + hi) >> 1;
         let mut psum = 0i32;
-        let mut done = false;
-        for (((&b1, &b2), &th), &cp) in band_bits1
+        let mut bands = band_bits1
             .iter()
             .zip(band_bits2)
             .zip(band_thresh)
             .zip(band_cap)
-            .rev()
-        {
+            .rev();
+        // Below the first qualifying band, only the per-band cap applies.
+        for (((&b1, &b2), &th), &cp) in bands.by_ref() {
             let tmp = b1 + ((mid * b2) >> ALLOC_STEPS);
-            if tmp >= th || done {
-                done = true;
+            if tmp >= th {
                 psum += tmp.min(cp);
+                break;
             } else if tmp >= alloc_floor {
                 psum += alloc_floor;
             }
         }
+        psum += bands
+            .map(|(((&b1, &b2), _), &cp)| (b1 + ((mid * b2) >> ALLOC_STEPS)).min(cp))
+            .sum::<i32>();
         if psum > total {
             hi = mid;
         } else {
@@ -261,58 +264,62 @@ fn interp_bits2pulses(
     let denom = mode.ebands[coded_bands] as i32 - mode.ebands[start] as i32;
     let percoeff = left0 / denom;
     let mut left = left0 - denom * percoeff;
-    for j in start..coded_bands {
-        pulses[j] += percoeff * (mode.ebands[j + 1] as i32 - mode.ebands[j] as i32);
-    }
-    for j in start..coded_bands {
-        let tmp = left.min(mode.ebands[j + 1] as i32 - mode.ebands[j] as i32);
-        pulses[j] += tmp;
-        left -= tmp;
-    }
-
     let mut balance = 0i32;
-    for j in start..coded_bands {
-        let n0 = mode.ebands[j + 1] as i32 - mode.ebands[j] as i32;
+    // Distribute the leftover bits and consume them in the same band pass.
+    let band_range = start..coded_bands;
+    let edges = &mode.ebands[start..=coded_bands];
+    let bands = edges
+        .windows(2)
+        .zip(&mode.log_n[band_range.clone()])
+        .zip(&cap[band_range.clone()])
+        .zip(&mut pulses[band_range.clone()])
+        .zip(&mut ebits[band_range.clone()])
+        .zip(&mut fine_priority[band_range]);
+    for (band, (((((edges, &log_n), &cap), pulses), ebits), fine_priority)) in bands.enumerate() {
+        let n0 = edges[1] as i32 - edges[0] as i32;
+        let rem = left.min(n0);
+        left -= rem;
         let n = n0 << lm;
-        let bit = pulses[j] + balance;
+        let bit = *pulses + percoeff * n0 + rem + balance;
 
         let excess;
         if n > 1 {
-            excess = (bit - cap[j]).max(0);
-            pulses[j] = bit - excess;
-            let den = c as i32 * n + i32::from(c == 2 && n > 2 && !*dual_stereo && j < *intensity);
-            let nclogn = den * (mode.log_n[j] as i32 + log_m);
+            excess = (bit - cap).max(0);
+            *pulses = bit - excess;
+            let den = c as i32 * n
+                + i32::from(c == 2 && n > 2 && !*dual_stereo && start + band < *intensity);
+            let nclogn = den * (log_n as i32 + log_m);
             let mut offset = (nclogn >> 1) - den * FINE_OFFSET;
             if n == 2 {
                 offset += den << BITRES >> 2;
             }
-            if pulses[j] + offset < den * 2 << BITRES {
+            if *pulses + offset < den * 2 << BITRES {
                 offset += nclogn >> 2;
-            } else if pulses[j] + offset < den * 3 << BITRES {
+            } else if *pulses + offset < den * 3 << BITRES {
                 offset += nclogn >> 3;
             }
 
-            ebits[j] = (pulses[j] + offset + (den << (BITRES - 1))).max(0);
-            ebits[j] = (ebits[j] / den) >> BITRES;
-            if c as i32 * ebits[j] > pulses[j] >> BITRES {
-                ebits[j] = pulses[j] >> i32::from(stereo) >> BITRES;
+            *ebits = (*pulses + offset + (den << (BITRES - 1))).max(0);
+            *ebits = (*ebits / den) >> BITRES;
+            if c as i32 * *ebits > *pulses >> BITRES {
+                *ebits = *pulses >> i32::from(stereo) >> BITRES;
             }
-            ebits[j] = ebits[j].min(MAX_FINE_BITS);
-            fine_priority[j] = i32::from(ebits[j] * (den << BITRES) >= pulses[j] + offset);
-            pulses[j] -= c as i32 * ebits[j] << BITRES;
+            *ebits = (*ebits).min(MAX_FINE_BITS);
+            *fine_priority = i32::from(*ebits * (den << BITRES) >= *pulses + offset);
+            *pulses -= c as i32 * *ebits << BITRES;
         } else {
             excess = (bit - ((c as i32) << BITRES)).max(0);
-            pulses[j] = bit - excess;
-            ebits[j] = 0;
-            fine_priority[j] = 1;
+            *pulses = bit - excess;
+            *ebits = 0;
+            *fine_priority = 1;
         }
 
         let mut excess = excess;
         if excess > 0 {
-            let extra_fine = (excess >> (i32::from(stereo) + BITRES)).min(MAX_FINE_BITS - ebits[j]);
-            ebits[j] += extra_fine;
+            let extra_fine = (excess >> (i32::from(stereo) + BITRES)).min(MAX_FINE_BITS - *ebits);
+            *ebits += extra_fine;
             let extra_bits = extra_fine * (c as i32) << BITRES;
-            fine_priority[j] = i32::from(extra_bits >= excess - balance);
+            *fine_priority = i32::from(extra_bits >= excess - balance);
             excess -= extra_bits;
         }
         balance = excess;
@@ -437,32 +444,40 @@ pub fn clt_compute_allocation_with_scratch(
     let band_thresh = &thresh[start..end];
     let band_cap = &cap[start..end];
     while lo <= hi {
-        let mut done = false;
         let mut psum = 0i32;
         let mid = (lo + hi) >> 1;
         let vector = &mode.alloc_vectors[mid as usize * len + start..mid as usize * len + end];
-        for (((((edges, &alloc), &trim), &offset), &th), &cp) in band_edges
+        let mut bands = band_edges
             .windows(2)
             .zip(vector)
             .zip(band_trim)
             .zip(band_offsets)
             .zip(band_thresh)
             .zip(band_cap)
-            .rev()
-        {
+            .rev();
+        let band_bits = |edges: &[i16], alloc: u8, trim: i32, offset: i32| {
             let width = edges[1] as i32 - edges[0] as i32;
-            let mut bitsj = channels as i32 * width * (alloc as i32) << lm >> 2;
-            if bitsj > 0 {
-                bitsj = 0.max(bitsj + trim);
+            let mut bits = channels as i32 * width * (alloc as i32) << lm >> 2;
+            if bits > 0 {
+                bits = 0.max(bits + trim);
             }
-            bitsj += offset;
-            if bitsj >= th || done {
-                done = true;
-                psum += bitsj.min(cp);
-            } else if bitsj >= (channels as i32) << BITRES {
-                psum += (channels as i32) << BITRES;
+            bits + offset
+        };
+        let alloc_floor = (channels as i32) << BITRES;
+        for (((((edges, &alloc), &trim), &offset), &th), &cp) in bands.by_ref() {
+            let bits = band_bits(edges, alloc, trim, offset);
+            if bits >= th {
+                psum += bits.min(cp);
+                break;
+            } else if bits >= alloc_floor {
+                psum += alloc_floor;
             }
         }
+        psum += bands
+            .map(|(((((edges, &alloc), &trim), &offset), _), &cp)| {
+                band_bits(edges, alloc, trim, offset).min(cp)
+            })
+            .sum::<i32>();
         if psum > total {
             hi = mid - 1;
         } else {
