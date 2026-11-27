@@ -44,7 +44,9 @@ and 89.6 kb/s. These rates exclude AEP1, link-layer headers and FEC.
 
 At this packet rate the C wire-rate target of 396.8 kb/s leaves 44.8 kb/s
 for Rust audio payload when both streams use the stated 44 bytes of
-headers. A 1 ms Rust payload of 320 kb/s leaves at most 9.6 bytes of
+headers. At C payload targets of 192 and 320 kb/s, the equivalent Rust
+payload budgets are below zero and 108.8 kb/s, respectively. A 1 ms Rust
+payload of 320 kb/s leaves at most 9.6 bytes of
 total headers per datagram to meet that target. IPv4 and UDP use 28 bytes
 before SoundKit framing. The 8 kb/s implicit-signalling reduction
 requires endpoints with the same pre-agreed Opus Custom configuration.
@@ -74,6 +76,29 @@ and retains the 2 ms nominal codec delay.
   and uses an exact inverse CDF for the first five coarse-energy symbols
   before falling back to the full model.
 
+## Native instruction counts
+
+Callgrind 3.24.0 counted the complete encode and decode example processes
+on an AMD EPYC 9V74 development VM. Both builds used Rust 1.100.0 with thin
+LTO and one release codegen unit. The equal-rate runs used the same two
+8.020-second orchestra and electronic excerpts at 256, 320 and 368 kb/s.
+The quality-adjusted runs used the same excerpts at the listed rates.
+
+| Comparison against PR #2 | Encode instruction reduction | Decode instruction reduction |
+|---|---:|---:|
+| Default x86-64 target, six equal-rate pairs | 13.8–14.3% | 7.2–7.4% |
+| Zen 3 and AVX2 flags, six equal-rate pairs | 16.3–17.0% | 7.6–7.8% |
+| Adaptive +4 in both builds at 312 and 344 kb/s | 13.8–14.1% | 7.3–7.4% |
+| PR #2 adaptive +4 at 344 versus pass 3 fixed 8 at 320 kb/s | 14.5% | 7.8–8.3% |
+
+The final row uses the rate that met both PEAQ means on the original
+eight excerpts for each trial. It remains exploratory because the later
+passages favor adaptive +4 at the rates that meet both means.
+[Default counts](default-instructions.csv), [Zen 3 counts](zen3-instructions.csv),
+[adaptive trim counts](adaptive-instructions.csv), [fixed trim counts](fixed-instructions.csv)
+
+## Compatibility
+
 The two Rust builds produced identical packets and i24 PCM across 128
 streams, 772,048 packets and 98,548,224 samples. The matrix includes eight
 excerpts, CBR and constrained VBR, 48/64/72/120/240-sample modes, and
@@ -81,6 +106,23 @@ excerpts, CBR and constrained VBR, 48/64/72/120/240-sample modes, and
 matched 128,320 packets and 12,318,720 i24 samples, including 5,872
 concealed frames. A separate narrow range-decoder test checks the raw window
 at every starting bit count and Laplace model boundaries.
+
+The release suite passed 152 tests, with five ignored. The explicitly
+enabled live C Custom comparison passed separately. In the initial
+concurrent run the existing allocation test counted four allocations.
+The serial release suite, a full default rerun, and 24 isolated default
+runs of that test passed.
+
+The adaptive +4 pass 3 build reproduced the previous trial packets, C
+Custom decode, and implicit-signalling results across eight excerpts at
+248, 312, 344, and 368 kb/s. At 320 and 400 kb/s the fixed trim build
+matched 176,440 archived packets and C Custom decoded 16,938,240 i24 samples
+identically. Turning off signalling saved 8 kb/s and preserved the decoded
+samples in all 22 fixed-trim streams. [Fixed-trim interop checks](../../quality-results/2026-11-27-opus-1ms-fixed-trim/integrated-interop.csv)
+
+A mixed-fixture smoke run measured a 48-sample alignment offset for all
+three Rust builds and a 120-sample offset for C. The 256, 344 and 320 kb/s
+Rust configurations produced 32-, 43- and 40-byte CBR packets respectively.
 
 ## Reproduce the instruction profiles
 
