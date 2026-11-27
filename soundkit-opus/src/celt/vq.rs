@@ -336,7 +336,31 @@ pub fn op_pvq_search_exact(
     y_scratch: &mut Vec<f32>,
     portable: bool,
 ) -> f32 {
+    // The 48-sample mode uses these PVQ dimensions. Constant sizes let the
+    // compiler unroll the short SSE2 search and remove repeated bounds checks.
+    #[cfg(target_arch = "x86_64")]
+    match n {
+        2 => return op_pvq_search_exact_impl::<2>(x, iy, k, n, y_scratch, portable),
+        4 => return op_pvq_search_exact_impl::<4>(x, iy, k, n, y_scratch, portable),
+        8 => return op_pvq_search_exact_impl::<8>(x, iy, k, n, y_scratch, portable),
+        _ => {}
+    }
+    op_pvq_search_exact_impl::<0>(x, iy, k, n, y_scratch, portable)
+}
+
+#[inline(always)]
+fn op_pvq_search_exact_impl<const N: usize>(
+    x: &mut [f32],
+    iy: &mut [i32],
+    k: usize,
+    n: usize,
+    y_scratch: &mut Vec<f32>,
+    portable: bool,
+) -> f32 {
+    let n = if N == 0 { n } else { N };
     assert!(x.len() >= n && iy.len() >= n + 3);
+    let x = &mut x[..n];
+    let iy = &mut iy[..n + 3];
     let mut signx = [false; 256];
     let mut signx_heap = Vec::new();
     let signx: &mut [bool] = if n <= 256 {
@@ -347,7 +371,7 @@ pub fn op_pvq_search_exact(
     };
     y_scratch.clear();
     y_scratch.resize(n + 3, 0.0);
-    let y = &mut y_scratch[..];
+    let y = &mut y_scratch[..n + 3];
     for j in 0..n {
         signx[j] = x[j] < 0.0;
         x[j] = x[j].abs();
@@ -359,7 +383,7 @@ pub fn op_pvq_search_exact(
 
     let sse2 = cfg!(target_arch = "x86_64") && !portable;
     #[cfg(target_arch = "x86_64")]
-    if sse2 {
+    if sse2 && k > (n >> 1) {
         // Four lanes over x padded with zeros, as the SSE2 loop reads them.
         let padded = |x: &[f32], j: usize| if j < n { x[j] } else { 0.0 };
         let mut lanes = [0.0f32; 4];
@@ -371,34 +395,32 @@ pub fn op_pvq_search_exact(
             j += 4;
         }
         let mut sum = (lanes[0] + lanes[2]) + (lanes[1] + lanes[3]);
-        if k > (n >> 1) {
-            if !(sum > 1e-15 && sum < 64.0) {
-                x[0] = 1.0;
-                x[1..n].fill(0.0);
-                sum = 1.0;
-            }
-            let rcp = ((k as f64 + 0.8) as f32) * crate::kernels::rcp_ps(sum);
-            let mut xy4 = [0.0f32; 4];
-            let mut yy4 = [0.0f32; 4];
-            let mut pulses = 0i32;
-            let mut j = 0usize;
-            while j < n {
-                for l in 0..4 {
-                    let xv = padded(x, j + l);
-                    let q = (xv * rcp) as i32;
-                    pulses += q;
-                    iy[j + l] = q;
-                    let yv = q as f32;
-                    xy4[l] += xv * yv;
-                    yy4[l] += yv * yv;
-                    y[j + l] = yv + yv;
-                }
-                j += 4;
-            }
-            pulses_left -= pulses;
-            xy = (xy4[0] + xy4[2]) + (xy4[1] + xy4[3]);
-            yy = (yy4[0] + yy4[2]) + (yy4[1] + yy4[3]);
+        if !(sum > 1e-15 && sum < 64.0) {
+            x[0] = 1.0;
+            x[1..n].fill(0.0);
+            sum = 1.0;
         }
+        let rcp = ((k as f64 + 0.8) as f32) * crate::kernels::rcp_ps(sum);
+        let mut xy4 = [0.0f32; 4];
+        let mut yy4 = [0.0f32; 4];
+        let mut pulses = 0i32;
+        let mut j = 0usize;
+        while j < n {
+            for l in 0..4 {
+                let xv = padded(x, j + l);
+                let q = (xv * rcp) as i32;
+                pulses += q;
+                iy[j + l] = q;
+                let yv = q as f32;
+                xy4[l] += xv * yv;
+                yy4[l] += yv * yv;
+                y[j + l] = yv + yv;
+            }
+            j += 4;
+        }
+        pulses_left -= pulses;
+        xy = (xy4[0] + xy4[2]) + (xy4[1] + xy4[3]);
+        yy = (yy4[0] + yy4[2]) + (yy4[1] + yy4[3]);
     }
     if !sse2 && k > (n >> 1) {
         let mut sum = 0.0f32;

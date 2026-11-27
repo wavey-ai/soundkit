@@ -426,13 +426,14 @@ impl RangeEncoder {
 
 #[derive(Clone, Debug)]
 pub struct RangeDecoder<'a> {
-    buf: &'a [u8],
+    // The range and raw readers advance independently, even if their bytes
+    // overlap on exhausted or truncated packets.
+    head: &'a [u8],
+    tail: &'a [u8],
     storage: u32,
-    end_offs: u32,
     end_window: u32,
     nend_bits: i32,
     nbits_total: i32,
-    offs: u32,
     rng: u32,
     val: u32,
     ext: u32,
@@ -442,15 +443,16 @@ pub struct RangeDecoder<'a> {
 
 impl<'a> RangeDecoder<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
+        let storage = buf.len() as u32;
+        let buf = &buf[..storage as usize];
         let mut dec = Self {
-            buf,
-            storage: buf.len() as u32,
-            end_offs: 0,
+            head: buf,
+            tail: buf,
+            storage,
             end_window: 0,
             nend_bits: 0,
             nbits_total: EC_CODE_BITS + 1
                 - ((EC_CODE_BITS - EC_CODE_EXTRA) / EC_SYM_BITS) * EC_SYM_BITS,
-            offs: 0,
             rng: 1u32 << EC_CODE_EXTRA,
             val: 0,
             ext: 0,
@@ -490,9 +492,8 @@ impl<'a> RangeDecoder<'a> {
     }
 
     fn read_byte(&mut self) -> i32 {
-        if self.offs < self.storage {
-            let value = self.buf[self.offs as usize];
-            self.offs += 1;
+        if let Some((&value, rest)) = self.head.split_first() {
+            self.head = rest;
             value as i32
         } else {
             0
@@ -500,9 +501,9 @@ impl<'a> RangeDecoder<'a> {
     }
 
     fn read_byte_from_end(&mut self) -> i32 {
-        if self.end_offs < self.storage {
-            self.end_offs += 1;
-            self.buf[(self.storage - self.end_offs) as usize] as i32
+        if let Some((&value, rest)) = self.tail.split_last() {
+            self.tail = rest;
+            value as i32
         } else {
             0
         }
@@ -596,6 +597,30 @@ impl<'a> RangeDecoder<'a> {
         ret
     }
 
+    /// Decode from a prefix of an inverse CDF, leaving the decoder unchanged
+    /// when the symbol is in the unlisted tail.
+    #[inline]
+    pub(crate) fn decode_icdf16_prefix<const N: usize>(
+        &mut self,
+        icdf: &[u16; N],
+        ftb: u32,
+    ) -> Option<usize> {
+        let unit = self.rng >> ftb;
+        let mut upper = self.rng;
+        for (index, &boundary) in icdf.iter().enumerate() {
+            let lower = imul32(unit, boundary as u32);
+            if self.val >= lower {
+                self.ext = unit;
+                self.val -= lower;
+                self.rng = upper - lower;
+                self.normalize();
+                return Some(index);
+            }
+            upper = lower;
+        }
+        None
+    }
+
     pub fn decode_uint(&mut self, mut ft: u32) -> u32 {
         ft -= 1;
         let mut ftb = ec_ilog(ft);
@@ -623,11 +648,22 @@ impl<'a> RangeDecoder<'a> {
         let mut window = self.end_window;
         let mut available = self.nend_bits;
         if (available as u32) < bits {
-            loop {
-                window |= (self.read_byte_from_end() as u32) << available;
-                available += EC_SYM_BITS;
-                if available as u32 > EC_WINDOW_SIZE - EC_SYM_BITS as u32 {
-                    break;
+            let unread = self.tail.len();
+            if available <= 24 && unread >= 4 {
+                // Read the same most recent 1–4 bytes as the scalar refill.
+                // The last packet byte provides the next low raw bits.
+                let chunk = u32::from_be_bytes(self.tail[unread - 4..].try_into().unwrap());
+                let loaded = 32 - ((available + 7) & !7);
+                window |= (chunk & (u32::MAX >> (32 - loaded))) << available;
+                self.tail = &self.tail[..unread - (loaded >> 3) as usize];
+                available += loaded;
+            } else {
+                loop {
+                    window |= (self.read_byte_from_end() as u32) << available;
+                    available += EC_SYM_BITS;
+                    if available as u32 > EC_WINDOW_SIZE - EC_SYM_BITS as u32 {
+                        break;
+                    }
                 }
             }
         }
@@ -690,5 +726,78 @@ mod snapshot_tests {
 
         assert_eq!(encoder.final_range(), expected_range);
         assert_eq!(encoder.into_range_data(), expected_data);
+    }
+}
+
+#[cfg(test)]
+mod decoder_tests {
+    use super::{RangeDecoder, EC_CODE_TOP};
+    use crate::celt::laplace::{decode_laplace, laplace_icdf_prefix};
+
+    #[test]
+    fn packed_raw_refill_matches_scalar_at_every_window_position() {
+        let packet = [0xE4, 0x61, 0x17, 0x00, 0x80, 0x81, 0x50, 0xAC];
+        for length in 0..=packet.len() {
+            for used in 0..=24 {
+                let mut actual = RangeDecoder::new(&packet[..length]);
+                actual.nend_bits = used;
+                actual.end_window = 0x93C78324 & ((1 << used) - 1);
+                let mut scalar = actual.clone();
+                for bits in [24, 13, 2, 1, 24, 17, 1, 0, 8] {
+                    while scalar.nend_bits < bits as i32 {
+                        loop {
+                            scalar.end_window |=
+                                (scalar.read_byte_from_end() as u32) << scalar.nend_bits;
+                            scalar.nend_bits += 8;
+                            if scalar.nend_bits > 24 {
+                                break;
+                            }
+                        }
+                    }
+                    let expected = scalar.end_window & ((1 << bits) - 1);
+                    scalar.end_window >>= bits;
+                    scalar.nend_bits -= bits as i32;
+                    scalar.nbits_total += bits as i32;
+                    assert_eq!(actual.decode_bits(bits), expected);
+                    assert_eq!(actual.nend_bits, scalar.nend_bits);
+                    assert_eq!(actual.end_window, scalar.end_window);
+                    assert_eq!(actual.nbits_total, scalar.nbits_total);
+                    assert_eq!(actual.tail, scalar.tail);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn laplace_prefix_preserves_every_frequency_bin_and_range_remainder() {
+        for (zero_freq, decay) in [
+            (72 << 7, 127 << 6),
+            (24 << 7, 179 << 6),
+            (177 << 7, 11 << 6),
+        ] {
+            let prefix = laplace_icdf_prefix(zero_freq, decay);
+            let mut initial = RangeDecoder::new(&[0xAF, 0x61, 0x4C, 0x30, 0x66, 0x51, 0x00]);
+            for range in [EC_CODE_TOP, EC_CODE_TOP - 12_345] {
+                initial.rng = range;
+                let unit = range >> 15;
+                for interval in 0..32768 {
+                    initial.val = unit * interval;
+                    let mut scalar = initial.clone();
+                    let mut actual = initial.clone();
+                    let expected = decode_laplace(&mut scalar, zero_freq, decay);
+                    let decoded = actual.decode_icdf16_prefix(&prefix, 15).map_or_else(
+                        || decode_laplace(&mut actual, zero_freq, decay),
+                        |index| [0, -1, 1, -2, 2][index],
+                    );
+                    assert_eq!(decoded, expected);
+                    assert_eq!(actual.rng, scalar.rng);
+                    assert_eq!(actual.ext, scalar.ext);
+                    assert_eq!(actual.val, scalar.val);
+                    assert_eq!(actual.nbits_total, scalar.nbits_total);
+                    assert_eq!(actual.head, scalar.head);
+                    assert_eq!(actual.rem, scalar.rem);
+                }
+            }
+        }
     }
 }

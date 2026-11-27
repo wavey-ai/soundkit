@@ -43,22 +43,23 @@ pub fn inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
 /// `dual_inner_prod_sse`.
 #[inline]
 pub fn dual_inner_prod(x: &[f32], y1: &[f32], y2: &[f32], n: usize) -> (f32, f32) {
-    let mut a = [0.0f32; 4];
-    let mut b = [0.0f32; 4];
-    let mut i = 0usize;
-    while i + 3 < n {
-        for l in 0..4 {
-            a[l] += x[i + l] * y1[i + l];
-            b[l] += x[i + l] * y2[i + l];
-        }
-        i += 4;
+    let (x, x_tail) = x[..n].as_chunks::<4>();
+    let (y1, y1_tail) = y1[..n].as_chunks::<4>();
+    let (y2, y2_tail) = y2[..n].as_chunks::<4>();
+    let mut a = f32x4::ZERO;
+    let mut b = f32x4::ZERO;
+    for ((&x, &y1), &y2) in x.iter().zip(y1).zip(y2) {
+        let x = f32x4::new(x);
+        a += x * f32x4::new(y1);
+        b += x * f32x4::new(y2);
     }
-    let mut s1 = (a[0] + a[2]) + (a[1] + a[3]);
-    let mut s2 = (b[0] + b[2]) + (b[1] + b[3]);
-    while i < n {
-        s1 += x[i] * y1[i];
-        s2 += x[i] * y2[i];
-        i += 1;
+    let [a0, a1, a2, a3] = a.to_array();
+    let [b0, b1, b2, b3] = b.to_array();
+    let mut s1 = (a0 + a2) + (a1 + a3);
+    let mut s2 = (b0 + b2) + (b1 + b3);
+    for ((&x, &y1), &y2) in x_tail.iter().zip(y1_tail).zip(y2_tail) {
+        s1 += x * y1;
+        s2 += x * y2;
     }
     (s1, s2)
 }
@@ -437,8 +438,8 @@ pub fn pitch_search(
     scratch.x_lp4.extend((0..len >> 2).map(|j| x_lp[2 * j]));
     scratch.y_lp4.clear();
     scratch.y_lp4.extend((0..lag >> 2).map(|j| y[2 * j]));
-    scratch.xcorr.clear();
-    scratch.xcorr.resize(max_pitch >> 1, 0.0);
+    let fine_lags = max_pitch >> 1;
+    scratch.xcorr.resize(fine_lags, 0.0);
     pitch_xcorr(
         &scratch.x_lp4,
         &scratch.y_lp4,
@@ -447,15 +448,18 @@ pub fn pitch_search(
         max_pitch >> 2,
     );
     let best = find_best_pitch(&scratch.xcorr, &scratch.y_lp4, len >> 2, max_pitch >> 2);
-    for i in 0..max_pitch >> 1 {
-        scratch.xcorr[i] = 0.0;
-        if (i as isize - 2 * best[0] as isize).abs() > 2
-            && (i as isize - 2 * best[1] as isize).abs() > 2
-        {
-            continue;
+    // Only the windows around the coarse peaks need fine correlations.
+    scratch.xcorr.fill(0.0);
+    let [first, second] = best;
+    let mut last_end = 0;
+    for center in [first.min(second), first.max(second)] {
+        let center = 2 * center;
+        let end = (center + 3).min(fine_lags);
+        let start = center.saturating_sub(2).max(last_end).min(end);
+        for i in start..end {
+            scratch.xcorr[i] = inner_prod(x_lp, &y[i..], len >> 1).max(-1.0);
         }
-        let sum = inner_prod(x_lp, &y[i..], len >> 1);
-        scratch.xcorr[i] = sum.max(-1.0);
+        last_end = end;
     }
     let best = find_best_pitch(&scratch.xcorr, y, len >> 1, max_pitch >> 1);
     let offset = if best[0] > 0 && best[0] < (max_pitch >> 1) - 1 {

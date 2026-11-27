@@ -1,7 +1,7 @@
 //! CELT energy quantization, ported from official `celt/quant_bands.c`.
 
 use crate::celt::entropy::{RangeDecoder, RangeEncoder};
-use crate::celt::laplace::{decode_laplace, encode_laplace};
+use crate::celt::laplace::{decode_laplace, encode_laplace, laplace_icdf_prefix};
 use crate::celt::mathops::mode_log2;
 use crate::celt::modes::CeltMode;
 
@@ -76,6 +76,30 @@ const E_PROB_MODEL: [[[u8; 42]; 2]; 4] = [
         ],
     ],
 ];
+
+const COARSE_LAPLACE_PREFIX: [[[[u16; 5]; 21]; 2]; 4] = coarse_laplace_prefixes();
+
+const fn coarse_laplace_prefixes() -> [[[[u16; 5]; 21]; 2]; 4] {
+    let mut prefixes = [[[[0; 5]; 21]; 2]; 4];
+    let mut lm = 0;
+    while lm < 4 {
+        let mut intra = 0;
+        while intra < 2 {
+            let mut band = 0;
+            while band < 21 {
+                let model = &E_PROB_MODEL[lm][intra];
+                prefixes[lm][intra][band] = laplace_icdf_prefix(
+                    (model[2 * band] as u32) << 7,
+                    (model[2 * band + 1] as i32) << 6,
+                );
+                band += 1;
+            }
+            intra += 1;
+        }
+        lm += 1;
+    }
+    prefixes
+}
 
 const SMALL_ENERGY_ICDF: [u8; 3] = [2, 1, 0];
 
@@ -441,6 +465,7 @@ pub fn unquant_coarse_energy(
     lm: usize,
 ) {
     let prob_model = &E_PROB_MODEL[lm][usize::from(intra)];
+    let prefixes = &COARSE_LAPLACE_PREFIX[lm][usize::from(intra)];
     let mut prev = [0.0f32; 2];
     let (coef, beta) = if intra {
         (0.0, BETA_INTRA)
@@ -453,12 +478,18 @@ pub fn unquant_coarse_energy(
         for c in 0..channels {
             let tell = dec.tell();
             let qi = if budget - tell >= 15 {
-                let pi = 2 * i.min(20);
-                decode_laplace(
-                    dec,
-                    (prob_model[pi] as u32) << 7,
-                    (prob_model[pi + 1] as i32) << 6,
-                )
+                let band = i.min(20);
+                if let Some(symbol) = dec.decode_icdf16_prefix(&prefixes[band], 15) {
+                    let symbol = symbol as i32;
+                    (symbol >> 1) ^ -(symbol & 1)
+                } else {
+                    let pi = 2 * band;
+                    decode_laplace(
+                        dec,
+                        (prob_model[pi] as u32) << 7,
+                        (prob_model[pi + 1] as i32) << 6,
+                    )
+                }
             } else if budget - tell >= 2 {
                 let qi = dec.decode_icdf(&SMALL_ENERGY_ICDF, 2) as i32;
                 (qi >> 1) ^ -(qi & 1)
@@ -485,6 +516,31 @@ pub fn unquant_fine_energy(
     dec: &mut RangeDecoder<'_>,
     channels: usize,
 ) {
+    if channels == 2 && start < end {
+        let (left, right) = old_e_bands.split_at_mut(mode.nb_ebands);
+        for ((left, right), &bits) in left[start..end]
+            .iter_mut()
+            .zip(&mut right[start..end])
+            .zip(&fine_quant[start..end])
+        {
+            if bits <= 0 {
+                continue;
+            }
+            let bits = bits as u32;
+            // Read two valid fine-energy fields together. The lower bits
+            // belong to the left channel, as in two consecutive reads.
+            let (q_left, q_right) = if bits <= 12 {
+                let q = dec.decode_bits(2 * bits);
+                (q & ((1 << bits) - 1), q >> bits)
+            } else {
+                (dec.decode_bits(bits), dec.decode_bits(bits))
+            };
+            let scale = (1 << (14 - bits)) as f32;
+            *left += (q_left as f32 + 0.5) * scale / 16384.0 - 0.5;
+            *right += (q_right as f32 + 0.5) * scale / 16384.0 - 0.5;
+        }
+        return;
+    }
     for i in start..end {
         if fine_quant[i] <= 0 {
             continue;
