@@ -1,6 +1,6 @@
 --- a/soundkit-opus/src/encoder.rs
 +++ b/soundkit-opus/src/encoder.rs
-@@ -1181,7 +1181,11 @@
+@@ -1181,5 +1181,9 @@
              trim -= (2.0 * (tonality_slope + 0.05)).clamp(-2.0, 2.0);
          }
          trim += crate::tuning::get(crate::tuning::TRIM_OFFSET, 0.0);
@@ -11,5 +11,3 @@
 +            (0.5 + trim).floor().clamp(0.0, 10.0) as i32
 +        }
      }
- 
-     /// `stereo_analysis` over the first `bands` bands. The theta cost scales
