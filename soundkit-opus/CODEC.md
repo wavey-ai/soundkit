@@ -463,6 +463,11 @@ show where the 1 ms path spends CPU time and how to run the paired timing
 comparison. The [allocation trim experiment](quality-results/2026-11-26-opus-1ms-trim/README.md)
 records per-excerpt results from the bitrate sweep.
 
+The [third native optimization pass](performance-results/2026-11-27-opus-1ms-pass-3/README.md)
+uses PR #2's pinned Linode wall times as its benchmark and reports separate
+development instruction counts. The [fixed trim trial](quality-results/2026-11-27-opus-1ms-fixed-trim/README.md)
+includes per-excerpt scores for seven additional passages.
+
 ## Codec Status
 
 The encoder is experimental. CELT-only CBR and constrained VBR are suitable for

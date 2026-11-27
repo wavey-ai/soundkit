@@ -1,0 +1,44 @@
+[
+  {
+    "source": "31_cymbal",
+    "offset_seconds": 45,
+    "file_sha256": "f9b363e0fdbd60dd719111e083f322ec43c63d27402c37fb3c383d21c6638111",
+    "pcm_sha256": "77664d43de14091e08ab0326fd2f7ea02e190f89039ba5af69eee7bd16331085"
+  },
+  {
+    "source": "49_female_speech_english_mono",
+    "offset_seconds": 14,
+    "file_sha256": "6f338a58fb447bd2a84dbdee13c788724f6e3c609cc97bd4502b667b7b35417e",
+    "pcm_sha256": "c18d65ab8f2fed9065e2a206d1904bcb183131c5755e7bca0f09902d6148e69e"
+  },
+  {
+    "source": "59_violin_ravel_stereo",
+    "offset_seconds": 16,
+    "file_sha256": "6d3a1453906b8883e99a2f8b4163f9200bcb5c29a8f57aef3e9ff8c323916451",
+    "pcm_sha256": "ee90a75e0abc63414e741ee53347570e9e9567a87bb8d4c1c43318b8c5891552"
+  },
+  {
+    "source": "65_orchestra_strauss_stereo",
+    "offset_seconds": 52,
+    "file_sha256": "5f5a74fd65dc9cb7d2fc6ce35d2ba78bb01231f16d02befe8a7930276baee400",
+    "pcm_sha256": "487254b1db17a09a414794df99616477b68c90f64760a46669942ee2b200afd2"
+  },
+  {
+    "source": "allegaeon-beasts-and-worms",
+    "offset_seconds": 55,
+    "file_sha256": "b30aeb43046a18871a9eb6f75e166735da7de37132ccd9f5d60d50baf91ab4f8",
+    "pcm_sha256": "9903ad17bf40f5aa9b888efe568ca3e2369fa50dc2364912e1466735874081a6"
+  },
+  {
+    "source": "four_tet_baby",
+    "offset_seconds": 40,
+    "file_sha256": "337792a2fd90d59fec46d43c3cd1e90d67449d12c48256ecb25590f73da9f14f",
+    "pcm_sha256": "e8e1f04f817faff46a118e81f19192301ddd820ab8eea802be3322a95afbe9a1"
+  },
+  {
+    "source": "julien_baker_sprained_ankle",
+    "offset_seconds": 31,
+    "file_sha256": "f048300b1bac44f29b03f81898b56268cd44bcb9c65427a77557bfc142d52586",
+    "pcm_sha256": "a98965b15dfb7fd7c41ff00cda5ced72445230b42b25e352453468cdedac8aa1"
+  }
+]
